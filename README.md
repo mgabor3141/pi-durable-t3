@@ -1,5 +1,7 @@
 # pi-durable-t3
 
+https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
+
 Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness — T3 Code as a frontend for pi-durable.
 
 Unofficial; not affiliated with T3 Tools or Earendil. Experimental. Built against pi `1.2.0`. Design: [`docs/design.md`](docs/design.md).
