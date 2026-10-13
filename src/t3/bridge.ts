@@ -14,7 +14,7 @@ import type {
 } from "@t3tools/contracts";
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Thread } from "../threads.ts";
-import type { BridgeConfig, ProjectConfig } from "./config.ts";
+import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
 import type { ConversationView, ModelRef, ModelsState } from "./model-types.ts";
 import {
@@ -138,21 +138,23 @@ export class Bridge {
 		return { id, title: `${basename(path) || path} (other)`, path };
 	}
 
+	/** A project shell with the fixed fields T3 expects, stamped at the bridge's start time. */
+	#projectShell(project: { id: string; title: string; path: string }): OrchestrationProjectShell {
+		return {
+			id: project.id,
+			title: project.title,
+			workspaceRoot: project.path,
+			repositoryIdentity: null,
+			defaultModelSelection: null,
+			scripts: [],
+			createdAt: this.#startedAt,
+			updatedAt: this.#startedAt,
+		} as unknown as OrchestrationProjectShell;
+	}
+
 	projects(): OrchestrationProjectShell[] {
-		const at = this.#startedAt;
-		const shell = (project: { id: string; title: string; path: string }): OrchestrationProjectShell =>
-			({
-				id: project.id,
-				title: project.title,
-				workspaceRoot: project.path,
-				repositoryIdentity: null,
-				defaultModelSelection: null,
-				scripts: [],
-				createdAt: at,
-				updatedAt: at,
-			}) as unknown as OrchestrationProjectShell;
 		return [
-			...this.config.projects.map((p: ProjectConfig) => shell({ id: p.id, title: p.name, path: p.path })),
+			...this.config.projects.map((p) => this.#projectShell({ id: p.id, title: p.name, path: p.path })),
 			...[...this.#extraProjects.values()],
 		];
 	}
@@ -167,16 +169,7 @@ export class Bridge {
 		const cwd = (thread === undefined ? undefined : this.#projectPath(thread.projectId)) ?? state?.view?.docs["pi.agent"]?.cwd ?? "/";
 		const project = this.projectForCwd(cwd);
 		if (!this.config.projects.some((p) => p.id === project.id) && !this.#extraProjects.has(project.id)) {
-			const shell = {
-				id: project.id,
-				title: project.title,
-				workspaceRoot: project.path,
-				repositoryIdentity: null,
-				defaultModelSelection: null,
-				scripts: [],
-				createdAt: this.#startedAt,
-				updatedAt: this.#startedAt,
-			} as unknown as OrchestrationProjectShell;
+			const shell = this.#projectShell(project);
 			this.#extraProjects.set(project.id, shell);
 			queueMicrotask(() => this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: shell }));
 		}
