@@ -160,8 +160,7 @@ export class Threads {
 	}
 
 	async thread(threadId: string): Promise<Thread | undefined> {
-		const found = (await this.list()).find((candidate) => candidate.threadId === threadId);
-		return found;
+		return (await this.list()).find((candidate) => candidate.threadId === threadId);
 	}
 
 	/**
