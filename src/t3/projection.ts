@@ -186,7 +186,7 @@ export interface ProjectionResult {
 	readonly runs: readonly ProjectedRun[];
 }
 
-const textOf = (content: string | ContentBlock[] | undefined): string =>
+export const textOf = (content: string | ContentBlock[] | undefined): string =>
 	typeof content === "string"
 		? content
 		: (content ?? []).flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");

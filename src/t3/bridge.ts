@@ -25,6 +25,7 @@ import {
 	projectThread,
 	type RolledBackRun,
 	rolledBackRuns,
+	textOf,
 	type ThreadMeta,
 	undoTarget,
 } from "./projection.ts";
@@ -376,10 +377,7 @@ export class Bridge {
 			if (entry.kind !== "pi.user" || state.messageIds.has(entry.id)) continue;
 			const message = entry.model?.[0];
 			if (message?.role !== "user") continue;
-			const text =
-				typeof message.content === "string"
-					? message.content
-					: message.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+			const text = textOf(message.content);
 			const index = state.pending.findIndex((p) => p.text === text && entry.id > p.afterEntryId);
 			if (index < 0) continue;
 			state.messageIds.set(entry.id, state.pending[index]!.messageId);
