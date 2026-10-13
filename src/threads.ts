@@ -164,6 +164,14 @@ export class Threads {
 	}
 
 	/**
+	 * A new thread pointer with a freshly minted id and the current time. `parent` is set only when the thread is
+	 * promoted or forked off another; a plain `create` names its own threadId and does not go through here.
+	 */
+	#newThread(head: number, projectId: string, title: string, parent?: ThreadParent): Thread {
+		return { threadId: randomUUID(), projectId, head, title, createdAt: this.#now(), ...(parent === undefined ? {} : { parent }) };
+	}
+
+	/**
 	 * One commit: if `threadId` already names a thread, return it (a retried create is a no-op and creates no second
 	 * conversation); else create a conversation with the project's `cwd` and add the thread.
 	 */
@@ -228,14 +236,7 @@ export class Threads {
 			if (doc.threads.some((candidate) => candidate.head === conversationId)) return;
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
 			const projectId = via?.projectId ?? this.#projects[0]?.id ?? "";
-			doc.threads.push({
-				threadId: randomUUID(),
-				projectId,
-				head: conversationId,
-				title: via?.title ?? "",
-				createdAt: this.#now(),
-				parent: { threadId: viaThreadId, entryId: null },
-			});
+			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId, entryId: null }));
 		}, this.#context);
 	}
 
@@ -288,14 +289,7 @@ export class Threads {
 			}
 			// The head moved on: leave the thread and record the fork as a new child thread.
 			const projectId = thread?.projectId ?? this.#projects[0]?.id ?? "";
-			doc.threads.push({
-				threadId: randomUUID(),
-				projectId,
-				head: fork.id,
-				title: thread?.title ?? "",
-				createdAt: this.#now(),
-				parent: { threadId: input.threadId, entryId: input.entryId },
-			});
+			doc.threads.push(this.#newThread(fork.id, projectId, thread?.title ?? "", { threadId: input.threadId, entryId: input.entryId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
 		}, this.#context);
@@ -335,13 +329,7 @@ export class Threads {
 				if (!(await owedIn(tx, record.id))) continue;
 				const agent = await tx.doc(AgentDoc, record.id);
 				const projectId = (agent.cwd === undefined ? undefined : cwdToProject.get(agent.cwd)) ?? this.#projects[0]?.id ?? "";
-				doc.threads.push({
-					threadId: randomUUID(),
-					projectId,
-					head: record.id,
-					title: "",
-					createdAt: this.#now(),
-				});
+				doc.threads.push(this.#newThread(record.id, projectId, ""));
 				heads.add(record.id);
 			}
 		}, this.#context);
