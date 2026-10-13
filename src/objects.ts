@@ -14,7 +14,7 @@ import {
 } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { ConversationId, ConversationView, ConversationWatch } from "@earendil-works/pi-durable";
+import type { AgentChange, ConversationId, ConversationView, ConversationWatch } from "@earendil-works/pi-durable";
 import { HostError } from "./host-errors.ts";
 import { ThreadsDoc, type Thread, type Threads } from "./threads.ts";
 
@@ -259,6 +259,15 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				thinkingLevel: agent.thinkingLevel,
 			};
 		};
+		/** Configure the head, then re-read and publish its configuration (shared by `select` / `selectThinking`). */
+		const configureHead = async (change: AgentChange, ctx: Ctx) => {
+			const conversation = await headConversation();
+			if (conversation === undefined) throw invalid("unknown_thread", `no head for thread ${threadId}`);
+			await conversation.configure(change, BACKGROUND_CONTEXT);
+			const configuration = await readConfiguration();
+			state.configuration.replace(ctx, configuration, { diff: true });
+			return configuration;
+		};
 		self.tasks({
 			// Seed and refresh the head's configuration; the head only changes via a switch, so re-read on a thread change.
 			pump: async (ctx) => {
@@ -280,23 +289,13 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				if (!catalog.some((model) => model.provider === args.provider && model.modelId === args.modelId)) {
 					throw invalid("unknown_model", `not in the catalog: ${args.provider}/${args.modelId}`);
 				}
-				const conversation = await headConversation();
-				if (conversation === undefined) throw invalid("unknown_thread", `no head for thread ${threadId}`);
-				await conversation.configure({ model: args }, BACKGROUND_CONTEXT);
-				const configuration = await readConfiguration();
-				state.configuration.replace(ctx, configuration, { diff: true });
-				return configuration;
+				return configureHead({ model: args }, ctx);
 			},
 			selectThinking: async (args, ctx) => {
 				if (!THINKING_LEVELS.includes(args.level as (typeof THINKING_LEVELS)[number])) {
 					throw invalid("unknown_thinking_level", `unknown thinking level: ${args.level}`);
 				}
-				const conversation = await headConversation();
-				if (conversation === undefined) throw invalid("unknown_thread", `no head for thread ${threadId}`);
-				await conversation.configure({ thinkingLevel: args.level as ModelThinkingLevel }, BACKGROUND_CONTEXT);
-				const configuration = await readConfiguration();
-				state.configuration.replace(ctx, configuration, { diff: true });
-				return configuration;
+				return configureHead({ thinkingLevel: args.level as ModelThinkingLevel }, ctx);
 			},
 		};
 	});
