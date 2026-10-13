@@ -245,11 +245,13 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			catalog: cell(Catalog, catalog),
 			configuration: cell(ConfigurationSchema, { model: null, thinkingLevel: "off" }),
 		});
-		const readConfiguration = async (): Promise<{ model: { provider: string; modelId: string } | null; thinkingLevel: string }> => {
+		const headConversation = async () => {
 			const doc = await harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 			const head = headOf(doc ?? null, threadId);
-			if (head === undefined) return { model: null, thinkingLevel: "off" };
-			const conversation = await harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+			return head === undefined ? undefined : harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+		};
+		const readConfiguration = async (): Promise<{ model: { provider: string; modelId: string } | null; thinkingLevel: string }> => {
+			const conversation = await headConversation();
 			if (conversation === undefined) return { model: null, thinkingLevel: "off" };
 			const agent = await conversation.agent(BACKGROUND_CONTEXT);
 			return {
@@ -271,11 +273,6 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				}
 			},
 		});
-		const headConversation = async () => {
-			const doc = await harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
-			const head = headOf(doc ?? null, threadId);
-			return head === undefined ? undefined : harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
-		};
 		return {
 			catalog: state.catalog,
 			configuration: state.configuration,
