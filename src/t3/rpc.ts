@@ -113,7 +113,7 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 	} as Any;
 }
 
-const toPromiseEffect = <A>(what: string, run: () => Promise<A>, onError: (message: string) => Any) =>
+const toPromiseEffect = <A>(run: () => Promise<A>, onError: (message: string) => Any) =>
 	Effect.tryPromise({ try: run, catch: (error) => onError((error as Error).message || String(error)) });
 
 export function makeRpcLayer(deps: RpcDeps) {
@@ -192,7 +192,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}
 			return bridge.nextSequence();
 		};
-		return toPromiseEffect("dispatch", () => bridge.idempotent(command.commandId, run), fail).pipe(
+		return toPromiseEffect(() => bridge.idempotent(command.commandId, run), fail).pipe(
 			Effect.map((sequence) => ({ sequence })),
 			Effect.tapError((error: Any) => Effect.sync(() => log.warn("command failed", { type: command.type, error: error.message }))),
 		);
@@ -245,13 +245,11 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}),
 		[`orchestration.getThreadProjection`]: (input: Any) =>
 			toPromiseEffect(
-				"projection",
 				() => bridge.projection(input.threadId),
 				(message) => new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message } as Any),
 			).pipe(Effect.map((result) => result.projection)),
 		[`orchestration.launchThread`]: (input: Any) =>
 			toPromiseEffect(
-				"launch",
 				async () => {
 					const threadId = await bridge.createThread({ threadId: input.threadId, projectId: input.projectId });
 					if (input.modelSelection?.model !== undefined) await bridge.selectModel(threadId, input.modelSelection.model);
