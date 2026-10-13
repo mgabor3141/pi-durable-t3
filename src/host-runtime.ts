@@ -1,0 +1,64 @@
+// The host's Harness wiring — the exact code `main.ts` runs — factored out so the tool/env path is testable without
+// booting the facet. Opens storage under the env root, installs the coding tools (`read`/`write`/`edit`/`bash`), and
+// supplies an env builder that builds a fresh execution environment per call from the conversation's `cwd`. New
+// conversations are configured with that cwd (in `Threads.create`), so a thread runs its tools in its project's dir.
+import { readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Models } from "@earendil-works/pi-ai";
+import { createRegistry, type EnvTarget, Harness, type ModelRef } from "@earendil-works/pi-durable";
+import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { BasePrompt } from "./base-prompt.ts";
+import type { HostConfig } from "./config.ts";
+import { Threads } from "./threads.ts";
+
+export type HostRuntime = {
+	readonly harness: Harness;
+	readonly threads: Threads;
+	/** Close to release the storage file. */
+	close(context?: typeof BACKGROUND_CONTEXT): Promise<void>;
+};
+
+export async function openHostRuntime(
+	config: HostConfig,
+	models: Models,
+	defaultModel: ModelRef | undefined,
+	options: { readonly onWarn?: (message: string, error: unknown) => void } = {},
+): Promise<HostRuntime> {
+	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd.
+	for (const project of config.projects) await mkdir(project.cwd, { recursive: true });
+	const storage = await openNodeSqliteStorage(join(config.root, "durable.db"));
+
+	const registry = createRegistry();
+	registry.install(CodingTools); // read, write, edit, bash — available to conversations by default.
+	registry.install(BasePrompt); // the built-in base system prompt section, so a new conversation is not left blank.
+
+	const harness = await Harness.open(
+		storage,
+		{
+			models,
+			registry,
+			// A fresh env per invocation, honoring the conversation's `cwd` (its project dir); the root is the fallback.
+			env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? config.root }),
+		},
+		BACKGROUND_CONTEXT,
+	);
+
+	// `instructions` is read at thread-create time (not cached), so editing the file affects new threads only.
+	const instructions = config.instructionsPath === undefined ? undefined : () => readFileSync(config.instructionsPath!, "utf8");
+	const threads = new Threads({ harness, projects: config.projects, defaultModel, ...(instructions === undefined ? {} : { instructions }), ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }) });
+	await threads.repair();
+	harness.resume(); // continue the runs the last process left unfinished
+
+	return {
+		harness,
+		threads,
+		close: async (context = BACKGROUND_CONTEXT) => {
+			await harness.close(context).catch(() => {});
+			await storage.close(context);
+		},
+	};
+}
