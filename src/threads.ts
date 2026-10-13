@@ -17,9 +17,7 @@ import {
 	defineDoc,
 	type EntryId,
 	InboxDoc,
-	type InboxState,
 	LiveDoc,
-	type LiveState,
 	type ModelRef,
 	type Submission,
 	type Tx,
@@ -115,9 +113,9 @@ async function configureNewConversation(tx: Tx, agent: Awaited<ReturnType<Conver
 /** Whether a conversation owes a turn right now: a run in progress or an input queued behind a failed one. */
 async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> {
 	const live = await tx.doc(LiveDoc, conversationId);
-	if ((live as LiveState).run !== undefined) return true;
+	if (live.run !== undefined) return true;
 	const inbox = await tx.doc(InboxDoc, conversationId);
-	return ((inbox as InboxState).items?.length ?? 0) > 0;
+	return (inbox.items?.length ?? 0) > 0;
 }
 
 /** The threads layer over a caller-provided Harness. Stateless apart from the Harness's own storage. */
