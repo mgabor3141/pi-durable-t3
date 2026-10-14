@@ -13,6 +13,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Threads } from "../src/threads.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const THREADS_KIND = "pi-durable-t3.threads";
@@ -27,7 +28,7 @@ describe("threads document checkpoints", () => {
 		const model = createScriptedModel([]);
 		const harness = await Harness.open(storage, { models: model.models, registry: createRegistry() }, ctx);
 		try {
-			const threads = new Threads({ harness, projects: [{ id: "p", name: "p", cwd: dir }], defaultModel: model.modelRef });
+			const threads = new Threads({ harness, registry: testRegistry([{ id: "p", cwd: dir }]), defaultModel: model.modelRef });
 			for (let i = 0; i < CYCLES; i++) {
 				await threads.create({ threadId: `t${i}`, projectId: "p" });
 				await threads.remove(`t${i}`);

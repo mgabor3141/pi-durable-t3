@@ -1,13 +1,16 @@
 // T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup). The minimal viable surface is implemented; every other method
 // gets a stub: streams stay open and silent, and unary calls answer with a benign value or a clear failure.
 import {
+	FilesystemBrowseError,
 	type ExecutionEnvironmentDescriptor,
 	OrchestrationV2DispatchCommandError,
 	OrchestrationV2GetThreadProjectionError,
 	OrchestrationV2ThreadLaunchError,
+	ProjectMutationError,
 	RpcScopeAuthorization,
 	DEFAULT_SERVER_SETTINGS,
 	type ServerConfig,
+	type ServerSettings,
 	WsRpcGroup,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -16,10 +19,13 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
+import { ProjectConflict, ProjectNotFound } from "../registry.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
+import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
+import { splitSlug } from "./model-types.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
@@ -63,10 +69,6 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.metadata.update": "Renaming threads is not supported by pi-durable-t3 yet.",
-	"projects.add": "Adding projects is not supported by pi-durable-t3 yet.",
-	"projects.remove": "Removing projects is not supported by pi-durable-t3 yet.",
-	"filesystem.browse": "Browsing directories is not supported by pi-durable-t3 yet.",
-	"server.updateSettings": "Changing settings is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
 };
@@ -91,10 +93,17 @@ interface RpcDeps {
 
 // T3 treats provider instances that are not listed in settings as disabled. Start from the contracts' canonical
 // defaults (a partial decode would drop required-with-default keys) and enable the `pi` instance.
-const defaultSettings = {
+const baseSettings: ServerSettings = {
 	...DEFAULT_SERVER_SETTINGS,
 	providerInstances: { [PROVIDER_INSTANCE_ID]: { driver: PROVIDER_INSTANCE_ID, displayName: "pi", enabled: true } },
-};
+} as ServerSettings;
+
+/** The host-wide settings T3 reads: the canonical defaults plus the new-thread model default from the instance file.
+ * The registry is the source of truth, so `getSettings`, `updateSettings`, and the config snapshot all agree. */
+function serverSettings(deps: RpcDeps): ServerSettings {
+	const model = deps.bridge.config.registry.defaults().model;
+	return { ...baseSettings, defaultModelSelection: model === undefined ? null : { instanceId: PROVIDER_INSTANCE_ID, model: `${model.provider}/${model.modelId}` } } as ServerSettings;
+}
 
 function serverConfig(deps: RpcDeps): ServerConfig {
 	return {
@@ -115,7 +124,7 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 			otlpMetricsEnabled: false,
 			otlpLogsEnabled: false,
 		},
-		settings: defaultSettings,
+		settings: serverSettings(deps),
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
 	} as Any;
@@ -210,7 +219,51 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.probe": () => Effect.succeed({}),
 		"server.getConfig": () => Effect.sync(() => serverConfig(deps)),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
-		"server.getSettings": () => Effect.succeed(defaultSettings),
+		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
+		// The new-thread model default lives in the instance file; `defaultModelSelection` sets it, `null` clears it.
+		// `providerInstanceMutation` (enabling a provider instance) is a no-op: pi is the only provider. Returns the full settings.
+		"server.updateSettings": (input: Any) =>
+			Effect.try({
+				try: () => {
+					const selection = input?.patch?.defaultModelSelection;
+					const registry = bridge.config.registry;
+					if (selection === null) registry.setModel(null);
+					else if (selection?.model !== undefined) {
+						const ref = splitSlug(String(selection.model));
+						if (ref !== undefined) registry.setModel(ref);
+					}
+					return serverSettings(deps);
+				},
+				catch: (error) => ({ _tag: "ServerSettingsError", message: (error as Error).message || String(error) }),
+			}),
+		// Projects are added/removed/edited through `projects.mutate` (the sendable surface). A duplicate path and a
+		// non-empty remove map to the contract's typed errors; every refusal is a `ProjectMutationError` (T3's shape).
+		"projects.mutate": (mutation: Any) =>
+			Effect.tryPromise({
+				try: () => bridge.mutateProject(mutation),
+				catch: (error) =>
+					new ProjectMutationError({
+						commandId: mutation.commandId,
+						message: error instanceof ProjectConflict || error instanceof ProjectNotFound ? error.message : (error as Error).message || String(error),
+					}),
+			}),
+		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
+		"filesystem.browse": (input: Any) =>
+			Effect.tryPromise({
+				try: () => browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) }),
+				catch: (error) =>
+					new FilesystemBrowseError({
+						partialPath: input.partialPath,
+						...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+						failure:
+							error instanceof BrowseWindowsPathUnsupported
+								? "windows_path_unsupported"
+								: error instanceof BrowseCurrentProjectRequired
+									? "current_project_required"
+									: "read_directory_failed",
+						...(error instanceof BrowseReadDirectoryFailed ? { parentPath: error.parentPath } : {}),
+					}),
+			}),
 		"server.reportClientActivity": () => Effect.succeed({}),
 		subscribeServerConfig: () =>
 			Stream.concat(

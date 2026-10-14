@@ -8,7 +8,7 @@
 // never read. Ports here are their own (4901-4905, 4908) and distinct, so the tests can run in parallel.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { request } from "node:http";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -44,7 +44,9 @@ function launch(root: string, port: number, extraEnv: NodeJS.ProcessEnv = {}): L
 async function writeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
-	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, "utf8");
+	// The integrator's `config.toml` (host-owned keys) and the instance file (the project registry the UI edits).
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
+	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }], defaults: {} }), "utf8");
 	return root;
 }
 
@@ -240,6 +242,87 @@ it("the thread-detail routes answer pairing state and an unknown thread as T3 re
 		const unpaired = await getJson(port, "/api/orchestration/threads/.nope");
 		expect(unpaired.status).toBe(401);
 		expect(unpaired.body.code).toBe("auth_invalid");
+	} finally {
+		host.child.kill("SIGKILL");
+		await host.exited;
+	}
+}, 40_000);
+
+it("REST /api/projects/mutate adds a project (id from its path), refuses a duplicate path, and removes it (files untouched)", async () => {
+	// The reachable project-management surface over the documented HTTP route, sharing one store with `projects.mutate`
+	// over `/ws`. A fixed pairing token (env-var-only) makes the exchange repeatable, exactly as the routes test does.
+	const port = 4909;
+	const root = await writeRoot("projects", port);
+	const pairingToken = "test-pairing-code-projects-0123";
+	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: pairingToken });
+	const target = join(root, "projects", "added");
+	const marker = join(target, "keep.txt");
+	try {
+		expect(await waitListening(port)).toBe(true);
+		const paired = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
+			method: "POST",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({
+				grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+				subject_token: pairingToken,
+				subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+				requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+			}).toString(),
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(paired.status).toBe(200);
+		const bearer = (paired.json() as Promise<{ access_token: string }>).then((b) => b.access_token);
+		const token = await bearer;
+		const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+
+		// Unpaired is refused (the same bearer guard as every route).
+		const unpaired = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ type: "project.create", commandId: "c0", projectId: "x", title: "x", workspaceRoot: target }),
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(unpaired.status).toBe(401);
+
+		// Create: a project at a new path, its id derived from the path. It creates the directory (createWorkspaceRootIfMissing).
+		const created = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
+			method: "POST",
+			headers: auth,
+			body: JSON.stringify({ type: "project.create", commandId: "c1", projectId: "client-minted", title: "Added", workspaceRoot: target, createWorkspaceRootIfMissing: true }),
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(created.status).toBe(200);
+		const project = (await created.json()) as { id: string; workspaceRoot: string; title: string; deletedAt: string | null };
+		expect(project.workspaceRoot).toBe(target);
+		expect(project.title).toBe("Added");
+		expect(project.id).toMatch(/^p-[0-9a-f]{16}$/); // derived from the path, not the client-minted id
+
+		// It appears in the project list, and the directory exists (a marker written into it).
+		const list1 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string }[] };
+		expect(list1.projects.some((entry) => entry.id === project.id)).toBe(true);
+		await writeFile(marker, "keep me\n", "utf8");
+
+		// A duplicate path is refused (T3 refuses it too): the same folder under a different title.
+		const dup = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
+			method: "POST",
+			headers: auth,
+			body: JSON.stringify({ type: "project.create", commandId: "c2", projectId: "y", title: "Dup", workspaceRoot: target }),
+			signal: AbortSignal.timeout(5000),
+		});
+		const dupBody = (await dup.json()) as { _tag: string; message: string };
+		expect([dup.status, dupBody._tag, dupBody.message]).toEqual([409, "ProjectMutationError", expect.stringMatching(/already belongs to project/)]);
+
+		// Remove (force:true) drops the entry; the files on disk are untouched (T3's dialog promises exactly this).
+		const removed = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
+			method: "POST",
+			headers: auth,
+			body: JSON.stringify({ type: "project.delete", commandId: "c3", projectId: project.id, force: true }),
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(removed.status).toBe(200);
+		const list2 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string }[] };
+		expect(list2.projects.some((entry) => entry.id === project.id)).toBe(false);
+		expect((await readFile(marker, "utf8"))).toBe("keep me\n");
 	} finally {
 		host.child.kill("SIGKILL");
 		await host.exited;

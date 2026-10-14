@@ -9,10 +9,11 @@ import { createHost } from "@earendil-works/chord";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
-function makeBridge(projects: BridgeConfig["projects"]): Bridge {
+function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
 	const config: BridgeConfig = {
 		host: "127.0.0.1",
 		port: 0,
@@ -21,7 +22,7 @@ function makeBridge(projects: BridgeConfig["projects"]): Bridge {
 		pairingToken: undefined,
 		tokenTtlSeconds: 60,
 		corsOrigins: [],
-		projects,
+		registry: testRegistry(projects.map((project) => ({ id: project.id, cwd: project.path }))),
 	};
 	// `projectForCwd` never touches the host, so an unloaded one is enough to construct a Bridge.
 	return new Bridge(config, log, createHost({ name: "server" }));
@@ -29,7 +30,7 @@ function makeBridge(projects: BridgeConfig["projects"]): Bridge {
 
 describe("project ids for unconfigured folders", () => {
 	it("the same cwd yields the same id across two Bridges (stable across restarts)", () => {
-		const projects = [{ id: "alpha", name: "alpha", path: "/data/alpha" }] as const;
+		const projects = [{ id: "alpha", path: "/data/alpha" }] as const;
 		const a = makeBridge(projects);
 		const b = makeBridge(projects);
 
@@ -51,8 +52,8 @@ describe("project ids for unconfigured folders", () => {
 		expect(spelled).toBe(plain);
 	});
 
-	it("a configured folder keeps its name id (and a subpath of it maps to it); a different folder differs", () => {
-		const projects = [{ id: "alpha", name: "alpha", path: "/data/alpha" }] as const;
+	it("a configured folder keeps its id (and a subpath of it maps to it); a different folder differs", () => {
+		const projects = [{ id: "alpha", path: "/data/alpha" }] as const;
 		const bridge = makeBridge(projects);
 		expect(bridge.projectForCwd("/data/alpha").id).toBe("alpha");
 		expect(bridge.projectForCwd("/data/alpha/sub").id).toBe("alpha");

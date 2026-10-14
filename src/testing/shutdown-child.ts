@@ -4,12 +4,15 @@
 // what makes the process exit fast. Hermetic: a scripted faux model, a temp root, no network, no `~/.pi`.
 //
 // Run: node --experimental-strip-types src/testing/shutdown-child.ts <root> <project> <port> [tool-sleep-ms]
+import { join } from "node:path";
 import { Type } from "typebox";
 import { createHost } from "@earendil-works/chord";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { parseConfigToml } from "../config.ts";
 import { openHostRuntime } from "../host-runtime.ts";
+import { FileProjectRegistry } from "../registry.ts";
+import { writeInstanceFile } from "../settings.ts";
 import { installShutdown } from "../shutdown.ts";
 import { createServerFacet } from "../objects.ts";
 import { ModelCatalog } from "../t3/models.ts";
@@ -33,20 +36,23 @@ const slowTool = defineTool({
 	},
 });
 
-const config = parseConfigToml(`listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "${project}"\npath = "p"\n`, root);
+const config = parseConfigToml(`listen = "127.0.0.1:${port}"\n`, root);
+// The instance file the host edits on the UI's behalf: a project at `<root>/p` (its id is derived from that path).
+await writeInstanceFile(root, { projects: [{ path: join(root, "p"), title: project }], defaults: {} });
+const registry = await FileProjectRegistry.open(root);
 // Generation 1 is a `tool_use` for `slow`; nothing is queued after, so the run sits inside the tool until the signal.
 const model = createScriptedModel([fauxAssistantMessage([fauxToolCall("slow", {})], { stopReason: "toolUse" })]);
-const runtime = await openHostRuntime(config, model.models, model.modelRef, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });
+const runtime = await openHostRuntime(config, registry, model.models, model.modelRef, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });
 
 const server = createHost({ name: "server" });
 await server.load([createServerFacet(runtime.threads, model.models)]);
 await server.ready();
 const catalog = new ModelCatalog(async () => []);
 await catalog.refresh();
-const facet = startFacet({ host: server, catalog, log: { info: () => {}, warn: () => {} }, config: config.bridge });
+const facet = startFacet({ host: server, catalog, log: { info: () => {}, warn: () => {} }, config: { ...config.bridge, registry } });
 await facet.ready;
 
-const thread = await runtime.threads.create({ threadId: "shutdown", projectId: project });
+const thread = await runtime.threads.create({ threadId: "shutdown", projectId: registry.list()[0]!.id });
 await runtime.threads.submit({ threadId: "shutdown", conversationId: thread.head, requestId: "shutdown-1", message: "go" }, undefined);
 process.stdout.write(`ADMITTED ${thread.head}\n`);
 

@@ -1,22 +1,24 @@
-# pi-durable-t3 host config. This file is `config.toml`, read from the config dir; data (storage, models
-# store, facet state, project cwd roots) goes under the data dir. Default (XDG) locations:
+# pi-durable-t3 integrator config: `config.toml`, read from the config dir. It is the INTEGRATOR's tier —
+# what a UI must not set (the listen address, the web origin, the facet's own settings, the instructions
+# file). Everything the T3 UI edits — the project registry and the new-thread model/thinking defaults —
+# lives in the INSTANCE file, `settings.json`, in the DATA dir (see below). Data (storage, models store,
+# facet state, the instance file, project cwd roots) goes under the data dir. Default (XDG) locations:
 #   ~/.config/pi-durable-t3/config.toml   ($XDG_CONFIG_HOME, default ~/.config)
 #   ~/.local/share/pi-durable-t3/         ($XDG_DATA_HOME,   default ~/.local/share)
 # Copy it into the config dir:
 #   mkdir -p ~/.config/pi-durable-t3 && cp config.example.toml ~/.config/pi-durable-t3/config.toml
 # `--root <dir>` overrides both, so an instance is one directory: config <dir>/config.toml, all data under
-# <dir>/ (durable.db, models-store.json, t3-auth/):
+# <dir>/ (durable.db, models-store.json, settings.json, t3-auth/):
 #   mkdir -p <dir> && cp config.example.toml <dir>/config.toml && pnpm start -- --root <dir>
-# Unknown keys are rejected, naming the file, the key path, and what was expected.
-# An empty file is also valid (defaults, no projects); a missing file is an error.
-# Keys are listed in TOML order: root scalars, then [t3], then [[projects]]. Uncomment in place.
+# Unknown keys are rejected, naming the file, the key path, and what was expected. A key that moved to the
+# instance file (`[[projects]]`, `default_model`) is refused by name, pointing at settings.json.
+# An empty file is also valid (defaults only); a missing file is an error.
+# Keys are listed in TOML order: root scalars, then [t3]. Uncomment in place.
 
 # Optional — every key below defaults to the commented value.
 # listen = "127.0.0.1:3774"                 # str  "host:port"; the facet address (the T3 app uses 3773)
 # web = "http://127.0.0.1:5733"             # str? your T3 web app URL; setting it prints a ready pairing link
 #                                           #      and pins CORS to it; `pnpm web` serves on 5733
-# default_model = "provider/model"          # str? model new threads start on (unset: first available from
-#                                           #      your pi config, ~/.pi/agent)
 # instructions = "AGENTS.md"                # str? file whose text becomes new threads' instructions; read at
 #                                           #      thread create (new threads only); `~` ok, relative to the
 #                                           #      data dir; a missing file fails at start
@@ -26,14 +28,13 @@
 # token_ttl_days = 90                       # int    bearer-token lifetime
 # cors_origins = ["http://127.0.0.1:5733"]  # [str]  allowed CORS origins (default: the `web` origin)
 
-# Required: at least one project, or the host serves an empty environment. A project is a directory
-# under the data dir (absolute paths must stay under it), and its threads run in it. Add one
-# [[projects]] block per project; `name` is also the default path.
-[[projects]]
-name = "alpha"
-# path = "projects/alpha" # directory under the data dir (default: the name)
+# Projects and the new-thread default model are NOT set here. They live in the instance file
+# `settings.json`, in the DATA dir, which the T3 UI edits (Add project / the model picker) and the running
+# host writes. With `--root <dir>` it is `<dir>/settings.json`. A missing file is valid (no projects, the
+# first available model); the shape is documented in `docs/state.md` and the README. Writing `projects` or
+# `default_model` into this file is refused, naming settings.json as where they belong.
 
-# Notes: a fixed, reusable pairing token is test-only — set the PI_DURABLE_T3_PAIRING_TOKEN env
-# var, there is no key for it. The facet binds to loopback by default and requests with a
-# non-loopback `Host` header are rejected. With neither `web` nor `cors_origins` set the facet
-# answers `Access-Control-Allow-Origin: *`; every call needs a bearer token.
+# Notes: a fixed, reusable pairing token is test-only — set the PI_DURABLE_T3_PAIRING_TOKEN env var,
+# there is no key for it. The facet binds to loopback by default and requests with a non-loopback `Host`
+# header are rejected. With neither `web` nor `cors_origins` set the facet answers
+# `Access-Control-Allow-Origin: *`; every call needs a bearer token.

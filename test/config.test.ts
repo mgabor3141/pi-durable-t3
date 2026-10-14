@@ -1,8 +1,9 @@
 // `config.toml` parsing: schema validation (with defaults, unknown-key rejection, and every error path) plus the semantic
-// checks the schema can't express. Project-path containment is the design's invariant — a project's cwd must resolve
-// under the data dir, or a later env builder would run tools outside it — so `../x`, an absolute path outside the data
-// dir, and `a/../../b` are refused. `loadConfig` file behavior (missing vs. empty) is checked against a temp root.
-import { readFile, writeFile } from "node:fs/promises";
+// checks the schema can't express (host:port). This file holds ONLY what a UI must not set; the project registry and the
+// new-thread model default moved to the instance file (`settings.json`), so a `[[projects]]` block or a `default_model`
+// key is refused here with a message naming the file they belong in. Project parsing is tested in `settings.test.ts`.
+// `loadConfig` file behavior (missing vs. empty) is checked against a temp root.
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { chooseDefaultModel, loadConfig, parseConfigToml, resolvePaths } from "../src/config.ts";
@@ -10,83 +11,49 @@ import { tempRoot } from "./temp-root.ts";
 
 const root = "/srv/host-root";
 
-function toml(paths: string[]): string {
-	return paths.map((p, i) => `[[projects]]\nname = "p${i}"\npath = "${p}"`).join("\n\n");
-}
-
-describe("project path containment", () => {
-	it("accepts a relative path under the root", () => {
-		const config = parseConfigToml(toml(["work"]), root);
-		expect(config.projects[0]?.cwd).toBe(join(root, "work"));
+describe("config.toml holds only host-owned keys", () => {
+	it("listen, web, instructions, and the [t3] table parse; projects and default_model are gone", () => {
+		const config = parseConfigToml(
+			`listen = "0.0.0.0:9000"\nweb = "http://localhost:5733"\ninstructions = "AGENTS.md"\n\n[t3]\nlabel = "studio"\nstate_dir = "auth"\ntoken_ttl_days = 7\ncors_origins = ["http://a", "http://b"]\n`,
+			root,
+		);
+		expect(config.listen).toEqual({ host: "0.0.0.0", port: 9000 });
+		expect(config.webAppUrl).toBe("http://localhost:5733");
+		expect(config.instructionsPath).toBe(join(root, "AGENTS.md"));
+		expect(config.bridge.label).toBe("studio");
+		expect(config.bridge.stateDir).toBe(join(root, "auth"));
+		expect(config.bridge.tokenTtlSeconds).toBe(7 * 86_400);
+		expect(config.bridge.corsOrigins).toEqual(["http://a", "http://b"]);
 	});
 
-	it("accepts a nested path that stays under the root", () => {
-		const config = parseConfigToml(toml(["a/b/c"]), root);
-		expect(config.projects[0]?.cwd).toBe(join(root, "a/b/c"));
+	it("a [[projects]] block is refused and names the instance file", () => {
+		expect(() => parseConfigToml(`[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, root)).toThrow(/projects.*settings\.json/i);
+		expect(() => parseConfigToml(`[[projects]]\nname = "alpha"\n`, root)).toThrow(/config\.toml/);
 	});
 
-	it("accepts an absolute path that stays under the root", () => {
-		const config = parseConfigToml(toml([`${root}/inside`]), root);
-		expect(config.projects[0]?.cwd).toBe(`${root}/inside`);
-	});
-
-	it("refuses a path that escapes the data dir", () => {
-		expect(() => parseConfigToml(toml(["../outside"]), root)).toThrow(/outside the data dir/);
-	});
-
-	it("refuses an absolute path outside the data dir", () => {
-		expect(() => parseConfigToml(toml(["/etc"]), root)).toThrow(/outside the data dir/);
-	});
-
-	it("refuses a path that walks back out (`a/../../b`)", () => {
-		expect(() => parseConfigToml(toml(["a/../../b"]), root)).toThrow(/outside the data dir/);
-	});
-
-	it("names the offending project in the error", () => {
-		expect(() => parseConfigToml(toml(["../escape"]), root)).toThrow(/path "\.\.\/escape"/);
+	it("a default_model key is refused and names the instance file", () => {
+		expect(() => parseConfigToml(`default_model = "anthropic/claude-sonnet-4-5"\n`, root)).toThrow(/default_model.*settings\.json/i);
 	});
 });
 
 describe("defaults (a minimal file gets them)", () => {
-	const config = parseConfigToml(`[[projects]]\nname = "only"\n`, root);
-
+	const config = parseConfigToml(``, root);
 	it("listen defaults to 127.0.0.1:3774", () => {
 		expect(config.listen).toEqual({ host: "127.0.0.1", port: 3774 });
 	});
-	it("an absent path defaults to the project name", () => {
-		expect(config.projects[0]?.cwd).toBe(join(root, "only"));
-	});
-	it("web and default_model are absent", () => {
+	it("web and instructions are absent", () => {
 		expect(config.webAppUrl).toBeUndefined();
-		expect(config.defaultModel).toBeUndefined();
+		expect(config.instructionsPath).toBeUndefined();
 	});
 	it("the facet bridge carries its defaults", () => {
 		expect(config.bridge.label).toBe("pi");
 		expect(config.bridge.tokenTtlSeconds).toBe(90 * 86_400);
-		expect(config.bridge.corsOrigins).toEqual([]); // no `web` set → no CORS origins (was the old wildcard default)
+		expect(config.bridge.corsOrigins).toEqual([]); // no `web` set → no CORS origins
 		expect(config.bridge.stateDir).toBe(join(root, "t3-auth"));
 		expect(config.bridge.pairingToken).toBeUndefined();
-		expect(config.bridge.projects).toEqual([{ id: "only", name: "only", path: join(root, "only") }]);
 	});
 	it("modelsStorePath sits under the data dir", () => {
 		expect(config.modelsStorePath).toBe(join(root, "models-store.json"));
-	});
-});
-
-describe("full document", () => {
-	const config = parseConfigToml(
-		`listen = "0.0.0.0:9000"\nweb = "http://localhost:5733"\ndefault_model = "anthropic/claude-sonnet-4-5"\n\n[t3]\nlabel = "studio"\nstate_dir = "auth"\ntoken_ttl_days = 7\ncors_origins = ["http://a", "http://b"]\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`,
-		root,
-	);
-	it("parses every key", () => {
-		expect(config.listen).toEqual({ host: "0.0.0.0", port: 9000 });
-		expect(config.webAppUrl).toBe("http://localhost:5733");
-		expect(config.defaultModel).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
-		expect(config.bridge.label).toBe("studio");
-		expect(config.bridge.stateDir).toBe(join(root, "auth"));
-		expect(config.bridge.pairingToken).toBeUndefined(); // the fixed token is the env var, never the file
-		expect(config.bridge.tokenTtlSeconds).toBe(7 * 86_400);
-		expect(config.bridge.corsOrigins).toEqual(["http://a", "http://b"]);
 	});
 });
 
@@ -106,11 +73,6 @@ describe("security defaults (S4)", () => {
 });
 
 describe("semantic checks after validation", () => {
-	it("default_model must be provider/model", () => {
-		expect(() => parseConfigToml(`default_model = "noslash"\n`, root)).toThrow(/default_model "noslash" must be provider\/model/);
-		expect(() => parseConfigToml(`default_model = "/only-model"\n`, root)).toThrow(/must be provider\/model/);
-		expect(() => parseConfigToml(`default_model = "only-provider/"\n`, root)).toThrow(/must be provider\/model/);
-	});
 	it("listen must be host:port with a valid, explicit port (S5)", () => {
 		expect(() => parseConfigToml(`listen = "nohost"\n`, root)).toThrow(/listen "nohost" must be host:port/);
 		expect(() => parseConfigToml(`listen = "host:99999"\n`, root)).toThrow(/port 1-65535/);
@@ -122,10 +84,6 @@ describe("semantic checks after validation", () => {
 		expect(parseConfigToml(`listen = "127.0.0.1:1"\n`, root).listen.port).toBe(1);
 		expect(parseConfigToml(`listen = "127.0.0.1:65535"\n`, root).listen.port).toBe(65535);
 	});
-	it("project names must be unique", () => {
-		const dup = `[[projects]]\nname = "same"\npath = "a"\n\n[[projects]]\nname = "same"\npath = "b"\n`;
-		expect(() => parseConfigToml(dup, root)).toThrow(/duplicate project name "same"/);
-	});
 });
 
 describe("schema validation (errors name the file, key path, and expectation)", () => {
@@ -134,15 +92,6 @@ describe("schema validation (errors name the file, key path, and expectation)", 
 	});
 	it("rejects a wrong nested type", () => {
 		expect(() => parseConfigToml(`[t3]\ntoken_ttl_days = "7"\n`, root)).toThrow(/t3\.token_ttl_days: must be integer/);
-	});
-	it("rejects a project without a name", () => {
-		expect(() => parseConfigToml(`[[projects]]\npath = "x"\n`, root)).toThrow(/projects\[0\]: must have required properties name/);
-	});
-	it("rejects projects that is not an array", () => {
-		expect(() => parseConfigToml(`projects = "x"\n`, root)).toThrow(/projects: must be array/);
-	});
-	it("rejects an empty project name", () => {
-		expect(() => parseConfigToml(`[[projects]]\nname = ""\n`, root)).toThrow(/projects\[0\]\.name: must not have fewer than/);
 	});
 });
 
@@ -153,16 +102,12 @@ describe("unknown keys are rejected (catches typos)", () => {
 	it("inside [t3]", () => {
 		expect(() => parseConfigToml(`[t3]\nlabl = "x"\n`, root)).toThrow(/t3\.unknown key "labl"/);
 	});
-	it("inside a project", () => {
-		expect(() => parseConfigToml(`[[projects]]\nname = "a"\npaht = "x"\n`, root)).toThrow(/projects\[0\]\.unknown key "paht"/);
-	});
 });
 
 describe("empty and missing files", () => {
-	it("an empty file is valid: defaults, no projects", () => {
+	it("an empty file is valid: defaults apply", () => {
 		const config = parseConfigToml("", root);
 		expect(config.listen).toEqual({ host: "127.0.0.1", port: 3774 });
-		expect(config.projects).toEqual([]);
 		expect(config.bridge.label).toBe("pi");
 	});
 
@@ -233,18 +178,5 @@ describe("chooseDefaultModel (S1)", () => {
 	it("fails at start, naming ~/.pi/agent, when no models are available", () => {
 		expect(() => chooseDefaultModel([], undefined)).toThrow(/no models are available/);
 		expect(() => chooseDefaultModel([], undefined)).toThrow(/~\/\.pi\/agent/);
-	});
-});
-
-describe("config.example.toml", () => {
-	it("parses as written, with defaults applied", async () => {
-		const dir = await tempRoot();
-		const text = await readFile(new URL("../config.example.toml", import.meta.url), "utf8");
-		const config = parseConfigToml(text, dir, "config.example.toml");
-		expect(config.projects.map((p) => p.name)).toEqual(["alpha"]);
-		expect(config.projects[0]!.cwd).toBe(join(dir, "alpha"));
-		expect(config.listen).toEqual({ host: "127.0.0.1", port: 3774 });
-		expect(config.webAppUrl).toBeUndefined();
-		expect(config.defaultModel).toBeUndefined();
 	});
 });

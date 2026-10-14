@@ -13,6 +13,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BasePrompt } from "./base-prompt.ts";
 import type { HostConfig } from "./config.ts";
+import type { ProjectRegistry } from "./registry.ts";
 import { Threads } from "./threads.ts";
 
 type HostRuntime = {
@@ -24,12 +25,13 @@ type HostRuntime = {
 
 export async function openHostRuntime(
 	config: HostConfig,
+	projectRegistry: ProjectRegistry,
 	models: Models,
 	defaultModel: ModelRef | undefined,
 	options: { readonly onWarn?: (message: string, error: unknown) => void; readonly extensions?: readonly Extension[] } = {},
 ): Promise<HostRuntime> {
 	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd.
-	for (const project of config.projects) await mkdir(project.cwd, { recursive: true });
+	for (const project of projectRegistry.list()) await mkdir(project.cwd, { recursive: true });
 	const storage = await openNodeSqliteStorage(join(config.dataDir, "durable.db"));
 
 	const registry = createRegistry();
@@ -52,7 +54,8 @@ export async function openHostRuntime(
 
 	// `instructions` is read at thread-create time (not cached), so editing the file affects new threads only.
 	const instructions = config.instructionsPath === undefined ? undefined : () => readFileSync(config.instructionsPath!, "utf8");
-	const threads = new Threads({ harness, projects: config.projects, defaultModel, ...(instructions === undefined ? {} : { instructions }), ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }) });
+	const defaults = projectRegistry.defaults();
+	const threads = new Threads({ harness, registry: projectRegistry, defaultModel, ...(defaults.thinkingLevel === undefined ? {} : { defaultThinkingLevel: defaults.thinkingLevel }), ...(instructions === undefined ? {} : { instructions }), ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }) });
 	await threads.repair();
 	harness.resume(); // continue the runs the last process left unfinished
 

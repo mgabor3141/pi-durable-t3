@@ -10,6 +10,7 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@eare
 import { parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 import { idle } from "./threads-harness.ts";
 
 describe("host runtime (main.ts wiring)", () => {
@@ -17,7 +18,8 @@ describe("host runtime (main.ts wiring)", () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-durable-t3-runtime-"));
 		await mkdir(join(root, "projects/alpha"), { recursive: true });
 		await mkdir(join(root, "projects/beta"), { recursive: true });
-		const config = parseConfigToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
+		const config = parseConfigToml(`listen = "127.0.0.1:1"\n`, root);
+		const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]);
 
 		// The model answers the turn with a `bash pwd > pwd.txt`, then finishes — exercising a real tool in the env cwd.
 		const steps: FauxResponseStep[] = [
@@ -25,7 +27,7 @@ describe("host runtime (main.ts wiring)", () => {
 			async () => fauxAssistantMessage("done"),
 		];
 		const model = createScriptedModel(steps);
-		const runtime = await openHostRuntime(config, model.models, model.modelRef);
+		const runtime = await openHostRuntime(config, registry, model.models, model.modelRef);
 		try {
 			const thread = await runtime.threads.create({ threadId: "a", projectId: "alpha" });
 			await runtime.threads.submit({ threadId: "a", conversationId: thread.head, requestId: "r1", message: "where am I" }, undefined);

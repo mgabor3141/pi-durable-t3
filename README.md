@@ -19,23 +19,39 @@ pnpm setup:t3     # shallow-fetches t3code at the pin; vendors @t3tools/contract
 
 ## Configure
 
-```sh
+There are **two files**, one per tier — each owns what it owns, and neither duplicates the other.
+
+```
 mkdir -p ~/.config/pi-durable-t3 && cp config.example.toml ~/.config/pi-durable-t3/config.toml
 ```
 
-The config lives in `$XDG_CONFIG_HOME/pi-durable-t3` (default `~/.config/…`); data (storage, the models
-store, facet state) lives in `$XDG_DATA_HOME/pi-durable-t3` (default `~/.local/share/…`). `--root <dir>`
-overrides both, keeping this instance's config (`<dir>/config.toml`) and all its data in one directory.
+**`config.toml` — the integrator's tier.** What a UI must not set: the listen address, the `web` origin, the
+facet's own settings (`[t3]`), and the `instructions` file. It lives in `$XDG_CONFIG_HOME/pi-durable-t3`
+(default `~/.config/…`); the data dir is `$XDG_DATA_HOME/pi-durable-t3` (default `~/.local/share/…`).
+`--root <dir>` overrides both, keeping this instance's config (`<dir>/config.toml`) and all its data in one
+directory. [`config.example.toml`](config.example.toml) is the commented reference. Unknown keys are rejected,
+naming the file, key path, and what was expected; a missing file is an error, an empty one is valid.
 
-[`config.example.toml`](config.example.toml) is a commented reference: the required part is at least one
-`[[projects]]` block (a directory under the data dir, in which its threads run `bash` and the file tools, as
-the host user), and every optional key is shown commented with its default (`listen`, `web`,
-`default_model`, `instructions`, `[t3]`). Unknown keys are rejected, naming the file, the key path, and
-what was expected; an empty file is valid (defaults, no projects), a missing file is an error. Defaults
-keep the facet on loopback, requests with a non-loopback `Host` are rejected, and the fixed reusable
-pairing token is env-var-only, for tests. CORS is pinned to `web` when you set it; with `web` and
-`cors_origins` both unset the facet answers `Access-Control-Allow-Origin: *` — every call still needs a
-bearer token, so a browser can't read the API cross-site, but set `web` to pin it.
+**`settings.json` — the instance file, the UI's tier.** The project registry and the new-thread defaults (the
+model and thinking level a new thread starts on) live here, **in the data dir** — with `--root <dir>`,
+`<dir>/settings.json`. This is the file T3's **Add project** picker and model picker edit: you add a project in
+the UI, and the running host writes it (atomically) on your behalf. A project is a directory (paths under the
+data dir; `~` and absolute paths expand), and its **id is derived from its path**, so the title is only a label
+and the same folder can't be added twice. A missing file is valid (no projects, the first available model). The
+shape:
+
+```jsonc
+{
+  "projects": [ { "path": "projects/alpha", "title": "alpha" } ],  // path required, title optional (defaults to the folder)
+  "defaults": { "model": "pi/…", "thinkingLevel": "off" }          // model optional; thinkingLevel one of off…max
+}
+```
+
+Writing `[[projects]]` or `default_model` into `config.toml` is refused by name, pointing at `settings.json`.
+Defaults keep the facet on loopback, requests with a non-loopback `Host` are rejected, and the fixed reusable
+pairing token is env-var-only, for tests. CORS is pinned to `web` when you set it; with `web` and `cors_origins`
+both unset the facet answers `Access-Control-Allow-Origin: *` — every call still needs a bearer token, so a
+browser can't read the API cross-site, but set `web` to pin it.
 
 ## Run
 
@@ -45,7 +61,7 @@ pnpm start          # reads the XDG config above; add `-- --root <dir>` for a si
 
 The host opens a Harness with the coding tools (`read`/`write`/`edit`/`bash`), runs each thread in its project's directory, serves the T3 facet, and prints a one-time pairing code and link. Model catalog and credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials? Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start` (or with `-- --root …`).
 
-New threads start from a built-in base prompt (coding agent, its working directory, the platform). `instructions` appends a file's text to it, read at thread create: editing the file affects new threads only, and a missing file fails at start.
+New threads start on the instance file's default model, else the first available one, and from a built-in base prompt (coding agent, its working directory, the platform). `instructions` appends a file's text to it, read at thread create: editing the file affects new threads only, and a missing file fails at start.
 
 ## Pair
 
@@ -77,8 +93,9 @@ Open the pairing link the host printed at start. With `web` set it is exactly:
 
 [T3's API calls and what this host answers](docs/capabilities.md), marked ✅ works, 🔜 soon, 🕐 later,
 ❌ never, each with its reason. The short version: threads, prompts, steering, interrupts, per-thread
-models and undo work today; forks, renames and the project registry are next; git, terminals, file panels
-and previews are refused on purpose, because the agent has `bash` and works in real repos itself.
+models, undo, and the project registry (add/remove from T3's picker, the model default) work today; forks and
+renames are next; git, terminals, file panels and previews are refused on purpose, because the agent has `bash`
+and works in real repos itself.
 
 A refused call answers T3 with a message, so the UI shows why, and state is never left half-changed.
 Refused *on purpose* says so; refused *for now* says "yet".

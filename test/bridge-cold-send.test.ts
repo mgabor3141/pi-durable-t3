@@ -31,7 +31,7 @@ it("sends the first message on a cold thread with no prior warming (S2)", async 
 	fixture.model.respond(fauxAssistantMessage("pong"));
 
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir, pairingToken: undefined, tokenTtlSeconds: 60, corsOrigins: [], projects: fixture.projects.map((p) => ({ id: p.id, name: p.name, path: p.cwd })) },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir, pairingToken: undefined, tokenTtlSeconds: 60, corsOrigins: [], registry: fixture.registry },
 		log,
 		host,
 	);

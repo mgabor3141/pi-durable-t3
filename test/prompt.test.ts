@@ -9,6 +9,7 @@ import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-
 import { loadConfig, parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 import { firstUserEntry, idle } from "./threads-harness.ts";
 
 type SysSection = { content: unknown; sections?: Record<string, string | null> };
@@ -46,10 +47,11 @@ describe("base prompt + instructions", () => {
 		try {
 			const marker = "REPO-MARKER-42 follow these rules";
 			await writeFile(join(root, "notes.md"), marker);
-			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const runtime = await openHostRuntime(config, model.models, model.modelRef);
+			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]);
+			const runtime = await openHostRuntime(config, registry, model.models, model.modelRef);
 			try {
 				await runtime.threads.create({ threadId: "a", projectId: "alpha" });
 				await runtime.threads.submit({ threadId: "a", conversationId: (await runtime.threads.thread("a"))!.head, requestId: "r1", message: "x" }, undefined);
@@ -82,10 +84,11 @@ describe("base prompt + instructions", () => {
 	it("no instructions key → base prompt only, no instructions section", async () => {
 		const root = await tempRoot();
 		try {
-			const config = parseConfigToml(`[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, root);
+			const config = parseConfigToml(``, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const runtime = await openHostRuntime(config, model.models, model.modelRef);
+			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }]);
+			const runtime = await openHostRuntime(config, registry, model.models, model.modelRef);
 			try {
 				await runtime.threads.create({ threadId: "a", projectId: "alpha" });
 				await runtime.threads.submit({ threadId: "a", conversationId: (await runtime.threads.thread("a"))!.head, requestId: "r1", message: "x" }, undefined);
@@ -108,10 +111,11 @@ describe("base prompt + instructions", () => {
 		const root = await tempRoot();
 		try {
 			await writeFile(join(root, "notes.md"), "stable rules");
-			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const runtime = await openHostRuntime(config, model.models, model.modelRef);
+			const registry = testRegistry([{ id: "alpha", cwd: join(root, "p") }]);
+			const runtime = await openHostRuntime(config, registry, model.models, model.modelRef);
 			try {
 				const t = await runtime.threads.create({ threadId: "a", projectId: "alpha" });
 				await runtime.threads.submit({ threadId: "a", conversationId: t.head, requestId: "r1", message: "first" }, undefined);
@@ -134,10 +138,11 @@ describe("base prompt + instructions", () => {
 		try {
 			const marker = "FORK-Keeper rules";
 			await writeFile(join(root, "notes.md"), marker);
-			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const runtime = await openHostRuntime(config, model.models, model.modelRef);
+			const registry = testRegistry([{ id: "alpha", cwd: join(root, "p") }]);
+			const runtime = await openHostRuntime(config, registry, model.models, model.modelRef);
 			try {
 				const t = await runtime.threads.create({ threadId: "a", projectId: "alpha" });
 				await runtime.threads.submit({ threadId: "a", conversationId: t.head, requestId: "r1", message: "hello" }, undefined);
@@ -165,7 +170,7 @@ describe("instructions file path (config)", () => {
 	it("missing instructions file is a ConfigError at start", async () => {
 		const root = await tempRoot();
 		try {
-			await writeFile(join(root, "config.toml"), `instructions = "nope.md"\n\n[[projects]]\nname = "a"\npath = "a"\n`);
+			await writeFile(join(root, "config.toml"), `instructions = "nope.md"\n`);
 			await expect(loadConfig(join(root, "config.toml"), root)).rejects.toThrow(/instructions file .* is not readable/);
 		} finally {
 			await rm(root, { recursive: true, force: true });

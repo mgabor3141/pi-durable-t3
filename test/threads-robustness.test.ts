@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads, scanConversations } from "../src/threads.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { firstUserEntry, gated, idle, makeThreads } from "./threads-harness.ts";
 
@@ -33,7 +34,7 @@ describe("submit honesty (S3)", () => {
 
 		// A prompt to the now-untracked head, with promote broken: the submit must SUCCEED (the run is live) and warn.
 		const warnings: string[] = [];
-		const brittle = new FailingPromoteThreads({ harness, projects: f.projects, defaultModel: model.modelRef, onWarn: (m) => warnings.push(m) });
+		const brittle = new FailingPromoteThreads({ harness, registry: testRegistry(f.projects), defaultModel: model.modelRef, onWarn: (m) => warnings.push(m) });
 		const run = gated("still running");
 		model.respond(run.step);
 		const submission = await brittle.submit({ threadId: "t", conversationId: oldHead, requestId: "late", message: "two" }, undefined);

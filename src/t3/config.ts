@@ -1,13 +1,11 @@
-// The T3 facet's configuration: one plain, fully-resolved object the host builds once from `config.toml` (`../config.ts`)
-// and hands to the facet, so the facet never parses the file and carries no host-only (or TOML) concerns of its own.
-export interface ProjectConfig {
-	readonly id: string;
-	readonly name: string;
-	/** Absolute directory a new thread in this project runs in (a project cwd under the env root). */
-	readonly path: string;
-}
+// The T3 facet's configuration. The static, integrator-owned fields (`FacetConfig`) come from `config.toml`
+// (`../config.ts`); the live project registry and new-thread defaults are the instance file (`../registry.ts`), a
+// mutable source the host opens at start. The facet reads projects through the registry and answers a UI's add/remove
+// at once, so the registry is shared (host + threads layer + facet), never a snapshot the facet owns.
+import type { ProjectRegistry } from "../registry.ts";
 
-export interface BridgeConfig {
+/** The facet's integrator-owned fields, assembled once from `config.toml` (no facet-only concerns of its own). */
+export interface FacetConfig {
 	readonly host: string;
 	readonly port: number;
 	readonly label: string;
@@ -15,11 +13,17 @@ export interface BridgeConfig {
 	readonly pairingToken: string | undefined;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];
-	readonly projects: readonly ProjectConfig[];
+}
+
+/** The fully-assembled facet config: the integrator's static fields plus the live registry the host opens at start. */
+export interface BridgeConfig extends FacetConfig {
+	/** The live project registry (the instance file). The facet reads it for the shell's `projects` and mutates it for
+	 * `projects.mutate`; it is the source of truth, shared with the host and threads layer. */
+	readonly registry: ProjectRegistry;
 }
 
 /** The single server-level `cwd` T3's ServerConfig shows: the first project's path, or the state dir when there are no
- * projects — so a project-less host (a valid empty `config.toml`) stays connectable instead of throwing in `serverConfig`. */
+ * projects — so a project-less host (an empty instance file) stays connectable instead of throwing in `serverConfig`. */
 export function serverCwd(config: BridgeConfig): string {
-	return config.projects[0]?.path ?? config.stateDir;
+	return config.registry.list()[0]?.cwd ?? config.stateDir;
 }

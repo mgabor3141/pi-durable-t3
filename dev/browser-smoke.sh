@@ -35,15 +35,17 @@ trap cleanup EXIT
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/state"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
-
-[[projects]]
-name = "alpha"
-path = "$root/projects/alpha"
-
-[[projects]]
-name = "beta"
-path = "$root/projects/beta"
 TOML
+# The instance file (the project registry the UI edits) lives in the data dir, NOT config.toml.
+cat > "$root/settings.json" <<JSON
+{
+  "projects": [
+    { "path": "$root/projects/alpha", "title": "alpha" },
+    { "path": "$root/projects/beta", "title": "beta" }
+  ],
+  "defaults": {}
+}
+JSON
 
 echo "root=$root  facet=127.0.0.1:$FACET_PORT  web=127.0.0.1:$WEB_PORT  web-dist=$WEB_DIST"
 
@@ -106,6 +108,25 @@ if [ "$status" -eq 0 ]; then
   wait "$crash_pid"; crash_status=$?
   set -e
   [ "$crash_status" -ne 0 ] && status="$crash_status"
+fi
+
+# Smoke 3: the project-management flow — add a project from the directory picker, create a thread in it, remove it, and
+# confirm the files on disk are untouched. The target directory is NOT in settings.json (the picker adds it), and it
+# holds a marker file that must survive the removal.
+if [ "$status" -eq 0 ]; then
+  mkdir -p "$root/projects/newproj"
+  printf 'do not delete me\n' > "$root/projects/newproj/keep.txt"
+  set +e
+  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" CHROMIUM="$CHROMIUM" \
+    PICK_TARGET="$root/projects/newproj" PICK_MARKER="$root/projects/newproj/keep.txt" \
+    node --experimental-strip-types "$here/test/e2e/project-flow.ts"
+  flow_status=$?
+  set -e
+  # Belt and braces: the marker file must still be on disk after the whole flow.
+  if [ "$flow_status" -eq 0 ] && [ ! -f "$root/projects/newproj/keep.txt" ]; then
+    echo "project-flow: the marker file was deleted from disk"; flow_status=1
+  fi
+  [ "$flow_status" -ne 0 ] && status="$flow_status"
 fi
 
 if [ "$status" -ne 0 ]; then

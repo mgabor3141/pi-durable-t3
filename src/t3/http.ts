@@ -23,6 +23,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 import { WsRpcGroup } from "@t3tools/contracts";
+import { ProjectConflict } from "../registry.ts";
 import { type AuthStore, PairingRateLimit } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -239,6 +240,29 @@ export function makeServerLayer(deps: {
 			"GET",
 			"/api/projects",
 			authorized(() => Effect.sync(() => json({ projects: bridge.projects() }))),
+		),
+		// REST parity with the documented HTTP surface (`EnvironmentProjectsHttpApi`): the web client reaches projects
+		// over `/ws`, but the same mutation is served here over the same bearer-token guard, sharing one store.
+		HttpRouter.add(
+			"POST",
+			"/api/projects/mutate",
+			authorized((request) =>
+				Effect.gen(function* () {
+					const mutation = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
+					if (mutation === undefined || typeof mutation !== "object") return json({ _tag: "ProjectMutationError", commandId: "", message: "A project mutation is required." }, 400);
+					return yield* Effect.tryPromise({
+						try: () => bridge.mutateProject(mutation),
+						catch: (error) => error as Error,
+					}).pipe(
+						Effect.map((project) => json(project)),
+						Effect.catch((error) =>
+							// A duplicate path (a workspace owned by another project) is a conflict (409); classify by the
+							// error's `name` so it holds across module boundaries, not only by `instanceof`.
+							Effect.succeed(json({ _tag: "ProjectMutationError", commandId: mutation.commandId ?? "", message: error.message || String(error) }, error.name === ProjectConflict.name ? 409 : 400)),
+						),
+					);
+				}),
+			),
 		),
 		HttpRouter.add(
 			"GET",

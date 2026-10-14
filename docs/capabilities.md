@@ -21,8 +21,9 @@ hang open waiting.
 | Model per thread | `thread.model-selection.set`, the model picker | ✅ | the catalog is your pi config; one provider, pi |
 | Instructions | per-thread instructions, `instructions` (config) | ✅ | read at thread create, inherited by forks and undos |
 | Crash resume | `message.dispatch` + the resumed run | ✅ | kill the host mid-turn, restart, the turn finishes; see the clip in the README |
-| Settings writes | `server.updateSettings` | 🔜 | the host-wide defaults go to `settings.json`; `server.getSettings` answers from defaults until then |
-| Folder picker | `filesystem.browse` | 🔜 | read-only, for the dialog that adds a project |
+| Project registry | `projects.mutate` (`project.create` / `project.update` / `project.delete`) | ✅ | the UI adds/edits/removes projects in the instance file; ids derive from the path, a duplicate workspace is refused, a delete cascades threads (files on disk untouched, `force` for a non-empty removal). `projects.list`/`projects.add`/`projects.remove` are **not on the sendable surface** — projects ride the shell snapshot, and edits go through `projects.mutate` |
+| Settings writes | `server.updateSettings` | ✅ | the model default writes to the instance file's registry; `server.getSettings`/`server.getConfig` answer from it |
+| Folder picker | `filesystem.browse` | ✅ | read-only, feeds the "Add project" picker (directories only, prefix filter, `~` expansion) |
 | Thread fork | `thread.fork`, `thread.merge_back` | 🔜 | the undo fork is already the mechanism |
 | Thread rename | `thread.metadata.update` | 🔜 | the title is a field on the thread pointer |
 | Archive, snooze | `thread.archive`, `thread.unarchive`, `thread.snooze`, `thread.unsnooze` | 🔜 | sidebar plumbing exists; the threads-layer semantics are missing |
@@ -33,7 +34,7 @@ hang open waiting.
 | Scheduled tasks | `scheduledTasks.*` (incl. the `subscribe` stream) | 🕐 | pi-durable's task tree can host them; the orchestration semantics are the work |
 | Host diagnostics | `server.getHostResources`, `server.getProcessDiagnostics`, `server.getProcessResourceHistory`, `server.getTraceDiagnostics`, `server.getResourceTelemetryHistory`, `server.retryResourceTelemetry`, `subscribeResourceTelemetry`, `server.signalProcess`, `server.getBackgroundPolicy`, `server.reportHostPowerState`, `subscribeBackgroundPolicy` | 🕐 | one process, one machine; nothing to correlate, and no mobile/background policy to serve |
 | Workflow scripts, turn items | `orchestration.getWorkflowScript`, `orchestration.getTurnItem` | 🕐 | reads for the workflow/timeline surfaces the threads layer does not project |
-| File access | `projects.readFile`, `projects.writeFile`, `projects.listEntries`, `projects.mutate`, `projects.createNew`, `projects.ensureScratch` | ❌ | the agent has `bash` and edits files itself; a facet-side file API makes the facet a second owner of the workspace |
+| File access | `projects.readFile`, `projects.writeFile`, `projects.listEntries`, `projects.createNew`, `projects.ensureScratch`, and the file/dir operations *inside* `projects.mutate` | ❌ | the agent has `bash` and edits files itself; a facet-side file API makes the facet a second owner of the workspace. `projects.mutate` answers the **project** operations (create/update/delete) — see the project registry row; its file/dir operations are refused |
 | Git, PRs, diffs, worktrees | `git.*`, `pullRequests.*`, `vcs.*`, `sourceControl.*`, `review.*`, `projectClone.*`, `worktreeSetup.*`, `subscribeVcsStatus`, `subscribeWorktreeSetup`, `subscribeProjectClones`, `orchestration.getTurnDiff`, `orchestration.getFullThreadDiff`, `thread.pull-request*`, `server.discoverSourceControl` | ❌ | the agent works in real repos with `git`; mirroring repo state would put the facet in charge of it |
 | File restore | `checkpoint.rollback` with `restoreFiles: true` | ❌ | filesystem ownership belongs to the Harness and its extensions, not to a threads layer |
 | Terminal | `terminal.*`, `subscribeTerminalEvents`, `subscribeTerminalMetadata` | ❌ | the host runs no interactive terminal; tools run in the Harness |

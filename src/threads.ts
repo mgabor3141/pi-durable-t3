@@ -26,6 +26,8 @@ import {
 import type { Harness } from "@earendil-works/pi-durable";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
+import { projectIdForPath } from "./project-ids.ts";
+import type { ProjectRegistry } from "./registry.ts";
 
 /** The entry kind this host places a client prompt as, so the client's message id rides durably in the entry's `data`.
  * It must not start with `pi.` (pi-durable's rule for an input's own entry kind); the facet reads the id back in the projection. */
@@ -67,10 +69,14 @@ export const ThreadsDoc = defineDoc<ThreadsState>({
 
 type ThreadsDeps = {
 	readonly harness: Harness;
-	readonly projects: readonly Project[];
+	/** The live project registry (the instance file). A project's id is derived from its path, so a UI add/remove is
+	 * visible without rebuilding this layer; threads look their project's cwd up here at create. */
+	readonly registry: ProjectRegistry;
 	readonly context?: Context;
 	/** The model a newly created thread starts on; absent leaves the model unset until `pi.models` selects one. */
 	readonly defaultModel?: ModelRef;
+	/** The thinking level a newly created thread starts on (from the instance file's defaults). */
+	readonly defaultThinkingLevel?: string;
 	/**
 	 * Provides the instructions text for a newly created conversation, read fresh at create time so a changed file
 	 * affects new threads only. Absent or empty leaves the conversation on just the base prompt. Stored on the
@@ -137,20 +143,20 @@ async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> 
 /** The threads layer over a caller-provided Harness. Stateless apart from the Harness's own storage. */
 export class Threads {
 	readonly #harness: Harness;
-	readonly #projects: readonly Project[];
-	readonly #byId: Map<string, Project>;
+	readonly #registry: ProjectRegistry;
 	readonly #context: Context;
 	readonly #defaultModel: ModelRef | undefined;
+	readonly #defaultThinkingLevel: string | undefined;
 	readonly #instructions: (() => string | undefined) | undefined;
 	readonly #now: () => number;
 	readonly #onWarn: (message: string, error: unknown) => void;
 
 	constructor(deps: ThreadsDeps) {
 		this.#harness = deps.harness;
-		this.#projects = deps.projects;
-		this.#byId = new Map(deps.projects.map((project) => [project.id, project]));
+		this.#registry = deps.registry;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#defaultModel = deps.defaultModel;
+		this.#defaultThinkingLevel = deps.defaultThinkingLevel;
 		this.#instructions = deps.instructions;
 		this.#now = deps.now ?? (() => Date.now());
 		this.#onWarn = deps.onWarn ?? (() => {});
@@ -166,7 +172,7 @@ export class Threads {
 	}
 
 	get projects(): readonly Project[] {
-		return this.#projects;
+		return this.#registry.list();
 	}
 
 	/** The threads as stored (a read of the doc). Order is creation order. */
@@ -192,16 +198,20 @@ export class Threads {
 	 * conversation); else create a conversation with the project's `cwd` and add the thread.
 	 */
 	async create(input: CreateInput): Promise<Thread> {
-		const project = this.#byId.get(input.projectId);
+		const project = this.projects.find((candidate) => candidate.id === input.projectId);
 		if (project === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
-		const model = this.#defaultModel;
+		// New-thread defaults are read live (the instance file, edited by the UI), so a settings change affects threads
+		// created after it. The model falls back to the resolved default (first available) when the file sets none.
+		const defaults = this.#registry.defaults();
+		const model = defaults.model ?? this.#defaultModel;
+		const thinking = defaults.thinkingLevel ?? this.#defaultThinkingLevel;
 		const instructions = this.#instructions?.();
 		return this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
 			if (existing !== undefined) return { ...existing };
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			await configure(tx, conversation.id, { cwd: project.cwd, ...(model === undefined ? {} : { model }), ...(instructions === undefined || instructions === "" ? {} : { instructions }) });
+			await configure(tx, conversation.id, { cwd: project.cwd, ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinkingLevel: thinking as never }), ...(instructions === undefined || instructions === "" ? {} : { instructions }) });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,
@@ -258,7 +268,7 @@ export class Threads {
 			const doc = await tx.doc(ThreadsDoc);
 			if (doc.threads.some((candidate) => candidate.head === conversationId)) return;
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
-			const projectId = via?.projectId ?? this.#projects[0]?.id ?? "";
+			const projectId = via?.projectId ?? this.projects[0]?.id ?? "";
 			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId, entryId: null }));
 		}, this.#context);
 	}
@@ -311,7 +321,7 @@ export class Threads {
 				return fork.id;
 			}
 			// The head moved on: leave the thread and record the fork as a new child thread.
-			const projectId = thread?.projectId ?? this.#projects[0]?.id ?? "";
+			const projectId = thread?.projectId ?? this.projects[0]?.id ?? "";
 			doc.threads.push(this.#newThread(fork.id, projectId, thread?.title ?? "", { threadId: input.threadId, entryId: input.entryId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
@@ -346,12 +356,19 @@ export class Threads {
 			const doc = await tx.doc(ThreadsDoc);
 			const heads = new Set(doc.threads.map((thread) => thread.head));
 			const cwdToProject = new Map<string, string>();
-			for (const project of this.#projects) cwdToProject.set(project.cwd, project.id);
+			for (const project of this.projects) cwdToProject.set(project.cwd, project.id);
 			for (const record of await scanConversations(tx)) {
 				if (heads.has(record.id)) continue;
 				if (!(await owedIn(tx, record.id))) continue;
 				const agent = await tx.doc(AgentDoc, record.id);
-				const projectId = (agent.cwd === undefined ? undefined : cwdToProject.get(agent.cwd)) ?? this.#projects[0]?.id ?? "";
+				// A thread's `projectId` is a foreign key: take the registered project whose cwd matches the conversation,
+				// else derive the id from the recorded cwd (a folder discovered outside the registry keeps a stable id),
+				// else the first project. Existing conversations keep working from the cwd they record.
+				const projectId =
+					(agent.cwd === undefined ? undefined : cwdToProject.get(agent.cwd)) ??
+					(agent.cwd === undefined ? undefined : projectIdForPath(agent.cwd)) ??
+					this.projects[0]?.id ??
+					"";
 				doc.threads.push(this.#newThread(record.id, projectId, ""));
 				heads.add(record.id);
 			}

@@ -10,6 +10,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { tempRoot } from "./temp-root.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
+import { testRegistry } from "../src/testing/test-registry.ts";
 import { Threads } from "../src/threads.ts";
 
 const childScript = new URL("../src/testing/repair-child.ts", import.meta.url).pathname;
@@ -38,7 +39,7 @@ describe("boot repair", () => {
 		// Reopen without resuming scheduling, then repair: the owed, untracked conversation becomes a thread.
 		const storageHandle = await openNodeSqliteStorage(storage);
 		const harness = await Harness.open(storageHandle, { models: createScriptedModel([]).models, registry: createRegistry() }, BACKGROUND_CONTEXT);
-		const threads = new Threads({ harness, projects: [{ id: "p", name: "p", cwd: work }] });
+		const threads = new Threads({ harness, registry: testRegistry([{ id: "p", cwd: work }]) });
 		await threads.repair();
 
 		const promoted = (await threads.list()).find((thread) => thread.head === crashed);

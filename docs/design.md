@@ -41,8 +41,9 @@ it, and T3's web app becomes a view over your threads.
 
 ## Configuration
 
-Where a setting lives is decided by who edits it. Today one `config.toml` carries all three tiers; the split
-below is the target.
+Where a setting lives is decided by who edits it. The split below is in place: a host file (`config.toml`)
+and an instance file (`settings.json`, in the data dir) cover the two file tiers; the thread tier is pi-durable's
+`pi.agent`.
 
 | Tier | File | Edited by |
 |---|---|---|
@@ -78,11 +79,16 @@ thread list is a read of it.
   navigates to it), honored exactly, so a retried create is a no-op. The host mints one only when it
   promotes a conversation (see Invariants).
 - **Conversation IDs:** minted by pi-durable.
-- **Project IDs:** for a configured project, the name the integrator wrote — so renaming it renames the
-  id, and existing threads keep the old one. They keep working, from the `cwd` their own conversation
-  records; what changes is their project grouping. A folder discovered at runtime gets an id derived from
-  its normalized absolute path, so the same folder keeps the same id across restarts. Moving projects
-  into the instance file means making every id path-derived, with the title as a free label.
+- **Project IDs are derived from the path, always.** Every project — one the UI added, one the integrator
+  once configured, a folder discovered at runtime — has an id that is a function of its normalized absolute
+  path (`p-<sha256(path)>`). A per-process random id would strand T3's selection for that folder on every
+  restart. Nothing mints an id, so nothing has to remember it, and it survives a restart unchanged. The
+  title is a free label: renaming a project changes only the label, never the id.
+- **A thread's `projectId` is a foreign key.** The sidebar groups by it, and a project's `cwd` is looked up
+  through the registry. A thread's work does not depend on the registry: existing conversations keep working
+  from the `cwd` their own conversation records, so a lost registry costs names, not work. A duplicate path
+  is refused (T3 refuses the same folder twice): a project IS a path; two entries for one path would make
+  the id collide and the grouping ambiguous.
 
 ## Invariants
 
@@ -115,8 +121,10 @@ What the T3 facet calls, and what any other pi client could call. Per-thread obj
 | `pi.controller` | | `prompt`, `steer`, `followUp`, `abort`, `rewind` |
 | `pi.models` | `{ catalog, configuration }` | `select`, `selectThinking` |
 
-The threads layer also serves the registry (`projectsList`, `addProject`, `removeProject`) from
-`settings.json`, writing the file rather than a chord.
+The threads layer also owns the project registry (list / add / update / remove) in `settings.json`, writing the
+file rather than a chord. T3 reads it from the shell snapshot's `projects` field and edits it through the sendable
+`projects.mutate` (`project.create` / `project.update` / `project.delete`) — not a `projects.list`/`add`/`remove`
+call, which is not on the reachable surface.
 
 Errors: `unknown_project`, `project_conflict`, `project_not_empty`, `unknown_thread`, `turn_running`, `not_rewindable`, `unknown_model`,
 `unknown_thinking_level` (the last two from `pi.models`' `select` / `selectThinking`).

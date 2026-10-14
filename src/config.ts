@@ -4,13 +4,12 @@
 // config file and data dir: `--root <dir>` keeps them in one directory; otherwise XDG (`$XDG_CONFIG_HOME`,
 // `$XDG_DATA_HOME`, falling back to `~/.config` and `~/.local/share`).
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ModelRef } from "@earendil-works/pi-durable";
-import type { BridgeConfig, ProjectConfig } from "./t3/config.ts";
-import { splitSlug } from "./t3/model-types.ts";
+import type { FacetConfig } from "./t3/config.ts";
 
 /** A bad `config.toml`; its message is meant for the user as is. */
 export class ConfigError extends Error {}
@@ -30,24 +29,24 @@ export type HostConfig = {
 	readonly dataDir: string; // where durable storage, the models store, facet state, and project cwds live.
 	readonly listen: { readonly host: string; readonly port: number };
 	readonly webAppUrl: string | undefined; // web app base URL; prints a ready-to-open pairing link at start.
-	readonly projects: readonly Project[];
-	readonly defaultModel: ModelRef | undefined; // the model a new thread starts on, if configured.
 	readonly modelsStorePath: string; // pi-ai models store, under the data dir so `~/.pi/agent` is never written.
 	/** Absolute path to an explicit instructions file, if configured; its text is read when a thread is created. */
 	readonly instructionsPath: string | undefined;
-	readonly bridge: BridgeConfig; // the facet's settings, assembled once so the facet never reads the file.
+	/** The facet's integrator-owned fields. The live project registry is NOT here: it is the instance file, opened at
+	 * start (`../registry.ts`) and assembled into the facet's `BridgeConfig` in `main.ts`. */
+	readonly bridge: FacetConfig;
 };
 
 // One schema for the whole `config.toml`: defaults live in `default` annotations (applied by `Value.Default`) and every
 // object sets `additionalProperties: false`, so an unknown key is rejected here, naming the file, the key path and what
-// was expected. The checks the schema cannot express — host:port, `provider/model`, a project path under the data dir — are below.
+// was expected. This file holds ONLY what a UI must not set; the project registry and the new-thread defaults (model,
+// thinking level) are the instance file (`../settings.ts`), so `[[projects]]`/`default_model` are rejected below, naming
+// where they belong. The checks the schema cannot express — host:port — are below.
 const HostTomlSchema = Type.Object(
 	{
 		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }), // the facet address; T3's own app uses 3773.
 		web: Type.Optional(Type.String({ minLength: 1 })), // web app URL, only to print a pairing link.
-		default_model: Type.Optional(Type.String({ minLength: 1 })), // `provider/model` new threads start on.
 		instructions: Type.Optional(Type.String({ minLength: 1 })), // path to a file whose text becomes new threads' instructions.
-		projects: Type.Array(Type.Object({ name: Type.String({ minLength: 1 }), path: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }), { default: [] }), // `path` (default: name) must resolve under the data dir.
 		t3: Type.Object(
 			{
 				label: Type.String({ default: "pi", minLength: 1 }),
@@ -68,8 +67,9 @@ const HostTomlSchema = Type.Object(
 );
 type HostToml = Type.Static<typeof HostTomlSchema>;
 
-/** Parse and validate `config.toml` text for `dataDir` (TOML → defaults → schema → checks). Every path (project cwd, models
- * store, facet state, relative `instructions`) resolves under `dataDir`; `file` names the source in messages. Empty is valid. */
+/** Parse and validate `config.toml` text for `dataDir` (TOML → defaults → schema → checks). Every path (models store,
+ * facet state, relative `instructions`) resolves under `dataDir`; `file` names the source in messages. Empty is valid.
+ * `[[projects]]` and `default_model` are refused with a message naming the instance file they belong in. */
 export function parseConfigToml(text: string, dataDir: string, file = "config.toml"): HostConfig {
 	let parsed: unknown;
 	try {
@@ -77,18 +77,25 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 	} catch (error) {
 		fail(file, (error as Error).message);
 	}
+	// These keys moved to the instance file (settings.json, in the data dir), which the T3 UI edits. Reject them by name
+	// with a message that says where they belong, before the generic unknown-key path (so the guidance is specific).
+	if (parsed !== null && typeof parsed === "object") {
+		for (const key of ["projects", "default_model"] as const) {
+			if (key in (parsed as Record<string, unknown>)) {
+				const where = key === "projects" ? `projects (a [[projects]] block)` : `the new-thread model default (default_model)`;
+				fail(file, `"${key}" is not a ${file} key: ${where} belongs in the instance file settings.json in the data dir, which the T3 UI edits (see README)`);
+			}
+		}
+	}
 	const doc = Value.Default(HostTomlSchema, parsed) as HostToml;
 	const errors = [...Value.Errors(HostTomlSchema, doc)];
 	if (errors.length > 0) throw new ConfigError(describeErrors(file, errors));
 	const { host, port } = parseListen(doc.listen, file);
-	const projects = resolveProjects(doc.projects, dataDir, file);
 	return {
 		configFile: file,
 		dataDir,
 		listen: { host, port },
 		webAppUrl: doc.web,
-		projects,
-		defaultModel: doc.default_model === undefined ? undefined : parseModelRef(doc.default_model, file),
 		modelsStorePath: join(dataDir, "models-store.json"),
 		instructionsPath: doc.instructions === undefined ? undefined : expandPath(doc.instructions, dataDir),
 		bridge: {
@@ -99,7 +106,6 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 			pairingToken: undefined, // from `PI_DURABLE_T3_PAIRING_TOKEN` in main.ts (tests only); never read from the file.
 			tokenTtlSeconds: doc.t3.token_ttl_days * 86_400,
 			corsOrigins: doc.t3.cors_origins ?? (doc.web === undefined ? [] : [originOf(doc.web)]),
-			projects: projects.map((p): ProjectConfig => ({ id: p.id, name: p.name, path: p.cwd })),
 		},
 	};
 }
@@ -174,14 +180,14 @@ function expandHome(value: string, env: NodeJS.ProcessEnv): string {
 }
 
 /** Expand a leading `~`/`~/` to `$HOME`, then resolve a relative path against `base` (the data dir) — an absolute path stays. */
-function expandPath(value: string, base: string): string {
+export function expandPath(value: string, base: string): string {
 	const home = process.env["HOME"] ?? ".";
 	if (value === "~") return resolve(home);
 	if (value.startsWith("~/")) return resolve(home, value.slice(2));
 	return isAbsolute(value) ? value : resolve(base, value);
 }
 
-function fail(file: string, message: string): never {
+export function fail(file: string, message: string): never {
 	throw new ConfigError(`${file}: ${message}`);
 }
 
@@ -198,7 +204,7 @@ function parseListen(value: string, file: string): { host: string; port: number 
 	return { host, port };
 }
 
-/** The model new threads start on: the configured `default_model`, else the first available model. With no models
+/** The model new threads start on: the instance file's default, else the first available model. With no models
  * available, fail loudly (naming where credentials live) instead of defaulting to a blank model, which makes every
  * thread show an unexplained interrupted turn: "unset → the first available" promises a model, and it holds only when one exists. */
 export function chooseDefaultModel(available: readonly { provider: string; id: string }[], configured: ModelRef | undefined): ModelRef {
@@ -207,37 +213,8 @@ export function chooseDefaultModel(available: readonly { provider: string; id: s
 	return configured ?? { provider: first.provider, modelId: first.id };
 }
 
-/** Split `provider/model` into a `ModelRef`; both parts must be non-empty. */
-function parseModelRef(value: string, file: string): ModelRef {
-	const model = splitSlug(value);
-	if (model === undefined) fail(file, `default_model "${value}" must be provider/model`);
-	return model;
-}
-
-/** Give each project an absolute `cwd` under the data dir (missing `path` = name), require unique names, and refuse a path that resolves outside it (`../x`, `/etc`, `a/../../b`). */
-function resolveProjects(entries: readonly { name: string; path?: string }[], dataDir: string, file: string): Project[] {
-	const projects: Project[] = [];
-	const seen = new Set<string>();
-	for (const [index, entry] of entries.entries()) {
-		if (seen.has(entry.name)) fail(file, `projects[${index}]: duplicate project name "${entry.name}"`);
-		seen.add(entry.name);
-		const dir = entry.path ?? entry.name;
-		const cwd = resolve(dataDir, dir);
-		if (!isUnderDir(cwd, dataDir)) fail(file, `project "${entry.name}" path "${dir}" resolves to ${cwd}, outside the data dir ${dataDir}`);
-		projects.push({ id: entry.name, name: entry.name, cwd });
-	}
-	return projects;
-}
-
-/** True when `cwd` is the data dir itself or a descendant, compared on normalized absolute paths. */
-function isUnderDir(cwd: string, dataDir: string): boolean {
-	if (cwd === dataDir) return true;
-	const rel = relative(dataDir, cwd);
-	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
 /** TypeBox errors → one line each (dotted key path + expectation); unknown keys are named, the paired `schema is false` sub-error folded in. */
-function describeErrors(file: string, errors: readonly { keyword: string; instancePath: string; message: string; params: object }[]): string {
+export function describeErrors(file: string, errors: readonly { keyword: string; instancePath: string; message: string; params: object }[]): string {
 	const dotted = (p: string) => p.split("/").filter(Boolean).reduce((o, k) => (/^\d+$/.test(k) ? `${o}[${k}]` : o ? `${o}.${k}` : k), "");
 	const lines = errors.flatMap((e) => {
 		const at = dotted(e.instancePath);

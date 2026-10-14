@@ -47,12 +47,20 @@ Applied undos are the one field we write that grows without bound.
 
 ## Configuration, input only
 
+Two files, two tiers. `config.toml` is the integrator's (a UI must not set it); `settings.json` — the
+instance file, in the data dir — is the UI's, and the running host writes it on the UI's behalf. Both are
+*input*, never the record of what happened.
+
 | what | lifetime | if it's lost |
 |---|---|---|
-| `config.toml`: projects, listen address, web origin, default model, per-thread instructions | until the integrator edits it | the host refuses to start |
+| `config.toml`: listen address, web origin, the facet's `[t3]` settings, per-thread `instructions` | until the integrator edits it | the host refuses to start |
+| `settings.json` (the instance file): the project registry and the new-thread model/thinking defaults, in the data dir | until the UI edits it (the running host writes it atomically) | an empty registry and the first available model — a missing file is valid |
 | the environment | one run | defaults apply |
 
-The running host never writes configuration, and nothing a thread does reaches it.
+`config.toml` is written by nobody at runtime. The instance file is **host-owned state shaped as input**: the
+running host rewrites it when the UI adds a project or changes the default model, atomically (temp → rename),
+so a crash never leaves a half-written registry. A thread never reaches it. Project ids are never stored —
+they are derived from each project's path.
 
 ## The bridge owns, in memory — all of it correct to lose
 
@@ -60,7 +68,7 @@ The running host never writes configuration, and nothing a thread does reaches i
 |---|---|---|
 | the per-thread view cache, its subscribers, and the undo overlay | while a client is watching | clients re-subscribe and get a fresh snapshot |
 | the thread list, shells | process | rebuilt at start |
-| projects discovered outside configuration, with ids derived from the path | process | recomputed at the next projection: the id is a function of the folder's path, so T3's selection for it survives |
+| the live project registry (the instance file's projects, ids derived from each path) | process, kept in sync with `settings.json` by a subscription | reread from the instance file at the next projection: the id is a function of the folder's path, so T3's selection for it survives |
 | command id → the first result, so a retry returns it | process | the retry recomputes; durable dedup still stops the second write |
 | the projection sequence clock | process | projections get new sequence numbers |
 | pairing tickets and rate-limit buckets | seconds | the code is redeemed again; the window restarts |
@@ -71,8 +79,8 @@ None. The two that were here are closed.
 
 - **The client's message id** rides in the entry the host places the prompt as (an `app.user` entry's data), and its
   store is deleted.
-- **Project ids for folders outside the configuration** are derived from the normalized path, so nothing is
-  minted.
+- **Every project id is derived from the project's normalized path**, in the instance file and from
+  `projects.mutate` alike, so nothing is minted and a project is identified by its folder, not a label.
 
 What is left is a transcript we do not own, one document of pointers, a credential file, and caches that are correct
 to lose.

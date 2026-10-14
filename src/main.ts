@@ -10,6 +10,7 @@ import { chooseDefaultModel, ConfigError, loadConfig, resolvePaths } from "./con
 import { openHostRuntime } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
 import { createServerFacet } from "./objects.ts";
+import { FileProjectRegistry } from "./registry.ts";
 import { AuthStore } from "./t3/auth.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
@@ -28,10 +29,13 @@ async function main(): Promise<void> {
 	while (argv[0] === "--") argv.shift();
 	const paths = resolvePaths(argv);
 	const config = await loadConfig(paths.configFile, paths.dataDir);
+	// The instance file (`settings.json`, in the data dir): the project registry and new-thread defaults the T3 UI edits.
+	// A missing file is valid — an empty registry, the defaults — and the host writes it on the UI's behalf.
+	const registry = await FileProjectRegistry.open(paths.dataDir);
 	// One line naming the resolved config file and data dir, so a user sees where the instance reads and writes.
-	log.info("pi-durable-t3 config resolved", { config: config.configFile, dataDir: config.dataDir });
+	log.info("pi-durable-t3 config resolved", { config: config.configFile, dataDir: config.dataDir, instance: registry.path });
 	const pairingToken = process.env["PI_DURABLE_T3_PAIRING_TOKEN"];
-	const bridge = pairingToken === undefined ? config.bridge : { ...config.bridge, pairingToken };
+	const bridge = pairingToken === undefined ? { ...config.bridge, registry } : { ...config.bridge, registry, pairingToken };
 
 	// `pnpm start pair --root <dir>`: mint one more pairing code against the running server's auth store.
 	if (argv[0] === "pair") {
@@ -55,10 +59,10 @@ async function main(): Promise<void> {
 		const available = await runtime.getAvailable();
 		catalogSource = async () => available.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
 		// `unset → first available`, but fail at start (a clear, credential-naming message) when there is nothing to pick.
-		defaultModel = chooseDefaultModel(available, config.defaultModel);
+		defaultModel = chooseDefaultModel(available, registry.defaults().model);
 	}
 
-	const runtime = await openHostRuntime(config, models, defaultModel, { onWarn: (message, error) => log.warn(message, { error: String(error) }) });
+	const runtime = await openHostRuntime(config, registry, models, defaultModel, { onWarn: (message, error) => log.warn(message, { error: String(error) }) });
 	const { threads } = runtime;
 
 	const server = createHost({ name: "server" });
@@ -83,9 +87,11 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	log.info("pi-durable-t3 ready", { address, dataDir: config.dataDir, projects: config.projects.map((p) => `${p.name}=${p.cwd}`) });
-	// An empty `config.toml` is valid and connectable, but a host with no projects cannot make threads — say so, don't leave it a mystery.
-	if (config.projects.length === 0) log.warn("no projects configured: the host serves an empty environment and cannot make threads; add [[projects]] to config.toml");
+	const projects = registry.list();
+	log.info("pi-durable-t3 ready", { address, dataDir: config.dataDir, projects: projects.map((p) => `${p.name}=${p.cwd}`) });
+	// An empty instance file is valid and connectable, but a host with no projects cannot make threads — say so, don't
+	// leave it a mystery. The UI can add one (the directory picker → "Add project"); the file is written on the UI's behalf.
+	if (projects.length === 0) log.warn("no projects configured: the host serves an empty environment and cannot make threads; add one from the T3 UI, or write projects into the instance file settings.json in the data dir");
 	// One pairing code per start; codes are shown, never logged.
 	const code = facet.pairingCode();
 	console.log(`\nPairing code (single use): ${code}`);
