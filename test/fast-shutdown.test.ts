@@ -26,7 +26,7 @@ type Child = { child: ChildProcessByStdio<null, Readable, Readable>; out: () => 
 async function launch(name: string, port: number): Promise<Child> {
 	const root = join(scratch, name);
 	await mkdir(root, { recursive: true });
-	await writeFile(join(root, "host.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, "utf8");
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, "utf8");
 	const child = spawn(process.execPath, ["--experimental-strip-types", childScript, root, "alpha", String(port), "60000"], {
 		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_DURABLE_T3_FAKE: undefined },
 		stdio: ["ignore", "pipe", "pipe"],

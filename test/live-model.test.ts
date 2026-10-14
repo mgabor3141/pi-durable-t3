@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { parseHostToml } from "../src/config.ts";
+import { parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { conversation, idle } from "./threads-harness.ts";
 import { tempRoot } from "./temp-root.ts";
@@ -18,7 +18,7 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 	it("answers one short turn", async () => {
 		const target = ref!;
 		const root = await tempRoot();
-		const config = parseHostToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "live"\npath = "p"\n`, root);
+		const config = parseConfigToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "live"\npath = "p"\n`, root);
 
 		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
 		const available = await runtime.getAvailable();

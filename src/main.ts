@@ -1,11 +1,12 @@
-// Entry point: build the Harness (sqlite under the env root, coding tools, an env builder, a model runtime), wrap it
+// Entry point: build the Harness (sqlite under the data dir, coding tools, an env builder, a model runtime), wrap it
 // in `Threads`, serve the host objects on a chord host, and boot the T3 facet beside them (in-process). Pairing URLs
-// print at start. Run: `pnpm start [-- --root <dir>]`. `PI_DURABLE_T3_FAKE=1` swaps in an offline reply model.
+// print at start. Run: `pnpm start [-- --root <dir>]` (no `--root`: XDG config/data dirs). `PI_DURABLE_T3_FAKE=1` swaps
+// in an offline reply model.
 import { createHost } from "@earendil-works/chord";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
-import { chooseDefaultModel, ConfigError, loadHostConfig, rootFromArgv } from "./config.ts";
+import { chooseDefaultModel, ConfigError, loadConfig, resolvePaths } from "./config.ts";
 import { openHostRuntime } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
 import { createServerFacet } from "./objects.ts";
@@ -25,8 +26,10 @@ async function main(): Promise<void> {
 	// `pnpm start -- pair …` forwards a leading `--` (pnpm does not strip it before a subcommand); drop any leading `--`
 	// so `pair` is seen as the subcommand. The Run form (`pnpm start -- --root R`) is unaffected.
 	while (argv[0] === "--") argv.shift();
-	const root = rootFromArgv(argv);
-	const config = await loadHostConfig(root);
+	const paths = resolvePaths(argv);
+	const config = await loadConfig(paths.configFile, paths.dataDir);
+	// One line naming the resolved config file and data dir, so a user sees where the instance reads and writes.
+	log.info("pi-durable-t3 config resolved", { config: config.configFile, dataDir: config.dataDir });
 	const pairingToken = process.env["PI_DURABLE_T3_PAIRING_TOKEN"];
 	const bridge = pairingToken === undefined ? config.bridge : { ...config.bridge, pairingToken };
 
@@ -80,9 +83,9 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	log.info("pi-durable-t3 ready", { address, root: config.root, projects: config.projects.map((p) => `${p.name}=${p.cwd}`) });
-	// An empty `host.toml` is valid and connectable, but a host with no projects cannot make threads — say so, don't leave it a mystery.
-	if (config.projects.length === 0) log.warn("no projects configured: the host serves an empty environment and cannot make threads; add [[projects]] to host.toml");
+	log.info("pi-durable-t3 ready", { address, dataDir: config.dataDir, projects: config.projects.map((p) => `${p.name}=${p.cwd}`) });
+	// An empty `config.toml` is valid and connectable, but a host with no projects cannot make threads — say so, don't leave it a mystery.
+	if (config.projects.length === 0) log.warn("no projects configured: the host serves an empty environment and cannot make threads; add [[projects]] to config.toml");
 	// One pairing code per start; codes are shown, never logged.
 	const code = facet.pairingCode();
 	console.log(`\nPairing code (single use): ${code}`);

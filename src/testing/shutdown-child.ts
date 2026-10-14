@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { createHost } from "@earendil-works/chord";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { parseHostToml } from "../config.ts";
+import { parseConfigToml } from "../config.ts";
 import { openHostRuntime } from "../host-runtime.ts";
 import { installShutdown } from "../shutdown.ts";
 import { createServerFacet } from "../objects.ts";
@@ -33,7 +33,7 @@ const slowTool = defineTool({
 	},
 });
 
-const config = parseHostToml(`listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "${project}"\npath = "p"\n`, root);
+const config = parseConfigToml(`listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "${project}"\npath = "p"\n`, root);
 // Generation 1 is a `tool_use` for `slow`; nothing is queued after, so the run sits inside the tool until the signal.
 const model = createScriptedModel([fauxAssistantMessage([fauxToolCall("slow", {})], { stopReason: "toolUse" })]);
 const runtime = await openHostRuntime(config, model.models, model.modelRef, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });

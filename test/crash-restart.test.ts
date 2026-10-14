@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId, type EntryRecord, UserEntry } from "@earendil-works/pi-durable";
-import { parseHostToml } from "../src/config.ts";
+import { parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
 
@@ -54,7 +54,7 @@ describe("crash and restart (the wiring main.ts runs)", () => {
 
 			// The restart: the same wiring, the same root, and nothing submitted here.
 			const model = createScriptedModel([fauxAssistantMessage("RESUMED-REPLY")]);
-			const runtime = await openHostRuntime(parseHostToml(TOML, root), model.models, model.modelRef);
+			const runtime = await openHostRuntime(parseConfigToml(TOML, root), model.models, model.modelRef);
 			try {
 				const entriesAt = async (): Promise<readonly EntryRecord[]> => {
 					const conversation = await runtime.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);

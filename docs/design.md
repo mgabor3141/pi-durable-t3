@@ -41,7 +41,7 @@ it, and T3's web app becomes a view over your threads.
 
 ## Configuration
 
-Where a setting lives is decided by who edits it. Today one `host.toml` carries all three tiers; the split
+Where a setting lives is decided by who edits it. Today one `config.toml` carries all three tiers; the split
 below is the target.
 
 | Tier | File | Edited by |

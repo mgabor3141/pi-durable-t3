@@ -6,14 +6,14 @@
 // Run: node --experimental-strip-types src/testing/crash-child.ts <root> <project-name> <out-file>
 import { writeFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { parseHostToml } from "../config.ts";
+import { parseConfigToml } from "../config.ts";
 import { openHostRuntime } from "../host-runtime.ts";
 import { createScriptedModel } from "./fake-model.ts";
 
 const [root, project, outFile] = process.argv.slice(2);
 if (root === undefined || project === undefined || outFile === undefined) throw new Error("usage: crash-child.ts <root> <project> <out-file>");
 
-const config = parseHostToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "${project}"\npath = "p"\n`, root);
+const config = parseConfigToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "${project}"\npath = "p"\n`, root);
 // ~5 minutes of streaming at this rate: the generation is unmistakably mid-flight when the parent kills us.
 const model = createScriptedModel([fauxAssistantMessage("token ".repeat(2000))], { tokensPerSecond: 6 });
 const runtime = await openHostRuntime(config, model.models, model.modelRef);

@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { loadHostConfig, parseHostToml } from "../src/config.ts";
+import { loadConfig, parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
 import { firstUserEntry, idle } from "./threads-harness.ts";
@@ -46,7 +46,7 @@ describe("base prompt + instructions", () => {
 		try {
 			const marker = "REPO-MARKER-42 follow these rules";
 			await writeFile(join(root, "notes.md"), marker);
-			const config = parseHostToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const runtime = await openHostRuntime(config, model.models, model.modelRef);
@@ -82,7 +82,7 @@ describe("base prompt + instructions", () => {
 	it("no instructions key → base prompt only, no instructions section", async () => {
 		const root = await tempRoot();
 		try {
-			const config = parseHostToml(`[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, root);
+			const config = parseConfigToml(`[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const runtime = await openHostRuntime(config, model.models, model.modelRef);
@@ -108,7 +108,7 @@ describe("base prompt + instructions", () => {
 		const root = await tempRoot();
 		try {
 			await writeFile(join(root, "notes.md"), "stable rules");
-			const config = parseHostToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const runtime = await openHostRuntime(config, model.models, model.modelRef);
@@ -134,7 +134,7 @@ describe("base prompt + instructions", () => {
 		try {
 			const marker = "FORK-Keeper rules";
 			await writeFile(join(root, "notes.md"), marker);
-			const config = parseHostToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
+			const config = parseConfigToml(`instructions = "notes.md"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, root);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const runtime = await openHostRuntime(config, model.models, model.modelRef);
@@ -165,8 +165,8 @@ describe("instructions file path (config)", () => {
 	it("missing instructions file is a ConfigError at start", async () => {
 		const root = await tempRoot();
 		try {
-			await writeFile(join(root, "host.toml"), `instructions = "nope.md"\n\n[[projects]]\nname = "a"\npath = "a"\n`);
-			await expect(loadHostConfig(root)).rejects.toThrow(/instructions file .* is not readable/);
+			await writeFile(join(root, "config.toml"), `instructions = "nope.md"\n\n[[projects]]\nname = "a"\npath = "a"\n`);
+			await expect(loadConfig(join(root, "config.toml"), root)).rejects.toThrow(/instructions file .* is not readable/);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -174,10 +174,10 @@ describe("instructions file path (config)", () => {
 
 	it("resolves relative to the root, keeps absolute, and expands ~ (no read at parse)", () => {
 		const base = "/srv/root";
-		expect(parseHostToml(`instructions = "docs/instructions.md"\n`, base).instructionsPath).toBe(join(base, "docs/instructions.md"));
-		expect(parseHostToml(`instructions = "/etc/rules.md"\n`, base).instructionsPath).toBe("/etc/rules.md");
-		expect(parseHostToml(`instructions = "~"\n`, base).instructionsPath).toBe(homedir());
-		expect(parseHostToml(`instructions = "~/rules.md"\n`, base).instructionsPath).toBe(join(homedir(), "rules.md"));
-		expect(parseHostToml(``, base).instructionsPath).toBeUndefined();
+		expect(parseConfigToml(`instructions = "docs/instructions.md"\n`, base).instructionsPath).toBe(join(base, "docs/instructions.md"));
+		expect(parseConfigToml(`instructions = "/etc/rules.md"\n`, base).instructionsPath).toBe("/etc/rules.md");
+		expect(parseConfigToml(`instructions = "~"\n`, base).instructionsPath).toBe(homedir());
+		expect(parseConfigToml(`instructions = "~/rules.md"\n`, base).instructionsPath).toBe(join(homedir(), "rules.md"));
+		expect(parseConfigToml(``, base).instructionsPath).toBeUndefined();
 	});
 });

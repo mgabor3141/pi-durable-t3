@@ -1,5 +1,5 @@
 // The host's Harness wiring — the exact code `main.ts` runs — factored out so the tool/env path is testable without
-// booting the facet. Opens storage under the env root, installs the coding tools (`read`/`write`/`edit`/`bash`), and
+// booting the facet. Opens storage under the data dir, installs the coding tools (`read`/`write`/`edit`/`bash`), and
 // supplies an env builder that builds a fresh execution environment per call from the conversation's `cwd`. New
 // conversations are configured with that cwd (in `Threads.create`), so a thread runs its tools in its project's dir.
 import { readFileSync } from "node:fs";
@@ -30,7 +30,7 @@ export async function openHostRuntime(
 ): Promise<HostRuntime> {
 	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd.
 	for (const project of config.projects) await mkdir(project.cwd, { recursive: true });
-	const storage = await openNodeSqliteStorage(join(config.root, "durable.db"));
+	const storage = await openNodeSqliteStorage(join(config.dataDir, "durable.db"));
 
 	const registry = createRegistry();
 	registry.install(CodingTools); // read, write, edit, bash — available to conversations by default.
@@ -44,8 +44,8 @@ export async function openHostRuntime(
 		{
 			models,
 			registry,
-			// A fresh env per invocation, honoring the conversation's `cwd` (its project dir); the root is the fallback.
-			env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? config.root }),
+			// A fresh env per invocation, honoring the conversation's `cwd` (its project dir); the data dir is the fallback.
+			env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? config.dataDir }),
 		},
 		BACKGROUND_CONTEXT,
 	);

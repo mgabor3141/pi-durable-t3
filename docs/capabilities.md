@@ -7,39 +7,41 @@ pretends to work is worse than an absent one (see [`design.md`](design.md)).
 **✅ works · 🔜 soon** (planned, the mechanism exists) **· 🕐 later** (needs real work, or a feature
 pi-durable doesn't have) **· ❌ never** (on purpose; the reason is in the row)
 
-The statuses are the code's, not a wish list: a 🔜 call is refused with *"… yet"*, and a 🕐 or ❌ one is
-refused flatly.
+The statuses are the code's, not a wish list: a 🔜 call is refused with *"… yet"*, and a 🕐 or ❌ one
+is refused flatly. A refused **stream** dies with that same message — the panel closes, it does not
+hang open waiting.
 
 | Area | Calls | | Why |
 |---|---|:-:|---|
-| Connection | `server.probe`, `server.getConfig`, `server.getSettings`, `server.reportClientActivity`, pairing and tickets | ✅ | pairing points T3 at one Harness ([the model](design.md)) |
-| Settings writes | `server.updateSettings` | 🔜 | the host-wide defaults go to `settings.json`; `server.getSettings` answers from defaults until then |
-| Threads | `thread.create`, `thread.delete`, `message.dispatch`, `run.interrupt`, `thread.stop` | ✅ | create, prompt, steer, queue, restart, interrupt, delete (delete aborts the run first) |
-| Model per thread | `thread.model-selection.set`, the model picker | ✅ | the catalog is your pi config; one provider, pi |
+| Connection & config | `server.probe`, `server.getConfig`, `server.getSettings`, `server.refreshProviders`, `server.reportClientActivity`, `subscribeServerConfig` (stream), pairing and tickets | ✅ | pairing points T3 at one Harness ([the model](design.md)); `getSettings` answers from host defaults |
+| Shell & thread reads | `orchestration.subscribeShell`, `orchestration.subscribeThread`, `orchestration.subscribeArchivedShell` (streams), `orchestration.getThreadProjection`, `orchestration.getArchivedShellSnapshot`, `orchestration.launchThread` | ✅ | the thread list and the projects ride the shell snapshot's `projects` field, not a `projects.list` call; the transcript streams as a thread projection |
+| Threads | `thread.create`, `thread.delete`, `message.dispatch`, `run.interrupt`, `thread.model-selection.set` | ✅ | create, prompt, steer, queue, restart, interrupt, delete (delete aborts the run first) |
 | Undo | `checkpoint.rollback` | ✅ | forks just before the reverted message; never rewrites history |
-| Sidebar bookkeeping | `thread.visit`, `thread.mark-unread`, `thread.settle`, `thread.unsettle`, `thread.auto-settle`, `thread.pin`, `thread.unpin`, `thread.pin.reorder`, `thread.active.reorder` | ✅ | acknowledged; T3 keeps the ordering and flags client-side |
-| Projects | `projects.list`, and each thread's `cwd` | ✅ | every thread runs in its project's directory |
-| Project registry | `projects.add`, `projects.remove`, `filesystem.browse` | 🔜 | the folder picker is how a project gets added; browse is read-only for that dialog |
+| Sidebar bookkeeping | `thread.visit`, `thread.mark-unread`, `thread.settle`, `thread.unsettle`, `thread.auto-settle`, `thread.auto-settle.set`, `thread.pin`, `thread.unpin`, `thread.pin.reorder`, `thread.active.reorder`, `notification.delivery.accept` | ✅ | acknowledged; T3 keeps the ordering and flags client-side |
+| Model per thread | `thread.model-selection.set`, the model picker | ✅ | the catalog is your pi config; one provider, pi |
+| Instructions | per-thread instructions, `instructions` (config) | ✅ | read at thread create, inherited by forks and undos |
+| Crash resume | `message.dispatch` + the resumed run | ✅ | kill the host mid-turn, restart, the turn finishes; see the clip in the README |
+| Settings writes | `server.updateSettings` | 🔜 | the host-wide defaults go to `settings.json`; `server.getSettings` answers from defaults until then |
+| Folder picker | `filesystem.browse` | 🔜 | read-only, for the dialog that adds a project |
 | Thread fork | `thread.fork`, `thread.merge_back` | 🔜 | the undo fork is already the mechanism |
 | Thread rename | `thread.metadata.update` | 🔜 | the title is a field on the thread pointer |
 | Archive, snooze | `thread.archive`, `thread.unarchive`, `thread.snooze`, `thread.unsnooze` | 🔜 | sidebar plumbing exists; the threads-layer semantics are missing |
 | Queued messages | `queued-*`, `queue.resume` | 🔜 | the queue is pi-durable's; editing its entries from the UI is the missing half |
-| Instructions | per-thread instructions, `instructions` (config) | ✅ | read at thread create, inherited by forks and undos |
-| Project instructions | per-project `AGENTS.md` | 🔜 | loaded like `instructions`: once at thread create, through the env's file API |
-| Crash resume | — | ✅ | kill the host mid-turn, restart, the turn finishes; see the clip in the README |
-| Attachments, images in prompts | `attachments.*`, `assets.createUrl`, `assets.persistChatAttachments` | 🕐 | the threads layer takes images; the host has no asset store to receive them |
-| Search | `projects.searchEntries`, `projects.searchContents` | 🕐 | needs an index over conversations |
+| Attachments, images in prompts | `attachments.*`, `assets.*` | 🕐 | the threads layer takes images; the host has no asset store to receive them |
+| Search | `projects.searchEntries`, `projects.searchContents`, `orchestration.searchThreads` | 🕐 | needs an index over conversations |
 | Usage | `server.getUsageSummary`, `server.refreshUsageRates` | 🕐 | pi-durable keeps per-conversation usage; T3's panels expect provider quotas too |
-| Scheduled tasks | `scheduledTasks.*` | 🕐 | pi-durable's task tree can host them; the orchestration semantics are the work |
-| Host diagnostics | `server.getHostResources`, `server.getProcessDiagnostics`, `server.getProcessResourceHistory`, `server.getTraceDiagnostics`, `server.getResourceTelemetryHistory`, `server.signalProcess` | 🕐 | one process, one machine; nothing to correlate yet |
-| File access | `projects.readFile`, `projects.writeFile`, `projects.listEntries`, `projects.mutate` | ❌ | the agent has `bash` and edits files itself; a facet-side file API makes the facet a second owner of the workspace |
-| Git, PRs, diffs, worktrees | `git.*`, `pullRequests.*`, `vcs.*`, `sourceControl.*`, `review.*`, `projectClone.*`, `worktreeSetup.*` | ❌ | the agent works in real repos with `git`; mirroring repo state would put the facet in charge of it |
+| Scheduled tasks | `scheduledTasks.*` (incl. the `subscribe` stream) | 🕐 | pi-durable's task tree can host them; the orchestration semantics are the work |
+| Host diagnostics | `server.getHostResources`, `server.getProcessDiagnostics`, `server.getProcessResourceHistory`, `server.getTraceDiagnostics`, `server.getResourceTelemetryHistory`, `server.retryResourceTelemetry`, `server.signalProcess` | 🕐 | one process, one machine; nothing to correlate yet |
+| Workflow scripts, turn items | `orchestration.getWorkflowScript`, `orchestration.getTurnItem` | 🕐 | reads for the workflow/timeline surfaces the threads layer does not project |
+| File access | `projects.readFile`, `projects.writeFile`, `projects.listEntries`, `projects.mutate`, `projects.createNew`, `projects.ensureScratch` | ❌ | the agent has `bash` and edits files itself; a facet-side file API makes the facet a second owner of the workspace |
+| Git, PRs, diffs, worktrees | `git.*`, `pullRequests.*`, `vcs.*`, `sourceControl.*`, `review.*`, `projectClone.*`, `worktreeSetup.*`, `subscribeVcsStatus`, `subscribeWorktreeSetup`, `subscribeProjectClones`, `orchestration.getTurnDiff`, `orchestration.getFullThreadDiff`, `thread.pull-request.*` | ❌ | the agent works in real repos with `git`; mirroring repo state would put the facet in charge of it |
 | File restore | `checkpoint.rollback` with `restoreFiles: true` | ❌ | filesystem ownership belongs to the Harness and its extensions, not to a threads layer |
-| Terminal | `terminal.*` | ❌ | the host runs no interactive terminal; tools run in the Harness |
-| Editor, previews, browser | `shell.openInEditor`, `preview.*`, `mcpApps.*` | ❌ | no editor, no dev-server supervision, no browser automation in a threads layer |
-| Devices, relay, cloud | `device.*`, `cloud.*` | ❌ | a remote machine is another Harness ([the model](design.md)) |
-| Providers | `provider.switch`, `provider.consumeResetCredit`, `provider.uploadFeedback`, `server.*AcpRegistry*` | ❌ | one provider: pi. ACP registries and per-provider credits are T3's provider system, not pi's |
-| Approvals, plan mode | `runtime-request.respond`, `thread.runtime-mode.set` (not `full-access`), `thread.interaction-mode.set` (plan) | ❌ | pi runs tools without approvals, so there is nothing to answer and no plan-only mode |
+| Terminal | `terminal.*`, `subscribeTerminalEvents`, `subscribeTerminalMetadata` | ❌ | the host runs no interactive terminal; tools run in the Harness |
+| Editor, previews, browser | `shell.openInEditor`, `preview.*`, `mcpApps.*`, `subscribePreviewEvents`, `subscribeDiscoveredLocalServers` | ❌ | no editor, no dev-server supervision, no browser automation in a threads layer |
+| Devices, relay, cloud | `device.*`, `cloud.*`, `subscribeDeviceState` | ❌ | a remote machine is another Harness ([the model](design.md)) |
+| Providers | `provider.*` (auth, install, credits, feedback), `provider.switch`, `server.updateProvider`, `server.*AcpRegistry*` | ❌ | one provider: pi. ACP registries and per-provider auth/credits are T3's provider system, not pi's |
+| Approvals, plan mode | `runtime-request.respond`, `thread.user-input.dismiss`, `thread.runtime-mode.set` (not `full-access`), `thread.interaction-mode.set` (plan) | ❌ | pi runs tools without approvals, so there is nothing to answer and no plan-only mode |
+| Orchestrator-internal | `delegated_task.*`, `prepared-run.*`, `provider-session.detach`, `thread.created.record`, `thread.title.regeneration.complete` | ❌ | subagent tasks, workspace-prepared runs, provider-session detach: pi-durable threads are none of these objects |
 | Self-update | `server.updateServer`, `server.updateServerWithProgress`, `server.commitDesktopUpdate`, `server.uninstallAcpRegistryManagedBinary` | ❌ | the host updates with your package manager, or with the container image |
 | Imported sessions | `agentSessions.*` | ❌ | a thread is a pi-durable conversation; there is no external agent session to import |
 | Secrets | `secrets.answerRequest` | ❌ | tools inherit the host's environment; there is no prompt to answer |
@@ -49,9 +51,5 @@ refused flatly.
 - **Storage only grows:** deleting drops pointers, never data ([the T3 facet](design.md)).
 - **The agent runs `bash` as the host user, with no approvals** — the warning, and the bind/`Host`/
   CORS story, is in [`README.md`](../README.md).
-- **Shells survive a crash.** pi-durable starts them detached (on non-Windows), so they outlive a killed
-  host; run under systemd to clean them up.
-- **Reconnect takes a minute.** After a host restart, T3's socket reconnects on its own backoff; press
+- **Reconnect takes ~75s.** After a host restart, T3's socket reconnects on its own backoff; press
   Retry to skip the wait.
-- **Some panels stay visible.** T3 shows the terminal drawer, the diff view and the folder picker; the
-  first two fail with the refusal above, and the picker appears once `filesystem.browse` lands.

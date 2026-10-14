@@ -44,7 +44,7 @@ function launch(root: string, port: number, extraEnv: NodeJS.ProcessEnv = {}): L
 async function writeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
-	await writeFile(join(root, "host.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, "utf8");
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n`, "utf8");
 	return root;
 }
 

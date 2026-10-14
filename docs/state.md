@@ -49,7 +49,7 @@ Applied undos are the one field we write that grows without bound.
 
 | what | lifetime | if it's lost |
 |---|---|---|
-| `host.toml`: projects, listen address, web origin, default model, per-thread instructions | until the integrator edits it | the host refuses to start |
+| `config.toml`: projects, listen address, web origin, default model, per-thread instructions | until the integrator edits it | the host refuses to start |
 | the environment | one run | defaults apply |
 
 The running host never writes configuration, and nothing a thread does reaches it.

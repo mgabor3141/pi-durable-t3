@@ -4,6 +4,9 @@ A bridge that allows using T3 Code as a frontend for pi-durable. Experimental.
 
 https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
 
+A turn survives a crash: the clip sends a message, kills the host mid-turn, restarts it, and the turn
+finishes after T3 reconnects — its socket reconnects on a ~75s backoff, so press **Retry** to skip the wait.
+
 Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a T3 facet that speaks T3's wire protocol. T3 then shows your Harness in the sidebar, with its projects and threads. Design: [`docs/design.md`](docs/design.md).
 
 ## Set up
@@ -17,12 +20,15 @@ pnpm setup:t3     # shallow-fetches t3code at the pin; vendors @t3tools/contract
 ## Configure
 
 ```sh
-mkdir -p ~/.pi/durable-t3
-cp host.example.toml ~/.pi/durable-t3/host.toml
+mkdir -p ~/.config/pi-durable-t3 && cp config.example.toml ~/.config/pi-durable-t3/config.toml
 ```
 
-[`host.example.toml`](host.example.toml) is a commented reference: the required part is at least one
-`[[projects]]` block (a directory under the root, in which its threads run `bash` and the file tools, as
+The config lives in `$XDG_CONFIG_HOME/pi-durable-t3` (default `~/.config/…`); data (storage, the models
+store, facet state) lives in `$XDG_DATA_HOME/pi-durable-t3` (default `~/.local/share/…`). `--root <dir>`
+overrides both, keeping this instance's config (`<dir>/config.toml`) and all its data in one directory.
+
+[`config.example.toml`](config.example.toml) is a commented reference: the required part is at least one
+`[[projects]]` block (a directory under the data dir, in which its threads run `bash` and the file tools, as
 the host user), and every optional key is shown commented with its default (`listen`, `web`,
 `default_model`, `instructions`, `[t3]`). Unknown keys are rejected, naming the file, the key path, and
 what was expected; an empty file is valid (defaults, no projects), a missing file is an error. Defaults
@@ -34,10 +40,10 @@ bearer token, so a browser can't read the API cross-site, but set `web` to pin i
 ## Run
 
 ```sh
-pnpm start -- --root ~/.pi/durable-t3
+pnpm start          # reads the XDG config above; add `-- --root <dir>` for a single-directory instance
 ```
 
-The host opens a Harness with the coding tools (`read`/`write`/`edit`/`bash`), runs each thread in its project's directory, serves the T3 facet, and prints a one-time pairing code and link. Model catalog and credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials? Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start -- --root …`.
+The host opens a Harness with the coding tools (`read`/`write`/`edit`/`bash`), runs each thread in its project's directory, serves the T3 facet, and prints a one-time pairing code and link. Model catalog and credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials? Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start` (or with `-- --root …`).
 
 New threads start from a built-in base prompt (coding agent, its working directory, the platform). `instructions` appends a file's text to it, read at thread create: editing the file affects new threads only, and a missing file fails at start.
 
@@ -78,7 +84,7 @@ A refused call answers T3 with a message, so the UI shows why, and state is neve
 Refused *on purpose* says so; refused *for now* says "yet".
 
 The paired agent runs `bash` with **no approvals, as the host user**, in the project directories you
-add. Loopback is the default bind; `host.toml` holds the address, CORS and the Host check.
+add. Loopback is the default bind; `config.toml` holds the address, CORS and the Host check.
 
 ## License
 

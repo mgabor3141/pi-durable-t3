@@ -26,7 +26,7 @@ trap cleanup EXIT
 [ -d "$WEB_DIST" ] || { echo "web-dist not found at $WEB_DIST (set WEB_DIST to the built T3 web app)"; exit 2; }
 
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/state"
-cat > "$root/host.toml" <<TOML
+cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 
 [[projects]]

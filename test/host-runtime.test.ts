@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { parseHostToml } from "../src/config.ts";
+import { parseConfigToml } from "../src/config.ts";
 import { openHostRuntime } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../src/testing/fake-model.ts";
 import { idle } from "./threads-harness.ts";
@@ -17,7 +17,7 @@ describe("host runtime (main.ts wiring)", () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-durable-t3-runtime-"));
 		await mkdir(join(root, "projects/alpha"), { recursive: true });
 		await mkdir(join(root, "projects/beta"), { recursive: true });
-		const config = parseHostToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
+		const config = parseConfigToml(`listen = "127.0.0.1:1"\n\n[[projects]]\nname = "alpha"\npath = "projects/alpha"\n\n[[projects]]\nname = "beta"\npath = "projects/beta"\n`, root);
 
 		// The model answers the turn with a `bash pwd > pwd.txt`, then finishes — exercising a real tool in the env cwd.
 		const steps: FauxResponseStep[] = [
