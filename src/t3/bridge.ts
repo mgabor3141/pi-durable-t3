@@ -56,6 +56,30 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
 const EMIT_THROTTLE_MS = 60;
 
+/** One `projects.mutate` payload, as the facet decoded it. `commandId` is the client-chosen id the receipt store keys
+ * on, and it is required by the contract (`ProjectMutation.commandId`), so the dedup has a key on every path. */
+export type ProjectMutation = {
+	readonly type: "project.create" | "project.update" | "project.delete";
+	readonly projectId: string;
+	readonly commandId: string;
+	readonly title?: string;
+	readonly workspaceRoot?: string;
+	readonly createWorkspaceRootIfMissing?: boolean;
+	readonly force?: boolean;
+};
+
+/** What the first attempt at a commandId did: its project id and command type (so a reuse for a different command is
+ * visible), and the promise carrying its outcome. A SUCCESS is kept as the receipt; a REFUSAL is evicted on rejection
+ * (store M4) so it is never replayed — the entry exists only for the in-flight window (to dedup a concurrent double-send). */
+type ProjectMutationReceipt = { readonly projectId: string; readonly commandType: string; readonly outcome: Promise<Record<string, unknown>> };
+
+/** How many client-chosen ids the bridge remembers, for both dedup maps (dispatch commands, project mutations). One
+ * bound, one meaning: it is the only memory a client-chosen id can cost, so a client cannot grow the bridge by inventing
+ * ids. Past it the oldest entry is dropped, and a very old retry is treated as a fresh request — for a create that
+ * means the duplicate-path refusal, for a delete the not-found: the same answers a fresh request gets, not a corruption.
+ * A restart clears both maps, the same repair the command map already had. */
+export const DEDUP_ENTRY_LIMIT = 2_000;
+
 
 export class Bridge {
 	readonly config: BridgeConfig;
@@ -69,6 +93,9 @@ export class Bridge {
 	/** The project shells last shown, so a registry EDIT (rename, root move) re-emits only the shells that changed. */
 	readonly #shownProjects = new Map<string, OrchestrationProjectShell>();
 	readonly #commandResults = new Map<string, Promise<number>>();
+	/** Project mutations by commandId: what the first attempt produced (or the refusal it was refused with), so a retry
+	 * after a lost response replays that instead of re-planning. Bounded by `MUTATION_RECEIPT_LIMIT`. */
+	readonly #mutationReceipts = new Map<string, ProjectMutationReceipt>();
 	/** Called with every thread's `pi.models` state, so the provider catalog follows the host. */
 	onModels: ((models: ModelsState | undefined) => void) | undefined;
 	/** Model reported for threads whose transcript is not loaded. */
@@ -100,6 +127,12 @@ export class Bridge {
 		// A UI edit to the instance file (add/remove/rename a project) lands through the registry: emit the added and
 		// removed project shells, drop a now-registered folder from the discovered set, and republish thread shells.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
+		// Seed the shown-project map with the boot registry (store finding #5). The shell snapshot is the baseline a client
+		// renders at connect, and `#onRegistryChange` emits a rename/move only when it can DIFF the new shell against the last
+		// SHOWN one. A project that was in the file at boot was never `#emitShell`-ed, so its `shown` was `undefined`, the
+		// guard `shown !== undefined` skipped the emission, and a rename/move of a boot-loaded project reached no connected
+		// sidebar (`p8`/`p5`/`v1 V4a` saw `shell items: []`). Seeding is silent (the snapshot is the baseline, not a delta).
+		for (const project of this.#configured()) this.#shownProjects.set(project.id, this.#projectShell(project));
 		this.#registryStop = this.config.registry.subscribe(() => this.#onRegistryChange());
 		this.#log.info("bridge started (over the objects)");
 	}
@@ -164,25 +197,50 @@ export class Bridge {
 		return this.#configured().map((p) => this.#projectShell(p));
 	}
 
-	/**
-	 * One project mutation the UI sent (`projects.mutate`). `create` registers a path (refusing a duplicate, as T3
-	 * does) and, when asked, makes the directory; `update` renames/moves an entry; `delete` drops the entry AND its
-	 * threads, over T3's dialog that promises exactly those two — files on disk are never touched. The id of a created
-	 * project is the id the client minted when it minted one (T3's UI sends a UUID and navigates to it); otherwise it
-	 * derives from the normalized path, so a retried create lands on the same id. Returns the T3 `Project` shape.
-	 * A workspace root is validated BEFORE it is stored (T3's own order, `ProjectService.create` → `normalizeWorkspaceRoot`):
-	 * a path that exists as a non-directory is refused naming the path, a missing path is created only when asked, and a
-	 * failed creation is a typed refusal — never a swallowed `.catch(() => {})`, which used to store roots that brick the
-	 * next boot. The facet maps all of these to the contract's `ProjectMutationError`.
-	 */
-	async mutateProject(mutation: {
-		readonly type: "project.create" | "project.update" | "project.delete";
-		readonly projectId: string;
-		readonly title?: string;
-		readonly workspaceRoot?: string;
-		readonly createWorkspaceRootIfMissing?: boolean;
-		readonly force?: boolean;
-	}): Promise<Record<string, unknown>> {
+		/** One project mutation, deduplicated by commandId the way T3's ProjectService dedups by receipt. A client whose
+	 * response was lost resends the SAME commandId, and the FIRST attempt's outcome — not a fresh plan — decides the
+	 * answer: a retried create returns the project it created, a retried delete returns the deletion it made (a delete of
+	 * a project that is already gone is idempotent, never "was not found"). A REFUSAL is NOT a receipt (store M4): it
+	 * records nothing durable, so a retry of a refused commandId re-plans against the CURRENT state — the transient cause
+	 * that refused it (a parent that was a file, a path a peer held, a conflict whose project has since gone) may be gone,
+	 * and a client obeying the contract's dedup rule (reuse the commandId) must be able to recover. T3's ProjectService
+	 * persists a rejected command as its receipt (`ProjectService.commit` → `commitRejectedProjectCommand`, lines 245-252)
+	 * and replays it on retry (lines 281-294); we keep T3's ACCEPTED-receipt idempotency (lines 278-280) and drop the
+	 * rejected-receipt. Pre-fix there was no dedup at all, so every one of those retries answered a fresh-plan conflict
+	 * naming a project the client had just created. A commandId that SUCCEEDED is remembered: reused for a DIFFERENT
+	 * command (type or project) it is T3's "was already used by" refusal. The store is bounded by `DEDUP_ENTRY_LIMIT`,
+	 * oldest first. */
+	mutateProject(mutation: ProjectMutation): Promise<Record<string, unknown>> {
+		const receipt = this.#mutationReceipts.get(mutation.commandId);
+		if (receipt !== undefined) {
+			if (receipt.projectId !== mutation.projectId || receipt.commandType !== mutation.type) {
+				return Promise.reject(
+					new CommandError(`Command ${mutation.commandId} was already used by ${receipt.commandType} for ${receipt.projectId}.`),
+				);
+			}
+			return receipt.outcome;
+		}
+		const outcome = this.#applyMutation(mutation);
+		// Store the in-flight outcome so a CONCURRENT double-send of the same commandId dedups (it lands while the promise
+		// is pending). A refusal is not a receipt (store M4): the `.catch` below evicts the entry when the outcome rejects,
+		// so a later retry of the same commandId re-plans against the current state. A SUCCESS stays, so a retried
+		// create/delete replays the result it produced (T3's accepted-receipt idempotency).
+		this.#mutationReceipts.set(mutation.commandId, { projectId: mutation.projectId, commandType: mutation.type, outcome });
+		while (this.#mutationReceipts.size > DEDUP_ENTRY_LIMIT) {
+			const oldest = this.#mutationReceipts.keys().next().value;
+			if (oldest === undefined) break;
+			this.#mutationReceipts.delete(oldest);
+		}
+		// A refusal records nothing durable: evict its entry so it is never replayed. (Handling the rejection here also
+		// keeps a refusal from being an unhandled rejection — the replayed promise is the caller's, not this store's.)
+		// `?.outcome === outcome` guards eviction against a later command that reused this id after the entry was evicted.
+		outcome.catch(() => {
+			if (this.#mutationReceipts.get(mutation.commandId)?.outcome === outcome) this.#mutationReceipts.delete(mutation.commandId);
+		});
+		return outcome;
+	}
+
+	async #applyMutation(mutation: ProjectMutation): Promise<Record<string, unknown>> {
 		switch (mutation.type) {
 			case "project.create": {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
@@ -211,6 +269,17 @@ export class Bridge {
 				// delete, so conversations stay; a directory on disk is never part of this operation.
 				for (const thread of targets) await this.deleteThread(thread.threadId);
 				this.config.registry.remove(mutation.projectId);
+				// Sweep late arrivals. The target list above is a snapshot taken before the entry was removed, and a
+				// `thread.create` whose commit lands in that window wrote a row for a project that is now gone — the
+				// dialog promised the project's threads go WITH it. The registry entry is gone, so the threads layer's
+				// commit-time FK check refuses any NEW row under the id; draining what already landed closes the window.
+				for (let pass = 0; pass < 5; pass++) {
+					await new Promise((resolve) => setTimeout(resolve, 20));
+					this.#syncDirectory();
+					const late = this.#directory.filter((thread) => thread.projectId === mutation.projectId);
+					if (late.length === 0) break;
+					for (const thread of late) await this.deleteThread(thread.threadId);
+				}
 				return this.#projectResult(entry, new Date().toISOString());
 			}
 		}
@@ -521,7 +590,7 @@ export class Bridge {
 		const result = run();
 		this.#commandResults.set(commandId, result);
 		result.catch(() => this.#commandResults.delete(commandId));
-		if (this.#commandResults.size > 2_000) {
+		while (this.#commandResults.size > DEDUP_ENTRY_LIMIT) {
 			const oldest = this.#commandResults.keys().next().value;
 			if (oldest !== undefined) this.#commandResults.delete(oldest);
 		}

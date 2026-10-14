@@ -172,8 +172,12 @@ describe("chooseDefaultModel (S1)", () => {
 	it("is the first available model when none is configured", () => {
 		expect(chooseDefaultModel([{ provider: "anthropic", id: "sonnet" }], undefined)).toEqual({ provider: "anthropic", modelId: "sonnet" });
 	});
-	it("is the configured model when one is set", () => {
-		expect(chooseDefaultModel([{ provider: "a", id: "m" }], { provider: "x", modelId: "y" })).toEqual({ provider: "x", modelId: "y" });
+	it("is the configured model when the catalog has it (M1: an unvalidated default made every thread an interrupted turn)", () => {
+		expect(chooseDefaultModel([{ provider: "a", id: "m" }], { provider: "a", modelId: "m" })).toEqual({ provider: "a", modelId: "m" });
+		// A configured model the catalog cannot call is a start-time refusal, never a silent default. The message names
+		// the model and a bounded list of what IS available. (This case used to assert the pass-through, i.e. the defect.)
+		expect(() => chooseDefaultModel([{ provider: "a", id: "m" }], { provider: "x", modelId: "y" })).toThrow(/model x\/y is not available/);
+		expect(() => chooseDefaultModel([{ provider: "a", id: "m" }], { provider: "x", modelId: "y" })).toThrow(/available: a\/m/);
 	});
 	it("fails at start, naming ~/.pi/agent, when no models are available", () => {
 		expect(() => chooseDefaultModel([], undefined)).toThrow(/no models are available/);

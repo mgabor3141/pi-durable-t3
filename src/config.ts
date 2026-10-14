@@ -9,6 +9,7 @@ import { parse } from "smol-toml";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ModelRef } from "@earendil-works/pi-durable";
+import { ModelNotAvailable, refSlug } from "./t3/model-types.ts";
 import type { FacetConfig } from "./t3/config.ts";
 
 /** A bad `config.toml`; its message is meant for the user as is. */
@@ -204,13 +205,36 @@ function parseListen(value: string, file: string): { host: string; port: number 
 	return { host, port };
 }
 
-/** The model new threads start on: the instance file's default, else the first available model. With no models
- * available, fail loudly (naming where credentials live) instead of defaulting to a blank model, which makes every
- * thread show an unexplained interrupted turn: "unset → the first available" promises a model, and it holds only when one exists. */
-export function chooseDefaultModel(available: readonly { provider: string; id: string }[], configured: ModelRef | undefined): ModelRef {
+/** The model new threads start on: the instance file's default when the catalog has it, else the first available one.
+ * Two failures: no models at all (a clear, credential-naming message — "unset → the first available" promises a model,
+ * and it holds only when one exists), and a configured default the catalog does not have. The second is refused by
+ * WRITE TIME and TOLERATED AT BOOT, and `onWarn` picks which:
+ *
+ *   - `onWarn` supplied (the BOOT path): a catalog-absent default is a warning naming the model and what IS available,
+ *     and the first catalog model is returned. The default lives in the instance file — the tier the T3 UI edits, and
+ *     the UI is its only editor. The catalog is a function of credentials at boot (a rotated/revoked key, a laptop with
+ *     no route to the gateway, a model renamed upstream), so a default valid at set-time can be absent at the next
+ *     boot; exiting before the listener binds strands the file with no way to fix it (the same reason the boot read of
+ *     project ENTRIES is tolerant). This is review store M2 / wire NEW-R2-1, and it mirrors the tolerant boot read
+ *     already applied to the same field's other spelling (a malformed slug is dropped with a warning).
+ *   - `onWarn` absent (the WRITE path, `server.updateSettings`): a catalog-absent default is a fatal, typed
+ *     `ModelNotAvailable` naming the model and a bounded list of what IS available. The UI is reachable there, and a
+ *     default the host cannot call is not a label — EVERY new thread becomes an interrupted turn (review M1).
+ *
+ * "No models at all" is fatal in BOTH modes: there is no fallback to fall back to. */
+export function chooseDefaultModel(available: readonly { provider: string; id: string }[], configured: ModelRef | undefined, onWarn?: (message: string) => void): ModelRef {
 	const first = available[0];
 	if (first === undefined) throw new ConfigError("no models are available: add provider credentials under ~/.pi/agent (or set PI_CODING_AGENT_DIR), or run with PI_DURABLE_T3_FAKE=1 for the offline demo model");
-	return configured ?? { provider: first.provider, modelId: first.id };
+	const firstModel: ModelRef = { provider: first.provider, modelId: first.id };
+	if (configured === undefined) return firstModel;
+	const availableSlugs = available.map(refSlug);
+	if (!availableSlugs.includes(refSlug(configured))) {
+		const refusal = new ModelNotAvailable(refSlug(configured), availableSlugs);
+		if (onWarn === undefined) throw refusal;
+		onWarn(`${refusal.message} — the default was dropped; new threads start on ${refSlug(firstModel)} until it is set from the UI`);
+		return firstModel;
+	}
+	return configured;
 }
 
 /** TypeBox errors → one line each (dotted key path + expectation); unknown keys are named, the paired `schema is false` sub-error folded in. */

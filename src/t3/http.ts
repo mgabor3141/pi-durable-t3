@@ -12,6 +12,7 @@ import {
 	OrchestrationV2ShellSnapshot,
 	OrchestrationV2ThreadDetailSnapshot,
 	OrchestrationV2ThreadBoundedSnapshot,
+	ProjectMutation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -23,7 +24,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 import { WsRpcGroup } from "@t3tools/contracts";
-import { ProjectConflict } from "../registry.ts";
+import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import { type AuthStore, PairingRateLimit } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -51,14 +52,21 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnviron
 }
 
 /**
- * The address pairing attempts are counted against. Behind a local reverse proxy (`tailscale serve`) every request
- * comes from loopback, so the proxy's X-Forwarded-For (the tailnet client) is used instead; it is trusted only when
- * the connection itself is from loopback.
+ * The address a pairing attempt is counted against: the socket it arrived on, and nothing a client wrote.
+ *
+ * A rate limiter's bucket key has to be something the caller cannot choose. `x-forwarded-for` is a client-supplied
+ * header, and on the default (loopback) bind every connection is loopback, so trusting it when the socket is loopback
+ * — the previous rule — let any caller mint a fresh bucket per attempt by setting a header: ten thousand guesses at a
+ * pairing code, ten thousand fresh counters, and the limiter existed only for callers that did not think of it. Per
+ * review sec F7 / conc F4 the header is not consulted.
+ *
+ * The proxy case the header was there for (`tailscale serve` forwarding a tailnet client through loopback) is not
+ * forgotten: it now shares one bucket per proxy, which fails CLOSED — a flood through the proxy locks out the proxy's
+ * clients, instead of unlocking the limiter for everyone. Per-client accounting behind a proxy needs an explicit
+ * "this deployment is behind a proxy" setting, so the operator, not the request, decides which header to believe.
  */
-function clientAddress(remote: string, forwarded: string | undefined): string {
-	const loopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
-	const first = forwarded?.split(",")[0]?.trim();
-	return loopback && first ? first : remote;
+function clientAddress(remote: string): string {
+	return remote;
 }
 
 /** `/api/auth/session` for a paired client: legacy `scopes` plus the full `permissions` list T3 gates actions on. */
@@ -85,6 +93,17 @@ export const authDescriptor = {
 
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 const encode = <S extends Schema.Top>(schema: S, value: unknown) => Schema.encodeUnknownSync(schema as Any)(value);
+
+/** The commandId of a body that failed to decode, for the `commandId` the contract's error carries (an empty string when
+ * the body has none — the field is required, and its absence is part of what the refusal says). */
+const commandIdOf = (raw: unknown): string => (typeof raw === "object" && raw !== null && typeof (raw as Any).commandId === "string" ? String((raw as Any).commandId) : "");
+
+/** A schema refusal in the route's shape: the contract's own error tree, flattened to one readable line. The full
+ * structure is in the log; a client gets the first path that failed. */
+function decodeMessage(error: unknown): string {
+	const detail = error instanceof Error ? error.message : String(error);
+	return `Not a valid project mutation: ${detail.replace(/\s+/g, " ").slice(0, 400)}`;
+}
 
 export function makeServerLayer(deps: {
 	bridge: Bridge;
@@ -157,10 +176,7 @@ export function makeServerLayer(deps: {
 			"/oauth/token",
 			Effect.gen(function* () {
 				const request = yield* HttpServerRequest.HttpServerRequest;
-				const address = clientAddress(
-					Option.getOrElse(request.remoteAddress, () => "unknown"),
-					request.headers["x-forwarded-for"],
-				);
+				const address = clientAddress(Option.getOrElse(request.remoteAddress, () => "unknown"));
 				if (pairingLimit.blocked(address)) {
 					log.warn("pairing rate limited", { address });
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "rate_limited", message: "Too many pairing attempts; wait a minute." }, 429);
@@ -248,17 +264,31 @@ export function makeServerLayer(deps: {
 			"/api/projects/mutate",
 			authorized((request) =>
 				Effect.gen(function* () {
-					const mutation = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
-					if (mutation === undefined || typeof mutation !== "object") return json({ _tag: "ProjectMutationError", commandId: "", message: "A project mutation is required." }, 400);
+					const raw = yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)));
+					// Parity with the RPC means parity of VALIDATION, not just of route: `projects.mutate` decodes its
+					// payload with the contract's `ProjectMutation`, so the same JSON has to mean the same thing on both
+					// transports. Passed through unchecked, a body the RPC refuses reached the bridge's switch — `{}` matched
+					// no case and the route answered 200 with an empty body (a create that did nothing, reported as success),
+					// and a `projectId` outside the contract's brand took a bridge-minted id, so one JSON made two projects.
+					const decoded = yield* Effect.try({
+						try: () => Schema.decodeUnknownSync(ProjectMutation)(raw),
+						catch: (error) => decodeMessage(error),
+					}).pipe(
+						Effect.map((value) => ({ value } as const)),
+						Effect.catch((message) => Effect.succeed({ message } as const)),
+					);
+					if ("message" in decoded) return json({ _tag: "ProjectMutationError", commandId: commandIdOf(raw), message: decoded.message }, 400);
+					const mutation = decoded.value;
 					return yield* Effect.tryPromise({
 						try: () => bridge.mutateProject(mutation),
 						catch: (error) => error as Error,
 					}).pipe(
 						Effect.map((project) => json(project)),
 						Effect.catch((error) =>
-							// A duplicate path (a workspace owned by another project) is a conflict (409); classify by the
-							// error's `name` so it holds across module boundaries, not only by `instanceof`.
-							Effect.succeed(json({ _tag: "ProjectMutationError", commandId: mutation.commandId ?? "", message: error.message || String(error) }, error.name === ProjectConflict.name ? 409 : 400)),
+							// A duplicate path (a workspace owned by another project) and a duplicate minted id are both
+							// conflicts (409); classify by the error's `name` so it holds across module boundaries, not only
+							// by `instanceof`.
+							Effect.succeed(json({ _tag: "ProjectMutationError", commandId: mutation.commandId, message: error.message || String(error) }, error.name === ProjectConflict.name || error.name === ProjectIdConflict.name ? 409 : 400)),
 						),
 					);
 				}),

@@ -26,7 +26,11 @@ type Child = { child: ChildProcessByStdio<null, Readable, Readable>; out: () => 
 async function launch(name: string, port: number): Promise<Child> {
 	const root = join(scratch, name);
 	await mkdir(root, { recursive: true });
-	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n\n[[projects]]\nname = "alpha"\npath = "p"\n`, "utf8");
+	// Only `listen` belongs in `config.toml`. This fixture used to write a `[[projects]]` block too — a key the current
+	// parser refuses by name (projects live in the instance file, `settings.json`, which the child writes itself). It
+	// passed only because the child builds its own config string and never reads this file, which makes it a trap for
+	// whoever points the child at the file on disk.
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	const child = spawn(process.execPath, ["--experimental-strip-types", childScript, root, "alpha", String(port), "60000"], {
 		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_DURABLE_T3_FAKE: undefined },
 		stdio: ["ignore", "pipe", "pipe"],

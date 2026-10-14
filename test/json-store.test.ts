@@ -1,8 +1,9 @@
-// The facet's on-disk store (auth.json) uses `readJson`/`writeJsonAtomic`, so the format and the
-// permissions are the contract: a value survives a write→read round-trip, the file is 0600 (secrets), and a read
-// never throws. The 0600 case that matters is a leftover `*.tmp` from a crashed write at a looser mode: `open(2)`
-// applies `mode` only when it creates, so the writer chmods the temp explicitly.
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+// The facet's on-disk store (auth.json) and the host's instance file share this writer, so the format and the
+// permissions are the contract: a value survives a write→read round-trip, the file is 0600 (secrets), a read never
+// throws, and a write never inherits anything from a temp file it did not create. The last one is the 0600 case that
+// matters: `open(2)` applies `mode` only when it CREATES, so a writer that reuses `<file>.tmp` publishes whatever mode
+// a crashed writer's leftover temp file had. The writer's temp name is unique (`wx`) and chmod'ed before the rename.
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readJson, writeJsonAtomic } from "../src/t3/json-store.ts";
@@ -27,10 +28,14 @@ describe("json-store", () => {
 		writeFileSync(temporary, "stale\n", { mode: 0o644 });
 		chmodSync(temporary, 0o644);
 		expect(modeOf(temporary)).toBe(0o644);
+		const litter = () => readdirSync(root).filter((name) => name.endsWith(".tmp") || name.endsWith(".lock")).sort();
+		const before = litter();
 		writeJsonAtomic(file, { ok: true });
-		expect(modeOf(file)).toBe(0o600);
-		expect(existsSync(temporary)).toBe(false); // the rename consumed it
+		expect(modeOf(file)).toBe(0o600); // the write's own mode, never the leftover temp file's
 		expect(readFileSync(file, "utf8")).toContain("ok");
+		// The writer used a name of its own, so it neither inherits the leftover's mode nor adds litter. A pre-existing
+		// temp file is not the writer's to delete: it belongs to a writer that may still be running.
+		expect(litter()).toEqual(before);
 	});
 
 	it("a missing file returns the fallback", async () => {

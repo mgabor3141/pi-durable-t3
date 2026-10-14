@@ -11,6 +11,7 @@ import {
 	DEFAULT_SERVER_SETTINGS,
 	type ServerConfig,
 	type ServerSettings,
+	ServerSettingsError,
 	WsRpcGroup,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -20,12 +21,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
+import { ModelNotAvailable, modelSlug, refSlug, splitSlug } from "./model-types.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
-import { splitSlug } from "./model-types.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
@@ -229,13 +230,33 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const registry = bridge.config.registry;
 					if (selection === null) registry.setModel(null);
 					else if (selection?.model !== undefined) {
-						const ref = splitSlug(String(selection.model));
-						if (ref !== undefined) registry.setModel(ref);
+						// The catalog is the only list of models this host can call, so a default outside it is not a label:
+						// every new thread becomes an interrupted turn. Refuse, naming the model and what IS available.
+						const requested = String(selection.model);
+						const ref = splitSlug(requested);
+						const available = deps.catalog.available().map(modelSlug);
+						if (ref === undefined) throw new ModelNotAvailable(requested, available);
+						if (!deps.catalog.available().some((model) => model.provider === ref.provider && model.modelId === ref.modelId)) {
+							throw new ModelNotAvailable(refSlug(ref), available);
+						}
+						registry.setModel(ref);
 					}
 					return serverSettings(deps);
 				},
-				catch: (error) => ({ _tag: "ServerSettingsError", message: (error as Error).message || String(error) }),
-			}),
+				// The contract's error for this call, BUILT as the contract's class: `settingsPath` and `operation` are
+				// required fields, and the hand-rolled `{_tag, message}` shape used to fail the schema encode at the RPC
+				// boundary — the client received a `Die` defect, not a refusal. The specific reason (the model named, the
+				// available list) rides in `cause`, which the contract declares as an optional defect.
+				catch: (error) =>
+					new ServerSettingsError({
+						settingsPath: bridge.config.registry.path,
+						operation: error instanceof ModelNotAvailable ? "normalize" : "write-file",
+						providerInstanceId: PROVIDER_INSTANCE_ID,
+						cause: error,
+					}),
+				}).pipe(
+					Effect.tapError((error: ServerSettingsError) => Effect.sync(() => log.warn("settings update refused", { operation: error.operation, cause: error.cause instanceof Error ? error.cause.message : String(error.cause) }))),
+				),
 		// Projects are added/removed/edited through `projects.mutate` (the sendable surface). A duplicate path and a
 		// non-empty remove map to the contract's typed errors; every refusal is a `ProjectMutationError` (T3's shape).
 		"projects.mutate": (mutation: Any) =>
@@ -265,14 +286,25 @@ export function makeRpcLayer(deps: RpcDeps) {
 					}),
 			}),
 		"server.reportClientActivity": () => Effect.succeed({}),
+		// The config stream a paired client reads its settings from. A settings write lands in the registry, so the
+		// registry's change signal is what makes the edit visible: without the `settingsUpdated` event the pane re-renders
+		// from its connect-time snapshot and the saved change looks like it reverted (the projection replaces
+		// `config.settings` on exactly this event).
 		subscribeServerConfig: () =>
 			Stream.concat(
 				Stream.make({ version: 1, type: "snapshot", config: serverConfig(deps) }),
-				fromListener<Any>((emit) =>
-					deps.catalog.onChange(() =>
+				fromListener<Any>((emit) => {
+					const stopCatalog = deps.catalog.onChange(() =>
 						emit({ version: 1, type: "providerStatuses", payload: { providers: deps.catalog.providers() } }),
-					),
-				),
+					);
+					const stopRegistry = bridge.config.registry.subscribe(() =>
+						emit({ version: 1, type: "settingsUpdated", payload: { settings: serverSettings(deps) } }),
+					);
+					return () => {
+						stopCatalog();
+						stopRegistry();
+					};
+				}),
 			),
 		[`orchestration.subscribeShell`]: (input: Any) =>
 			Stream.suspend(() => {
@@ -338,8 +370,12 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const { projection } = await bridge.projection(threadId);
 					return { threadId, projection, resumed: false };
 				},
-				(message) =>
-					new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, message } as Any),
+				// The declared failure is `OrchestrationV2ThreadLaunchError` — its payload is `{ commandId, projectId,
+				// message, cause? }`. Building it from the catch-all message alone and casting away the checker shipped
+				// a payload WITHOUT `projectId`: not a `OrchestrationV2ThreadLaunchError`, so the encode failed at the
+				// boundary and a strict client received a Defect ("Schema validation failed") where it asked "did the
+				// launch work?". Name the project the client asked about — the whole point of the field.
+				(message) => new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, projectId: input.projectId, message }),
 			),
 		[`orchestration.dispatchCommand`]: dispatch,
 	};

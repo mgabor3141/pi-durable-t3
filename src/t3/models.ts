@@ -31,6 +31,11 @@ export class ModelCatalog {
 		}
 	}
 
+	/** The catalog's models: the list a new-thread default is validated against, and the list a refusal names. */
+	available(): CatalogModel[] {
+		return this.#models.map((model) => ({ ...model }));
+	}
+
 	/** Adopt a Session's catalog and its selected model as the default for new threads. */
 	adopt(state: ModelsState | undefined): void {
 		if (state === undefined) return;

@@ -15,11 +15,14 @@ export class TestRegistry implements ProjectRegistry {
 	#model: ModelRef | undefined;
 	#thinkingLevel: string;
 	readonly #listeners = new Set<() => void>();
+	/** The instance-file path an in-memory registry claims: nothing is written, a refusal just names something. */
+	readonly path: string;
 
-	constructor(projects: readonly Project[], defaults: { model?: ModelRef; thinkingLevel?: string } = {}) {
+	constructor(projects: readonly Project[], defaults: { model?: ModelRef; thinkingLevel?: string; path?: string } = {}) {
 		this.#projects = projects.map((project) => ({ ...project }));
 		this.#model = defaults.model;
 		this.#thinkingLevel = defaults.thinkingLevel ?? "off";
+		this.path = defaults.path ?? "/test/settings.json";
 	}
 
 	list(): Project[] {
@@ -70,12 +73,16 @@ export class TestRegistry implements ProjectRegistry {
 		this.#thinkingLevel = level;
 		this.#notify();
 	}
+	dropModelDefault(): void {
+		// Boot-time catalog drop (see the interface): clear the in-memory model default, no notify (nothing is subscribed at boot).
+		this.#model = undefined;
+	}
 	#notify(): void {
 		for (const listener of this.#listeners) listener();
 	}
 }
 
 /** Shorthand: a registry over `{ id, cwd }` (cwd defaults to `/data/<id>`). */
-export function testRegistry(projects: readonly { id: string; name?: string; cwd?: string }[], defaults: { model?: ModelRef; thinkingLevel?: string } = {}): TestRegistry {
+export function testRegistry(projects: readonly { id: string; name?: string; cwd?: string }[], defaults: { model?: ModelRef; thinkingLevel?: string; path?: string } = {}): TestRegistry {
 	return new TestRegistry(projects.map((project) => ({ id: project.id, name: project.name ?? project.id, cwd: project.cwd ?? `/data/${project.id}` })), defaults);
 }

@@ -257,7 +257,7 @@ it("the thread-detail routes answer pairing state and an unknown thread as T3 re
 	}
 }, 40_000);
 
-it("REST /api/projects/mutate adds a project (id from its path), refuses a duplicate path, and removes it (files untouched)", async () => {
+it("REST /api/projects/mutate adds a project (honoring the client's id), refuses a duplicate path, and removes it (files untouched)", async () => {
 	// The reachable project-management surface over the documented HTTP route, sharing one store with `projects.mutate`
 	// over `/ws`. A fixed pairing token (env-var-only) makes the exchange repeatable, exactly as the routes test does.
 	const port = 4909;
@@ -293,7 +293,10 @@ it("REST /api/projects/mutate adds a project (id from its path), refuses a dupli
 		});
 		expect(unpaired.status).toBe(401);
 
-		// Create: a project at a new path, its id derived from the path. It creates the directory (createWorkspaceRootIfMissing).
+		// Create: a project at a new path. The mutation carries a client id and the host HONORS it — the contract's
+		// ProjectId is a branded trimmed non-empty string, and T3's server commits the client's id verbatim; the
+		// old shape derived the id from the path and silently dropped the client's (review wire NEW-2). It creates
+		// the directory (createWorkspaceRootIfMissing).
 		const created = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
 			method: "POST",
 			headers: auth,
@@ -304,7 +307,7 @@ it("REST /api/projects/mutate adds a project (id from its path), refuses a dupli
 		const project = (await created.json()) as { id: string; workspaceRoot: string; title: string; deletedAt: string | null };
 		expect(project.workspaceRoot).toBe(target);
 		expect(project.title).toBe("Added");
-		expect(project.id).toMatch(/^p-[0-9a-f]{16}$/); // derived from the path, not the client-minted id
+		expect(project.id).toBe("client-minted"); // the id the client minted is the id the host answers with
 
 		// It appears in the project list, and the directory exists (a marker written into it).
 		const list1 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string }[] };

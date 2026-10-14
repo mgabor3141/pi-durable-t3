@@ -7,6 +7,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import { chooseDefaultModel, ConfigError, loadConfig, resolvePaths } from "./config.ts";
+import { ModelNotAvailable } from "./t3/model-types.ts";
 import { openHostRuntime } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
 import { createServerFacet } from "./objects.ts";
@@ -30,8 +31,10 @@ async function main(): Promise<void> {
 	const paths = resolvePaths(argv);
 	const config = await loadConfig(paths.configFile, paths.dataDir);
 	// The instance file (`settings.json`, in the data dir): the project registry and new-thread defaults the T3 UI edits.
-	// A missing file is valid — an empty registry, the defaults — and the host writes it on the UI's behalf.
-	const registry = await FileProjectRegistry.open(paths.dataDir);
+	// A missing file is valid — an empty registry, the defaults — and the host writes it on the UI's behalf. The boot
+	// read is TOLERANT: an entry the parser refuses (a duplicate id, a duplicate path) is skipped with a warning
+	// naming the file, never a crash before the bind — the UI is the only place that can fix the entry.
+	const registry = await FileProjectRegistry.open(paths.dataDir, (message) => log.warn(message));
 	// One line naming the resolved config file and data dir, so a user sees where the instance reads and writes.
 	log.info("pi-durable-t3 config resolved", { config: config.configFile, dataDir: config.dataDir, instance: registry.path });
 	const pairingToken = process.env["PI_DURABLE_T3_PAIRING_TOKEN"];
@@ -45,22 +48,31 @@ async function main(): Promise<void> {
 	}
 
 	let models: Models;
-	let defaultModel: ModelRef;
+	let available: readonly { provider: string; id: string }[];
 	let catalogSource: () => Promise<{ provider: string; modelId: string; name: string }[]>;
 	if (process.env["PI_DURABLE_T3_FAKE"] === "1") {
 		const reply = createReplyModel();
 		models = reply.models;
-		defaultModel = reply.modelRef;
 		catalogSource = async () => reply.catalog;
+		available = reply.catalog.map((m) => ({ provider: m.provider, id: m.modelId }));
 	} else {
 		const runtime = await ModelRuntime.create({ modelsStorePath: config.modelsStorePath });
 		models = runtime;
 		// `getAvailable()` returns the credentialed models (credentials come from `~/.pi/agent`).
-		const available = await runtime.getAvailable();
-		catalogSource = async () => available.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
-		// `unset → first available`, but fail at start (a clear, credential-naming message) when there is nothing to pick.
-		defaultModel = chooseDefaultModel(available, registry.defaults().model);
+		const credentialed = await runtime.getAvailable();
+		available = credentialed.map((m) => ({ provider: m.provider, id: m.id }));
+		catalogSource = async () => credentialed.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
 	}
+	// The new-thread default is validated against the catalog. At BOOT the check is TOLERANT, like the instance file's
+	// other fields: a default the catalog cannot call warns naming the model and what IS available, is DROPPED (so new
+	// threads fall back to the first catalog model, and the UI can set a good one), and the host BINDS. The instance
+	// file is the UI's tier and the UI is its only editor — a host that exits before binding cannot be told to fix it
+	// (store M2 / wire NEW-R2-1). "No models at all" is fatal (there is no fallback). At WRITE time the check stays
+	// strict (rpc.ts `server.updateSettings` refuses a catalog-absent default with the contract's typed error, M1).
+	const defaultModel = chooseDefaultModel(available, registry.defaults().model, (message) => {
+		log.warn(message);
+		registry.dropModelDefault();
+	});
 
 	const runtime = await openHostRuntime(config, registry, models, defaultModel, { onWarn: (message, error) => log.warn(message, { error: String(error) }) });
 	const { threads } = runtime;
@@ -115,7 +127,9 @@ async function main(): Promise<void> {
 try {
 	await main();
 } catch (error) {
-	if (!(error instanceof ConfigError)) throw error;
+	// A bad `config.toml` and a default model the catalog does not have are both user-fixable refusals: print the
+	// message and exit 1, never a stack trace.
+	if (!(error instanceof ConfigError) && !(error instanceof ModelNotAvailable)) throw error;
 	console.error(error.message);
 	process.exitCode = 1;
 }

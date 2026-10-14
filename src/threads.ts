@@ -203,6 +203,12 @@ export class Threads {
 	/**
 	 * One commit: if `threadId` already names a thread, return it (a retried create is a no-op and creates no second
 	 * conversation); else create a conversation with the project's `cwd` and add the thread.
+	 *
+	 * The `projectId` is a foreign key, and it is checked AT COMMIT TIME: the registry lives in the other store
+	 * (`settings.json`, mutated synchronously by `project.delete`), so a check outside the commit can pass while the
+	 * project is being removed under it — the row would land with a `projectId` that exists nowhere, durable across a
+	 * restart. Commits serialize on the one storage, so the registry read inside the closure sees every mutation that
+	 * landed before it, and a create racing a delete is refused rather than stranded.
 	 */
 	async create(input: CreateInput): Promise<Thread> {
 		const project = this.projects.find((candidate) => candidate.id === input.projectId);
@@ -228,8 +234,12 @@ export class Threads {
 			const doc = await tx.doc(ThreadsDoc);
 			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
 			if (existing !== undefined) return { ...existing };
+			// The FK, re-checked inside the commit (see the method comment): the project must be registered when the
+			// row is written, not merely when the call started.
+			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
+			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			await configure(tx, conversation.id, { cwd: project.cwd, ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinkingLevel: thinking as never }), ...(instructions === undefined || instructions === "" ? {} : { instructions }) });
+			await configure(tx, conversation.id, { cwd: committed.cwd, ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinkingLevel: thinking as never }), ...(instructions === undefined || instructions === "" ? {} : { instructions }) });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,
@@ -361,6 +371,17 @@ export class Threads {
 				doc.undos.push({ requestId: input.requestId, head: fork.id });
 				return fork.id;
 			}
+			if (thread === undefined) {
+				// The named thread has NO row: its removal won the race (the row drop and the removal record commit
+				// together). The fork is a FRESH conversation — no tombstone names it — so the tombstone's promise,
+				// "a removed thread stays removed", must be enforced at this door too: the undo of a deleted thread
+				// adds no row. The fork stays ownerless (the log names it); a deleted thread's content never
+				// resurfaces as a child of the deletion. The receipt is recorded, so a retried requestId returns
+				// this fork instead of forking a second one.
+				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} is removed; the fork stays ownerless`, undefined);
+				doc.undos.push({ requestId: input.requestId, head: fork.id });
+				return fork.id;
+			}
 			// The head moved on: leave the thread and record the fork as a new child thread — in the project the FORK's
 			// own cwd covers (it inherits the head's agent config). No cover, no row: an ownerless fork is logged, never
 			// a thread under the first registered project and never an empty `projectId`.
@@ -369,7 +390,7 @@ export class Threads {
 				this.#onWarn(`not promoting the undo fork ${fork.id} of thread ${input.threadId}: its cwd matches no registered project; it stays ownerless`, undefined);
 				return fork.id;
 			}
-			doc.threads.push(this.#newThread(fork.id, projectId, thread?.title ?? "", { threadId: input.threadId, entryId: input.entryId }));
+			doc.threads.push(this.#newThread(fork.id, projectId, thread.title, { threadId: input.threadId, entryId: input.entryId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
 		}, this.#context);
@@ -395,6 +416,11 @@ export class Threads {
 			const removed = (doc.removed ??= []);
 			if (!removed.includes(thread.head)) removed.push(thread.head);
 		}, this.#context);
+		// The abort above ran BEFORE the commit, and a prompt admitted in that window — the row was still there, so
+		// its admission succeeded — is a live turn on a thread the document has just removed. The tombstone keeps it
+		// from resurrecting the thread; the removal must also win the RUN: interrupt the head again so no admitted
+		// turn streams on after the deletion. A removed thread has no live turn.
+		await head?.abort(this.#context);
 	}
 
 	/**
@@ -408,12 +434,17 @@ export class Threads {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const heads = new Set(doc.threads.map((thread) => thread.head));
+			// The tombstones are a SET: the scan is per conversation, the removals only ever grow, and `includes`
+			// per record made boot repair quadratic in a store's history (review store N3). The count is what the
+			// operator needs — the ids are in the document — so the log gets ONE line, not one per tombstone.
+			const removed = new Set(doc.removed ?? []);
+			let tombstoned = 0;
 			for (const record of await scanConversations(tx)) {
 				if (heads.has(record.id)) continue;
 				// A tombstoned conversation stays removed — even when it owes work (a prompt admitted during the delete
 				// that the abort could not outrun). The removal record outranks boot repair's adoption.
-				if ((doc.removed ?? []).includes(record.id)) {
-					this.#onWarn(`boot repair: conversation ${record.id} was removed (tombstoned); it stays unthreaded even though it ${await owedIn(tx, record.id) ? "owes work" : "is idle"}`, undefined);
+				if (removed.has(record.id)) {
+					tombstoned++;
 					continue;
 				}
 				if (!(await owedIn(tx, record.id))) continue;
@@ -424,6 +455,12 @@ export class Threads {
 				}
 				doc.threads.push(this.#newThread(record.id, projectId, ""));
 				heads.add(record.id);
+			}
+			if (tombstoned > 0) {
+				// The count leads, the ids follow (capped): the operator sees the scale in one line, and can name
+				// the conversations without opening the document.
+				const ids = [...removed].slice(0, 8).join(", ");
+				this.#onWarn(`boot repair: ${tombstoned} removed conversation${tombstoned === 1 ? "" : "s"} (tombstoned) stayed unthreaded: ${ids}${tombstoned > 8 ? ` (+${tombstoned - 8} more)` : ""}`, undefined);
 			}
 		}, this.#context);
 	}

@@ -148,9 +148,12 @@ describe("FileProjectRegistry", () => {
 		// A title rename is free (keeps the id); a move keeps the id too (the project's threads follow — see F4).
 		expect(reopened.update(clientId, { title: "Renamed" }).id).toBe(clientId);
 		expect(reopened.update(clientId, { path: join(dir, "b") })).toMatchObject({ id: clientId, cwd: join(dir, "b") });
-		// An id that is not the shape the T3 UI mints (a placeholder) is not a mint: the id derives from the path.
+		// Any id the contract's `ProjectId` accepts is a mint: a branded TRIMMED NON-EMPTY STRING
+		// (`vendor/contracts/src/baseSchemas.ts`), and T3's server commits the client's id verbatim
+		// (`apps/server/src/project/ProjectService.ts`). The host stores what the client minted — the old
+		// UUID-shape gate silently re-derived everything else (review wire NEW-2).
 		const placeholder = registry.add("P2", join(dir, "c"), { clientId: "client-minted" });
-		expect(placeholder.id).toBe(projectIdForPath(join(dir, "c")));
+		expect(placeholder.id).toBe("client-minted");
 	});
 
 	it("remove drops the entry and persists", async () => {

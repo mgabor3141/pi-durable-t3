@@ -33,7 +33,7 @@ describe("a project id is minted by whoever registers it", () => {
 			const bridge = new Bridge(config, log, createHost({ name: "server" }));
 
 			const clientProjectId = randomUUID(); // exactly what `newProjectId()` mints in the web app.
-			const created = await bridge.mutateProject({ type: "project.create", projectId: clientProjectId, title: "picked", workspaceRoot: root, createWorkspaceRootIfMissing: true });
+			const created = await bridge.mutateProject({ type: "project.create", projectId: clientProjectId, commandId: "cmd-create-picked", title: "picked", workspaceRoot: root, createWorkspaceRootIfMissing: true });
 			expect(created.id).toBe(clientProjectId); // honored, not replaced by a path-derived id
 
 			// The shell carries it: this is what `useProject`/`handleNewThread` look the project up by.
@@ -47,13 +47,72 @@ describe("a project id is minted by whoever registers it", () => {
 			expect(reopened.list().map((project) => project.id)).toContain(clientProjectId);
 			expect(reopened.list()[0]?.cwd).toBe(root);
 
-			// A mutation WITHOUT a client-minted id (not the UUID shape the T3 UI mints) derives from the path.
+			// A mutation whose id is NOT the UUID shape the T3 UI happens to mint is still a valid mint: the
+			// contract's ProjectId is a branded trimmed non-empty string and T3's server commits it verbatim,
+			// so the host answers with the id the client sent (review wire NEW-2; pre-fix: silently re-derived).
 			const root2 = join(dir, "proj2");
 			await mkdir(root2, { recursive: true });
-			const derived = await bridge.mutateProject({ type: "project.create", projectId: "placeholder-not-a-uuid", title: "other", workspaceRoot: root2, createWorkspaceRootIfMissing: true });
-			expect(derived.id).toMatch(/^p-[0-9a-f]{16}$/);
+			const derived = await bridge.mutateProject({ type: "project.create", projectId: "placeholder-not-a-uuid", commandId: "cmd-create-other", title: "other", workspaceRoot: root2, createWorkspaceRootIfMissing: true });
+			expect(derived.id).toBe("placeholder-not-a-uuid");
 		}
 		finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("(e) a MOVE of a path-derived project keeps its id too — ids never re-derive after first assignment (conc N3, store N5, wire NEW-3)", async () => {
+		// The rule: an id is assigned once, stored in the entry on the first mutation that needs it, and kept.
+		// A project registered WITHOUT a client id (an integrator entry, a hand-written one, an `add` with no
+		// clientId) derives its id from the path — and pre-fix `update` stored an id only when the entry
+		// already carried one, so moving such a project minted a NEW id from the NEW path while every thread
+		// row kept the OLD one: one project, two sidebar entries, the old one unreachable (a `project.delete`
+		// on the ghost id answers not-found — it is not registered).
+		const fixture = await makeThreads({ projects: [] });
+		const dir = await mkdtemp(join(tmpdir(), "pi-durable-t3-id-e-"));
+		try {
+			const from = join(dir, "from");
+			const to = join(dir, "to");
+			await mkdir(from, { recursive: true });
+			await mkdir(to, { recursive: true });
+			// The REAL file registry (the re-derivation lives in FileProjectRegistry.update): registered with
+			// NO client id, so the id derives from the normalized path (the integrator shape).
+			const registry = await FileProjectRegistry.open(dir);
+			const derived = registry.add("derived", from);
+			expect(derived.id, "a client-less registration derives its id from the path").toMatch(/^p-[0-9a-f]{16}$/);
+			const { Threads } = await import("../src/threads.ts");
+			const threads = new Threads({ harness: fixture.harness, registry, defaultModel: fixture.model.modelRef });
+			const host = createHost({ name: "server" });
+			await host.load([createServerFacet(threads, fixture.model.models)]);
+			await host.ready();
+			const bridge = new Bridge(
+				{ host: "127.0.0.1", port: 0, label: "t", stateDir: join(dir, "state"), pairingToken: undefined, tokenTtlSeconds: 60, corsOrigins: [], registry },
+				log,
+				host,
+			);
+			bridge.start();
+
+			await bridge.createThread({ threadId: "keep-rows", projectId: derived.id });
+			expect((await threads.list()).map((thread) => thread.projectId)).toEqual([derived.id]);
+
+			// Move the root through the UI mutation.
+			const moved = await bridge.mutateProject({ type: "project.update", projectId: derived.id, commandId: "cmd-move-derived", title: "derived", workspaceRoot: to });
+			expect(moved.id, "a move does NOT re-mint the id — even for a path-derived one").toBe(derived.id);
+
+			// The threads resolve: every row's projectId is the registry's project id — no split, no ghost.
+			const rows = (await threads.list()).map((thread) => thread.projectId);
+			expect(rows, "the rows keep an id the registry answers").toEqual([derived.id]);
+			expect(registry.list().map((project) => ({ id: project.id, cwd: project.cwd })), "one entry, at the moved root, under the SAME id").toEqual([{ id: derived.id, cwd: to }]);
+			const shell = bridge.shellSnapshot();
+			expect((shell.projects as unknown as { id: string; workspaceRoot: string }[]).map((project) => [project.id, project.workspaceRoot]), "the shell shows ONE project: the moved root").toEqual([[derived.id, to]]);
+			expect((shell.threads as unknown as { projectId: string }[]).map((thread) => thread.projectId), "the thread sits under the moved project").toEqual([derived.id]);
+
+			// The id is durable: the entry now STORES it, so a reopen (the next boot) answers the same id for
+			// the moved folder — nothing re-derives from the new path.
+			const reopened = await FileProjectRegistry.open(dir);
+			expect(reopened.list().map((project) => ({ id: project.id, cwd: project.cwd })), "the moved entry keeps its id across a restart").toEqual([{ id: derived.id, cwd: to }]);
+			await bridge.close();
+			await host.close();
+		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
 	}, 30_000);
@@ -87,7 +146,7 @@ describe("a project id is minted by whoever registers it", () => {
 			expect((await fixture.threads.list()).map((thread) => thread.projectId)).toEqual([clientProjectId]);
 
 			// Move the root through the UI mutation (the T3 project-edit dialog sends title+workspaceRoot).
-			const moved = await bridge.mutateProject({ type: "project.update", projectId: clientProjectId, title: "moving", workspaceRoot: to });
+			const moved = await bridge.mutateProject({ type: "project.update", projectId: clientProjectId, commandId: "cmd-move", title: "moving", workspaceRoot: to });
 			expect(moved.id).toBe(clientProjectId); // the id is opaque and stable: a move does NOT re-mint it.
 
 			// The same threads, the same project: one registry entry (the moved one), rows carry the SAME id.

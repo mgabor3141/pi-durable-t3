@@ -35,7 +35,13 @@ naming the file, key path, and what was expected; a missing file is an error, an
 **`settings.json` — the instance file, the UI's tier.** The project registry and the new-thread defaults (the
 model and thinking level a new thread starts on) live here, **in the data dir** — with `--root <dir>`,
 `<dir>/settings.json`. This is the file T3's **Add project** picker and model picker edit: you add a project in
-the UI, and the running host writes it (atomically) on your behalf. A project is a directory (paths under the
+the UI, and the running host writes it on your behalf — atomically, and as an edit to the file as it is on disk, so
+an instance sharing a data dir with another host (the documented dev setup) does not lose either one's changes. A
+default model the catalog cannot call is refused from the model picker on the wire (naming the model and the models
+that are available); at start the same check is tolerant, like this file's other fields — a default absent from the
+catalog (credentials change between boots) warns naming it, is dropped, new threads start on the first catalog model,
+and the host binds so you can set a good one from the UI (a host that died before binding could not be told to fix
+the file it owns). A project is a directory (paths under the
 data dir; `~` and absolute paths expand). Its **id is minted by whoever registers it** — the UI mints a UUID and
 the host stores it; an entry you write by hand may carry an `id` (the host honors it) or omit one, and the host
 derives a stable id from the path. The title is only a label, and **the path is the uniqueness key**: the same
@@ -43,7 +49,8 @@ folder can't be added twice. A missing file is valid (no projects, the first ava
 
 ```jsonc
 {
-  // path required; title optional (defaults to the folder); id optional — a UUID the UI minted, honored as-is
+  // path required; title optional (defaults to the folder); id optional — a client-minted id (the UI sends a
+  // UUID; any id the contract accepts is honored), stored and kept — an id is assigned once, never re-derived
   "projects": [ { "path": "projects/alpha", "title": "alpha", "id": "e05053f2-9966-4b92-9886-5092481b9703" } ],
   "defaults": { "model": "pi/…", "thinkingLevel": "off" }          // model optional; thinkingLevel one of off…max
 }

@@ -49,7 +49,7 @@ describe("a registered path that is a file (H1)", () => {
 			const { bridge, registry } = await makeBridge(dir);
 
 			// The Web UI's add-project sends createWorkspaceRootIfMissing: true — the mkdir must not be swallowed.
-			const failure = await bridge.mutateProject({ type: "project.create", projectId: "u1", title: "bad", workspaceRoot: file, createWorkspaceRootIfMissing: true }).then(() => undefined, (error: unknown) => error);
+			const failure = await bridge.mutateProject({ type: "project.create", projectId: "u1", commandId: "cmd-ws-create-u1", title: "bad", workspaceRoot: file, createWorkspaceRootIfMissing: true }).then(() => undefined, (error: unknown) => error);
 			expect(failure, "the create is refused, not answered with success").toBeInstanceOf(Error);
 			expect(failure).toBeInstanceOf(ProjectWorkspaceNotDirectory);
 			expect((failure as Error).message).toContain(file); // the refusal names the path
@@ -69,10 +69,10 @@ describe("a registered path that is a file (H1)", () => {
 			const file = join(dir, "afile");
 			await writeFile(file, "not a directory\n", "utf8");
 			const { bridge, registry } = await makeBridge(dir);
-			const created = await bridge.mutateProject({ type: "project.create", projectId: "u0", title: "good", workspaceRoot: good, createWorkspaceRootIfMissing: true });
+			const created = await bridge.mutateProject({ type: "project.create", projectId: "u0", commandId: "cmd-ws-create-u0", title: "good", workspaceRoot: good, createWorkspaceRootIfMissing: true });
 			expect(created.workspaceRoot).toBe(good);
 
-			const failure = await bridge.mutateProject({ type: "project.update", projectId: created.id as string, workspaceRoot: file }).then(() => undefined, (error: unknown) => error);
+			const failure = await bridge.mutateProject({ type: "project.update", projectId: created.id as string, commandId: "cmd-ws-move-onto-file", workspaceRoot: file }).then(() => undefined, (error: unknown) => error);
 			expect(failure, "the move is refused, not applied").toBeInstanceOf(ProjectWorkspaceNotDirectory);
 			expect((failure as Error).message).toContain(file);
 			// The registry is unchanged: the entry still names its good root.

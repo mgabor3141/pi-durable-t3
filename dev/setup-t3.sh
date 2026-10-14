@@ -33,8 +33,25 @@ fi
 mkdir -p "$here/vendor/contracts"
 rm -rf "$here/vendor/contracts/src"
 cp -r "$CACHE/packages/contracts/src" "$here/vendor/contracts/src"
-cp "$CACHE/packages/contracts/package.json" "$CACHE/packages/contracts/tsconfig.json" "$here/vendor/contracts/"
+cp "$CACHE/packages/contracts/package.json" "$here/vendor/contracts/"
 cp "$CACHE/LICENSE" "$here/vendor/contracts/LICENSE"
+# T3's contracts tsconfig extends the monorepo root's `tsconfig.base.json`, which is NOT part of the vendored copy:
+# a bundler that resolves the per-file tsconfig (vitest) then fails on a dangling `extends`. Write a self-contained
+# one, matching this repo's own compiler options so the vendored sources transform the same way as the host's.
+cat > "$here/vendor/contracts/tsconfig.json" <<'TS'
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2024", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+TS
 echo "vendored @t3tools/contracts at $PIN (+ LICENSE) into vendor/contracts"
 
 # 3. Build the T3 web app into web-dist (needs the whole monorepo).
