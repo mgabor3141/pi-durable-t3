@@ -12,7 +12,7 @@ refused flatly.
 
 | Area | Calls | | Why |
 |---|---|:-:|---|
-| Connection | `server.probe`, `server.getConfig`, `server.getSettings`, `server.reportClientActivity`, pairing and tickets | ✅ | one Harness is one T3 environment |
+| Connection | `server.probe`, `server.getConfig`, `server.getSettings`, `server.reportClientActivity`, pairing and tickets | ✅ | pairing points T3 at one Harness ([the model](design.md)) |
 | Settings writes | `server.updateSettings` | 🔜 | the host-wide defaults go to `settings.json`; `server.getSettings` answers from defaults until then |
 | Threads | `thread.create`, `thread.delete`, `message.dispatch`, `run.interrupt`, `thread.stop` | ✅ | create, prompt, steer, queue, restart, interrupt, delete (delete aborts the run first) |
 | Model per thread | `thread.model-selection.set`, the model picker | ✅ | the catalog is your pi config; one provider, pi |
@@ -37,7 +37,7 @@ refused flatly.
 | File restore | `checkpoint.rollback` with `restoreFiles: true` | ❌ | filesystem ownership belongs to the Harness and its extensions, not to a threads layer |
 | Terminal | `terminal.*` | ❌ | the host runs no interactive terminal; tools run in the Harness |
 | Editor, previews, browser | `shell.openInEditor`, `preview.*`, `mcpApps.*` | ❌ | no editor, no dev-server supervision, no browser automation in a threads layer |
-| Devices, relay, cloud | `device.*`, `cloud.*` | ❌ | a remote machine is another Harness, paired separately |
+| Devices, relay, cloud | `device.*`, `cloud.*` | ❌ | a remote machine is another Harness ([the model](design.md)) |
 | Providers | `provider.switch`, `provider.consumeResetCredit`, `provider.uploadFeedback`, `server.*AcpRegistry*` | ❌ | one provider: pi. ACP registries and per-provider credits are T3's provider system, not pi's |
 | Approvals, plan mode | `runtime-request.respond`, `thread.runtime-mode.set` (not `full-access`), `thread.interaction-mode.set` (plan) | ❌ | pi runs tools without approvals, so there is nothing to answer and no plan-only mode |
 | Self-update | `server.updateServer`, `server.updateServerWithProgress`, `server.commitDesktopUpdate`, `server.uninstallAcpRegistryManagedBinary` | ❌ | the host updates with your package manager, or with the container image |
@@ -46,10 +46,9 @@ refused flatly.
 
 ## Not a capability, a consequence
 
-- **Storage only grows.** pi-durable has no delete or GC. Deleting a thread or a project drops pointers;
-  the conversations stay in `durable.db`.
-- **The agent runs `bash` as the host user, with no approvals,** in the project directory you added.
-  Bind address, CORS and the Host check are in `host.toml`; loopback is the default.
+- **Storage only grows:** deleting drops pointers, never data ([the T3 facet](design.md)).
+- **The agent runs `bash` as the host user, with no approvals** — the warning, and the bind/`Host`/
+  CORS story, is in [`README.md`](../README.md).
 - **Shells survive a crash.** pi-durable starts them detached (on non-Windows), so they outlive a killed
   host; run under systemd to clean them up.
 - **Reconnect takes a minute.** After a host restart, T3's socket reconnects on its own backoff; press

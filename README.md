@@ -4,7 +4,7 @@ A bridge that allows using T3 Code as a frontend for pi-durable. Experimental.
 
 https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
 
-Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a T3 facet that speaks T3's wire protocol. T3 then shows your Harness as one environment, its projects and threads in the sidebar. Design: [`docs/design.md`](docs/design.md).
+Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a T3 facet that speaks T3's wire protocol. T3 then shows your Harness in the sidebar, with its projects and threads. Design: [`docs/design.md`](docs/design.md).
 
 ## Set up
 

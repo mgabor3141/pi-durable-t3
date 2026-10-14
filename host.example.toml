@@ -20,8 +20,8 @@
 # cors_origins = ["http://127.0.0.1:5733"]  # [str]  allowed CORS origins (default: the `web` origin)
 
 # Required: at least one project, or the host serves an empty environment. A project is a directory
-# under the root (absolute paths must stay under it); its threads run in it with `bash` and the file
-# tools, as the host user. Add one [[projects]] block per project; `name` is also the default path.
+# under the root (absolute paths must stay under it), and its threads run in it. Add one
+# [[projects]] block per project; `name` is also the default path.
 [[projects]]
 name = "alpha"
 # path = "projects/alpha" # directory under the root (default: the name)
