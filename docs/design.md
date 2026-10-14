@@ -107,10 +107,15 @@ in-process.
   An undo of a head that already moved on — a stale or concurrent undo — becomes a promoted child thread in the
   sidebar (lineage `relationshipToParent: "fork"`); clutter is the price of conflicts-never-error.
 - **AGENTS.md** is not loaded yet. When it is: once at thread create, through the env's file API.
-- **Shutdown is graceful.** Ctrl-C (SIGINT) and SIGTERM close the facet server (interrupting its fiber, which releases
-  the port), then the objects host and storage, and the process exits 0. A bind failure (port already in use) exits 1
-  with the address and `EADDRINUSE` *before* printing "ready". (A shell a turn started is detached and finishes on its
-  own after a crash — see "Shells survive a crash" above — and the model is told the call may have partially run.)
+- **Shutdown is bounded, not fully graceful.** Ctrl-C (SIGINT) and SIGTERM print one line `stopping`, run the graceful
+  close (facet server → objects host → storage) under a short grace, then force `process.exit(0)`; a second signal exits
+  at once. A turn's in-flight work can ignore its abort signal — a model provider's HTTP stream lingers after abort —
+  and pi-durable's close *awaits* such an invocation, so a fully graceful close can hang for tens of seconds. We bound it
+  instead: the close is best-effort and the process always leaves within ~2 s. Crash-safety is pi-durable's job — commits
+  are durable and an aborted turn resumes on the next start (a forced exit is that crash). A bind failure (port already
+  in use) exits 1 with the address and `EADDRINUSE` *before* printing "ready". (A shell a turn started is detached and
+  finishes on its own after a crash — see "Shells survive a crash" above — and the model is told the call may have
+  partially run.)
 - **Delete stops the run.** Deleting a thread aborts its running turn, so it stops spending and touching files, and boot
   repair does not re-add it.
 - **Cold-thread writes await the head.** A freshly created thread's transcript resolves a few awaits after it is opened
