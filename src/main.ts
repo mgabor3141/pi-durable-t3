@@ -7,6 +7,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import { chooseDefaultModel, ConfigError, loadHostConfig, rootFromArgv } from "./config.ts";
 import { openHostRuntime } from "./host-runtime.ts";
+import { installShutdown } from "./shutdown.ts";
 import { createServerFacet } from "./server-facet.ts";
 import { AuthStore } from "./t3/auth.ts";
 import { ModelCatalog } from "./t3/models.ts";
@@ -91,14 +92,15 @@ async function main(): Promise<void> {
 	}
 	for (const url of facet.pairingUrls(code)) console.log(`  ${url}\n`);
 
-	// Ctrl-C (SIGINT) or SIGTERM stops the host: closing the facet interrupts its server fiber (releasing the port),
-	// then the objects host and storage are closed and the process exits. Both signals behave the same way.
-	await new Promise<void>((resolve) => {
-		for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
+	// Ctrl-C (SIGINT) or SIGTERM stops the host fast: print "stopping", run the graceful close (facet server, objects
+	// host, storage) under a short grace, then exit 0. A close that hangs on an in-flight turn that ignores its abort
+	// signal is bounded, and a second signal exits at once. Crash-safety is pi-durable's job: an aborted turn resumes
+	// after a restart. Both signals behave the same way. The process stays alive until then on the servers' handles.
+	installShutdown(async () => {
+		await facet.close();
+		await server.close();
+		await runtime.close();
 	});
-	await facet.close();
-	await server.close();
-	await runtime.close();
 }
 
 try {
