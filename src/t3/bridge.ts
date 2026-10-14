@@ -3,7 +3,7 @@
 // writes through `pi.controller` (prompt/steer/followUp/abort/rewind). It holds the per-thread projection memory
 // (client message IDs, rolled-back runs) and the monotonic sequence counter.
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { Ctx, Handle, Host } from "@earendil-works/chord";
 import type {
@@ -15,20 +15,11 @@ import type {
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
+import { readJson, writeJsonAtomic } from "./json-store.ts";
 import type { Logger } from "./logging.ts";
-import type { ConversationView, ModelRef, ModelsState } from "./model-types.ts";
-import {
-	BASELINE_CHECKPOINT_ID,
-	MAX_ROLLED_BACK_RUNS,
-	type ProjectionResult,
-	parseModelSlug,
-	projectThread,
-	type RolledBackRun,
-	rolledBackRuns,
-	textOf,
-	type ThreadMeta,
-	undoTarget,
-} from "./projection.ts";
+import { type ConversationView, type ModelRef, type ModelsState, splitSlug } from "./model-types.ts";
+import { type ProjectionResult, projectThread, textOf, type ThreadMeta } from "./projection.ts";
+import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
 export class CommandError extends Error {}
 
@@ -244,24 +235,13 @@ export class Bridge {
 	// ---- threads ----------------------------------------------------------------------------------------------
 
 	#loadMemory(): Record<string, StoredMemory> {
-		if (!existsSync(this.#memoryFile)) return {};
-		try {
-			return JSON.parse(readFileSync(this.#memoryFile, "utf8")) as Record<string, StoredMemory>;
-		} catch {
-			return {};
-		}
+		return readJson(this.#memoryFile, {});
 	}
 
 	#saveMemory(state: ThreadState): void {
 		const all = this.#loadMemory();
 		all[state.threadId] = { messageIds: [...state.messageIds], pending: state.pending };
-		this.#writeMemory(all);
-	}
-
-	#writeMemory(all: Record<string, StoredMemory>): void {
-		const temporary = `${this.#memoryFile}.tmp`;
-		writeFileSync(temporary, JSON.stringify(all), { mode: 0o600 });
-		renameSync(temporary, this.#memoryFile);
+		writeJsonAtomic(this.#memoryFile, all);
 	}
 
 	#memoryOf(state: ThreadState | undefined) {
@@ -344,7 +324,7 @@ export class Bridge {
 		const all = this.#loadMemory();
 		if (all[state.threadId] !== undefined) {
 			delete all[state.threadId];
-			this.#writeMemory(all);
+			writeJsonAtomic(this.#memoryFile, all);
 		}
 		this.#log.info("thread forgotten", { threadId: state.threadId, reason: error.message });
 	}
@@ -389,9 +369,8 @@ export class Bridge {
 
 	#buildModelsState(state: ThreadState): ModelsState {
 		return {
-			catalog: { revision: 1, availableModels: state.catalog.map((model) => ({ ...model, name: model.modelId, reasoning: false })) },
+			catalog: { revision: 1, availableModels: state.catalog.map((model) => ({ ...model, name: model.modelId })) },
 			configuration: { model: state.configuration?.model ?? null, thinkingLevel: state.configuration?.thinkingLevel ?? "off" },
-			refresh: { status: "ready" },
 		};
 	}
 
@@ -477,7 +456,7 @@ export class Bridge {
 	 * Wait until the thread's head conversation is actually loaded and return its id. A freshly created thread's
 	 * transcript cell resolves a few awaits after `acquire`, and its initial value is the empty view with a `0` id — so a
 	 * write that read `conversationId` directly could see `undefined`/`0` and lose the message (or aim at conversation 0).
-	 * Every write path awaits the real head first (S2): no cold message loss, and no reliance on some earlier call having
+	 * Every write path awaits the real head first: no cold message loss, and no reliance on some earlier call having
 	 * warmed the transcript.
 	 */
 	async #awaitHead(state: ThreadState, timeoutMs = 15_000): Promise<number> {
@@ -509,7 +488,7 @@ export class Bridge {
 	}
 
 	async selectModel(threadId: string, slug: string): Promise<void> {
-		const model = parseModelSlug(slug);
+		const model = splitSlug(slug);
 		if (model === undefined) return;
 		const release = this.acquire(threadId);
 		try {

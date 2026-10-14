@@ -1,11 +1,15 @@
-// The chord2 surface, served on the host named `server`. These are thin adapters over `Threads`: they mirror the
-// thread list and each thread's head view as observable state and map host errors to `ChordError`s (the design's codes
-// as the error's `reason`). Per-thread objects are keyed by `{ threadId }`; `pi.threads` is the eager directory.
+// The server facet: the chord2 surface served on the host named `server`, over a `Threads` layer and the model catalog.
+// These are thin adapters over `Threads`: they mirror the thread list and each thread's head view as observable state
+// and map host errors to `ChordError`s, carrying the host's code as the error's `reason`. Per-thread objects are keyed by
+// `{ threadId }`; `pi.threads` is the eager directory. The T3 bridge (`t3/bridge.ts`) loads beside the facet and calls
+// these in-process.
 import { Type } from "typebox";
 import {
 	type Ctx,
 	cell,
 	ChordError,
+	defineFacet,
+	type Facet,
 	type FacetApi,
 	invalid,
 	isChordError,
@@ -299,4 +303,11 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			},
 		};
 	});
+}
+
+// ── The facet the host loads ────────────────────────────────────────────────
+
+/** Serve every object above as one facet. The T3 bridge is a local client of these objects, loaded beside this facet. */
+export function createServerFacet(threads: Threads, models: Models): Facet {
+	return { name: "pi-durable-t3", ...defineFacet((api) => serveServerObjects(api, threads, models)) };
 }

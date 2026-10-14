@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createHost, isChordError } from "@earendil-works/chord";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { PiController, PiModels, PiThreads, PiTranscript } from "../src/objects.ts";
-import { createServerFacet } from "../src/server-facet.ts";
+import { createServerFacet } from "../src/objects.ts";
 import { makeThreads } from "./threads-harness.ts";
 
 type Cell<T> = { readonly value: T | undefined; subscribe(listener: (value: T | undefined) => void): () => void };

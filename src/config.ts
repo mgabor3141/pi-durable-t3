@@ -8,6 +8,7 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { BridgeConfig, ProjectConfig } from "./t3/config.ts";
+import { splitSlug } from "./t3/model-types.ts";
 
 /** A bad `host.toml`; its message is meant for the user as is. */
 export class ConfigError extends Error {}
@@ -30,7 +31,8 @@ export type HostConfig = {
 };
 
 // One schema for the whole `host.toml`: defaults live in `default` annotations (applied by `Value.Default`) and every
-// object sets `additionalProperties: false` (unknown keys rejected). README "Configure" lists keys; host:port, provider/model and path containment are checked below.
+// object sets `additionalProperties: false`, so an unknown key is rejected here, naming the file, the key path and what
+// was expected. The checks the schema cannot express — host:port, `provider/model`, a project path under the root — are below.
 const HostTomlSchema = Type.Object(
 	{
 		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }), // the facet address; T3's own app uses 3773.
@@ -157,7 +159,7 @@ function parseListen(value: string, file: string): { host: string; port: number 
 
 /** The model new threads start on: the configured `default_model`, else the first available model. With no models
  * available, fail loudly (naming where credentials live) instead of defaulting to a blank model, which makes every
- * thread show an unexplained interrupted turn (README says "unset → first available"; that only holds when one exists). */
+ * thread show an unexplained interrupted turn: "unset → the first available" promises a model, and it holds only when one exists. */
 export function chooseDefaultModel(available: readonly { provider: string; id: string }[], configured: ModelRef | undefined): ModelRef {
 	const first = available[0];
 	if (first === undefined) throw new ConfigError("no models are available: add provider credentials under ~/.pi/agent (or set PI_CODING_AGENT_DIR), or run with PI_DURABLE_T3_FAKE=1 for the offline demo model");
@@ -166,9 +168,9 @@ export function chooseDefaultModel(available: readonly { provider: string; id: s
 
 /** Split `provider/model` into a `ModelRef`; both parts must be non-empty. */
 function parseModelRef(value: string, file: string): ModelRef {
-	const slash = value.indexOf("/");
-	if (slash <= 0 || slash === value.length - 1) fail(file, `default_model "${value}" must be provider/model`);
-	return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
+	const model = splitSlug(value);
+	if (model === undefined) fail(file, `default_model "${value}" must be provider/model`);
+	return model;
 }
 
 /** Give each project an absolute `cwd` under the root (missing `path` = name), require unique names, and refuse a path that resolves outside it (`../x`, `/etc`, `a/../../b`). */

@@ -8,7 +8,7 @@ import type { ModelRef } from "@earendil-works/pi-durable";
 import { chooseDefaultModel, ConfigError, loadHostConfig, rootFromArgv } from "./config.ts";
 import { openHostRuntime } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
-import { createServerFacet } from "./server-facet.ts";
+import { createServerFacet } from "./objects.ts";
 import { AuthStore } from "./t3/auth.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
 
 	let models: Models;
 	let defaultModel: ModelRef;
-	let catalogSource: () => Promise<{ provider: string; modelId: string; name: string; reasoning: boolean }[]>;
+	let catalogSource: () => Promise<{ provider: string; modelId: string; name: string }[]>;
 	if (process.env["PI_DURABLE_T3_FAKE"] === "1") {
 		const reply = createReplyModel();
 		models = reply.models;
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
 		models = runtime;
 		// `getAvailable()` returns the credentialed models (credentials come from `~/.pi/agent`).
 		const available = await runtime.getAvailable();
-		catalogSource = async () => available.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name, reasoning: m.reasoning }));
+		catalogSource = async () => available.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
 		// `unset → first available`, but fail at start (a clear, credential-naming message) when there is nothing to pick.
 		defaultModel = chooseDefaultModel(available, config.defaultModel);
 	}

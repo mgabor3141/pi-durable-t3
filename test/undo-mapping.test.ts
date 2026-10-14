@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { UserEntry } from "@earendil-works/pi-durable";
-import { undoTarget } from "../src/t3/projection.ts";
+import { undoTarget } from "../src/t3/undo.ts";
 import { conversation, idle, makeThreads } from "./threads-harness.ts";
 
 // Three settled runs. Checkpoints are `cp<userEntryId>`; the baseline keeps nothing.

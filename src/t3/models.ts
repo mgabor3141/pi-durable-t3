@@ -1,10 +1,10 @@
 // The "pi" provider's model list for T3's ServerConfig. Read from pi's own model runtime (same agent dir and
 // models.json as the host) and replaced by a Session's `pi.models` catalog whenever the bridge sees one.
 import type { ServerProvider } from "@t3tools/contracts";
-import type { ModelRef, ModelsState } from "./model-types.ts";
-import { modelSlug, PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { modelSlug, type ModelRef, type ModelsState } from "./model-types.ts";
+import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 
-type CatalogModel = ModelRef & { name: string; reasoning: boolean };
+type CatalogModel = ModelRef & { name: string };
 
 export class ModelCatalog {
 	#models: CatalogModel[] = [];

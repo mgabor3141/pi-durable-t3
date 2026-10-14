@@ -10,7 +10,7 @@ import { createHost } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId, UserEntry } from "@earendil-works/pi-durable";
-import { createServerFacet } from "../src/server-facet.ts";
+import { createServerFacet } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { makeThreads } from "./threads-harness.ts";

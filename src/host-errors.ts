@@ -1,6 +1,6 @@
-// Stable host error codes the design keeps. The threads core throws these; the chord2 objects map each to a `ChordError`
-// (`invalid` with the code as its `reason`), so a caller tests `isChordError(e, "invalid")` and reads `e.reason`. Kept
-// free of `chord` so the core stays testable on its own.
+// The host's stable error codes: a caller switches on the code, so renaming one is a breaking change. The threads core
+// throws these; the chord2 objects map each to a `ChordError` (`invalid` with the code as its `reason`), so a caller
+// tests `isChordError(e, "invalid")` and reads `e.reason`. Kept free of `chord` so the core stays testable on its own.
 type HostErrorCode = "unknown_project" | "unknown_thread" | "turn_running" | "not_rewindable";
 
 export class HostError extends Error {

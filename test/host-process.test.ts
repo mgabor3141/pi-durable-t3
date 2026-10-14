@@ -1,10 +1,11 @@
-// The start/shutdown paths of the reference host, driven over a real child process (the wiring `main.ts` runs). These
-// cover the two things a first-time terminal user hits: Ctrl-C must stop the host (B1), and starting a second instance
-// on a taken port must fail loudly — naming the address and EADDRINUSE — WITHOUT printing "ready" or a pairing link (B2).
+// The reference host driven as a user does, over a real child process (the wiring `main.ts` runs): Ctrl-C must stop it
+// (B1); a second instance on a taken port must fail loudly — naming the address and EADDRINUSE — without printing
+// "ready" or a pairing link (B2); it must fail at start when there are no models; and the HTTP surface must answer as
+// T3 reads it (the Host guard, the thread-detail routes' auth and unknown-thread contracts).
 //
 // Each test spawns `node --experimental-strip-types src/main.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
-// never read. Ports here are their own (4901/4902) and distinct, so the two tests can run in parallel.
+// never read. Ports here are their own (4901-4905, 4908) and distinct, so the tests can run in parallel.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { request } from "node:http";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -26,9 +27,9 @@ afterAll(async () => {
 type Launched = { child: ChildProcessByStdio<null, Readable, Readable>; out: () => string; exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }> };
 
 /** Start the host on `port` with one project under a fresh root; returns the child and a live output getter. */
-function launch(root: string, port: number): Launched {
+function launch(root: string, port: number, extraEnv: NodeJS.ProcessEnv = {}): Launched {
 	const child = spawn(process.execPath, ["--experimental-strip-types", main, "--root", root], {
-		env: { ...process.env, PI_DURABLE_T3_FAKE: "1", PI_CODING_AGENT_DIR: agentDir },
+		env: { ...process.env, PI_DURABLE_T3_FAKE: "1", PI_CODING_AGENT_DIR: agentDir, ...extraEnv },
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	let buffer = "";
@@ -71,6 +72,12 @@ const get = async (port: number, path: string): Promise<number> => {
 		return 0;
 	}
 };
+
+/** GET `path` on `port` with `headers`; the status and the parsed body (a body is asserted as often as the status). */
+async function getJson(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+	const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers, signal: AbortSignal.timeout(3000) });
+	return { status: response.status, body: (await response.json().catch(() => ({}))) as Record<string, unknown> };
+}
 
 /** Poll the well-known endpoint until the server answers 200 (ready and listening), or give up. */
 async function waitListening(port: number, timeoutMs = 15_000): Promise<boolean> {
@@ -195,6 +202,49 @@ it("fails at start, before ready, when no models are available (S1)", async () =
 	expect(out).toMatch(/no models are available/);
 	expect(out).not.toContain("pi-durable-t3 ready");
 }, 30_000);
+
+it("the thread-detail routes answer pairing state and an unknown thread as T3 reads them", async () => {
+	// Both `/api/orchestration/threads/:threadId*` routes share one preamble, and its two contracts are only visible
+	// over HTTP: an unpaired request is refused before any projection is read, and a thread this host does not know
+	// is the resource-not-found T3 renders as a missing thread. A fixed pairing token (env-var-only, for tests) makes
+	// the token exchange repeatable.
+	const port = 4908;
+	const root = await writeRoot("routes", port);
+	const pairingToken = "test-pairing-code-0123456789";
+	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: pairingToken });
+	try {
+		expect(await waitListening(port)).toBe(true);
+		const paired = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
+			method: "POST",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({
+				grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+				subject_token: pairingToken,
+				subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+				requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+			}).toString(),
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(paired.status).toBe(200);
+		const token = (await paired.json() as { access_token: string }).access_token;
+		expect(token.length).toBeGreaterThan(20);
+		const bearer = { authorization: `Bearer ${token}`, "x-t3-orchestration-protocol": "2" };
+		// A thread this host cannot have: 404 with the error tag T3 renders, on both routes. A thread id the host
+		// cannot mint (here: a leading dot) is the fast path to that answer; a deleted thread reaches the same one.
+		for (const path of ["/api/orchestration/threads/.nope", "/api/orchestration/threads/.nope/bounded"]) {
+			const unknown = await getJson(port, path, bearer);
+			expect([path, unknown.status]).toEqual([path, 404]);
+			expect(unknown.body._tag).toBe("EnvironmentResourceNotFoundError");
+		}
+		// Unpaired: refused with the auth error, before the thread is looked up.
+		const unpaired = await getJson(port, "/api/orchestration/threads/.nope");
+		expect(unpaired.status).toBe(401);
+		expect(unpaired.body.code).toBe("auth_invalid");
+	} finally {
+		host.child.kill("SIGKILL");
+		await host.exited;
+	}
+}, 40_000);
 
 it("on loopback, rejects a non-loopback Host header — DNS-rebinding guard (S4)", async () => {
 	const port = 4905;

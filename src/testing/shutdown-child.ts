@@ -11,7 +11,7 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { parseHostToml } from "../config.ts";
 import { openHostRuntime } from "../host-runtime.ts";
 import { installShutdown } from "../shutdown.ts";
-import { createServerFacet } from "../server-facet.ts";
+import { createServerFacet } from "../objects.ts";
 import { ModelCatalog } from "../t3/models.ts";
 import { startFacet } from "../t3/facet.ts";
 import { createScriptedModel } from "./fake-model.ts";

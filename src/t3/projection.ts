@@ -4,7 +4,9 @@
 // Model:
 //   one Session            = one T3 thread (threadId = sessionId)
 //   one user turn (run)    = a pi.user entry that starts a run; user entries inside a running run are steers
+//                            (entries are grouped into runs by ./runs.ts)
 //   checkpoints            = one synthetic "ready" checkpoint per settled run (no file snapshot) + a baseline
+//                            (the checkpoint ids are ./undo.ts's scheme)
 //   aborted partials       = an assistant entry with stopReason "aborted" that a later assistant entry of the same
 //                            run supersedes (crash + resume) is hidden; a trailing one (user interrupt) is shown and
 //                            the run is "interrupted".
@@ -14,7 +16,6 @@ import type {
 	OrchestrationV2ConversationMessage,
 	OrchestrationV2ExecutionNode,
 	OrchestrationV2ProjectedTurnItem,
-	OrchestrationV2ProviderCapabilities,
 	OrchestrationV2ProviderSession,
 	OrchestrationV2ProviderThread,
 	OrchestrationV2ProviderTurn,
@@ -25,114 +26,19 @@ import type {
 	OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import type { ContentBlock, ConversationView, DurableMessage, EntryRecord, ModelRef } from "./model-types.ts";
+import { PI_CAPABILITIES } from "./capabilities.ts";
+import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef } from "./model-types.ts";
+import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, stopReason } from "./runs.ts";
+import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
 export const PROVIDER_INSTANCE_ID = "pi";
 export const PROVIDER_DRIVER = "pi";
-export const BASELINE_CHECKPOINT_ID = "cp-baseline";
 const BASELINE_SCOPE_ID = "cs-baseline";
 
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
 const id = (value: string): Any => value;
 const time = (ms: number | undefined) => DateTime.makeUnsafe(ms ?? 0);
-
-const no = false;
-/** What pi (through this bridge) supports, in T3's capability vocabulary. */
-const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
-	sessions: {
-		supportsMultipleProviderThreadsPerSession: no,
-		supportsModelSwitchInSession: true,
-		supportsProviderSwitchingViaHandoff: no,
-		supportsRuntimeModeSwitchInSession: no,
-		pendingRequestsSurviveRestart: true,
-	},
-	threads: {
-		canCreateEmptyThread: true,
-		canReadThreadSnapshot: true,
-		canRollbackThread: true,
-		canForkThread: no,
-		canForkFromTurn: no,
-		canForkFromSubagentThread: no,
-		exposesNativeThreadId: true,
-	},
-	turns: {
-		exposesNativeTurnId: no,
-		emitsTurnStarted: true,
-		emitsTurnCompleted: true,
-		supportsInterrupt: true,
-		supportsActiveSteering: true,
-		activeSteeringInterruptsTools: no,
-		supportsSteeringByInterruptRestart: true,
-		supportsQueuedMessages: true,
-		terminalStatusQuality: "strong",
-	},
-	streaming: {
-		streamsAssistantText: true,
-		streamsReasoning: true,
-		streamsToolOutput: true,
-		streamsPlanText: no,
-		emitsMessageCompleted: true,
-	},
-	tools: {
-		exposesToolItemIds: true,
-		emitsToolStarted: true,
-		emitsToolCompleted: true,
-		emitsToolOutput: true,
-		supportsMcpTools: no,
-		supportsDynamicToolCallbacks: no,
-	},
-	approvals: {
-		supportsCommandApproval: no,
-		supportsFileReadApproval: no,
-		supportsFileChangeApproval: no,
-		supportsApplyPatchApproval: no,
-		approvalsHaveNativeRequestIds: no,
-		approvalCallbacksAreLiveOnly: no,
-		approvalsCanOriginateFromSubagents: no,
-	},
-	planning: {
-		emitsPlanUpdated: no,
-		emitsTodoList: no,
-		emitsProposedPlan: no,
-		supportsStructuredQuestions: no,
-		planDeltasHaveItemIds: no,
-	},
-	subagents: {
-		supportsSubagents: no,
-		exposesSubagentThreadIds: no,
-		emitsSubagentLifecycle: no,
-		canWaitForSubagents: no,
-		canCloseSubagents: no,
-		canForkSubagentThread: no,
-	},
-	context: {
-		acceptsSystemContext: no,
-		acceptsDeveloperContext: no,
-		acceptsSyntheticUserContext: no,
-		canGenerateSummaries: no,
-		canConsumeHandoffSummaries: no,
-		supportsDeltaHandoff: no,
-		supportsFullThreadHandoff: no,
-		maxRecommendedHandoffChars: null,
-	},
-	checkpointing: {
-		appCanCheckpointFilesystem: no,
-		supportsNestedCheckpointScopes: no,
-		providerCanRollbackConversation: true,
-		providerRollbackReturnsSnapshot: no,
-		providerCanReadConversationSnapshot: true,
-	},
-	identity: { nativeThreadIds: "strong", nativeTurnIds: "none", nativeItemIds: "weak", nativeRequestIds: "none" },
-	runtimePolicy: { enforcement: "client-boundary" },
-};
-
-export const modelSlug = (model: ModelRef) => `${model.provider}/${model.modelId}`;
-export function parseModelSlug(slug: string): ModelRef | undefined {
-	const index = slug.indexOf("/");
-	if (index <= 0 || index === slug.length - 1) return undefined;
-	return { provider: slug.slice(0, index), modelId: slug.slice(index + 1) };
-}
 
 export interface ThreadMeta {
 	readonly threadId: string;
@@ -159,17 +65,6 @@ interface ThreadMemory {
 	readonly rollbackFailure?: { requestId: string; message: string } | null | undefined;
 }
 
-/** A run removed by a rewind, with every row that references it, all marked rolled back (as the T3 server does). */
-export interface RolledBackRun {
-	readonly run: OrchestrationV2Run;
-	readonly items: readonly OrchestrationV2TurnItem[];
-	readonly messages: readonly OrchestrationV2ConversationMessage[];
-	readonly nodes: readonly OrchestrationV2ExecutionNode[];
-	readonly attempts: readonly OrchestrationV2RunAttempt[];
-	readonly providerTurns: readonly OrchestrationV2ProviderTurn[];
-	readonly checkpointScopes: readonly OrchestrationV2CheckpointScope[];
-}
-
 interface ProjectedRun {
 	readonly runId: string;
 	readonly ordinal: number;
@@ -193,61 +88,6 @@ export const textOf = (content: string | ContentBlock[] | undefined): string =>
 const thinkingOf = (content: ContentBlock[]): string =>
 	content.flatMap((block) => (block.type === "thinking" ? [block.thinking] : [])).join("");
 
-interface RunDraft {
-	userEntry: EntryRecord;
-	steps: EntryRecord[];
-}
-
-const firstMessage = (entry: EntryRecord): DurableMessage | undefined => entry.model?.[0];
-const isUserEntry = (entry: EntryRecord) => entry.kind === "pi.user" && firstMessage(entry)?.role === "user";
-const isAssistantEntry = (entry: EntryRecord) => firstMessage(entry)?.role === "assistant";
-const stopReason = (entry: EntryRecord | undefined) => {
-	const message = entry === undefined ? undefined : firstMessage(entry);
-	return message?.role === "assistant" ? message.stopReason : undefined;
-};
-
-/** A tool result the Harness wrote because the run was aborted (interrupt) while the tool ran. */
-const isAbortedToolResult = (entry: EntryRecord) =>
-	entry.kind === "pi.tool-result" &&
-	((entry.data as { diagnostics?: { code?: string }[] } | undefined)?.diagnostics ?? []).some(
-		(diagnostic) => diagnostic.code === "aborted",
-	);
-
-/**
- * Split active entries into runs. A user entry is a steer of the current run only when the run was demonstrably
- * still going: its last step is a completed tool round (every call of the last assistant entry has a result, none
- * of them aborted). Steers are applied at that boundary. After an interrupted tool round (aborted results, or calls
- * without results) the run has ended, so the next user entry starts a new run.
- */
-function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
-	const runs: RunDraft[] = [];
-	for (const entry of entries) {
-		if (isUserEntry(entry)) {
-			const current = runs.at(-1);
-			if (current !== undefined && endsWithCompletedToolRound(current.steps)) current.steps.push(entry);
-			else runs.push({ userEntry: entry, steps: [] });
-			continue;
-		}
-		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") runs.at(-1)?.steps.push(entry);
-	}
-	return runs;
-}
-
-function endsWithCompletedToolRound(steps: readonly EntryRecord[]): boolean {
-	const lastAssistantIndex = steps.findLastIndex(isAssistantEntry);
-	if (lastAssistantIndex < 0) return false;
-	const assistant = firstMessage(steps[lastAssistantIndex]!);
-	if (assistant?.role !== "assistant" || assistant.stopReason !== "toolUse") return false;
-	const results = steps.slice(lastAssistantIndex + 1).filter((step) => step.kind === "pi.tool-result");
-	if (results.length === 0 || results.some(isAbortedToolResult)) return false;
-	const answered = new Set(
-		results.flatMap((step) => {
-			const message = firstMessage(step);
-			return message?.role === "toolResult" ? [message.toolCallId] : [];
-		}),
-	);
-	return assistant.content.every((block) => block.type !== "toolCall" || answered.has(block.id));
-}
 
 export function projectThread(
 	meta: ThreadMeta,
@@ -499,7 +339,7 @@ export function projectThread(
 			at: number,
 			streaming: boolean,
 			toolResults: ReadonlyMap<string, EntryRecord>,
-			liveTools: ReadonlyMap<string, { status?: string; output?: string }>,
+			liveTools: ReadonlyMap<string, { output?: string }>,
 		) => {
 			const thinking = thinkingOf(message.content);
 			if (thinking.length > 0) {
@@ -595,11 +435,11 @@ export function projectThread(
 			const m = firstMessage(step);
 			if (m?.role === "toolResult") toolResults.set(m.toolCallId, step);
 		}
-		const liveTools = new Map<string, { status?: string; output?: string }>();
+		const liveTools = new Map<string, { output?: string }>();
 		if (running) {
 			for (const slot of live?.tools ?? []) {
 				const key = (slot.toolCallId ?? slot.id) as string | undefined;
-				if (key !== undefined) liveTools.set(key, slot as { status?: string; output?: string });
+				if (key !== undefined) liveTools.set(key, slot as { output?: string });
 			}
 		}
 		draft.steps.forEach((step, stepIndex) => {
@@ -798,50 +638,4 @@ export function projectThread(
 	} as Any;
 
 	return { projection, shell, runs: projectedRuns };
-}
-
-/** Snapshot the runs after `keepOrdinal` as rolled back, for the rewind confirmation. */
-export function rolledBackRuns(projection: OrchestrationV2ThreadProjection, keepOrdinal: number): RolledBackRun[] {
-	return projection.runs
-		.filter((run) => run.status !== "rolled_back" && run.ordinal > keepOrdinal)
-		.map((run) => ({
-			run: { ...run, status: "rolled_back" as const, checkpointId: null },
-			items: projection.turnItems.filter((item) => item.runId === run.id),
-			messages: projection.messages.filter((message) => message.runId === run.id),
-			nodes: projection.nodes
-				.filter((node) => node.runId === run.id)
-				.map((node) => ({ ...node, status: "rolled_back" as const })),
-			attempts: projection.attempts.filter((attempt) => attempt.runId === run.id),
-			providerTurns: projection.providerTurns.filter((turn) => turn.runAttemptId === run.activeAttemptId),
-			checkpointScopes: projection.checkpointScopes.filter((scope) => scope.runId === run.id),
-		}));
-}
-
-/** At most this many rolled-back runs are kept per thread (oldest dropped). */
-export const MAX_ROLLED_BACK_RUNS = 200;
-
-/**
- * Map a T3 rollback to the pi rewind target. `entryId` is the **user turn being reverted** — the entry whose whole run
- * (message and reply) disappears. `keepOrdinal` is the number of runs the checkpoint retains (for the rolled-back
- * overlay). `Threads.rewind` does the entry arithmetic: because a pi-durable fork is inclusive of its fork entry, it
- * forks at the entry just before `entryId` (dropping the reverted user message too), or — when `entryId` is the very
- * first entry and nothing precedes it — creates a fresh conversation carrying the head's agent config.
- * - Baseline keeps nothing: revert the first run's user entry → an empty conversation.
- * - `cp<userEntryId>` (run N) keeps runs 1..N: revert run N+1's user entry; if run N+1 does not exist, the checkpoint
- *   already keeps every run, so there is nothing to revert.
- */
-export function undoTarget(
-	runs: readonly { ordinal: number; userEntryId: number }[],
-	checkpointId: string,
-): { entryId: number; keepOrdinal: number } | { nothing: true } | { unknown: true } {
-	if (checkpointId === BASELINE_CHECKPOINT_ID) {
-		const first = runs[0];
-		if (first === undefined) return { nothing: true };
-		return { entryId: first.userEntryId, keepOrdinal: 0 };
-	}
-	const index = runs.findIndex((run) => `cp${run.userEntryId}` === checkpointId);
-	if (index < 0) return { unknown: true };
-	const next = runs[index + 1];
-	if (next === undefined) return { nothing: true };
-	return { entryId: next.userEntryId, keepOrdinal: runs[index]!.ordinal };
 }

@@ -27,6 +27,7 @@ import { type AuthStore, PairingRateLimit } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
+import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
 
 export const SERVER_VERSION = "0.0.45";
@@ -125,6 +126,19 @@ export function makeServerLayer(deps: {
 			return yield* handler(request);
 		});
 
+	// The two `/api/orchestration/threads/:threadId*` routes share their whole preamble: read the route's threadId, await
+	// its projection, and answer a thread this host does not know with the 404 T3 renders as a missing resource. They
+	// differ only in the snapshot they encode.
+	const withProjection = (render: (projection: ProjectionResult) => HttpServerResponse.HttpServerResponse) =>
+		authorized(() =>
+			Effect.gen(function* () {
+				const { threadId } = yield* HttpRouter.params;
+				const projected = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
+				if (Option.isNone(projected)) return json({ _tag: "EnvironmentResourceNotFoundError", message: "Unknown thread" }, 404);
+				return render(projected.value);
+			}),
+		);
+
 	const routes = Layer.mergeAll(
 		HttpRouter.add("GET", "/.well-known/t3/environment", Effect.sync(() => json(descriptor()))),
 		// Printed pairing URLs point here; a desktop browser opening one gets instructions instead of a 404.
@@ -202,38 +216,23 @@ export function makeServerLayer(deps: {
 		HttpRouter.add(
 			"GET",
 			"/api/orchestration/threads/:threadId",
-			authorized(() =>
-				Effect.gen(function* () {
-					const { threadId } = yield* HttpRouter.params;
-					const result = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
-					if (result._tag === "None") return json({ _tag: "EnvironmentResourceNotFoundError", message: "Unknown thread" }, 404);
-					return json(
-						encode(OrchestrationV2ThreadDetailSnapshot, {
-							snapshotSequence: bridge.nextSequence(),
-							projection: result.value.projection,
-						}),
-					);
-				}),
+			withProjection((projection) =>
+				json(encode(OrchestrationV2ThreadDetailSnapshot, { snapshotSequence: bridge.nextSequence(), projection: projection.projection })),
 			),
 		),
 		HttpRouter.add(
 			"GET",
 			"/api/orchestration/threads/:threadId/bounded",
-			authorized(() =>
-				Effect.gen(function* () {
-					const { threadId } = yield* HttpRouter.params;
-					const result = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
-					if (result._tag === "None") return json({ _tag: "EnvironmentResourceNotFoundError", message: "Unknown thread" }, 404);
-					return json(
-						encode(OrchestrationV2ThreadBoundedSnapshot, {
-							snapshotSequence: bridge.nextSequence(),
-							projection: result.value.projection,
-							historyCursor: null,
-							hasMoreHistory: false,
-							latestLocalTurnOrdinal: result.value.runs.at(-1)?.ordinal ?? null,
-						}),
-					);
-				}),
+			withProjection((projection) =>
+				json(
+					encode(OrchestrationV2ThreadBoundedSnapshot, {
+						snapshotSequence: bridge.nextSequence(),
+						projection: projection.projection,
+						historyCursor: null,
+						hasMoreHistory: false,
+						latestLocalTurnOrdinal: projection.runs.at(-1)?.ordinal ?? null,
+					}),
+				),
 			),
 		),
 		HttpRouter.add(

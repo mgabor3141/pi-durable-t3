@@ -100,8 +100,8 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,
-		// A host with no projects is still connectable; `serverCwd` falls back to the state dir so this cannot throw and
-		// drop a paired client into a reconnect loop (see the B4 note in `./config.ts`).
+		// A host with no projects is still connectable: `serverCwd` (./config.ts) falls back to the state dir, so a cwd is
+		// always answerable and a project-less host cannot throw here and drop a paired client into a reconnect loop.
 		cwd: serverCwd(deps.bridge.config),
 		keybindingsConfigPath: `${deps.bridge.config.stateDir}/keybindings.json`,
 		keybindings: [],

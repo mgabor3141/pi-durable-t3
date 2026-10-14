@@ -1,6 +1,6 @@
 // The threads layer: the only state this host adds is one document, `pi-durable-t3.threads`, in the Harness's own storage.
 // The integrator brings a Harness (storage, extensions, tools, env builder) and a project list; this adds named
-// pointers ("threads") to conversations and the writes the design defines. Every write names the conversation the
+// pointers ("threads") to conversations, and the writes that keep a pointer honest. Every write names the conversation the
 // client shows and carries a `requestId`; a write to a conversation that is no longer any thread's head promotes it to
 // a new child thread — conflicts become forks, never "stale" errors.
 import { randomUUID } from "node:crypto";
@@ -298,7 +298,7 @@ export class Threads {
 	/**
 	 * Delete a thread: stop its head's turn, then drop the pointer. Conversations stay (pi-durable has no delete), but the
 	 * run must not outlive the thread: aborting the head withdraws any queued inputs, interrupts the running turn, and
-	 * waits for idle — so boot `repair()` no longer sees an owed, headless conversation and resurrects a deleted thread (S3).
+	 * waits for idle — so boot `repair()` sees nothing owed and cannot resurrect a deleted thread.
 	 */
 	async remove(threadId: string): Promise<void> {
 		const thread = await this.thread(threadId);

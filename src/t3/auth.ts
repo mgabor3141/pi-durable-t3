@@ -1,8 +1,9 @@
 // Pairing codes, bearer tokens and WebSocket tickets. Codes and tokens are stored as SHA-256 hashes in
 // <stateDir>/auth.json (mode 0600); tickets live in memory for 60 s.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { readJson, writeJsonAtomic } from "./json-store.ts";
 
 interface StoredToken {
 	hash: string;
@@ -23,6 +24,7 @@ interface AuthFile {
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const newSecret = (bytes = 24) => randomBytes(bytes).toString("base64url");
+const newAuthFile = (): AuthFile => ({ environmentId: `pi-${newSecret(9)}`, pairings: [], tokens: [] });
 
 export class AuthStore {
 	readonly #file: string;
@@ -37,20 +39,21 @@ export class AuthStore {
 		this.#file = join(stateDir, "auth.json");
 		this.#fixedPairing = options.pairingToken;
 		this.#ttlMs = options.tokenTtlSeconds * 1000;
-		if (!existsSync(this.#file)) {
-			this.#write({ environmentId: `pi-${newSecret(9)}`, pairings: [], tokens: [] });
-		}
+		this.#read(); // writes a fresh store when there is none to read
 	}
 
+	// A store that is missing (deleted after start) or unparseable starts over, persisted at once so the
+	// environmentId does not change on every read.
 	#read(): AuthFile {
-		return JSON.parse(readFileSync(this.#file, "utf8")) as AuthFile;
+		const stored = readJson<AuthFile | undefined>(this.#file, undefined);
+		if (stored !== undefined) return stored;
+		const fresh = newAuthFile();
+		this.#write(fresh);
+		return fresh;
 	}
 
 	#write(data: AuthFile): void {
-		const temporary = `${this.#file}.tmp`;
-		writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-		chmodSync(temporary, 0o600);
-		renameSync(temporary, this.#file);
+		writeJsonAtomic(this.#file, data);
 	}
 
 	get environmentId(): string {

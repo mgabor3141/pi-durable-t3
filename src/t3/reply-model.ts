@@ -6,7 +6,7 @@ import type { ModelRef } from "@earendil-works/pi-durable";
 type ReplyModel = {
 	readonly models: Models;
 	readonly modelRef: ModelRef;
-	readonly catalog: { provider: string; modelId: string; name: string; reasoning: boolean }[];
+	readonly catalog: { provider: string; modelId: string; name: string }[];
 };
 
 export function createReplyModel(text = "OK — this is the offline reply model.", provider = "reply"): ReplyModel {
@@ -20,6 +20,6 @@ export function createReplyModel(text = "OK — this is the offline reply model.
 	return {
 		models,
 		modelRef: { provider, modelId },
-		catalog: faux.models.map((model) => ({ provider, modelId: model.id, name: model.name ?? model.id, reasoning: false })),
+		catalog: faux.models.map((model) => ({ provider, modelId: model.id, name: model.name ?? model.id })),
 	};
 }

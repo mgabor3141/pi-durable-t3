@@ -1,0 +1,93 @@
+// What pi supports, in T3's capability vocabulary: one static manifest the projection hands every thread, so T3
+// renders only the controls this host can answer. A `false` here is a refusal the UI never shows; a `true` is a promise
+// the bridge must keep. It is data, not policy — the refusals that answer a call live in rpc.ts.
+import type { OrchestrationV2ProviderCapabilities } from "@t3tools/contracts";
+
+const no = false;
+export const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
+	sessions: {
+		supportsMultipleProviderThreadsPerSession: no,
+		supportsModelSwitchInSession: true,
+		supportsProviderSwitchingViaHandoff: no,
+		supportsRuntimeModeSwitchInSession: no,
+		pendingRequestsSurviveRestart: true,
+	},
+	threads: {
+		canCreateEmptyThread: true,
+		canReadThreadSnapshot: true,
+		canRollbackThread: true,
+		canForkThread: no,
+		canForkFromTurn: no,
+		canForkFromSubagentThread: no,
+		exposesNativeThreadId: true,
+	},
+	turns: {
+		exposesNativeTurnId: no,
+		emitsTurnStarted: true,
+		emitsTurnCompleted: true,
+		supportsInterrupt: true,
+		supportsActiveSteering: true,
+		activeSteeringInterruptsTools: no,
+		supportsSteeringByInterruptRestart: true,
+		supportsQueuedMessages: true,
+		terminalStatusQuality: "strong",
+	},
+	streaming: {
+		streamsAssistantText: true,
+		streamsReasoning: true,
+		streamsToolOutput: true,
+		streamsPlanText: no,
+		emitsMessageCompleted: true,
+	},
+	tools: {
+		exposesToolItemIds: true,
+		emitsToolStarted: true,
+		emitsToolCompleted: true,
+		emitsToolOutput: true,
+		supportsMcpTools: no,
+		supportsDynamicToolCallbacks: no,
+	},
+	approvals: {
+		supportsCommandApproval: no,
+		supportsFileReadApproval: no,
+		supportsFileChangeApproval: no,
+		supportsApplyPatchApproval: no,
+		approvalsHaveNativeRequestIds: no,
+		approvalCallbacksAreLiveOnly: no,
+		approvalsCanOriginateFromSubagents: no,
+	},
+	planning: {
+		emitsPlanUpdated: no,
+		emitsTodoList: no,
+		emitsProposedPlan: no,
+		supportsStructuredQuestions: no,
+		planDeltasHaveItemIds: no,
+	},
+	subagents: {
+		supportsSubagents: no,
+		exposesSubagentThreadIds: no,
+		emitsSubagentLifecycle: no,
+		canWaitForSubagents: no,
+		canCloseSubagents: no,
+		canForkSubagentThread: no,
+	},
+	context: {
+		acceptsSystemContext: no,
+		acceptsDeveloperContext: no,
+		acceptsSyntheticUserContext: no,
+		canGenerateSummaries: no,
+		canConsumeHandoffSummaries: no,
+		supportsDeltaHandoff: no,
+		supportsFullThreadHandoff: no,
+		maxRecommendedHandoffChars: null,
+	},
+	checkpointing: {
+		appCanCheckpointFilesystem: no,
+		supportsNestedCheckpointScopes: no,
+		providerCanRollbackConversation: true,
+		providerRollbackReturnsSnapshot: no,
+		providerCanReadConversationSnapshot: true,
+	},
+	identity: { nativeThreadIds: "strong", nativeTurnIds: "none", nativeItemIds: "weak", nativeRequestIds: "none" },
+	runtimePolicy: { enforcement: "client-boundary" },
+};
