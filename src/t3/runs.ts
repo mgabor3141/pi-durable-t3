@@ -1,4 +1,4 @@
-// What a run is, and what a steer is. A run is one user turn: the `pi.user` entry that started it, plus the assistant
+// What a run is, and what a steer is. A run is one user turn: the user entry that started it, plus the assistant
 // entries and tool results that followed. A user entry that lands inside a run still in progress is a steer of that
 // run, not a new run — and only the entries can say whether the run was in progress, which is what `groupRuns` decides.
 // A leaf: it reads entry shapes only, so the projection, a test, or any other reader groups a conversation the same way.
@@ -10,7 +10,20 @@ export interface RunDraft {
 }
 
 export const firstMessage = (entry: EntryRecord): DurableMessage | undefined => entry.model?.[0];
-export const isUserEntry = (entry: EntryRecord) => entry.kind === "pi.user" && firstMessage(entry)?.role === "user";
+/**
+ * Entry kinds that carry a user turn. `pi.user` is pi-durable's default placement for an input; `app.user` is this
+ * host's, which rides the client's message id in the entry's `data` (see `Threads.submit`). A user-entry test accepts
+ * both, so threads created before and after that change project identically.
+ */
+export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user"]);
+export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
+/** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
+export const messageIdOf = (entry: EntryRecord): string | undefined => {
+	const data = entry.data;
+	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const id = (data as { messageId?: unknown }).messageId;
+	return typeof id === "string" ? id : undefined;
+};
 export const isAssistantEntry = (entry: EntryRecord) => firstMessage(entry)?.role === "assistant";
 export const stopReason = (entry: EntryRecord | undefined) => {
 	const message = entry === undefined ? undefined : firstMessage(entry);

@@ -49,6 +49,8 @@ const MessageArgs = Type.Object({
 	conversationId: Type.Number(),
 	requestId: Type.String(),
 	message: Type.String(),
+	/** The client's id for this message; placed as an `app.user` entry's data so the projection reads it back. */
+	messageId: Type.Optional(Type.String()),
 	images: Type.Optional(Type.Array(ImageInput)),
 });
 const AbortArgs = Type.Object({ conversationId: Type.Number() });
@@ -208,12 +210,12 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 	api.serve(PiController, ({ threadId }, _principal, _self) => {
 		const submit = async (
-			args: { conversationId: number; requestId: string; message: string; images?: { mimeType: string; data: string }[] },
+			args: { conversationId: number; requestId: string; message: string; messageId?: string; images?: { mimeType: string; data: string }[] },
 			whenBusy: "steer" | "followUp" | undefined,
 		): Promise<{ submissionId: number }> => {
 			try {
 				const submission = await threads.submit(
-					{ threadId, conversationId: args.conversationId, requestId: args.requestId, message: args.message, ...(args.images === undefined ? {} : { images: args.images }) },
+					{ threadId, conversationId: args.conversationId, requestId: args.requestId, message: args.message, ...(args.messageId === undefined ? {} : { messageId: args.messageId }), ...(args.images === undefined ? {} : { images: args.images }) },
 					whenBusy,
 				);
 				return { submissionId: submission.id };

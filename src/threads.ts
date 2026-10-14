@@ -27,6 +27,14 @@ import type { Harness } from "@earendil-works/pi-durable";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 
+/** The entry kind this host places a client prompt as, so the client's message id rides durably in the entry's `data`.
+ * It must not start with `pi.` (pi-durable's rule for an input's own entry kind); the facet reads the id back in the projection. */
+export const APP_USER_ENTRY = "app.user";
+
+/** Entry kinds that name a user turn, for the rewind's `not_rewindable` check: pi-durable's default placement and this
+ * host's id-carrying placement. Mirrors the facet's `USER_ENTRY_KINDS` (the host and facet each own the shared literal). */
+const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
+
 /** A thread's parent, recorded when it is promoted or forked off another thread. */
 type ThreadParent = { threadId: string; entryId: number | null };
 
@@ -50,6 +58,11 @@ export const ThreadsDoc = defineDoc<ThreadsState>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ threads: [], undos: [] }),
+	// Checkpoint on every write, as `pi.agent` does. This is a session (current-only) document, so a base write drops the
+	// delta rows it supersedes and the stored doc stays at one base row. With no policy the doc appends a delta row per
+	// create/remove/undo and grows without bound. Nothing reads this document's history — `snapshotAsOf` is not even
+	// offered for a session doc, and every read here is a current read (`snapshot` / `tx.doc` / `watchDoc`).
+	checkpointWhen: () => true,
 });
 
 type ThreadsDeps = {
@@ -80,6 +93,9 @@ type MessageInput = {
 	readonly requestId: string;
 	readonly message: string;
 	readonly images?: readonly { mimeType: string; data: string }[];
+	/** The client's id for this message. When present the input is placed as an `app.user` entry carrying it, so the
+	 * projection reads the id back from the entry (no side store); absent leaves the default `pi.user` placement. */
+	readonly messageId?: string;
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -211,7 +227,14 @@ export class Threads {
 						...images.map((image) => ({ type: "image" as const, mimeType: image.mimeType, data: image.data })),
 					];
 		const submission = await conversation.submit(
-			{ type: "input", requestId: input.requestId, content, ...(whenBusy === undefined ? {} : { whenBusy }) },
+			{
+				type: "input",
+				requestId: input.requestId,
+				content,
+				...(whenBusy === undefined ? {} : { whenBusy }),
+				// Carry the client's message id in the entry's data: an application entry the projection reads the id back from.
+				...(input.messageId === undefined ? {} : { entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } }),
+			},
 			this.#context,
 		);
 		// The turn is committed and running. Promoting it into a thread is best-effort: if that commit fails, the prompt
@@ -263,7 +286,7 @@ export class Threads {
 		const active = (await head.context(this.#context)).entries;
 		const targetIndex = active.findIndex((entry) => entry.id === input.entryId);
 		const target = targetIndex < 0 ? undefined : active[targetIndex]!;
-		if (target === undefined || target.kind !== UserEntry.kind) {
+		if (target === undefined || !USER_ENTRY_KINDS.has(target.kind)) {
 			throw hostError("not_rewindable", `entry ${input.entryId} is not a user turn in the head's active context`);
 		}
 		// A fork is INCLUSIVE of its fork entry, so to drop the reverted user turn we fork at the entry just before it.

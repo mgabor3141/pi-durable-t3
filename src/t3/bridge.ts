@@ -1,10 +1,9 @@
 // Bridge core: the T3 view over the host's threads. It is a local client of the chord2 objects — it reads the thread
 // directory from `pi.threads`, each thread's head view from `pi.transcript` and model state from `pi.models`, and
 // writes through `pi.controller` (prompt/steer/followUp/abort/rewind). It holds the per-thread projection memory
-// (client message IDs, rolled-back runs) and the monotonic sequence counter.
-import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { basename, join } from "node:path";
+// (rolled-back runs) and the monotonic sequence counter.
+import { createHash, randomUUID } from "node:crypto";
+import { basename, resolve } from "node:path";
 import type { Ctx, Handle, Host } from "@earendil-works/chord";
 import type {
 	OrchestrationProjectShell,
@@ -15,31 +14,17 @@ import type {
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
-import { readJson, writeJsonAtomic } from "./json-store.ts";
 import type { Logger } from "./logging.ts";
 import { type ConversationView, type ModelRef, type ModelsState, splitSlug } from "./model-types.ts";
-import { type ProjectionResult, projectThread, textOf, type ThreadMeta } from "./projection.ts";
+import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
 export class CommandError extends Error {}
-
-interface PendingMessage {
-	messageId: string;
-	text: string;
-	afterEntryId: number;
-}
-
-interface StoredMemory {
-	messageIds: [number, string][];
-	pending: PendingMessage[];
-}
 
 interface ThreadState {
 	readonly threadId: string;
 	refs: number;
 	closeTimer: NodeJS.Timeout | undefined;
-	messageIds: Map<number, string>;
-	pending: PendingMessage[];
 	rolledBack: RolledBackRun[];
 	rollbackRequestId: string | undefined;
 	rollbackFailure: { requestId: string; message: string } | null | undefined;
@@ -68,6 +53,11 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
 const EMIT_THROTTLE_MS = 60;
 
+/** A project id derived from a normalized absolute path, so the same folder maps to the same id every process: a random
+ * per-process id strands T3's selection for that folder on every restart. Configured projects use their name (a stable,
+ * user-chosen id); this is the path-derived form for a cwd the configuration does not cover. */
+const projectIdForPath = (path: string): string => `p-${createHash("sha256").update(path).digest("hex").slice(0, 16)}`;
+
 export class Bridge {
 	readonly config: BridgeConfig;
 	readonly #host: Host;
@@ -75,9 +65,8 @@ export class Bridge {
 	readonly #threads = new Map<string, ThreadState>();
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
-	readonly #extraProjects = new Map<string, OrchestrationProjectShell>();
+	readonly #extraProjects = new Map<string, { title: string; path: string }>();
 	readonly #commandResults = new Map<string, Promise<number>>();
-	readonly #memoryFile: string;
 	/** Called with every thread's `pi.models` state, so the provider catalog follows the host. */
 	onModels: ((models: ModelsState | undefined) => void) | undefined;
 	/** Model reported for threads whose transcript is not loaded. */
@@ -91,13 +80,9 @@ export class Bridge {
 		this.config = config;
 		this.#log = log;
 		this.#host = host;
-		this.#memoryFile = join(config.stateDir, "threads.json");
 	}
 
 	start(): void {
-		// The per-thread memory file lives under stateDir; ensure it exists so a Bridge started on its own (not after
-		// AuthStore) can write `threads.json`.
-		mkdirSync(this.config.stateDir, { recursive: true });
 		const handle = this.#host.get(PiThreads, {});
 		const publish = (): void => {
 			this.#directory = (handle.threads.value?.threads ?? []).map((thread) => ({ ...thread }));
@@ -125,9 +110,9 @@ export class Bridge {
 			(project) => cwd !== undefined && (cwd === project.path || cwd.startsWith(`${project.path}/`)),
 		);
 		if (configured !== undefined) return { id: configured.id, title: configured.name, path: configured.path };
-		const path = cwd ?? "/";
-		const id = `p-other-${randomUUID().slice(0, 10)}`;
-		return { id, title: `${basename(path) || path} (other)`, path };
+		// Not configured: derive the id from the normalized absolute path, so the folder keeps its identity across restarts.
+		const path = cwd === undefined ? "/" : resolve(cwd);
+		return { id: projectIdForPath(path), title: `${basename(path) || path} (other)`, path };
 	}
 
 	/** A project shell with the fixed fields T3 expects, stamped at the bridge's start time. */
@@ -147,7 +132,7 @@ export class Bridge {
 	projects(): OrchestrationProjectShell[] {
 		return [
 			...this.config.projects.map((p) => this.#projectShell({ id: p.id, title: p.name, path: p.path })),
-			...[...this.#extraProjects.values()],
+			...[...this.#extraProjects].map(([id, project]) => this.#projectShell({ id, title: project.title, path: project.path })),
 		];
 	}
 
@@ -161,8 +146,8 @@ export class Bridge {
 		const cwd = (thread === undefined ? undefined : this.#projectPath(thread.projectId)) ?? state?.view?.docs["pi.agent"]?.cwd ?? "/";
 		const project = this.projectForCwd(cwd);
 		if (!this.config.projects.some((p) => p.id === project.id) && !this.#extraProjects.has(project.id)) {
+			this.#extraProjects.set(project.id, { title: project.title, path: project.path });
 			const shell = this.#projectShell(project);
-			this.#extraProjects.set(project.id, shell);
 			queueMicrotask(() => this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: shell }));
 		}
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? this.defaultModel();
@@ -182,7 +167,11 @@ export class Bridge {
 	#shellFor(threadId: string): OrchestrationV2ThreadShell {
 		const state = this.#threads.get(threadId);
 		if (state?.result !== undefined) return state.result.shell;
-		return projectThread(this.#meta(threadId, this.#summary(threadId), state), undefined, this.#memoryOf(state)).shell;
+		return projectThread(this.#meta(threadId, this.#summary(threadId), state), undefined, {
+			rolledBack: state?.rolledBack ?? [],
+			rollbackRequestId: state?.rollbackRequestId,
+			rollbackFailure: state?.rollbackFailure,
+		}).shell;
 	}
 
 	shellSnapshot(): OrchestrationV2ShellSnapshot {
@@ -234,35 +223,13 @@ export class Bridge {
 
 	// ---- threads ----------------------------------------------------------------------------------------------
 
-	#loadMemory(): Record<string, StoredMemory> {
-		return readJson(this.#memoryFile, {});
-	}
-
-	#saveMemory(state: ThreadState): void {
-		const all = this.#loadMemory();
-		all[state.threadId] = { messageIds: [...state.messageIds], pending: state.pending };
-		writeJsonAtomic(this.#memoryFile, all);
-	}
-
-	#memoryOf(state: ThreadState | undefined) {
-		return {
-			messageIds: state?.messageIds ?? new Map(),
-			rolledBack: state?.rolledBack ?? [],
-			rollbackRequestId: state?.rollbackRequestId,
-			rollbackFailure: state?.rollbackFailure,
-		};
-	}
-
 	#state(threadId: string): ThreadState {
 		let state = this.#threads.get(threadId);
 		if (state === undefined) {
-			const stored = this.#loadMemory()[threadId];
 			state = {
 				threadId,
 				refs: 0,
 				closeTimer: undefined,
-				messageIds: new Map(stored?.messageIds ?? []),
-				pending: stored?.pending ?? [],
 				rolledBack: [],
 				rollbackRequestId: undefined,
 				rollbackFailure: undefined,
@@ -311,7 +278,7 @@ export class Bridge {
 		state.result = undefined;
 	}
 
-	/** Drop a thread that no longer exists: end its subscriptions and delete its memory. */
+	/** Drop a thread that no longer exists: end its subscriptions. */
 	#forget(state: ThreadState, error: Error): void {
 		if (this.#threads.get(state.threadId) !== state) return;
 		this.#threads.delete(state.threadId);
@@ -321,11 +288,6 @@ export class Bridge {
 		for (const end of state.enders) end();
 		state.listeners.clear();
 		state.enders.clear();
-		const all = this.#loadMemory();
-		if (all[state.threadId] !== undefined) {
-			delete all[state.threadId];
-			writeJsonAtomic(this.#memoryFile, all);
-		}
 		this.#log.info("thread forgotten", { threadId: state.threadId, reason: error.message });
 	}
 
@@ -349,24 +311,6 @@ export class Bridge {
 		};
 	}
 
-	#matchPending(state: ThreadState): void {
-		const view = state.view;
-		if (view === undefined || state.pending.length === 0) return;
-		let changed = false;
-		for (const entry of view.entries) {
-			if (entry.kind !== "pi.user" || state.messageIds.has(entry.id)) continue;
-			const message = entry.model?.[0];
-			if (message?.role !== "user") continue;
-			const text = textOf(message.content);
-			const index = state.pending.findIndex((p) => p.text === text && entry.id > p.afterEntryId);
-			if (index < 0) continue;
-			state.messageIds.set(entry.id, state.pending[index]!.messageId);
-			state.pending.splice(index, 1);
-			changed = true;
-		}
-		if (changed) this.#saveMemory(state);
-	}
-
 	#buildModelsState(state: ThreadState): ModelsState {
 		return {
 			catalog: { revision: 1, availableModels: state.catalog.map((model) => ({ ...model, name: model.modelId })) },
@@ -376,12 +320,11 @@ export class Bridge {
 
 	#recompute(state: ThreadState): void {
 		if (state.view === undefined) return;
-		this.#matchPending(state);
 		this.onModels?.(this.#buildModelsState(state));
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,
-			this.#memoryOf(state),
+			{ rolledBack: state.rolledBack, rollbackRequestId: state.rollbackRequestId, rollbackFailure: state.rollbackFailure },
 		);
 		this.#publishShell(state.threadId);
 		if (state.listeners.size === 0 || state.emitTimer !== undefined) return;
@@ -512,13 +455,10 @@ export class Bridge {
 		try {
 			const state = this.#state(input.threadId);
 			const head = await this.#awaitHead(state);
-			const maxEntry = Math.max(0, ...(state.view?.entries ?? []).map((entry) => entry.id));
-			if (!state.pending.some((p) => p.messageId === input.messageId)) {
-				state.pending.push({ messageId: input.messageId, text: input.text, afterEntryId: maxEntry });
-				this.#saveMemory(state);
-			}
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
-			const request = { conversationId: head, requestId: input.commandId, message: input.text };
+			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`), so the projection reads it
+			// back from the entry it is already reading; `requestId` stays the commandId for durable dedup.
+			const request = { conversationId: head, requestId: input.commandId, message: input.text, messageId: input.messageId };
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.
 			await this.#call(input.threadId, async (controller, _models, c) => {

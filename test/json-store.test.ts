@@ -1,4 +1,4 @@
-// The facet's on-disk stores (auth.json, threads.json) share `readJson`/`writeJsonAtomic`, so the format and the
+// The facet's on-disk store (auth.json) uses `readJson`/`writeJsonAtomic`, so the format and the
 // permissions are the contract: a value survives a write→read round-trip, the file is 0600 (secrets), and a read
 // never throws. The 0600 case that matters is a leftover `*.tmp` from a crashed write at a looser mode: `open(2)`
 // applies `mode` only when it creates, so the writer chmods the temp explicitly.

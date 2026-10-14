@@ -3,7 +3,7 @@
 //
 // Model:
 //   one Session            = one T3 thread (threadId = sessionId)
-//   one user turn (run)    = a pi.user entry that starts a run; user entries inside a running run are steers
+//   one user turn (run)    = a user entry (pi.user, or this host's app.user) that starts a run; user entries inside a running run are steers
 //                            (entries are grouped into runs by ./runs.ts)
 //   checkpoints            = one synthetic "ready" checkpoint per settled run (no file snapshot) + a baseline
 //                            (the checkpoint ids are ./undo.ts's scheme)
@@ -28,7 +28,7 @@ import type {
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef } from "./model-types.ts";
-import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, stopReason } from "./runs.ts";
+import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
 export const PROVIDER_INSTANCE_ID = "pi";
@@ -57,8 +57,6 @@ export interface ThreadMeta {
 
 /** Bridge-side memory needed for a faithful projection. */
 interface ThreadMemory {
-	/** Client message IDs by durable user entry ID, so optimistic sends dedupe. */
-	readonly messageIds: ReadonlyMap<number, string>;
 	/** Runs removed by rewinds, kept as `rolled_back` so the client can confirm the rewind. */
 	readonly rolledBack: readonly RolledBackRun[];
 	readonly rollbackRequestId?: string | undefined;
@@ -203,7 +201,7 @@ export function projectThread(
 			providerInstanceId: id(PROVIDER_INSTANCE_ID),
 			modelSelection: runModel,
 			providerThreadId: id(providerThreadId),
-			userMessageId: id(memory.messageIds.get(u.id) ?? `m${u.id}`),
+			userMessageId: id(messageIdOf(u) ?? `m${u.id}`),
 			rootNodeId: id(nodeId),
 			activeAttemptId: id(attemptId),
 			status,
@@ -305,7 +303,7 @@ export function projectThread(
 		});
 		const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
 			const message = firstMessage(entry)!;
-			const messageId = memory.messageIds.get(entry.id) ?? `m${entry.id}`;
+			const messageId = messageIdOf(entry) ?? `m${entry.id}`;
 			const at = message.timestamp ?? requestedAt;
 			const text = textOf(message.role === "user" ? message.content : undefined);
 			turnItems.push({

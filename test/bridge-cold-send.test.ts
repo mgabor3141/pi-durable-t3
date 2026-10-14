@@ -9,9 +9,10 @@ import { expect, it } from "vitest";
 import { createHost } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { type ConversationId, UserEntry } from "@earendil-works/pi-durable";
+import { type ConversationId } from "@earendil-works/pi-durable";
 import { createServerFacet } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
+import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { makeThreads } from "./threads-harness.ts";
 
@@ -47,7 +48,7 @@ it("sends the first message on a cold thread with no prior warming (S2)", async 
 		for (;;) {
 			const conversation = await fixture.harness.conversation(head as ConversationId, ctx);
 			const entries = (await conversation?.context(ctx))?.entries ?? [];
-			if (entries.some((entry) => entry.kind === UserEntry.kind)) break;
+			if (entries.some((entry) => USER_ENTRY_KINDS.has(entry.kind))) break;
 			if (Date.now() > deadline) throw new Error("the first message never produced a user turn (message was lost)");
 			await sleep(50);
 		}

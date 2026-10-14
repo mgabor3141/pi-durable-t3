@@ -78,9 +78,11 @@ thread list is a read of it.
   navigates to it), honored exactly, so a retried create is a no-op. The host mints one only when it
   promotes a conversation (see Invariants).
 - **Conversation IDs:** minted by pi-durable.
-- **Project IDs:** derived from the normalized absolute path, so renaming a project is free and the same
-  directory can't be registered twice; T3 refuses a duplicate too. Threads reference
-  `projectId`, so an id minted from anything the user can type would strand them.
+- **Project IDs:** for a configured project, the name the integrator wrote — so renaming it renames the
+  id, and existing threads keep the old one. They keep working, from the `cwd` their own conversation
+  records; what changes is their project grouping. A folder discovered at runtime gets an id derived from
+  its normalized absolute path, so the same folder keeps the same id across restarts. Moving projects
+  into the instance file means making every id path-derived, with the title as a free label.
 
 ## Invariants
 
@@ -134,8 +136,8 @@ in-process.
 - `appCanCheckpointFilesystem: false`; `restoreFiles: true` is refused by the facet.
 - Promoted and forked threads carry `lineage.parentThreadId` and `relationshipToParent: "fork"`.
 - **Storage only grows.** pi-durable has no delete or GC, so removing things drops pointers, never data.
-  A doc write also appends a delta row until the doc checkpoints; `ThreadsDoc` sets no checkpoint policy,
-  so it grows one small row per create, remove and undo.
+  A doc write also appends a delta row until the doc checkpoints, so `ThreadsDoc` checkpoints on every
+  write: the threads list is a current read, and nothing ever asks it for a past version.
 - **Undo of a head that already moved on becomes a thread.** A stale or concurrent undo can't move that
   head, so its fork is added as a child thread. Clutter is the price of conflicts-never-error.
 - **A restart shows a reverted thread with fewer runs.** The rolled-back-runs overlay is in memory on

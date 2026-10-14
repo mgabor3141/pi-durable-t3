@@ -14,8 +14,9 @@ stated in [design.md](design.md): the bridge duplicates no state and owns as lit
 |---|---|---|
 | thread, message, command and request ids, minted in the browser | one send, one retry | nothing: they arrive in requests we answer, and we mint nothing in T3's space |
 
-One client fact never reaches durable storage — the id the client chose for a user message. That is why
-`threads.json` exists.
+Every client fact reaches durable storage. The id the client chose for a user message rides in the entry the host
+places the prompt as (an `app.user` entry carrying it), so the projection reads the id back from the entry it is already
+reading — no side store.
 
 ## pi-durable owns
 
@@ -42,7 +43,6 @@ Applied undos are the one field we write that grows without bound.
 | what | lifetime | if it's lost | kind |
 |---|---|---|---|
 | `auth.json`: the environment id, and hashes of pairing codes and tokens | forever | every client re-pairs; no conversation is affected | credential |
-| `threads.json`: the client's message ids, and the sends not yet in the transcript | grows with every message of every thread | after a restart, a message T3 is still holding appears twice | **duplicative** |
 | `models-store.json`: the model catalog, owned by ModelRuntime | rewritten at will | re-fetched from the providers; without a path under the root it lands in the working directory | derived |
 
 ## Configuration, input only
@@ -60,21 +60,19 @@ The running host never writes configuration, and nothing a thread does reaches i
 |---|---|---|
 | the per-thread view cache, its subscribers, and the undo overlay | while a client is watching | clients re-subscribe and get a fresh snapshot |
 | the thread list, shells | process | rebuilt at start |
-| projects discovered outside configuration, with ids minted at random | process | the folder's id changes, so T3's selection for it is lost |
+| projects discovered outside configuration, with ids derived from the path | process | recomputed at the next projection: the id is a function of the folder's path, so T3's selection for it survives |
 | command id → the first result, so a retry returns it | process | the retry recomputes; durable dedup still stops the second write |
 | the projection sequence clock | process | projections get new sequence numbers |
 | pairing tickets and rate-limit buckets | seconds | the code is redeemed again; the window restarts |
 
 ## Gaps
 
-Two pieces are duplicative, and both have a durable slot available.
+None. The two that were here are closed.
 
-1. **The client's message id.** An input can be placed as an application entry carrying its own data, so
-   the id goes into the entry and the projection reads it from the entry it is already reading. The
-   other half, sends not yet in the transcript, is what the inbox already reports. Both fields go, and the
-   file with them.
-2. **Project ids for folders that are not in the configuration.** Derive them from the normalized path, as
-   configured projects already are, and nothing is minted.
+- **The client's message id** rides in the entry the host places the prompt as (an `app.user` entry's data), and its
+  store is deleted.
+- **Project ids for folders outside the configuration** are derived from the normalized path, so nothing is
+  minted.
 
-What is left after that is a transcript we do not own, one document of pointers, a credential file, and
-caches that are correct to lose.
+What is left is a transcript we do not own, one document of pointers, a credential file, and caches that are correct
+to lose.
