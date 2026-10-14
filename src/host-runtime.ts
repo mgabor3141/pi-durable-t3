@@ -7,7 +7,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
-import { createRegistry, type EnvTarget, Harness, type ModelRef } from "@earendil-works/pi-durable";
+import { createRegistry, type EnvTarget, type Extension, Harness, type ModelRef } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -26,7 +26,7 @@ export async function openHostRuntime(
 	config: HostConfig,
 	models: Models,
 	defaultModel: ModelRef | undefined,
-	options: { readonly onWarn?: (message: string, error: unknown) => void } = {},
+	options: { readonly onWarn?: (message: string, error: unknown) => void; readonly extensions?: readonly Extension[] } = {},
 ): Promise<HostRuntime> {
 	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd.
 	for (const project of config.projects) await mkdir(project.cwd, { recursive: true });
@@ -34,6 +34,9 @@ export async function openHostRuntime(
 
 	const registry = createRegistry();
 	registry.install(CodingTools); // read, write, edit, bash — available to conversations by default.
+	// Extra extensions to install beyond the coding tools. The host passes none; a shutdown test installs a tool whose
+	// run ignores its abort signal, to reproduce the mid-turn stall the graceful close must time-box (see test/fast-shutdown).
+	for (const extension of options.extensions ?? []) registry.install(extension);
 	registry.install(BasePrompt); // the built-in base system prompt section, so a new conversation is not left blank.
 
 	const harness = await Harness.open(
