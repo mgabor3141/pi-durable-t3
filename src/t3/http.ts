@@ -135,7 +135,7 @@ export function makeServerLayer(deps: {
 			Effect.gen(function* () {
 				const { threadId } = yield* HttpRouter.params;
 				const projected = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
-				if (Option.isNone(projected)) return json({ _tag: "EnvironmentResourceNotFoundError", message: "Unknown thread" }, 404);
+				if (Option.isNone(projected)) return json({ _tag: "EnvironmentResourceNotFoundError", reason: "thread_not_found", message: "Unknown thread" }, 404);
 				return render(projected.value);
 			}),
 		);

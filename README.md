@@ -36,13 +36,15 @@ naming the file, key path, and what was expected; a missing file is an error, an
 model and thinking level a new thread starts on) live here, **in the data dir** — with `--root <dir>`,
 `<dir>/settings.json`. This is the file T3's **Add project** picker and model picker edit: you add a project in
 the UI, and the running host writes it (atomically) on your behalf. A project is a directory (paths under the
-data dir; `~` and absolute paths expand), and its **id is derived from its path**, so the title is only a label
-and the same folder can't be added twice. A missing file is valid (no projects, the first available model). The
-shape:
+data dir; `~` and absolute paths expand). Its **id is minted by whoever registers it** — the UI mints a UUID and
+the host stores it; an entry you write by hand may carry an `id` (the host honors it) or omit one, and the host
+derives a stable id from the path. The title is only a label, and **the path is the uniqueness key**: the same
+folder can't be added twice. A missing file is valid (no projects, the first available model). The shape:
 
 ```jsonc
 {
-  "projects": [ { "path": "projects/alpha", "title": "alpha" } ],  // path required, title optional (defaults to the folder)
+  // path required; title optional (defaults to the folder); id optional — a UUID the UI minted, honored as-is
+  "projects": [ { "path": "projects/alpha", "title": "alpha", "id": "e05053f2-9966-4b92-9886-5092481b9703" } ],
   "defaults": { "model": "pi/…", "thinkingLevel": "off" }          // model optional; thinkingLevel one of off…max
 }
 ```

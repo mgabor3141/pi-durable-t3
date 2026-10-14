@@ -4,6 +4,7 @@
 // client shows and carries a `requestId`; a write to a conversation that is no longer any thread's head promotes it to
 // a new child thread — conflicts become forks, never "stale" errors.
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -26,7 +27,7 @@ import {
 import type { Harness } from "@earendil-works/pi-durable";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
-import { projectIdForPath } from "./project-ids.ts";
+
 import type { ProjectRegistry } from "./registry.ts";
 
 /** The entry kind this host places a client prompt as, so the client's message id rides durably in the entry's `data`.
@@ -53,13 +54,19 @@ export type Thread = {
 /** The applied result of an undo, so a retried `requestId` returns the same fork instead of forking again. */
 type AppliedUndo = { requestId: string; head: number };
 
-type ThreadsState = { threads: Thread[]; undos: AppliedUndo[] };
+/**
+ * The document state. `removed` is the REMOVAL RECORD: one id per removal — the head conversation of every thread
+ * `remove` deleted. It exists so a removal is durable: a prompt admitted before (or racing) a delete must not
+ * resurrect the thread through the promote path or boot repair. The doc checkpoints on every write, so the record
+ * costs one base row, never a delta per removal.
+ */
+type ThreadsState = { threads: Thread[]; undos: AppliedUndo[]; removed: number[] };
 
 export const ThreadsDoc = defineDoc<ThreadsState>({
 	kind: "pi-durable-t3.threads",
 	version: 1,
 	scope: "session",
-	initial: () => ({ threads: [], undos: [] }),
+	initial: () => ({ threads: [], undos: [], removed: [] }),
 	// Checkpoint on every write, as `pi.agent` does. This is a session (current-only) document, so a base write drops the
 	// delta rows it supersedes and the stored doc stays at one base row. With no policy the doc appends a delta row per
 	// create/remove/undo and grows without bound. Nothing reads this document's history — `snapshotAsOf` is not even
@@ -200,6 +207,17 @@ export class Threads {
 	async create(input: CreateInput): Promise<Thread> {
 		const project = this.projects.find((candidate) => candidate.id === input.projectId);
 		if (project === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
+		// A registered path that exists as a non-directory (a hand-edited registry naming a file — boot skipped it with a
+		// warning) cannot host a thread: refuse with the typed project error naming the path, not a run stranded in a cwd
+		// no tool can enter. A MISSING cwd is left alone: boot creates registered folders, and create stays usable.
+		let cwdIsDirectory = true;
+		try {
+			cwdIsDirectory = statSync(project.cwd).isDirectory();
+		}
+		catch {
+			/* missing/unreadable: boot's per-project mkdir (with its warning) owns that case. */
+		}
+		if (!cwdIsDirectory) throw hostError("unknown_project", `project ${input.projectId} is not a directory: ${project.cwd}`);
 		// New-thread defaults are read live (the instance file, edited by the UI), so a settings change affects threads
 		// created after it. The model falls back to the resolved default (first available) when the file sets none.
 		const defaults = this.#registry.defaults();
@@ -259,16 +277,39 @@ export class Threads {
 	}
 
 	/**
+	 * The project that OWNS a conversation, from the conversation's own recorded `pi.agent.cwd` through the registry:
+	 * the project rooted at the cwd, or the one whose root covers it. `undefined` when no project covers it — a
+	 * promoted conversation is then REFUSED (ownerless, logged), never attached to the first registered project and
+	 * never written with `""`: a `projectId` is a foreign key, and list order is not a fact about the conversation.
+	 */
+	async #projectForConversation(tx: Tx, conversationId: number): Promise<string | undefined> {
+		const agent = await tx.doc(AgentDoc, conversationId as ConversationId);
+		const cwd = agent.cwd;
+		if (cwd === undefined) return undefined;
+		const exact = this.projects.find((project) => project.cwd === cwd);
+		if (exact !== undefined) return exact.id;
+		return this.projects.find((project) => cwd.startsWith(`${project.cwd}/`))?.id;
+	}
+
+	/**
 	 * One commit: if no thread's head is `conversationId`, add a child thread for it (inheriting the named thread's
-	 * project and title). Concurrent promotions of the same conversation add exactly one thread: commits serialize on
-	 * the one storage, so the second sees the head already present.
+	 * title). The project comes from the conversation's OWN cwd (see `#projectForConversation`); a conversation no
+	 * project covers is not promoted — it stays ownerless and the log names it. Concurrent promotions of the same
+	 * conversation add exactly one thread: commits serialize on the one storage, so the second sees the head already
+	 * present.
 	 */
 	async promote(viaThreadId: string, conversationId: number): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			if (doc.threads.some((candidate) => candidate.head === conversationId)) return;
+			// A tombstoned conversation stays removed: the removal record outranks any prompt admitted before it.
+			if ((doc.removed ?? []).includes(conversationId)) return;
+			const projectId = await this.#projectForConversation(tx, conversationId);
+			if (projectId === undefined) {
+				this.#onWarn(`not promoting conversation ${conversationId}: its cwd matches no registered project; it stays ownerless`, undefined);
+				return;
+			}
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
-			const projectId = via?.projectId ?? this.projects[0]?.id ?? "";
 			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId, entryId: null }));
 		}, this.#context);
 	}
@@ -320,8 +361,14 @@ export class Threads {
 				doc.undos.push({ requestId: input.requestId, head: fork.id });
 				return fork.id;
 			}
-			// The head moved on: leave the thread and record the fork as a new child thread.
-			const projectId = thread?.projectId ?? this.projects[0]?.id ?? "";
+			// The head moved on: leave the thread and record the fork as a new child thread — in the project the FORK's
+			// own cwd covers (it inherits the head's agent config). No cover, no row: an ownerless fork is logged, never
+			// a thread under the first registered project and never an empty `projectId`.
+			const projectId = await this.#projectForConversation(tx, fork.id);
+			if (projectId === undefined) {
+				this.#onWarn(`not promoting the undo fork ${fork.id} of thread ${input.threadId}: its cwd matches no registered project; it stays ownerless`, undefined);
+				return fork.id;
+			}
 			doc.threads.push(this.#newThread(fork.id, projectId, thread?.title ?? "", { threadId: input.threadId, entryId: input.entryId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
@@ -343,32 +390,38 @@ export class Threads {
 			const index = doc.threads.findIndex((candidate) => candidate.threadId === threadId);
 			if (index < 0) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 			doc.threads.splice(index, 1);
+			// The removal is DURABLE: one id per removal (the head conversation). The promote path, the undo-fork and
+			// boot repair skip tombstoned conversations — a prompt racing this removal can never resurrect the thread.
+			const removed = (doc.removed ??= []);
+			if (!removed.includes(thread.head)) removed.push(thread.head);
 		}, this.#context);
 	}
 
 	/**
 	 * Boot repair, one commit: promote every conversation that has a run or a queued input but is nobody's head — the
-	 * crash-between-submit-and-promote gap. A promoted conversation takes the project whose `cwd` matches its agent's,
-	 * falling back to the first project.
+	 * crash-between-submit-and-promote gap. A promoted conversation takes its project from its OWN recorded cwd
+	 * (`#projectForConversation`); a conversation no registered project covers is not promoted — it stays ownerless
+	 * and the log names it. Existing conversations keep working from the cwd they record; a lost registry costs
+	 * names, not work.
 	 */
 	async repair(): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const heads = new Set(doc.threads.map((thread) => thread.head));
-			const cwdToProject = new Map<string, string>();
-			for (const project of this.projects) cwdToProject.set(project.cwd, project.id);
 			for (const record of await scanConversations(tx)) {
 				if (heads.has(record.id)) continue;
+				// A tombstoned conversation stays removed — even when it owes work (a prompt admitted during the delete
+				// that the abort could not outrun). The removal record outranks boot repair's adoption.
+				if ((doc.removed ?? []).includes(record.id)) {
+					this.#onWarn(`boot repair: conversation ${record.id} was removed (tombstoned); it stays unthreaded even though it ${await owedIn(tx, record.id) ? "owes work" : "is idle"}`, undefined);
+					continue;
+				}
 				if (!(await owedIn(tx, record.id))) continue;
-				const agent = await tx.doc(AgentDoc, record.id);
-				// A thread's `projectId` is a foreign key: take the registered project whose cwd matches the conversation,
-				// else derive the id from the recorded cwd (a folder discovered outside the registry keeps a stable id),
-				// else the first project. Existing conversations keep working from the cwd they record.
-				const projectId =
-					(agent.cwd === undefined ? undefined : cwdToProject.get(agent.cwd)) ??
-					(agent.cwd === undefined ? undefined : projectIdForPath(agent.cwd)) ??
-					this.projects[0]?.id ??
-					"";
+				const projectId = await this.#projectForConversation(tx, record.id);
+				if (projectId === undefined) {
+					this.#onWarn(`boot repair: not promoting conversation ${record.id}: its cwd matches no registered project; it stays ownerless`, undefined);
+					continue;
+				}
 				doc.threads.push(this.#newThread(record.id, projectId, ""));
 				heads.add(record.id);
 			}

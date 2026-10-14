@@ -1,8 +1,8 @@
 // The browser flow a user performs to manage projects, over the real (unmodified) T3 web app and the real facet:
 //   1. pair,
 //   2. add a project from the directory picker — the command palette's ">Add project" → "Local folder" → the path field
-//      fed by `filesystem.browse`, then Enter sends `projects.mutate` {type:"project.create"} with the id derived from
-//      the path,
+//      fed by `filesystem.browse`, then Enter sends `projects.mutate` {type:"project.create"} with the id the client
+//      minted (a UUID — the host honors it, and the app navigates to it: the composer must be editable without reload),
 //   3. create a thread in it — the composer sends a message; the SPA launches a thread in the active (new) project,
 //   4. remove it — `projects.mutate` {type:"project.delete", force:true} (exactly what T3's sidebar "Remove project"
 //      sends), over the REST parity route that shares the one store with `projects.mutate` on `/ws`,
@@ -122,18 +122,28 @@ try {
 	});
 	console.log(`added project id=${addedProjectId.slice(0, 10)} (the picker listed the target via filesystem.browse)`);
 	if (baseline[pickTarget] !== undefined) throw new Error("the target was already a project — the fixture is wrong");
+	// The web app mints the project id (a UUID) BEFORE the project exists and navigates to it; the host must answer
+	// with THAT id (the shell carries it), or the client's `useProject` lookup misses and the composer below renders
+	// `contenteditable="false"` — the user cannot type until a reload.
+	if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(addedProjectId)) {
+		throw new Error(`the server answered a path-derived id (${addedProjectId}) for the id the client minted — the composer will be dead`);
+	}
 
-	// 3. Create a thread in the project: reset to the app's root composer (the newly added project is now the active
-	//    context), then send a message — the SPA launches a thread in the active project.
-	await page.keyboard.press("Escape");
-	await page.goto(`${webAppUrl}/`, { waitUntil: "domcontentloaded" });
-	await page.waitForSelector("[contenteditable]", { timeout: 30000 });
+	// 3. Create a thread in the project. The app navigated to the new project's draft on add — WITHOUT a reload, the
+	//    composer must be EDITABLE (the defect: the composer rendered `contenteditable="false"` until a reload, because
+	//    the shell's project id was not the one the client navigated to), and the launch must carry the added project's id.
 	const editor = page.locator('[contenteditable="true"]').first();
+	await editor.waitFor({ state: "visible", timeout: launchTimeout });
+	console.log("the composer is editable right after the add — the client's project id is the shell's project id");
 	await editor.click();
 	await page.keyboard.type(`project-flow ${Date.now()}`);
 	await page.keyboard.press("Enter");
-	await until("the SPA launches a thread (orchestration.launchThread on the wire)", Date.now() + launchTimeout, async () => ({ ok: sent("launchThread") || sent("orchestration"), value: wsFrames.length }));
-	console.log("a thread was created (launchThread sent) in the added project");
+	await until(
+		"the SPA launches a thread in the added project (launchThread carries the added project id)",
+		Date.now() + launchTimeout,
+		async () => ({ ok: wsFrames.some((frame) => frame.includes("launchThread") && frame.includes(addedProjectId)), value: wsFrames.length }),
+	);
+	console.log("a thread was created (launchThread sent) in the added project, under the id the client minted");
 
 	// 4. Remove the project (force:true — exactly what T3's sidebar "Remove project" sends over its dialog).
 	const removeResult = await fetch(`${bridgeUrl}/api/projects/mutate`, {

@@ -112,6 +112,47 @@ describe("FileProjectRegistry", () => {
 		expect(registry.add("three", join(dir, "b")).id).not.toBe(first.id);
 	});
 
+	it("(c) the uniqueness key is the NORMALIZED path: …/alpha and …/alpha/ are one project, refused as a duplicate", async () => {
+		const dir = await tempRoot();
+		const registry = await FileProjectRegistry.open(dir);
+		const alpha = join(dir, "alpha");
+		const first = registry.add("alpha", alpha);
+		// A trailing slash is the same folder — the old unnormalized string compare made them "two projects, one id",
+		// and deleting one resurrected the other (M8).
+		expect(() => registry.add("alpha again", `${alpha}/`)).toThrow(ProjectConflict);
+		// A redundant segment is the same folder too.
+		expect(() => registry.add("alpha again", join(dir, "alpha", "."))).toThrow(ProjectConflict);
+		expect(registry.list()).toHaveLength(1);
+		// Re-registering the SAME project under its own trailing-slash spelling is its own id (a move onto oneself is no move).
+		const same = registry.update(first.id, { path: `${alpha}/` });
+		expect(same.id).toBe(first.id);
+		expect(registry.list()).toHaveLength(1);
+		// A hand-written file with the two spellings is one path, refused at parse.
+		expect(() => parseSettingsJson(JSON.stringify({ projects: [{ path: alpha }, { path: `${alpha}/` }] }), dir)).toThrow(/duplicate project path/);
+	});
+
+	it("add honors a client-minted id (the UUID T3's UI sends); it is stored, and a reopen answers the same id", async () => {
+		const dir = await tempRoot();
+		const registry = await FileProjectRegistry.open(dir);
+		const clientId = "550e8400-e29b-41d4-a716-446655440000";
+		const project = registry.add("Picked", join(dir, "a"), { clientId });
+		expect(project.id).toBe(clientId);
+		expect(registry.list()).toEqual([{ id: clientId, name: "Picked", cwd: join(dir, "a") }]);
+		// The id is stored in the instance file (the client navigates by it; nothing may re-mint it on restart).
+		const stored = JSON.parse(await readFile(join(dir, "settings.json"), "utf8")) as { projects: Record<string, unknown>[] };
+		expect(stored.projects[0]).toMatchObject({ id: clientId, path: join(dir, "a") });
+		// A reopen answers the same id; the path stays the uniqueness key.
+		const reopened = await FileProjectRegistry.open(dir);
+		expect(reopened.list()[0]?.id).toBe(clientId);
+		expect(() => reopened.add("dupe", join(dir, "a"))).toThrow(ProjectConflict);
+		// A title rename is free (keeps the id); a move keeps the id too (the project's threads follow — see F4).
+		expect(reopened.update(clientId, { title: "Renamed" }).id).toBe(clientId);
+		expect(reopened.update(clientId, { path: join(dir, "b") })).toMatchObject({ id: clientId, cwd: join(dir, "b") });
+		// An id that is not the shape the T3 UI mints (a placeholder) is not a mint: the id derives from the path.
+		const placeholder = registry.add("P2", join(dir, "c"), { clientId: "client-minted" });
+		expect(placeholder.id).toBe(projectIdForPath(join(dir, "c")));
+	});
+
 	it("remove drops the entry and persists", async () => {
 		const dir = await tempRoot();
 		const registry = await FileProjectRegistry.open(dir);

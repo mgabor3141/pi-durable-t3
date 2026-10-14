@@ -33,10 +33,12 @@ We read all of it and keep no copy. The projection is rebuilt from the view on e
 | what | lifetime | if it's lost |
 |---|---|---|
 | the threads document: one row per thread, pointing at the conversation that is its head | forever | an empty sidebar; conversations are intact and boot repair promotes the heads |
+| the removal record in that document: one id (the removed thread's head conversation) per removal — truth, not a cache: it is what makes "a deleted thread stays deleted" survive a restart | forever, append-only (one number per removal) | a prompt admitted before a delete could resurrect the thread at the next promote or boot repair |
 | applied undos, remembered so a retry does not fork twice | forever, append-only | a retried undo forks again |
 | `pi.agent` per thread: model, thinking level, working directory, instructions | with the thread; forks and undos inherit it | the thread falls back to the configured defaults |
 
-Applied undos are the one field we write that grows without bound.
+Applied undos and the removal record are the fields we write that grow with use (one entry per undo / per removal).
+The document checkpoints on every write, so growth costs rows in one base write, never a delta per mutation.
 
 ## The bridge owns, on disk
 
@@ -59,8 +61,10 @@ instance file, in the data dir — is the UI's, and the running host writes it o
 
 `config.toml` is written by nobody at runtime. The instance file is **host-owned state shaped as input**: the
 running host rewrites it when the UI adds a project or changes the default model, atomically (temp → rename),
-so a crash never leaves a half-written registry. A thread never reaches it. Project ids are never stored —
-they are derived from each project's path.
+so a crash never leaves a half-written registry. A thread never reaches it. A project's id is stored only when
+the client minted it (T3's UI sends a UUID and navigates to it — the host must answer with the same id after a
+restart); an entry without one derives its id from the normalized path, so nothing is stored and nothing has to
+remember it. The path is the uniqueness key in both cases.
 
 ## The bridge owns, in memory — all of it correct to lose
 
@@ -68,7 +72,7 @@ they are derived from each project's path.
 |---|---|---|
 | the per-thread view cache, its subscribers, and the undo overlay | while a client is watching | clients re-subscribe and get a fresh snapshot |
 | the thread list, shells | process | rebuilt at start |
-| the live project registry (the instance file's projects, ids derived from each path) | process, kept in sync with `settings.json` by a subscription | reread from the instance file at the next projection: the id is a function of the folder's path, so T3's selection for it survives |
+| the live project registry (the instance file's projects; ids stored when client-minted, else derived from each normalized path) | process, kept in sync with `settings.json` by a subscription | reread from the instance file at the next projection: a minted id is stored, a derived id is a function of the folder's path, so T3's selection for it survives |
 | command id → the first result, so a retry returns it | process | the retry recomputes; durable dedup still stops the second write |
 | the projection sequence clock | process | projections get new sequence numbers |
 | pairing tickets and rate-limit buckets | seconds | the code is redeemed again; the window restarts |
@@ -79,8 +83,9 @@ None. The two that were here are closed.
 
 - **The client's message id** rides in the entry the host places the prompt as (an `app.user` entry's data), and its
   store is deleted.
-- **Every project id is derived from the project's normalized path**, in the instance file and from
-  `projects.mutate` alike, so nothing is minted and a project is identified by its folder, not a label.
+- **Project identity is settled**: the id is minted by whoever registers the project (the UI's UUID is honored
+  and stored; a client-less registration derives `p-<sha256(normalized path)>`), and the normalized path is the
+  uniqueness key. A rename is free; a root move keeps the id, and the project's threads follow.
 
 What is left is a transcript we do not own, one document of pointers, a credential file, and caches that are correct
 to lose.

@@ -68,8 +68,8 @@ path the user chose. Both neighbours already use these names: pi's `~/.pi/agent/
 ## State
 
 One document in the Harness's storage, `pi-durable-t3.threads`: one row per thread, pointing at the
-conversation that is its head, plus the applied `requestId`s of undos. It is the only state we add. The
-thread list is a read of it.
+conversation that is its head, the applied `requestId`s of undos, and the removal record (one id per removal —
+see Invariants). It is the only state we add. The thread list is a read of it.
 
 [`docs/state.md`](state.md) maps every piece of state by owner, lifetime, and the cost of losing it.
 
@@ -79,16 +79,21 @@ thread list is a read of it.
   navigates to it), honored exactly, so a retried create is a no-op. The host mints one only when it
   promotes a conversation (see Invariants).
 - **Conversation IDs:** minted by pi-durable.
-- **Project IDs are derived from the path, always.** Every project — one the UI added, one the integrator
-  once configured, a folder discovered at runtime — has an id that is a function of its normalized absolute
-  path (`p-<sha256(path)>`). A per-process random id would strand T3's selection for that folder on every
-  restart. Nothing mints an id, so nothing has to remember it, and it survives a restart unchanged. The
-  title is a free label: renaming a project changes only the label, never the id.
+- **Project IDs are minted by whoever registers the project.** T3's UI mints a UUID before the project exists
+  (it sends `projectId` on `project.create` and navigates to it), and the host honors it exactly — the same rule
+  as client-minted thread ids. For folders the host registers without a client id — an integrator-written entry,
+  a folder discovered from a conversation cwd — the host derives one from the normalized absolute path
+  (`p-<sha256(path)>`), so it is stable across restarts and nothing has to remember it. The id is opaque
+  thereafter: the host stores and compares it, never parses it. The title is a free label: renaming a project
+  changes only the label, never the id. A root MOVE keeps the id — and therefore the project's threads, which
+  reference it (the sidebar re-groups under the moved root; no re-key, no ghost).
 - **A thread's `projectId` is a foreign key.** The sidebar groups by it, and a project's `cwd` is looked up
   through the registry. A thread's work does not depend on the registry: existing conversations keep working
-  from the `cwd` their own conversation records, so a lost registry costs names, not work. A duplicate path
-  is refused (T3 refuses the same folder twice): a project IS a path; two entries for one path would make
-  the id collide and the grouping ambiguous.
+  from the `cwd` their own conversation records, so a lost registry costs names, not work. A thread's project
+  comes from its project first, then from the conversation's own recorded `pi.agent.cwd`; a thread whose project
+  is not registered is reported with its `projectId` and no invented project. **The path is the uniqueness key**
+  (T3 refuses the same folder twice): a duplicate path is refused — compared NORMALIZED, so `…/alpha` and
+  `…/alpha/` are one project, not two sharing an id.
 
 ## Invariants
 
@@ -102,7 +107,11 @@ The code is the spec for the operations. These are the rules the code cannot sho
   (`tx.scanConversations`) that is nobody's head. That covers a crash between a submit and its promote.
 - **Undo forks one entry before the message it reverts** — `Threads.rewind` (`src/threads.ts`) owns the entry
   arithmetic, and why: a fork includes its fork entry.
-- **A delete aborts first** — `Threads.remove` (`src/threads.ts`) — so boot repair sees nothing owed.
+- **A delete aborts first** — `Threads.remove` (`src/threads.ts`) — so boot repair sees nothing owed. And the removal
+  is durable: `Threads.remove` records the removed thread's head conversation in the threads document (one id per
+  removal; the doc checkpoints, so the record is cheap). The promote path, the undo-fork, and boot repair skip
+  tombstoned conversations — a prompt admitted before (or racing) a delete can never resurrect the thread, not now
+  and not after a restart.
 - **A prompt racing an undo converges either way:** prompt first and the undo sees the run and refuses;
   undo first and the prompt's promote makes its conversation a thread.
 - **Removing a project takes its threads with it** and never touches files on disk. T3's UI always sends
@@ -135,7 +144,9 @@ The T3-facing bridge is a local client of the chord objects; it owns no socket. 
 `t3/http.ts`) owns the HTTP port, speaks T3's orchestration v2 wire protocol over HTTP plus `/ws`, and drives the bridge
 in-process.
 
-- **Wire surface** matches stock T3, so its web app needs no changes: the 9 HTTP routes and `/ws`, with
+- **Wire surface** matches stock T3, so its web app needs no changes: the 10 HTTP routes (discovery, pairing,
+  tickets, the shell and thread snapshots, and the `/api/projects` + `/api/projects/mutate` parity pair) plus `/ws`,
+  with
   `orchestrationProtocol=2` and a one-shot ticket, Effect RPC over JSON, and a `serverVersion` equal to the
   vendored contracts version.
 - **Effect stays inside the facet;** the boundary is the RPC handler table.

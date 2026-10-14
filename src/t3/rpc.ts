@@ -291,20 +291,29 @@ export function makeRpcLayer(deps: RpcDeps) {
 		[`orchestration.getArchivedShellSnapshot`]: () =>
 			Effect.sync(() => ({ schemaVersion: 1, snapshotSequence: bridge.nextSequence(), projects: bridge.projects(), threads: [] })),
 		[`orchestration.subscribeThread`]: (input: Any) =>
-			fromListener<Any>((emit, end) => {
-				let first = true;
-				// The stream ends when the thread is deleted or the host does not know it.
-				return bridge.subscribeThread(
-					input.threadId,
-					({ sequence, projection }) => {
-						emit({ kind: "snapshot", snapshotSequence: sequence, projection });
-						if (first && input.requestCompletionMarker === true) emit({ kind: "synchronized" });
-						first = false;
-					},
-					end,
-				);
-			}),
+			Stream.unwrap(
+				Effect.sync(() =>
+					// A thread the host does not know fails the stream with the contract's typed not-found (the declared
+					// stream error of `subscribeThread`) — it never emits a fabricated snapshot and stays open.
+					bridge.hasThread(input.threadId)
+						? fromListener<Any>((emit, end) => {
+								let first = true;
+								// The stream ends when the thread is deleted.
+								return bridge.subscribeThread(
+									input.threadId,
+									({ sequence, projection }) => {
+										emit({ kind: "snapshot", snapshotSequence: sequence, projection });
+										if (first && input.requestCompletionMarker === true) emit({ kind: "synchronized" });
+										first = false;
+									},
+									end,
+								);
+							})
+						: Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` } as Any)),
+				),
+			),
 		[`orchestration.getThreadProjection`]: (input: Any) =>
+
 			toPromiseEffect(
 				() => bridge.projection(input.threadId),
 				(message) => new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message } as Any),

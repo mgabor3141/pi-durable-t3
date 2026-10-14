@@ -1,8 +1,10 @@
 // An in-memory `ProjectRegistry` for tests. It returns the projects it is given, ids included, so a test can reference
 // a project by a readable id (`"p"`, `"alpha"`) — the threads layer and bridge treat `projectId` as a foreign key
-// resolved through `registry.list()`, and how the id is produced (path-derived in production, given in a test) is the
-// registry's business, not theirs. The path-derived ids and duplicate-path refusal of the REAL registry are tested in
-// `settings.test.ts` / `registry.test.ts`, not by forcing every threads test to hash an id.
+// resolved through `registry.list()`, and how the id is produced (client-minted / path-derived in production, given in
+// a test) is the registry's business, not theirs. `add` honors a `clientId` verbatim (the test names its id; the shape
+// policy is the real registry's), and the path is the uniqueness key, compared normalized, as in the real registry.
+// The path-derived ids and duplicate-path refusal of the REAL registry are tested in `settings.test.ts`.
+import { resolve } from "node:path";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { Project } from "../config.ts";
 import type { ProjectRegistry, RegistryDefaults } from "../registry.ts";
@@ -30,18 +32,22 @@ export class TestRegistry implements ProjectRegistry {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
 	}
-	add(title: string | undefined, path: string): Project {
-		if (this.#projects.some((project) => project.cwd === path)) throw new ProjectConflict(path, this.#projects.find((project) => project.cwd === path)!.id);
-		const project: Project = { id: title ?? path, name: title ?? path, cwd: path };
+	add(title: string | undefined, path: string, options?: { readonly clientId?: string }): Project {
+		const cwd = resolve(path);
+		if (this.#projects.some((project) => resolve(project.cwd) === cwd)) throw new ProjectConflict(cwd, this.#projects.find((project) => resolve(project.cwd) === cwd)!.id);
+		const project: Project = { id: options?.clientId ?? title ?? cwd, name: title ?? cwd, cwd };
 		this.#projects = [...this.#projects, project];
 		this.#notify();
 		return project;
 	}
+	resolvePath(path: string): string {
+		return resolve(path);
+	}
 	update(id: string, patch: { title?: string; path?: string }): Project {
 		const index = this.#projects.findIndex((project) => project.id === id);
 		if (index < 0) throw new ProjectNotFound(id);
-		const next = { ...this.#projects[index]!, ...(patch.title === undefined ? {} : { name: patch.title }), ...(patch.path === undefined ? {} : { cwd: patch.path }) };
-		if (this.#projects.some((project, i) => i !== index && project.cwd === next.cwd)) throw new ProjectConflict(next.cwd, this.#projects.find((project, i) => i !== index && project.cwd === next.cwd)!.id);
+		const next = { ...this.#projects[index]!, ...(patch.title === undefined ? {} : { name: patch.title }), ...(patch.path === undefined ? {} : { cwd: resolve(patch.path) }) };
+		if (this.#projects.some((project, i) => i !== index && resolve(project.cwd) === resolve(next.cwd))) throw new ProjectConflict(next.cwd, this.#projects.find((project, i) => i !== index && resolve(project.cwd) === resolve(next.cwd))!.id);
 		const projects = [...this.#projects];
 		projects[index] = next;
 		this.#projects = projects;

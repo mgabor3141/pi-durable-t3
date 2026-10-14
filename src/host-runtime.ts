@@ -30,8 +30,19 @@ export async function openHostRuntime(
 	defaultModel: ModelRef | undefined,
 	options: { readonly onWarn?: (message: string, error: unknown) => void; readonly extensions?: readonly Extension[] } = {},
 ): Promise<HostRuntime> {
-	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd.
-	for (const project of projectRegistry.list()) await mkdir(project.cwd, { recursive: true });
+	// A project is a directory its threads run in; create any that are missing so the first tool call has a cwd. A
+	// registered path that cannot be made a directory (an existing FILE at that path — a hand-edited `settings.json`, the
+	// one input the UI cannot pre-validate) must NEVER keep the host from binding: the UI is the only place that can fix
+	// the entry, and a host that dies before its listener binds cannot be told to. Catch per project, warn naming the
+	// path, skip, and continue to the bind; a thread in a skipped project fails later with a typed error (`Threads.create`).
+	for (const project of projectRegistry.list()) {
+		try {
+			await mkdir(project.cwd, { recursive: true });
+		}
+		catch (error) {
+			options.onWarn?.(`project "${project.name}" at ${project.cwd} is not usable as a workspace root and was skipped: ${(error as Error).message}`, error);
+		}
+	}
 	const storage = await openNodeSqliteStorage(join(config.dataDir, "durable.db"));
 
 	const registry = createRegistry();
