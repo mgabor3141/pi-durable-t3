@@ -22,7 +22,7 @@ interface AuthFile {
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-export const newSecret = (bytes = 24) => randomBytes(bytes).toString("base64url");
+const newSecret = (bytes = 24) => randomBytes(bytes).toString("base64url");
 
 export class AuthStore {
 	readonly #file: string;

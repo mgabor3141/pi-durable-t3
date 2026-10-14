@@ -12,7 +12,7 @@ import type { BridgeConfig, ProjectConfig } from "./t3/config.ts";
 /** A bad `host.toml`; its message is meant for the user as is. */
 export class ConfigError extends Error {}
 
-export const DEFAULT_ROOT = "~/.pi/durable-t3";
+const DEFAULT_ROOT = "~/.pi/durable-t3";
 
 /** A project directory, resolved to an absolute `cwd` under the env root (the invariant every env builder relies on). */
 export type Project = { readonly id: string; readonly name: string; readonly cwd: string };

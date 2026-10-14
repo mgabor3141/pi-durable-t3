@@ -30,7 +30,7 @@ import type { ContentBlock, ConversationView, DurableMessage, EntryRecord, Model
 export const PROVIDER_INSTANCE_ID = "pi";
 export const PROVIDER_DRIVER = "pi";
 export const BASELINE_CHECKPOINT_ID = "cp-baseline";
-export const BASELINE_SCOPE_ID = "cs-baseline";
+const BASELINE_SCOPE_ID = "cs-baseline";
 
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
@@ -39,7 +39,7 @@ const time = (ms: number | undefined) => DateTime.makeUnsafe(ms ?? 0);
 
 const no = false;
 /** What pi (through this bridge) supports, in T3's capability vocabulary. */
-export const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
+const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
 	sessions: {
 		supportsMultipleProviderThreadsPerSession: no,
 		supportsModelSwitchInSession: true,
@@ -150,7 +150,7 @@ export interface ThreadMeta {
 }
 
 /** Bridge-side memory needed for a faithful projection. */
-export interface ThreadMemory {
+interface ThreadMemory {
 	/** Client message IDs by durable user entry ID, so optimistic sends dedupe. */
 	readonly messageIds: ReadonlyMap<number, string>;
 	/** Runs removed by rewinds, kept as `rolled_back` so the client can confirm the rewind. */
@@ -170,7 +170,7 @@ export interface RolledBackRun {
 	readonly checkpointScopes: readonly OrchestrationV2CheckpointScope[];
 }
 
-export interface ProjectedRun {
+interface ProjectedRun {
 	readonly runId: string;
 	readonly ordinal: number;
 	/** Entry ID of the user message that started the run. */

@@ -67,13 +67,13 @@ const UNSUPPORTED: Record<string, string> = {
 	"provider.switch": "pi is the only provider.",
 };
 
-export function unsupportedMessage(type: string): string {
+function unsupportedMessage(type: string): string {
 	if (UNSUPPORTED[type] !== undefined) return UNSUPPORTED[type];
 	if (type.startsWith("queued-") || type === "queue.resume") return "Editing queued messages is not supported by pi-durable-t3 yet.";
 	return `${type} is not supported by pi-durable-t3 yet.`;
 }
 
-export interface RpcDeps {
+interface RpcDeps {
 	readonly bridge: Bridge;
 	readonly catalog: ModelCatalog;
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
@@ -88,7 +88,7 @@ const defaultSettings = {
 	providerInstances: { [PROVIDER_INSTANCE_ID]: { driver: PROVIDER_INSTANCE_ID, displayName: "pi", enabled: true } },
 };
 
-export function serverConfig(deps: RpcDeps): ServerConfig {
+function serverConfig(deps: RpcDeps): ServerConfig {
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,

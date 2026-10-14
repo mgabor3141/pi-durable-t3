@@ -13,7 +13,7 @@ import { makeServerLayer } from "./http.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 
-export type FacetHandle = {
+type FacetHandle = {
 	readonly auth: AuthStore;
 	readonly bridge: Bridge;
 	pairingCode(): string;

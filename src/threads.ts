@@ -30,7 +30,7 @@ import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 
 /** A thread's parent, recorded when it is promoted or forked off another thread. */
-export type ThreadParent = { threadId: string; entryId: number | null };
+type ThreadParent = { threadId: string; entryId: number | null };
 
 /** One sidebar entry: a named pointer to a head conversation. Stored in `pi-durable-t3.threads`. */
 export type Thread = {
@@ -43,9 +43,9 @@ export type Thread = {
 };
 
 /** The applied result of an undo, so a retried `requestId` returns the same fork instead of forking again. */
-export type AppliedUndo = { requestId: string; head: number };
+type AppliedUndo = { requestId: string; head: number };
 
-export type ThreadsState = { threads: Thread[]; undos: AppliedUndo[] };
+type ThreadsState = { threads: Thread[]; undos: AppliedUndo[] };
 
 export const ThreadsDoc = defineDoc<ThreadsState>({
 	kind: "pi-durable-t3.threads",
@@ -54,7 +54,7 @@ export const ThreadsDoc = defineDoc<ThreadsState>({
 	initial: () => ({ threads: [], undos: [] }),
 });
 
-export type ThreadsDeps = {
+type ThreadsDeps = {
 	readonly harness: Harness;
 	readonly projects: readonly Project[];
 	readonly context?: Context;
@@ -75,15 +75,15 @@ export type ThreadsDeps = {
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
-export type CreateInput = { readonly threadId: string; readonly projectId: string; readonly title?: string };
-export type MessageInput = {
+type CreateInput = { readonly threadId: string; readonly projectId: string; readonly title?: string };
+type MessageInput = {
 	readonly threadId: string;
 	readonly conversationId: number;
 	readonly requestId: string;
 	readonly message: string;
 	readonly images?: readonly { mimeType: string; data: string }[];
 };
-export type RewindInput = {
+type RewindInput = {
 	readonly threadId: string;
 	readonly expectedHead: number;
 	readonly entryId: number;

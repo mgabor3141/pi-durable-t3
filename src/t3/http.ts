@@ -34,7 +34,7 @@ export const SERVER_VERSION = "0.0.45";
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
 
-export function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnvironmentDescriptor {
+function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnvironmentDescriptor {
 	const os = platform() === "darwin" ? "darwin" : platform() === "linux" ? "linux" : platform() === "win32" ? "windows" : "unknown";
 	const cpu = arch() === "arm64" ? "arm64" : arch() === "x64" ? "x64" : "other";
 	return () =>
@@ -53,14 +53,14 @@ export function makeDescriptor(bridge: Bridge, auth: AuthStore): () => Execution
  * comes from loopback, so the proxy's X-Forwarded-For (the tailnet client) is used instead; it is trusted only when
  * the connection itself is from loopback.
  */
-export function clientAddress(remote: string, forwarded: string | undefined): string {
+function clientAddress(remote: string, forwarded: string | undefined): string {
 	const loopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
 	const first = forwarded?.split(",")[0]?.trim();
 	return loopback && first ? first : remote;
 }
 
 /** `/api/auth/session` for a paired client: legacy `scopes` plus the full `permissions` list T3 gates actions on. */
-export function authenticatedSession(expiresAt: number) {
+function authenticatedSession(expiresAt: number) {
 	const permissions = [...AuthStandardClientScopes];
 	return {
 		authenticated: true,

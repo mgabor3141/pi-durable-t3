@@ -15,7 +15,7 @@ import { BasePrompt } from "./base-prompt.ts";
 import type { HostConfig } from "./config.ts";
 import { Threads } from "./threads.ts";
 
-export type HostRuntime = {
+type HostRuntime = {
 	readonly harness: Harness;
 	readonly threads: Threads;
 	/** Close to release the storage file. */

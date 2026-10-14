@@ -102,7 +102,7 @@ export const PiModels = local("pi.models", {
 
 // ── Error mapping ────────────────────────────────────────────────────────────
 
-export function toChordError(error: unknown): ChordError {
+function toChordError(error: unknown): ChordError {
 	if (isChordError(error)) return error;
 	if (error instanceof HostError) return invalid(error.code, error.message);
 	return new ChordError("unavailable", error instanceof Error ? error.message : String(error), { cause: error });

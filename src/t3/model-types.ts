@@ -46,7 +46,7 @@ export interface EntryRecord {
 	byTaskId?: number;
 }
 
-export interface ToolSlot {
+interface ToolSlot {
 	toolCallId?: string;
 	id?: string;
 	name?: string;

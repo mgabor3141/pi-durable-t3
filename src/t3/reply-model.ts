@@ -3,7 +3,7 @@
 import { createModels, fauxAssistantMessage, fauxProvider, type Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
 
-export type ReplyModel = {
+type ReplyModel = {
 	readonly models: Models;
 	readonly modelRef: ModelRef;
 	readonly catalog: { provider: string; modelId: string; name: string; reasoning: boolean }[];

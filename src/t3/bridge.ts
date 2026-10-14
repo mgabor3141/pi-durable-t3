@@ -67,7 +67,7 @@ interface ThreadState {
 	catalog: ModelRef[];
 }
 
-export type ShellItem =
+type ShellItem =
 	| { kind: "thread.updated"; sequence: number; location: "active"; thread: OrchestrationV2ThreadShell }
 	| { kind: "thread.removed"; sequence: number; location: "active"; threadId: string }
 	| { kind: "project.updated"; sequence: number; project: OrchestrationProjectShell };
