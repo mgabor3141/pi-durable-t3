@@ -2,7 +2,7 @@
 // checks the schema can't express. Project-path containment is the design's invariant — a project's cwd must resolve
 // under the env root, or a later env builder would run tools outside it — so `../x`, an absolute path outside the root,
 // and `a/../../b` are refused. `loadHostConfig` file behavior (missing vs. empty) is checked against a temp root.
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { chooseDefaultModel, loadHostConfig, parseHostToml } from "../src/config.ts";
@@ -190,5 +190,18 @@ describe("chooseDefaultModel (S1)", () => {
 	it("fails at start, naming ~/.pi/agent, when no models are available", () => {
 		expect(() => chooseDefaultModel([], undefined)).toThrow(/no models are available/);
 		expect(() => chooseDefaultModel([], undefined)).toThrow(/~\/\.pi\/agent/);
+	});
+});
+
+describe("host.example.toml", () => {
+	it("parses as written, with defaults applied", async () => {
+		const dir = await tempRoot();
+		const text = await readFile(new URL("../host.example.toml", import.meta.url), "utf8");
+		const config = parseHostToml(text, dir, "host.example.toml");
+		expect(config.projects.map((p) => p.name)).toEqual(["alpha"]);
+		expect(config.projects[0]!.cwd).toBe(join(dir, "alpha"));
+		expect(config.listen).toEqual({ host: "127.0.0.1", port: 3774 });
+		expect(config.webAppUrl).toBeUndefined();
+		expect(config.defaultModel).toBeUndefined();
 	});
 });

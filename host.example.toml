@@ -1,0 +1,32 @@
+# pi-durable-t3 host config. Copy to <root>/host.toml (default root: ~/.pi/durable-t3):
+#   mkdir -p ~/.pi/durable-t3 && cp host.example.toml ~/.pi/durable-t3/host.toml
+# Unknown keys are rejected, naming the file, the key path, and what was expected.
+# An empty file is also valid (defaults, no projects); a missing file is an error.
+# Keys are listed in TOML order: root scalars, then [t3], then [[projects]]. Uncomment in place.
+
+# Optional — every key below defaults to the commented value.
+# listen = "127.0.0.1:3774"                 # str  "host:port"; the facet address (the T3 app uses 3773)
+# web = "http://127.0.0.1:5733"             # str? your T3 web app URL; setting it prints a ready pairing link
+#                                           #      and pins CORS to it; `pnpm web` serves on 5733
+# default_model = "provider/model"          # str? model new threads start on (unset: first available from
+#                                           #      your pi config, ~/.pi/agent)
+# instructions = "AGENTS.md"                # str? file whose text becomes new threads' instructions; read at
+#                                           #      thread create (new threads only); `~` ok, relative to root;
+#                                           #      a missing file fails at start
+# [t3]                                      # the facet's own settings — every key optional
+# label = "pi"                              # str    environment name shown in T3
+# state_dir = "t3-auth"                     # str?   auth dir, under the root
+# token_ttl_days = 90                       # int    bearer-token lifetime
+# cors_origins = ["http://127.0.0.1:5733"]  # [str]  allowed CORS origins (default: the `web` origin)
+
+# Required: at least one project, or the host serves an empty environment. A project is a directory
+# under the root (absolute paths must stay under it); its threads run in it with `bash` and the file
+# tools, as the host user. Add one [[projects]] block per project; `name` is also the default path.
+[[projects]]
+name = "alpha"
+# path = "projects/alpha" # directory under the root (default: the name)
+
+# Notes: a fixed, reusable pairing token is test-only — set the PI_DURABLE_T3_PAIRING_TOKEN env
+# var, there is no key for it. The facet binds to loopback by default and requests with a
+# non-loopback `Host` header are rejected. With neither `web` nor `cors_origins` set the facet
+# answers `Access-Control-Allow-Origin: *`; every call needs a bearer token.

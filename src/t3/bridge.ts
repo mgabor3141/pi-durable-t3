@@ -577,7 +577,7 @@ export class Bridge {
 			state.rollbackRequestId = input.commandId;
 			state.rollbackFailure = null;
 			if (input.restoreFiles) {
-				return fail("pi-durable-t3 cannot restore files yet; use “Revert and keep changes”.");
+				return fail("pi-durable-t3 does not restore files; use “Revert and keep changes”.");
 			}
 			if (runs.some((run) => run.status === "running")) return fail("Interrupt the current turn before reverting.");
 

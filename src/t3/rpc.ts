@@ -63,14 +63,22 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.metadata.update": "Renaming threads is not supported by pi-durable-t3 yet.",
+	"projects.add": "Adding projects is not supported by pi-durable-t3 yet.",
+	"projects.remove": "Removing projects is not supported by pi-durable-t3 yet.",
+	"filesystem.browse": "Browsing directories is not supported by pi-durable-t3 yet.",
+	"server.updateSettings": "Changing settings is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
 };
 
+/**
+ * A refusal the UI shows verbatim. "yet" claims we intend to build it: only the planned set says so, and
+ * an untriaged call is refused flatly. `docs/capabilities.md` keeps the same statuses.
+ */
 function unsupportedMessage(type: string): string {
 	if (UNSUPPORTED[type] !== undefined) return UNSUPPORTED[type];
 	if (type.startsWith("queued-") || type === "queue.resume") return "Editing queued messages is not supported by pi-durable-t3 yet.";
-	return `${type} is not supported by pi-durable-t3 yet.`;
+	return `${type} is not supported by pi-durable-t3.`;
 }
 
 interface RpcDeps {
@@ -180,10 +188,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 					}
 					break;
 				case "thread.runtime-mode.set":
-					if (command.runtimeMode !== "full-access") throw new CommandError("pi runs in full-access mode only (no approvals yet).");
+					if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
 					break;
 				case "thread.interaction-mode.set":
-					if (command.interactionMode !== "default") throw new CommandError("Plan mode is not supported by pi-durable-t3 yet.");
+					if (command.interactionMode !== "default") throw new CommandError("Plan mode is not supported by pi-durable-t3.");
 					break;
 				default:
 					if (!SIDEBAR_NO_OPS.has(command.type)) throw new CommandError(unsupportedMessage(command.type));
@@ -281,23 +289,13 @@ export function makeRpcLayer(deps: RpcDeps) {
 			all[tag] = implemented;
 			continue;
 		}
-		if (RpcSchema.isStreamSchema(rpc.successSchema) && tag.startsWith("terminal.")) {
-			// The terminal drawer waits on this stream; fail it so T3 shows an error instead of a blank terminal.
-			all[tag] = () => {
-				noteStub(tag);
-				return Stream.die(new CommandError("Terminals are not supported by pi-durable-t3 yet."));
-			};
-		} else if (RpcSchema.isStreamSchema(rpc.successSchema)) {
-			all[tag] = () => {
-				noteStub(tag);
-				return Stream.never;
-			};
-		} else {
-			all[tag] = () => {
-				noteStub(tag);
-				return Effect.die(new CommandError(`${tag} is not supported by pi-durable-t3`));
-			};
-		}
+		// Every refusal names why, streams included: a stream that never ends leaves T3 waiting on a blank
+		// panel, and a plain `${tag} is not supported` hides that a planned call is only missing "yet".
+		all[tag] = () => {
+			noteStub(tag);
+			const message = tag.startsWith("terminal.") ? "Terminals are not supported by pi-durable-t3." : unsupportedMessage(tag);
+			return RpcSchema.isStreamSchema(rpc.successSchema) ? Stream.die(new CommandError(message)) : Effect.die(new CommandError(message));
+		};
 	}
 
 	const handlersLayer = (WsRpcGroup as Any).toLayer(all) as Layer.Layer<never>;

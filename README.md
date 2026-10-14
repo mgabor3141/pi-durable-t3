@@ -1,64 +1,35 @@
 # pi-durable-t3
 
+A bridge that allows using T3 Code as a frontend for pi-durable. Experimental.
+
 https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
 
-Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness — T3 Code as a frontend for pi-durable.
-
-Unofficial; not affiliated with T3 Tools or Earendil. Experimental. Built against pi `1.2.0`. Design: [`docs/design.md`](docs/design.md).
-
-You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a
-T3 facet that speaks T3's wire protocol. T3 then shows your Harness as one environment, its projects and
-threads in the sidebar.
+Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a T3 facet that speaks T3's wire protocol. T3 then shows your Harness as one environment, its projects and threads in the sidebar. Design: [`docs/design.md`](docs/design.md).
 
 ## Set up
 
-pi's packages install from npm (`@earendil-works/*` at `1.2.0`); no local pi clone is needed. Then one script
-fetches the pinned T3 Code and builds the pieces the host needs:
-
 ```sh
 pnpm install
-pnpm setup:t3     # shallow-fetches t3code at the pin (dev/setup-t3.sh); vendors @t3tools/contracts (+ LICENSE)
-                  # into gitignored vendor/ and builds the web app into gitignored web-dist/
+pnpm setup:t3     # shallow-fetches t3code at the pin; vendors @t3tools/contracts (+ LICENSE) into gitignored
+                  # vendor/ and builds the web app into gitignored web-dist/ (a few minutes, needs network)
 ```
-
-The contracts are vendored locally (not linked into the T3 tree) so the facet and the contracts share one Effect
-copy — two Effect instances break the schema brand encode. `web-dist/` is the built SPA you serve in **Open T3**.
 
 ## Configure
 
-Write `<root>/host.toml` (parsed with `smol-toml` and validated against one schema). Every key's type and default is
-annotated below; **unknown keys are rejected** (a typo fails fast, naming the file, key path, and what was expected).
-
-```toml
-listen        = "127.0.0.1:3774"            # str  "host:port" — the facet address        (default "127.0.0.1:3774"; the T3 app uses 3773)
-web           = "http://127.0.0.1:5733"     # str? your T3 web app URL; set → print a pairing link   (unset)
-default_model = "anthropic/claude-sonnet-4-5"  # str? "provider/model" new threads start on        (unset → first available)
-instructions  = "AGENTS.md"     # str? file whose text becomes new threads' instructions   (unset; `~`/relative to root)
-
-[t3]                                        # the facet's own settings — every key optional
-label          = "pi"           # str    environment name shown in T3               (default "pi")
-state_dir      = "t3-auth"      # str?   auth/threads dir, under the root           (default "t3-auth")
-token_ttl_days = 90             # int    bearer-token lifetime in days              (default 90)
-cors_origins   = ["http://127.0.0.1:5733"]  # [str] allowed CORS origins   (default: the `web` origin, or none)
-
-[[projects]]                    # one per project; at least one to make threads
-name = "alpha"                  # str    unique id; also the default path
-path = "projects/alpha"         # str?   directory, relative to the root            (default: name)
+```sh
+mkdir -p ~/.pi/durable-t3
+cp host.example.toml ~/.pi/durable-t3/host.toml
 ```
 
-Checks beyond the types, run after validation: each project `path` must resolve **under the root** (`../x`, an
-absolute path outside it, and `a/../../b` are refused; an absolute path that stays under the root is fine), project
-names must be unique, `listen` must be a `host:port` with an **explicit** port `1-65535` (no leading zeros — a bare
-`host:` or `:0` is rejected), and `default_model` must be `provider/model`. An empty
-`host.toml` is valid (defaults, no projects); a missing file is an error. There is no `pairing_token` key: a fixed,
-reusable pairing token is set only with the `PI_DURABLE_T3_PAIRING_TOKEN` env var (for tests); it is not meant to live
-in `host.toml` and that key is rejected. By default a host has no CORS origins beyond the `web` origin, and when bound
-to loopback it rejects requests whose `Host` header is not a loopback name (DNS-rebinding guard).
-
-Every new thread starts from a built-in **base prompt** (the model is a coding agent; its own working directory and the
-platform). `instructions` adds a file's text on top: it is read when a thread is **created** and
-stored on that thread's conversation (so forks/undo copies keep it); editing the file affects **new threads only**, and
-a missing/unreadable file fails at start. Explicit only — nothing is auto-discovered.
+[`host.example.toml`](host.example.toml) is a commented reference: the required part is at least one
+`[[projects]]` block (a directory under the root, in which its threads run `bash` and the file tools, as
+the host user), and every optional key is shown commented with its default (`listen`, `web`,
+`default_model`, `instructions`, `[t3]`). Unknown keys are rejected, naming the file, the key path, and
+what was expected; an empty file is valid (defaults, no projects), a missing file is an error. Defaults
+keep the facet on loopback, requests with a non-loopback `Host` are rejected, and the fixed reusable
+pairing token is env-var-only, for tests. CORS is pinned to `web` when you set it; with `web` and
+`cors_origins` both unset the facet answers `Access-Control-Allow-Origin: *` — every call still needs a
+bearer token, so a browser can't read the API cross-site, but set `web` to pin it.
 
 ## Run
 
@@ -66,71 +37,49 @@ a missing/unreadable file fails at start. Explicit only — nothing is auto-disc
 pnpm start -- --root ~/.pi/durable-t3
 ```
 
-This opens a local Harness with the coding tools (`read`/`write`/`edit`/`bash`) running each thread in its
-project's directory, serves the T3 facet, and prints a one-time pairing code and a full pairing link.
+The host opens a Harness with the coding tools (`read`/`write`/`edit`/`bash`), runs each thread in its project's directory, serves the T3 facet, and prints a one-time pairing code and link. Model catalog and credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials? Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start -- --root …`.
 
-For a real model, the model catalog and their credentials come from your pi config in `~/.pi/agent` (override the
-directory with `PI_CODING_AGENT_DIR`); `default_model` is a `provider/model` you have access to there. To run without
-any credentials, use the offline reply model instead:
+New threads start from a built-in base prompt (coding agent, its working directory, the platform). `instructions` appends a file's text to it, read at thread create: editing the file affects new threads only, and a missing file fails at start.
 
-```sh
-PI_DURABLE_T3_FAKE=1 pnpm start -- --root ~/.pi/durable-t3
-```
+## Pair
 
-## Open T3
-
-Serve the built web app (a static SPA; `web` serves `web-dist/` on 5733 by default, override `WEB_DIST`/`WEB_PORT`):
+Serve the built web app (static SPA from `web-dist/`, on 5733; override `WEB_DIST`/`WEB_PORT`):
 
 ```sh
 pnpm web
 ```
 
-Then open the pairing link the host printed at start. With `web` set it is exactly:
+Open the pairing link the host printed at start. With `web` set it is exactly:
 
 ```
 <web>/pair?host=<facet>#token=<code>      e.g.  http://127.0.0.1:5733/pair?host=http%3A%2F%2F127.0.0.1%3A3774#token=AbCdEf
 ```
 
-(For the T3 **desktop/mobile** app, choose **Add environment** and paste the facet's own `/pair#token=<code>`
-link the host also prints.) Mint another code with `pnpm start pair --root <root>`.
+(For the T3 **desktop/mobile** app, choose **Add environment** and paste the facet's `/pair#token=<code>` link the host also prints.) Mint another code with `pnpm start pair --root <root>`.
 
-`src/main.ts` is the **reference host** (wires everything below); `src/host-runtime.ts` is the Harness wiring (installs
-the coding tools and the base prompt, and reads `instructions` per new thread); `src/t3/` is the facet.
+## Layout
+
+`src/main.ts` is the **reference host**: config, models, shutdown, wiring. `src/host-runtime.ts` opens the Harness (coding tools, base prompt, per-thread cwd); `src/threads.ts` is the threads layer over pi-durable; `src/t3/` is the facet (the only place Effect lives). `dev/` holds the setup and smoke scripts.
 
 ## Tests
 
-`pnpm test` and `pnpm typecheck` need no credentials and never touch `~/.pi` or the network. One test,
-`test/live-model.test.ts`, runs a single real-model turn end to end, but only when `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model>`
-is set (it uses your `~/.pi/agent` credentials then); it is skipped otherwise.
+`pnpm test` and `pnpm typecheck` need no credentials and never touch `~/.pi` or the network. `test/live-model.test.ts` runs one real-model turn end to end, only with `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model>` set; it is skipped otherwise.
 
-## Browser smoke
+`pnpm smoke` drives the real T3 web app in a browser (pair → prompt → reply → undo) against a throwaway root on its own ports. Needs `web-dist/` and Chromium.
 
-One Playwright smoke drives the real T3 web app: pair, prompt, see the offline reply, then undo.
-It brings up a throwaway root and both servers on its own ports (4911 / 4920), then tears them down.
-It needs the pinned web app and Chromium:
+## Capabilities
 
-```sh
-# WEB_DIST defaults to ./web-dist (built by setup:t3); CHROMIUM defaults to /usr/bin/chromium.
-pnpm smoke
-```
+[T3's API calls and what this host answers](docs/capabilities.md), marked ✅ works, 🔜 soon, 🕐 later,
+❌ never, each with its reason. The short version: threads, prompts, steering, interrupts, per-thread
+models and undo work today; forks, renames and the project registry are next; git, terminals, file panels
+and previews are refused on purpose, because the agent has `bash` and works in real repos itself.
 
-## Known limitations
+A refused call answers T3 with a message, so the UI shows why, and state is never left half-changed.
+Refused *on purpose* says so; refused *for now* says "yet".
 
-Short version of [the design's limitations](docs/design.md#limitations):
-
-- **No forking.** Fork / merge-back and archived threads are refused (thread copy on undo/promotion is internal).
-- **No per-project `AGENTS.md`.** Only the explicit `instructions` file is read (at thread create); nothing is
-  auto-discovered from a project directory.
-- **Storage only grows.** pi-durable has no delete/GC; deleting a thread drops its pointer, not the conversation.
-- **T3 panels are stubbed.** The git, terminal, diff and VCS/PR views are refused — the paired agent runs `bash` and
-  writes files with no approvals, as the host user.
-- **A shell running at a crash finishes on its own.** pi-durable runs shells detached; after a crash the command keeps
-  going and the model is told the call may have partially run.
-- **Reconnect after a restart is not instant.** T3's socket reconnects on its own cadence — after a host restart it can
-  take a minute (or more) to come back.
+The paired agent runs `bash` with **no approvals, as the host user**, in the project directories you
+add. Loopback is the default bind; `host.toml` holds the address, CORS and the Host check.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The pinned T3 contracts are vendored under their own MIT license
-(`vendor/contracts/LICENSE`, Copyright (c) 2026 T3 Tools Inc.); pi is used from npm. Unofficial; not affiliated
-with T3 Tools or Earendil.
+MIT. Vendored T3 contracts stay MIT (T3 Tools); see `LICENSE`.

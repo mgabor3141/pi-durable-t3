@@ -46,8 +46,9 @@ const HostTomlSchema = Type.Object(
 				// tests only. A reusable static token in a file is the wrong default for a control plane that runs `bash`
 				// with no approvals, so putting it in `host.toml` is now rejected here as an unknown key.
 				token_ttl_days: Type.Integer({ default: 90, minimum: 1 }),
-				// CORS origins: unset defaults to the `web` origin only (none if `web` is unset), so the default sends no
-				// wildcard `Access-Control-Allow-Origin` alongside the `authorization` header. Set it explicitly to override.
+				// CORS origins: unset takes the `web` origin. With `web` unset the list is empty, and Effect's CORS router
+				// answers `Access-Control-Allow-Origin: *` — harmless while every call needs a bearer token and the Host
+				// check stands, but set `web` to pin it. Set this key to override either way.
 				cors_origins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 			},
 			{ additionalProperties: false, default: {} },
