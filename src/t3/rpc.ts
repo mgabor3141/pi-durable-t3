@@ -12,6 +12,7 @@ import {
 	RpcScopeAuthorization,
 	type ServerConfig,
 	ServerSettingsError,
+	UsageReadError,
 	WsRpcGroup,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -31,6 +32,7 @@ import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
+import { piUsagePricing, summarizeUsage } from "./usage.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -293,6 +295,20 @@ export function makeRpcLayer(deps: RpcDeps) {
 					}),
 			}),
 		"server.reportClientActivity": () => Effect.succeed({}),
+		// T3's usage view. `server.getUsageSummary` is answered from what pi-durable records per turn (tokens, cost,
+		// model) — replicated bucketing from T3, provider-reported cost, fields pi has no value for omitted (see
+		// `usage.ts`). An invalid window is T3's typed `UsageReadError` (the client shows it); a scan that throws while
+		// reading conversations is `scanFailed`. `server.refreshUsageRates` is on the client's refresh path: it answers
+		// this host's pricing truthfully (no rate table — pi prices its own turns), never a fetched LiteLLM table.
+		"server.getUsageSummary": (input: Any) =>
+			Effect.tryPromise({
+				try: () => bridge.usageConversations().then((conversations) => summarizeUsage(input, conversations, bridge.config.stateDir)),
+				catch: (error) =>
+					error instanceof UsageReadError
+						? error
+						: new UsageReadError({ reason: "scanFailed", detail: (error as Error).message || "The usage scan failed.", cause: error }),
+			}),
+		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
 		// The config stream: the store's change signal is what emits `settingsUpdated`, the event on which the projection
 		// replaces `config.settings` (capabilities.md).
 		subscribeServerConfig: () =>

@@ -18,7 +18,7 @@ import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
-import { type ConversationView, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
+import { type ConversationView, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
@@ -505,6 +505,31 @@ export class Bridge {
 		} finally {
 			release();
 		}
+	}
+
+	/**
+	 * Every conversation on this host, as the usage view reads it: the head view of each thread in the directory, with
+	 * its entries and the conversation id that names them. Used by `server.getUsageSummary` (see `usage.ts`). Each head
+	 * is loaded through the same acquire path as a projection, so a thread the host cannot open is skipped rather than
+	 * guessed at; a thread with no usage contributes no records.
+	 */
+	async usageConversations(timeoutMs = 30_000): Promise<{ readonly conversationId: number; readonly entries: EntryRecord[] }[]> {
+		const threadIds = this.#directory.map((thread) => thread.threadId);
+		const loaded = await Promise.all(
+			threadIds.map(async (threadId) => {
+				try {
+					await this.projection(threadId, timeoutMs);
+				} catch {
+					return undefined;
+				}
+				const state = this.#threads.get(threadId);
+				const view = state?.view;
+				const conversationId = state?.conversationId;
+				if (view === undefined || conversationId === undefined) return undefined;
+				return { conversationId, entries: view.entries };
+			}),
+		);
+		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
 	/** Subscribe to full projection snapshots of a thread. The first snapshot arrives once the transcript loads.

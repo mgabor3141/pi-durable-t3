@@ -37,6 +37,20 @@ export type ContentBlock =
 	| { type: "image"; data: string; mimeType: string }
 	| { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> };
 
+/** pi-ai's per-response token and cost accounting (`Usage` in `@earendil-works/pi-ai`), the subset the usage view
+ * reads. `cost` is pi's own catalog-price estimate; `reasoning` is a subset of `output`; the input/cache counters are
+ * disjoint. pi reports no cache-savings figure and no speed tier, so neither appears here. */
+export interface PiUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cacheWrite1h?: number;
+	reasoning?: number;
+	totalTokens: number;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+}
+
 export type DurableMessage =
 	| { role: "user"; content: string | ContentBlock[]; timestamp?: number }
 	| {
@@ -47,6 +61,10 @@ export type DurableMessage =
 			timestamp?: number;
 			provider?: string;
 			model?: string;
+			/** The provider's own model id for this response; pi's usage reader prices on it when present. */
+			responseModel?: string;
+			/** Token counts and cost pi recorded for this turn (pi-ai `Usage`). */
+			usage?: PiUsage;
 	  }
 	| {
 			role: "toolResult";
@@ -55,6 +73,8 @@ export type DurableMessage =
 			content: ContentBlock[];
 			isError?: boolean;
 			timestamp?: number;
+			/** Usage from the tool execution itself, when the tool reports it (not part of the model context accounting). */
+			usage?: PiUsage;
 	  };
 
 export interface EntryRecord {
