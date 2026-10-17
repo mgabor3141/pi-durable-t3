@@ -60,7 +60,7 @@ export type DurableMessage =
 export interface EntryRecord {
 	id: number;
 	kind: string;
-	model?: DurableMessage[];
+	model?: readonly DurableMessage[];
 	data?: unknown;
 }
 

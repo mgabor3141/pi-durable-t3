@@ -37,6 +37,15 @@ const ThreadsCell = Type.Object({
 	threads: Type.Array(ThreadSchema),
 });
 
+// A thread-search match, as `pi.threads.search` answers it (the threads layer's `ThreadSearchMatch`, ms timestamps).
+const ThreadSearchMatchSchema = Type.Object({
+	threadId: Type.String(),
+	projectId: Type.String(),
+	source: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
+	snippet: Type.String(),
+	messageCreatedAt: Type.Union([Type.Number(), Type.Null()]),
+});
+
 // The head's durable view, carried through as-is (an opaque JSON value; the facet reads the fields it needs).
 const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown() });
 
@@ -71,6 +80,9 @@ export const PiThreads = local("pi.threads", {
 		// `cwd` is a folder of its own under the project (a Scratch thread's); absent, the project's root.
 		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()) }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
+		// T3's thread search over the threads the host has: a query and a limit, answered with T3's match shape (ms timestamps;
+		// the facet converts to ISO for the wire).
+		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
 	},
 });
 
@@ -158,6 +170,13 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 						await threads.remove(args.threadId);
 						await publish(ctx);
 						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				search: async (args) => {
+					try {
+						return await threads.search(args.query, args.limit);
 					} catch (error) {
 						throw toChordError(error);
 					}

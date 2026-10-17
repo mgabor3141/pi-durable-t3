@@ -23,6 +23,7 @@ import {
 import type { Harness } from "@earendil-works/pi-durable";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
+import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import type { ProjectRegistry } from "./registry.ts";
 
@@ -144,6 +145,38 @@ export class Threads {
 	async list(): Promise<Thread[]> {
 		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 		return state?.threads.map((thread) => ({ ...thread })) ?? [];
+	}
+
+	/**
+	 * T3's `orchestration.searchThreads`, answered from the conversations this host already has (design.md). It mirrors
+	 * T3's `ThreadSearch.search` semantics (in `t3/thread-search.ts`): every thread's committed user/assistant messages are
+	 * read, matched by an ASCII-case-insensitive substring, ranked per thread (a user message first, then newest, then
+	 * lowest entry id), and ordered globally (user-first thread, then most-recently-updated, then thread id), capped at
+	 * `limit`. A thread is searched by its HEAD conversation — the sidebar's live thread. Deleted threads are absent from
+	 * the document, so a search never names one (design.md, Invariants).
+	 */
+	async search(query: string, limit: number): Promise<ThreadSearchMatch[]> {
+		const threads = await this.list();
+		const threadUpdatedAt = new Map<string, number>();
+		const candidates: SearchCandidate[] = [];
+		for (const thread of threads) {
+			// T3's `threads.updated_at`: the most-recent activity on the head. A message's timestamp is the activity this
+			// host records, so the newest message time (falling back to creation) is the thread's recency.
+			let updatedAt = thread.createdAt;
+			const conversation = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
+			if (conversation === undefined) continue;
+			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
+			for (const entry of entries as readonly import("./t3/model-types.ts").EntryRecord[]) {
+				const candidate = searchCandidate(entry, thread.threadId, thread.projectId);
+				if (candidate === undefined) continue;
+				if (candidate.messageCreatedAt !== undefined && candidate.messageCreatedAt !== null && candidate.messageCreatedAt > updatedAt) {
+					updatedAt = candidate.messageCreatedAt;
+				}
+				candidates.push(candidate);
+			}
+			threadUpdatedAt.set(thread.threadId, updatedAt);
+		}
+		return searchThreads(candidates, threadUpdatedAt, query, limit);
 	}
 
 	async thread(threadId: string): Promise<Thread | undefined> {

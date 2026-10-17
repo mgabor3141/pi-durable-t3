@@ -61,13 +61,15 @@ origin (`webAppUrl`). What the agent may do is the Harness's business, not the b
 ## What works
 
 Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings, adding and removing projects, and T3's Connections settings (mint a pairing link,
-list the paired devices, revoke them). Git, terminals, file panels and previews are refused on purpose: the
-agent works in real folders with `bash`. Every call and its status:
-[`docs/capabilities.md`](docs/capabilities.md).
+crash resume, T3's settings, adding and removing projects, thread search (the command palette and sidebar
+"search thread messages"), and T3's Connections settings (mint a pairing link, list the paired devices, revoke
+them). Git, terminals, file panels and previews are refused on purpose: the agent works in real folders with
+`bash`. Every call and its status: [`docs/capabilities.md`](docs/capabilities.md).
 
 Known limitations:
 - T3 shows only threads created through T3, not conversations started by other code on the same Harness.
+- Thread search reads every thread's head conversation on each query (like T3's full-table scan); there is no
+  persistent index, so a very large thread count is scanned per keystroke (the client debounces input).
 - T3's first-run wizard lists only Codex and Claude as agents; pi appears once the computer is added.
 - T3 shows "Server update available" when the app is newer than the pinned T3 version. Dismissing it is safe.
 

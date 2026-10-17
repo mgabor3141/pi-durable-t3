@@ -4,6 +4,7 @@ import {
 	FilesystemBrowseError,
 	type ExecutionEnvironmentDescriptor,
 	OrchestrationDispatchCommandError,
+	OrchestrationSearchThreadsError,
 	OrchestrationV2DispatchCommandError,
 	OrchestrationV2GetThreadProjectionError,
 	OrchestrationV2ThreadLaunchError,
@@ -390,6 +391,13 @@ export function makeRpcLayer(deps: RpcDeps) {
 				(message) => new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, projectId: input.projectId, message }),
 			),
 		[`orchestration.dispatchCommand`]: dispatch,
+		// T3's command-palette / sidebar thread search, answered from the host's conversations (design.md, replication
+		// rule). The client validates the query (2..200) and limit; `limit` defaults to T3's 50.
+		[`orchestration.searchThreads`]: (input: Any) =>
+			toPromiseEffect(
+				() => bridge.searchThreads(input.query, input.limit ?? 50),
+				(message) => new OrchestrationSearchThreadsError({ message }),
+			),
 	};
 
 	const all: Record<string, (payload: Any) => Any> = {};

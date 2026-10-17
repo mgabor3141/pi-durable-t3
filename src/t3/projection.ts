@@ -20,6 +20,7 @@ import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { textOf } from "./thread-search.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
 export const PROVIDER_INSTANCE_ID = "pi";
@@ -76,10 +77,6 @@ export interface ProjectionResult {
 	readonly runs: readonly ProjectedRun[];
 }
 
-export const textOf = (content: string | ContentBlock[] | undefined): string =>
-	typeof content === "string"
-		? content
-		: (content ?? []).flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
 const thinkingOf = (content: ContentBlock[]): string =>
 	content.flatMap((block) => (block.type === "thinking" ? [block.thinking] : [])).join("");
 

@@ -6,6 +6,7 @@ import { stat } from "node:fs/promises";
 import type { Ctx, Handle, Host } from "@earendil-works/chord";
 import type {
 	OrchestrationProjectShell,
+	OrchestrationSearchThreadsResult,
 	OrchestrationV2ShellSnapshot,
 	OrchestrationV2ThreadProjection,
 	OrchestrationV2ThreadShell,
@@ -702,6 +703,25 @@ export class Bridge {
 		this.#syncDirectory();
 		const state = this.#threads.get(threadId);
 		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
+	}
+
+	/**
+	 * T3's `orchestration.searchThreads`, answered from the host's threads (`pi.threads.search`, whose scan lives in the
+	 * threads layer). The result is T3's shape: message timestamps cross the wire as ISO, the same conversion the projection
+	 * makes; the matching, ranking and ordering are T3's (`t3/thread-search.ts`).
+	 */
+	async searchThreads(query: string, limit: number): Promise<OrchestrationSearchThreadsResult> {
+		const handle = this.#host.get(PiThreads, {});
+		const matches = await this.#host.root((c) => handle.search({ query, limit }, c));
+		return {
+			matches: matches.map((match) => ({
+				threadId: match.threadId,
+				projectId: match.projectId,
+				source: match.source,
+				snippet: match.snippet,
+				messageCreatedAt: match.messageCreatedAt === null ? null : new Date(match.messageCreatedAt).toISOString(),
+			})),
+		} as unknown as OrchestrationSearchThreadsResult;
 	}
 
 	/** Refresh the directory mirror from the `pi.threads` handle (its cell value is authoritative after an awaited

@@ -37,7 +37,7 @@ describe("the message id the host writes", () => {
 		expect(placed.length, "submit wrote an application user entry").toBe(1);
 		expect((placed[0]!.data as { messageId: string }).messageId, "the entry carries the client's id").toBe(clientMessageId);
 		// The entry is a user turn the projection recognizes (kind alone is not enough: it must carry a user message).
-		expect((placed[0]!.model as { role: string }[])[0]!.role).toBe("user");
+		expect((placed[0]!.model as readonly { role: string }[])[0]!.role).toBe("user");
 
 		// The consumer, on the entries the producer wrote: the projected id is the client's, not the fallback.
 		const result = projectThread(meta, viewOf(entries), { rolledBack: [] });
