@@ -1,5 +1,5 @@
-// Boot the T3 facet beside the host's objects: build the auth store, model catalog, and bridge, then launch the Effect
-// HTTP/`/ws` server. The bridge is a local client of the chord objects, so there is no socket and no separate process.
+// Boot the T3 facet beside the host's objects: the auth store, model catalog and bridge, then the Effect HTTP/`/ws`
+// server. The bridge is a local client of the chord objects — no socket, no separate process.
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import * as Effect from "effect/Effect";
@@ -20,6 +20,9 @@ type FacetHandle = {
 	pairingUrls(code: string): string[];
 	/** Resolves once the HTTP server is listening; rejects with the bind error (e.g. `EADDRINUSE`) if it cannot start. */
 	readonly ready: Promise<void>;
+	/** Resolves when the server fiber ENDS on its own after `ready`; what to do about it is the integrator's policy —
+	 * the library never kills the process. */
+	readonly closed: Promise<void>;
 	close(): Promise<void>;
 };
 
@@ -35,10 +38,8 @@ export function startFacet(deps: {
 	const bridge = new Bridge(config, log, host);
 	bridge.start();
 
-	// Bind the HTTP server eagerly so we can await "listening" before the host prints "ready", and surface a bind error
-	// (a port already in use) to the caller. Keep the launch fiber: `close()` must interrupt it to release the port and
-	// let the process exit on Ctrl-C, and a fiber that ends on its own once it was ready means we can no longer serve —
-	// which is fatal, so exit non-zero rather than sit there printing nothing.
+	// Bind eagerly: await "listening" before the host prints "ready", and surface a bind error to the caller. Keep the
+	// launch fiber — `close()` interrupts it to release the port.
 	const httpServer = createServer();
 	const ready = new Promise<void>((resolve, reject) => {
 		httpServer.once("listening", () => resolve());
@@ -46,15 +47,17 @@ export function startFacet(deps: {
 	});
 	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer })) as Effect.Effect<never>);
 	let closing = false;
-	// Only after it has come up: an unexpected end of the server fiber is fatal. A bind failure is reported via the
-	// rejected `ready` (handled in `main`), so arm this only once we are actually serving.
-	void ready.then(() =>
-		void Effect.runPromise(Fiber.await(serverFiber) as Effect.Effect<unknown>).then(() => {
-			if (closing) return;
-			log.warn("t3 facet stopped; the host cannot serve, exiting");
-			process.exit(1);
-		}),
-	);
+	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
+	// call, never the library's.
+	const closed = new Promise<void>((resolve) => {
+		void ready.then(() =>
+			void Effect.runPromise(Fiber.await(serverFiber) as Effect.Effect<unknown>).then(() => {
+				if (closing) return;
+				log.warn("t3 facet stopped; the host cannot serve");
+				resolve();
+			}),
+		);
+	});
 
 	const pairingCode = (): string => auth.createPairingCode();
 	const pairingUrls = (code: string): string[] => {
@@ -74,6 +77,7 @@ export function startFacet(deps: {
 		pairingCode,
 		pairingUrls,
 		ready,
+		closed,
 		close: async () => {
 			closing = true;
 			await bridge.close();

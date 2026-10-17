@@ -27,6 +27,17 @@ const TOKEN = "probe-token-shell5-0123456789";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type ShellItem = { kind: string; projectId?: string; project?: { id: string; title: string; workspaceRoot?: string } };
 const shellItems = (chunks: Frame[]): ShellItem[] => chunks.flatMap((frame) => (frame.values ?? []) as ShellItem[]);
+type ShellSnapshot = { projects: { id: string; title: string }[] };
+/** The stream's opening `snapshot` frame (the baseline), waiting for it to arrive. */
+async function untilSnapshot(chunks: Frame[]): Promise<{ kind: string; snapshot: ShellSnapshot }> {
+	for (let i = 0; i < 60; i++) {
+		const frame = chunks.find((f) => (f.values as { kind?: string }[] | undefined)?.some((v) => v.kind === "snapshot"));
+		const found = (frame?.values as { kind: string; snapshot: ShellSnapshot }[] | undefined)?.find((v) => v.kind === "snapshot");
+		if (found !== undefined) return found;
+		await sleep(50);
+	}
+	throw new Error(`no shell snapshot frame in ${JSON.stringify(chunks).slice(0, 400)}`);
+}
 
 it("a rename and a move of a BOOT-loaded project emit project.updated so a connected sidebar follows (store #5)", async () => {
 	const port = 4984;
@@ -43,13 +54,14 @@ it("a rename and a move of a BOOT-loaded project emit project.updated so a conne
 	if (!(await waitListening(port))) throw new Error(`host did not bind: ${host.out()}`);
 	const ws = await connectWs(port, await pair(port, TOKEN));
 	try {
-		// The boot-loaded project is in the snapshot (the baseline), under a path-derived id.
-		const shell = exitValue(await ws.call("orchestration.getArchivedShellSnapshot", {}), "snapshot") as { projects: { id: string; title: string }[] };
-		expect(shell.projects.map((p) => p.title), "the boot project is present").toEqual(["Alpha"]);
-		const projectId = shell.projects[0]!.id;
-
+		// The shell snapshot is the surface projects ride on, and the baseline a client renders at connect: the
+		// boot-loaded project is in it, under a path-derived id. (Archived shells are a typed refusal — archive is
+		// 🔜 in capabilities.md — so this reads the live stream, which is also the stream the edits must reach.)
 		const shellId = await ws.open("orchestration.subscribeShell", { requestCompletionMarker: true });
 		await ws.call("server.probe", {}); // barrier: the shell stream is subscribed before the rename
+		const snapshot = (await untilSnapshot(ws.chunks(shellId))).snapshot;
+		expect(snapshot.projects.map((p) => p.title), "the boot project is present").toEqual(["Alpha"]);
+		const projectId = snapshot.projects[0]!.id;
 
 		// Rename (title only) — the old code emitted nothing for a boot project.
 		const renamed = exitValue(await ws.call("projects.mutate", { type: "project.update", projectId, title: "Renamed", commandId: "sh5-rename" }), "rename") as { title: string };

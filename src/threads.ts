@@ -1,8 +1,5 @@
-// The threads layer: the only state this host adds is one document, `pi-durable-t3.threads`, in the Harness's own storage.
-// The integrator brings a Harness (storage, extensions, tools, env builder) and a project list; this adds named
-// pointers ("threads") to conversations, and the writes that keep a pointer honest. Every write names the conversation the
-// client shows and carries a `requestId`; a write to a conversation that is no longer any thread's head promotes it to
-// a new child thread — conflicts become forks, never "stale" errors.
+// The threads layer: the one document this host adds, `pi-durable-t3.threads` — named pointers ("threads") to the
+// Harness's conversations. Every rule it enforces is an invariant in docs/design.md; this file is the code, not the case.
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -29,16 +26,16 @@ import type { Project } from "./config.ts";
 
 import type { ProjectRegistry } from "./registry.ts";
 
-/** The entry kind this host places a client prompt as, so the client's message id rides durably in the entry's `data`.
- * It must not start with `pi.` (pi-durable's rule for an input's own entry kind); the facet reads the id back in the projection. */
+/** The entry kind a client prompt is placed as, carrying the client's message id in its `data` (state.md: no side
+ * store). It must not start with `pi.` — pi-durable's namespace for an input's own entry kinds. */
 export const APP_USER_ENTRY = "app.user";
 
-/** Entry kinds that name a user turn, for the rewind's `not_rewindable` check: pi-durable's default placement and this
- * host's id-carrying placement. Mirrors the facet's `USER_ENTRY_KINDS` (the host and facet each own the shared literal). */
+/** Entry kinds that name a user turn, for the rewind's `not_rewindable` check; the facet owns a copy of this literal. */
 const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
 
-/** A thread's parent, recorded when it is promoted or forked off another thread. */
-type ThreadParent = { threadId: string; entryId: number | null };
+/** The thread this one was promoted or forked from — what T3's projection reports as `parentThreadId` with
+ * `relationshipToParent: "fork"` (design.md). Only the id is kept. */
+type ThreadParent = { threadId: string };
 
 /** One sidebar entry: a named pointer to a head conversation. Stored in `pi-durable-t3.threads`. */
 export type Thread = {
@@ -54,10 +51,8 @@ export type Thread = {
 type AppliedUndo = { requestId: string; head: number };
 
 /**
- * The document state. `removed` is the REMOVAL RECORD: one id per removal — the head conversation of every thread
- * `remove` deleted. It exists so a removal is durable: a prompt admitted before (or racing) a delete must not
- * resurrect the thread through the promote path or boot repair. The doc checkpoints on every write, so the record
- * costs one base row, never a delta per removal.
+ * The document state. `removed` is the REMOVAL RECORD — one id per removal, the reason a deleted thread stays
+ * deleted across restarts (design.md, state.md). The doc checkpoints on every write (state.md).
  */
 type ThreadsState = { threads: Thread[]; undos: AppliedUndo[]; removed: number[] };
 
@@ -66,34 +61,25 @@ export const ThreadsDoc = defineDoc<ThreadsState>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ threads: [], undos: [], removed: [] }),
-	// Checkpoint on every write, as `pi.agent` does. This is a session (current-only) document, so a base write drops the
-	// delta rows it supersedes and the stored doc stays at one base row. With no policy the doc appends a delta row per
-	// create/remove/undo and grows without bound. Nothing reads this document's history — `snapshotAsOf` is not even
-	// offered for a session doc, and every read here is a current read (`snapshot` / `tx.doc` / `watchDoc`).
+	// Checkpoint on every write, as `pi.agent` does: every read of this session document is a current read (state.md).
 	checkpointWhen: () => true,
 });
 
 type ThreadsDeps = {
 	readonly harness: Harness;
-	/** The live project registry (the bridge's file). A project's id is derived from its path, so a UI add/remove is
-	 * visible without rebuilding this layer; threads look their project's cwd up here at create. */
+	/** The live project registry: the foreign key's target, and the source of a new thread's `cwd`. */
 	readonly registry: ProjectRegistry;
-	/**
-	 * Called when a prompt's run is committed but its promote-into-a-thread step fails. The turn is running and will be
-	 * adopted by `repair()` on the next start or by a later write to the conversation; the submit itself succeeded.
-	 */
+	/** Notified when a prompt's commit lands and its promote fails; boot repair adopts the run (design.md). */
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
-type CreateInput = { readonly threadId: string; readonly projectId: string; readonly title?: string };
+type CreateInput = { readonly threadId: string; readonly projectId: string };
 type MessageInput = {
 	readonly threadId: string;
 	readonly conversationId: number;
 	readonly requestId: string;
 	readonly message: string;
-	readonly images?: readonly { mimeType: string; data: string }[];
-	/** The client's id for this message. When present the input is placed as an `app.user` entry carrying it, so the
-	 * projection reads the id back from the entry (no side store); absent leaves the default `pi.user` placement. */
+	/** The client's id for this message, placed in the entry's `data` (state.md: no side store). */
 	readonly messageId?: string;
 };
 type RewindInput = {
@@ -104,8 +90,8 @@ type RewindInput = {
 };
 
 /**
- * Copy a resolved agent's configuration into an `AgentChange` for a fresh conversation. Only the fields the head
- * actually carries are set, so undo-to-baseline reproduces the same model, tools, prompt text, and cwd.
+ * Copy a resolved agent's configuration into an `AgentChange` for a fresh conversation: only the fields the head
+ * carries are set, so an undo to baseline reproduces the same model, thinking level, tools, prompt text and cwd.
  */
 function agentCopy(agent: Awaited<ReturnType<Conversation["agent"]>>): AgentChange {
 	return {
@@ -165,29 +151,22 @@ export class Threads {
 	}
 
 	/**
-	 * A new thread pointer with a freshly minted id and the current time. `parent` is set only when the thread is
-	 * promoted or forked off another; a plain `create` names its own threadId and does not go through here.
+	 * A new thread pointer with a minted id; `parent` is set only for a promoted or forked thread (a plain `create`
+	 * names its own id).
 	 */
 	#newThread(head: number, projectId: string, title: string, parent?: ThreadParent): Thread {
 		return { threadId: randomUUID(), projectId, head, title, createdAt: Date.now(), ...(parent === undefined ? {} : { parent }) };
 	}
 
 	/**
-	 * One commit: if `threadId` already names a thread, return it (a retried create is a no-op and creates no second
-	 * conversation); else create a conversation with the project's `cwd` and add the thread.
-	 *
-	 * The `projectId` is a foreign key, and it is checked AT COMMIT TIME: the registry lives in the other store
-	 * (`settings.json`, mutated synchronously by `project.delete`), so a check outside the commit can pass while the
-	 * project is being removed under it — the row would land with a `projectId` that exists nowhere, durable across a
-	 * restart. Commits serialize on the one storage, so the registry read inside the closure sees every mutation that
-	 * landed before it, and a create racing a delete is refused rather than stranded.
+	 * One commit: a retried create is a no-op, and the `projectId` foreign key is checked AT COMMIT TIME (design.md,
+	 * IDs: the registry lives in the other store, so only a check inside the commit sees a project removed mid-call).
 	 */
 	async create(input: CreateInput): Promise<Thread> {
 		const project = this.projects.find((candidate) => candidate.id === input.projectId);
 		if (project === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
-		// A registered path that exists as a non-directory (a hand-edited registry naming a file — boot skipped it with a
-		// warning) cannot host a thread: refuse with the typed project error naming the path, not a run stranded in a cwd
-		// no tool can enter. A MISSING cwd is left alone: boot creates registered folders, and create stays usable.
+		// A registered path that exists as a non-directory cannot host a thread: refuse typed, naming the path
+		// (design.md, Invariants). A MISSING cwd is left alone: the integrator's boot creates registered folders.
 		let cwdIsDirectory = true;
 		try {
 			cwdIsDirectory = statSync(project.cwd).isDirectory();
@@ -200,19 +179,17 @@ export class Threads {
 			const doc = await tx.doc(ThreadsDoc);
 			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
 			if (existing !== undefined) return { ...existing };
-			// The FK, re-checked inside the commit (see the method comment): the project must be registered when the
-			// row is written, not merely when the call started.
+			// The FK, re-checked inside the commit (design.md, IDs).
 			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			// A fresh thread carries the project's cwd and nothing else: the bridge decides nothing about the agent,
-			// and the client names the model on the create/launch/prompt that follows (`t3/bridge.ts`).
+			// A fresh thread carries the project's cwd and nothing else (design.md: the bridge decides nothing about the agent).
 			await configure(tx, conversation.id, { cwd: committed.cwd });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,
 				head: conversation.id,
-				title: input.title ?? "",
+				title: "",
 				createdAt: Date.now(),
 			};
 			doc.threads.push(thread);
@@ -224,28 +201,20 @@ export class Threads {
 	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission> {
 		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		const images = input.images ?? [];
-		const content =
-			images.length === 0
-				? input.message
-				: [
-						{ type: "text" as const, text: input.message },
-						...images.map((image) => ({ type: "image" as const, mimeType: image.mimeType, data: image.data })),
-					];
+		const content = input.message;
 		const submission = await conversation.submit(
 			{
 				type: "input",
 				requestId: input.requestId,
 				content,
 				...(whenBusy === undefined ? {} : { whenBusy }),
-				// Carry the client's message id in the entry's data: an application entry the projection reads the id back from.
+				// The client's message id rides in the entry's data (state.md: no side store).
 				...(input.messageId === undefined ? {} : { entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } }),
 			},
 			BACKGROUND_CONTEXT,
 		);
-		// The turn is committed and running. Promoting it into a thread is best-effort: if that commit fails, the prompt
-		// still succeeded (the run is live), and it is adopted by `repair()` on the next start or a later write — so do
-		// not report a false failure to the caller.
+		// Promote is its own commit and best-effort (design.md): the run is live, so a failed promote is a warning, not a
+		// false failure to the caller.
 		try {
 			await this.promote(input.threadId, input.conversationId);
 		} catch (error) {
@@ -255,10 +224,9 @@ export class Threads {
 	}
 
 	/**
-	 * The project that OWNS a conversation, from the conversation's own recorded `pi.agent.cwd` through the registry:
-	 * the project rooted at the cwd, or the one whose root covers it. `undefined` when no project covers it — a
-	 * promoted conversation is then REFUSED (ownerless, logged), never attached to the first registered project and
-	 * never written with `""`: a `projectId` is a foreign key, and list order is not a fact about the conversation.
+	 * The project that OWNS a conversation, from its own recorded `pi.agent.cwd` through the registry: the project
+	 * rooted at the cwd, or the one whose root covers it. `undefined` when none covers it, and a promoted conversation
+	 * is then REFUSED — a `projectId` is a foreign key, never a guess from list order (design.md, IDs).
 	 */
 	async #projectForConversation(tx: Tx, conversationId: number): Promise<string | undefined> {
 		const agent = await tx.doc(AgentDoc, conversationId as ConversationId);
@@ -270,17 +238,14 @@ export class Threads {
 	}
 
 	/**
-	 * One commit: if no thread's head is `conversationId`, add a child thread for it (inheriting the named thread's
-	 * title). The project comes from the conversation's OWN cwd (see `#projectForConversation`); a conversation no
-	 * project covers is not promoted — it stays ownerless and the log names it. Concurrent promotions of the same
-	 * conversation add exactly one thread: commits serialize on the one storage, so the second sees the head already
-	 * present.
+	 * One commit: a conversation that is nobody's head becomes a child thread of the named thread, taking the project
+	 * from its OWN cwd. Commits serialize on the one storage, so racing promotes add exactly one thread (design.md).
 	 */
 	async promote(viaThreadId: string, conversationId: number): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			if (doc.threads.some((candidate) => candidate.head === conversationId)) return;
-			// A tombstoned conversation stays removed: the removal record outranks any prompt admitted before it.
+			// A tombstoned conversation stays removed: the removal record outranks the prompt (design.md, Invariants).
 			if ((doc.removed ?? []).includes(conversationId)) return;
 			const projectId = await this.#projectForConversation(tx, conversationId);
 			if (projectId === undefined) {
@@ -288,7 +253,7 @@ export class Threads {
 				return;
 			}
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
-			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId, entryId: null }));
+			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId }));
 		}, BACKGROUND_CONTEXT);
 	}
 
@@ -300,13 +265,11 @@ export class Threads {
 	}
 
 	/**
-	 * T3's undo, one commit. `entryId` names the USER turn being reverted; the whole run disappears. Because a fork is
-	 * inclusive of its fork entry, the new conversation forks at the entry just BEFORE `entryId` (dropping the reverted
-	 * user message too); if `entryId` is the first entry, nothing precedes it, so a fresh conversation is created that
-	 * copies the head's agent config (undo to baseline → empty). A retried `requestId` returns its earlier result
-	 * (idempotent). The entry must start a user turn in `expectedHead`'s active context (`not_rewindable`). If the named
-	 * thread's head is still `expectedHead`, refuse `turn_running` while it has a run or queued input, else move the head
-	 * to the new conversation; if the head has moved on, leave the thread and add the new conversation as a child thread.
+	 * T3's undo, one commit: fork at the entry just BEFORE the reverted user turn (a fork is inclusive of its fork
+	 * entry, so the reverted message goes with it), or create a fresh conversation carrying the head's agent config
+	 * when nothing precedes it. A retried `requestId` returns its earlier fork; the entry must start a user turn in
+	 * `expectedHead`'s active context (`not_rewindable`); a head that has moved on gets the fork as a child thread
+	 * (design.md, Invariants).
 	 */
 	async rewind(input: RewindInput): Promise<number> {
 		const expectedHead = input.expectedHead as ConversationId;
@@ -318,9 +281,8 @@ export class Threads {
 		if (target === undefined || !USER_ENTRY_KINDS.has(target.kind)) {
 			throw hostError("not_rewindable", `entry ${input.entryId} is not a user turn in the head's active context`);
 		}
-		// A fork is INCLUSIVE of its fork entry, so to drop the reverted user turn we fork at the entry just before it.
-		// If the reverted turn is the first entry there is nothing before it to fork at: create a fresh conversation
-		// that copies the head's agent config (model, tools, prompt text, cwd) instead, so undo to baseline is empty.
+		// A fork is INCLUSIVE of its fork entry: fork one entry earlier to drop the reverted turn; a first entry has
+		// nothing before it, so baseline is a fresh conversation with the head's agent config (design.md, Invariants).
 		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
 		const headAgent = forkAt === undefined ? await head.agent(BACKGROUND_CONTEXT) : undefined;
 		return this.#harness.commit(async (tx) => {
@@ -340,34 +302,29 @@ export class Threads {
 				return fork.id;
 			}
 			if (thread === undefined) {
-				// The named thread has NO row: its removal won the race (the row drop and the removal record commit
-				// together). The fork is a FRESH conversation — no tombstone names it — so the tombstone's promise,
-				// "a removed thread stays removed", must be enforced at this door too: the undo of a deleted thread
-				// adds no row. The fork stays ownerless (the log names it); a deleted thread's content never
-				// resurfaces as a child of the deletion. The receipt is recorded, so a retried requestId returns
-				// this fork instead of forking a second one.
+				// The named thread has NO row: its removal won the race. The fork is a FRESH conversation, so no tombstone
+				// names it — the removal record's promise is enforced at this door: the undo of a deleted thread adds no
+				// row. The receipt is recorded, so a retried `requestId` returns this fork instead of forking again.
 				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} is removed; the fork stays ownerless`, undefined);
 				doc.undos.push({ requestId: input.requestId, head: fork.id });
 				return fork.id;
 			}
-			// The head moved on: leave the thread and record the fork as a new child thread — in the project the FORK's
-			// own cwd covers (it inherits the head's agent config). No cover, no row: an ownerless fork is logged, never
-			// a thread under the first registered project and never an empty `projectId`.
+			// The head moved on: leave the thread and record the fork as a child thread, in the project the FORK's own
+			// cwd covers. No cover, no row (design.md, IDs).
 			const projectId = await this.#projectForConversation(tx, fork.id);
 			if (projectId === undefined) {
 				this.#onWarn(`not promoting the undo fork ${fork.id} of thread ${input.threadId}: its cwd matches no registered project; it stays ownerless`, undefined);
 				return fork.id;
 			}
-			doc.threads.push(this.#newThread(fork.id, projectId, thread.title, { threadId: input.threadId, entryId: input.entryId }));
+			doc.threads.push(this.#newThread(fork.id, projectId, thread.title, { threadId: input.threadId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
 		}, BACKGROUND_CONTEXT);
 	}
 
 	/**
-	 * Delete a thread: stop its head's turn, then drop the pointer. Conversations stay (pi-durable has no delete), but the
-	 * run must not outlive the thread: aborting the head withdraws any queued inputs, interrupts the running turn, and
-	 * waits for idle — so boot `repair()` sees nothing owed and cannot resurrect a deleted thread.
+	 * Delete a thread: abort its head first — so boot repair sees nothing owed — then drop the pointer and tombstone
+	 * the removal. Conversations stay: storage only grows (design.md, Invariants).
 	 */
 	async remove(threadId: string): Promise<void> {
 		const thread = await this.thread(threadId);
@@ -379,38 +336,29 @@ export class Threads {
 			const index = doc.threads.findIndex((candidate) => candidate.threadId === threadId);
 			if (index < 0) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 			doc.threads.splice(index, 1);
-			// The removal is DURABLE: one id per removal (the head conversation). The promote path, the undo-fork and
-			// boot repair skip tombstoned conversations — a prompt racing this removal can never resurrect the thread.
+			// The removal is DURABLE: the promote path, the undo fork and boot repair skip tombstoned conversations.
 			const removed = (doc.removed ??= []);
 			if (!removed.includes(thread.head)) removed.push(thread.head);
 		}, BACKGROUND_CONTEXT);
-		// The abort above ran BEFORE the commit, and a prompt admitted in that window — the row was still there, so
-		// its admission succeeded — is a live turn on a thread the document has just removed. The tombstone keeps it
-		// from resurrecting the thread; the removal must also win the RUN: interrupt the head again so no admitted
-		// turn streams on after the deletion. A removed thread has no live turn.
+		// The removal must also win the RUN: interrupt the head again after the commit, so a prompt admitted in the
+		// abort→commit window leaves no live turn on a thread the document has removed (design.md, Invariants).
 		await head?.abort(BACKGROUND_CONTEXT);
 	}
 
 	/**
-	 * Boot repair, one commit: promote every conversation that has a run or a queued input but is nobody's head — the
-	 * crash-between-submit-and-promote gap. A promoted conversation takes its project from its OWN recorded cwd
-	 * (`#projectForConversation`); a conversation no registered project covers is not promoted — it stays ownerless
-	 * and the log names it. Existing conversations keep working from the cwd they record; a lost registry costs
-	 * names, not work.
+	 * Boot repair, one commit: promote every conversation that has a run or queued input and is nobody's head, taking
+	 * each project from its OWN recorded cwd and skipping tombstones (design.md, Invariants).
 	 */
 	async repair(): Promise<void> {
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const heads = new Set(doc.threads.map((thread) => thread.head));
-			// The tombstones are a SET: the scan is per conversation, the removals only ever grow, and `includes`
-			// per record made boot repair quadratic in a store's history (review store N3). The count is what the
-			// operator needs — the ids are in the document — so the log gets ONE line, not one per tombstone.
+			// The tombstones are a SET: the scan is per conversation and the record only grows.
 			const removed = new Set(doc.removed ?? []);
 			let tombstoned = 0;
 			for (const record of await scanConversations(tx)) {
 				if (heads.has(record.id)) continue;
-				// A tombstoned conversation stays removed — even when it owes work (a prompt admitted during the delete
-				// that the abort could not outrun). The removal record outranks boot repair's adoption.
+				// A tombstoned conversation stays removed even when it owes work (design.md, Invariants).
 				if (removed.has(record.id)) {
 					tombstoned++;
 					continue;
@@ -425,8 +373,7 @@ export class Threads {
 				heads.add(record.id);
 			}
 			if (tombstoned > 0) {
-				// The count leads, the ids follow (capped): the operator sees the scale in one line, and can name
-				// the conversations without opening the document.
+				// One line: the count leads, capped ids follow (the ids are in the document).
 				const ids = [...removed].slice(0, 8).join(", ");
 				this.#onWarn(`boot repair: ${tombstoned} removed conversation${tombstoned === 1 ? "" : "s"} (tombstoned) stayed unthreaded: ${ids}${tombstoned > 8 ? ` (+${tombstoned - 8} more)` : ""}`, undefined);
 			}

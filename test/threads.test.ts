@@ -58,7 +58,7 @@ describe("prompt racing undo — both orders", () => {
 
 		const child = (await threads.list()).find((candidate) => candidate.head === oldHead);
 		expect(child, "a thread now points at the old head").toBeDefined();
-		expect(child?.parent).toEqual({ threadId: "t", entryId: null });
+		expect(child?.parent).toEqual({ threadId: "t" });
 	});
 
 	it("prompt first: a rewind while that run is live is refused, leaving the head and the live run", async () => {

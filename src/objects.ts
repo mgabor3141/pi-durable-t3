@@ -1,8 +1,5 @@
-// The server facet: the chord2 surface served on the host named `server`, over a `Threads` layer and the model catalog.
-// These are thin adapters over `Threads`: they mirror the thread list and each thread's head view as observable state
-// and map host errors to `ChordError`s, carrying the host's code as the error's `reason`. Per-thread objects are keyed by
-// `{ threadId }`; `pi.threads` is the eager directory. The T3 bridge (`t3/bridge.ts`) loads beside the facet and calls
-// these in-process.
+// The chord objects: the surface design.md's "chord objects" table describes — thin adapters over `Threads` that mirror
+// the thread list and each head view as observable state and answer host codes as `ChordError` reasons.
 import { Type } from "typebox";
 import {
 	type Ctx,
@@ -25,7 +22,7 @@ import { ThreadsDoc, type Thread, type Threads } from "./threads.ts";
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
 const ProjectSchema = Type.Object({ id: Type.String(), name: Type.String(), cwd: Type.String() });
-const ParentSchema = Type.Object({ threadId: Type.String(), entryId: Type.Union([Type.Number(), Type.Null()]) });
+const ParentSchema = Type.Object({ threadId: Type.String() });
 const ThreadSchema = Type.Object({
 	threadId: Type.String(),
 	projectId: Type.String(),
@@ -44,14 +41,12 @@ const ThreadsCell = Type.Object({
 const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown() });
 
 const ThreadKey = Type.Object({ threadId: Type.String() });
-const ImageInput = Type.Object({ mimeType: Type.String(), data: Type.String() });
 const MessageArgs = Type.Object({
 	conversationId: Type.Number(),
 	requestId: Type.String(),
 	message: Type.String(),
-	/** The client's id for this message; placed as an `app.user` entry's data so the projection reads it back. */
+	/** The client's id for this message; it rides in the `app.user` entry's data (state.md: no side store). */
 	messageId: Type.Optional(Type.String()),
-	images: Type.Optional(Type.Array(ImageInput)),
 });
 const AbortArgs = Type.Object({ conversationId: Type.Number() });
 const RewindArgs = Type.Object({ expectedHead: Type.Number(), entryId: Type.Number(), requestId: Type.String() });
@@ -72,7 +67,8 @@ export const PiThreads = local("pi.threads", {
 	input: Type.Object({}),
 	members: {
 		threads: ThreadsCell,
-		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), title: Type.Optional(Type.String()) }), ThreadSchema),
+		// A thread starts untitled: the create command carries no title (capabilities.md; the 🔜 rename owns the field).
+		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String() }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 	},
 });
@@ -114,7 +110,10 @@ function toChordError(error: unknown): ChordError {
 	return new ChordError("unavailable", error instanceof Error ? error.message : String(error), { cause: error });
 }
 
-const EMPTY_VIEW = { conversation: { id: 0 }, entries: [], docs: {} } as unknown as ConversationView;
+/** The view of a thread that is not loaded yet: NO conversation, no entries, no docs, and no head id — a magic `0`
+ * looks like a target, and a write that read one aims at a conversation that does not exist. `Bridge.#awaitHead`
+ * waits for the real id (design.md: cold-thread writes await the head). */
+const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as ConversationView;
 
 const untilAborted = (signal: AbortSignal): Promise<void> =>
 	new Promise((resolve) => {
@@ -210,12 +209,12 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 	api.serve(PiController, ({ threadId }, _principal, _self) => {
 		const submit = async (
-			args: { conversationId: number; requestId: string; message: string; messageId?: string; images?: { mimeType: string; data: string }[] },
+			args: { conversationId: number; requestId: string; message: string; messageId?: string },
 			whenBusy: "steer" | "followUp" | undefined,
 		): Promise<{ submissionId: number }> => {
 			try {
 				const submission = await threads.submit(
-					{ threadId, conversationId: args.conversationId, requestId: args.requestId, message: args.message, ...(args.messageId === undefined ? {} : { messageId: args.messageId }), ...(args.images === undefined ? {} : { images: args.images }) },
+					{ threadId, conversationId: args.conversationId, requestId: args.requestId, message: args.message, ...(args.messageId === undefined ? {} : { messageId: args.messageId }) },
 					whenBusy,
 				);
 				return { submissionId: submission.id };
@@ -309,7 +308,7 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 // ── The facet the host loads ────────────────────────────────────────────────
 
-/** Serve every object above as one facet. The T3 bridge is a local client of these objects, loaded beside this facet. */
+/** Serve every object above as one facet (the T3 bridge is a local client of these, loaded beside this facet). */
 export function createServerFacet(threads: Threads, models: Models): Facet {
 	return { name: "pi-durable-t3", ...defineFacet((api) => serveServerObjects(api, threads, models)) };
 }

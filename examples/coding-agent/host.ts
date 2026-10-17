@@ -66,7 +66,7 @@ async function main(): Promise<void> {
 		stateDir: config.stateDir,
 		label: config.label,
 		...(config.webAppUrl === undefined ? {} : { webAppUrl: config.webAppUrl }),
-		corsOrigins: config.corsOrigins,
+		...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),
 		tokenTtlSeconds: config.tokenTtlSeconds,
 		...(pairingToken === undefined ? {} : { pairingToken }),
 		log,
@@ -85,11 +85,15 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
+	// A facet that stops serving on its own cannot answer a paired client again. That is fatal for this host, and
+	// the policy is the host's: say so and exit non-zero, leaving the supervisor to restart it.
+	void attach.closed.then(() => process.exit(1));
+
 	const projects = registry.list();
 	log.info("pi-durable-t3 ready", { address, dataDir: config.dataDir, projects: projects.map((p) => `${p.name}=${p.cwd}`) });
 	// An empty registry is valid and connectable, but a host with no projects cannot make threads — say so, don't
 	// leave it a mystery. The UI can add one (the directory picker → "Add project"); the file is written on the UI's behalf.
-	if (projects.length === 0) log.warn("no projects configured: the host serves an empty environment and cannot make threads; add one from the T3 UI, or write projects into the instance file settings.json in the data dir");
+	if (projects.length === 0) log.warn("no projects yet: add one from the T3 UI (Add project)");
 	// One pairing code per start; codes are shown, never logged.
 	const code = attach.pairingCode();
 	console.log(`\nPairing code (single use): ${code}`);

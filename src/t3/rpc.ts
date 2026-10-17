@@ -64,6 +64,8 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.fork": "Forking is not supported by pi-durable-t3 yet.",
 	"thread.merge_back": "Merging a fork back is not supported by pi-durable-t3 yet.",
 	"thread.archive": "Archiving is not supported by pi-durable-t3 yet.",
+	"orchestration.subscribeArchivedShell": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
+	"orchestration.getArchivedShellSnapshot": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
 	"thread.unarchive": "Archiving is not supported by pi-durable-t3 yet.",
 	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
@@ -73,8 +75,8 @@ const UNSUPPORTED: Record<string, string> = {
 };
 
 /**
- * A refusal the UI shows verbatim. "yet" claims we intend to build it: only the planned set says so, and
- * an untriaged call is refused flatly. `docs/capabilities.md` keeps the same statuses.
+ * The refusal the UI shows verbatim: "yet" claims we intend to build it, so only the planned set says so and an
+ * untriaged call is refused flatly (capabilities.md keeps the same statuses).
  */
 function unsupportedMessage(type: string): string {
 	if (UNSUPPORTED[type] !== undefined) return UNSUPPORTED[type];
@@ -90,9 +92,8 @@ interface RpcDeps {
 	readonly log: Logger;
 }
 
-/** The host-wide settings T3 reads: the settings store's current document (the file decoded over the contract's
- * defaults, patched by `server.updateSettings`). The store is the source of truth, so `getSettings`,
- * `updateSettings`, and the config snapshot all agree — exactly as T3's server answers from its settings service. */
+/** The host-wide settings T3 reads: the settings store's current document — one source every settings read answers from
+ * (state.md). */
 function serverSettings(deps: RpcDeps) {
 	return deps.bridge.config.settings.current();
 }
@@ -101,7 +102,7 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,
-		// A host with no projects is still connectable: `serverCwd` (./config.ts) falls back to the state dir, so a cwd is
+		// A host with no projects stays connectable: `serverCwd` (./config.ts) falls back to the state dir, so a cwd is
 		// always answerable and a project-less host cannot throw here and drop a paired client into a reconnect loop.
 		cwd: serverCwd(deps.bridge.config),
 		keybindingsConfigPath: `${deps.bridge.config.stateDir}/keybindings.json`,
@@ -208,10 +209,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.getConfig": () => Effect.sync(() => serverConfig(deps)),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
-		// T3's settings write: a PATCH merged into the current settings (`updateSettings`), optionally with one
-		// provider-instance mutation applied to the same snapshot (`updateProviderInstance`). The store persists, the
-		// full settings answer, and the change signal emits `settingsUpdated` — T3's semantics, interpreted nowhere:
-		// the bridge validates the model against no catalog, computes no defaults, and rewrites no keys.
+		// T3's settings write, replicated (design.md): a PATCH merged into the current settings, optionally with one
+		// provider-instance mutation applied to the same snapshot.
 		"server.updateSettings": (input: Any) =>
 			Effect.try({
 				try: () => {
@@ -219,11 +218,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const patch = input?.patch ?? {};
 					return input?.providerInstanceMutation === undefined ? settings.update(patch) : settings.updateProviderInstance(input.providerInstanceMutation, patch);
 				},
-				// The contract's error for this call, BUILT as the contract's class: `settingsPath` and `operation` are
-				// required fields, and the hand-rolled `{_tag, message}` shape used to fail the schema encode at the RPC
-				// boundary — the client received a `Die` defect, not a refusal. The specific reason rides in `cause`,
-				// which the contract declares as an optional defect. A `create` for an instance the document has is
-				// T3's own refusal, with T3's own operation and instance id.
+				// Build the contract's own class: `settingsPath` and `operation` are required, so a hand-rolled literal fails
+				// the schema encode at the boundary and reaches the client as a defect, not a refusal (capabilities.md).
 				catch: (error) =>
 					error instanceof ProviderInstanceExists
 						? new ServerSettingsError({
@@ -241,8 +237,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 				}).pipe(
 					Effect.tapError((error: ServerSettingsError) => Effect.sync(() => log.warn("settings update refused", { operation: error.operation, cause: error.cause instanceof Error ? error.cause.message : String(error.cause) }))),
 				),
-		// Projects are added/removed/edited through `projects.mutate` (the sendable surface). A duplicate path and a
-		// non-empty remove map to the contract's typed errors; every refusal is a `ProjectMutationError` (T3's shape).
+		// Projects through `projects.mutate` (the sendable surface); every refusal is the contract's `ProjectMutationError`.
 		"projects.mutate": (mutation: Any) =>
 			Effect.tryPromise({
 				try: () => bridge.mutateProject(mutation),
@@ -270,10 +265,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 					}),
 			}),
 		"server.reportClientActivity": () => Effect.succeed({}),
-		// The config stream a paired client reads its settings from. A settings write lands in the store, so the
-		// store's change signal is what makes the edit visible: without the `settingsUpdated` event the pane re-renders
-		// from its connect-time snapshot and the saved change looks like it reverted (the projection replaces
-		// `config.settings` on exactly this event).
+		// The config stream: the store's change signal is what emits `settingsUpdated`, the event on which the projection
+		// replaces `config.settings` (capabilities.md).
 		subscribeServerConfig: () =>
 			Stream.concat(
 				Stream.make({ version: 1, type: "snapshot", config: serverConfig(deps) }),
@@ -296,21 +289,11 @@ export function makeRpcLayer(deps: RpcDeps) {
 				if (input.requestCompletionMarker === true) initial.push({ kind: "synchronized" });
 				return Stream.concat(Stream.fromIterable(initial), fromListener<Any>((emit) => bridge.onShell(emit)));
 			}),
-		[`orchestration.subscribeArchivedShell`]: () =>
-			Stream.concat(
-				Stream.make({
-					kind: "snapshot",
-					snapshot: { schemaVersion: 1, snapshotSequence: bridge.nextSequence(), projects: bridge.projects(), threads: [] },
-				}),
-				Stream.never,
-			),
-		[`orchestration.getArchivedShellSnapshot`]: () =>
-			Effect.sync(() => ({ schemaVersion: 1, snapshotSequence: bridge.nextSequence(), projects: bridge.projects(), threads: [] })),
 		[`orchestration.subscribeThread`]: (input: Any) =>
 			Stream.unwrap(
 				Effect.sync(() =>
-					// A thread the host does not know fails the stream with the contract's typed not-found (the declared
-					// stream error of `subscribeThread`) — it never emits a fabricated snapshot and stays open.
+					// A thread the host does not know fails the stream with the contract's typed not-found — never a fabricated
+					// snapshot that leaves the panel open (design.md, Invariants).
 					bridge.hasThread(input.threadId)
 						? fromListener<Any>((emit, end) => {
 								let first = true;
@@ -354,11 +337,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const { projection } = await bridge.projection(threadId);
 					return { threadId, projection, resumed: false };
 				},
-				// The declared failure is `OrchestrationV2ThreadLaunchError` — its payload is `{ commandId, projectId,
-				// message, cause? }`. Building it from the catch-all message alone and casting away the checker shipped
-				// a payload WITHOUT `projectId`: not a `OrchestrationV2ThreadLaunchError`, so the encode failed at the
-				// boundary and a strict client received a Defect ("Schema validation failed") where it asked "did the
-				// launch work?". Name the project the client asked about — the whole point of the field.
+				// The declared failure is `OrchestrationV2ThreadLaunchError`, and its payload names the project the client
+				// asked about — the whole point of the field (design.md, Invariants).
 				(message) => new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, projectId: input.projectId, message }),
 			),
 		[`orchestration.dispatchCommand`]: dispatch,
@@ -371,8 +351,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 			all[tag] = implemented;
 			continue;
 		}
-		// Every refusal names why, streams included: a stream that never ends leaves T3 waiting on a blank
-		// panel, and a plain `${tag} is not supported` hides that a planned call is only missing "yet".
+		// Every refusal names why, streams included: a stream that never ends leaves T3 waiting on a blank panel
+		// (capabilities.md).
 		all[tag] = () => {
 			noteStub(tag);
 			const message = tag.startsWith("terminal.") ? "Terminals are not supported by pi-durable-t3." : unsupportedMessage(tag);

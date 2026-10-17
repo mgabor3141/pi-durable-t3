@@ -1,9 +1,6 @@
-// The read-only directory listing that feeds T3's "Add project" picker — the same semantics as T3's own server
-// (`apps/server/src/workspace/WorkspaceEntries.ts`), copied, not forked: resolve an absolute path (`~` expanded),
-// resolve an explicit-relative path against the current project's `cwd` (a relative path with no cwd is refused),
-// read the parent directory, return ONLY subdirectories, prefix-filtered (hidden ones shown once the prefix starts
-// with `.`), an unreadable directory answering an empty list. This reads the filesystem; it writes nothing, and adds
-// no new trust surface — the facet reaches it over the same `/ws` bearer token and loopback bind as every other call.
+// The read-only directory listing for T3's "Add project" picker: T3's own semantics, copied from
+// `apps/server/src/workspace/WorkspaceEntries.ts`, not forked (capabilities.md). It reads, writes nothing, and adds no
+// trust surface beyond the `/ws` bearer token and loopback bind every other call needs.
 import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -45,8 +42,8 @@ export class BrowseReadDirectoryFailed extends Error {
 	}
 }
 
-/** Resolve a browse target, mirroring T3: an absolute path (with `~`) resolves directly; an explicit-relative one
- * needs the current project's `cwd`; a Windows path on a non-Windows server is refused. */
+/** Resolve a browse target, mirroring T3: absolute paths (with `~`) resolve directly, an explicit-relative one needs
+ * the current project's `cwd`, and a Windows path on a non-Windows server is refused. */
 function resolveBrowseTarget(partialPath: string, cwd: string | undefined, platform: NodeJS.Platform): string {
 	if (platform !== "win32" && isWindowsAbsolutePath(partialPath)) throw new BrowseWindowsPathUnsupported();
 	if (!isExplicitRelativePath(partialPath)) return resolve(expandHomePath(partialPath));
@@ -54,8 +51,8 @@ function resolveBrowseTarget(partialPath: string, cwd: string | undefined, platf
 	return resolve(expandHomePath(cwd), partialPath);
 }
 
-/** Browse one directory for the picker. Reads the parent of the target (a trailing separator means the target IS the
- * directory, filtered by an empty prefix; otherwise the basename is the prefix). Only subdirectories are returned. */
+/** Browse one directory for the picker: reads the target's PARENT (a trailing separator means the target is the
+ * directory), returning only subdirectories, prefix-filtered by the target's basename. */
 export async function browseFilesystem(input: { readonly partialPath: string; readonly cwd?: string; readonly platform?: NodeJS.Platform }): Promise<BrowseResult> {
 	const platform = input.platform ?? process.platform;
 	const resolved = resolveBrowseTarget(input.partialPath, input.cwd, platform);

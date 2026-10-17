@@ -26,12 +26,12 @@ export type HostConfig = {
 	readonly listen: { readonly host: string; readonly port: number };
 	readonly webAppUrl: string | undefined; // web app base URL; prints a ready-to-open pairing link at start.
 	readonly modelsStorePath: string; // pi-ai models store, under the data dir so `~/.pi/agent` is never written.
-	/** Absolute path to an explicit instructions file, if configured; its text renders into new threads' prompts. */
+	/** Absolute path to an explicit instructions file, if configured; its text joins every thread's system prompt, re-read each turn. */
 	readonly instructionsPath: string | undefined;
 	readonly label: string;
 	readonly stateDir: string;
 	readonly tokenTtlSeconds: number;
-	readonly corsOrigins: readonly string[];
+	readonly corsOrigins: readonly string[] | undefined;
 };
 
 // One schema for the whole `config.toml`. This file holds ONLY what a UI must not set; UI-edited settings live in
@@ -99,17 +99,8 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		label: doc.t3.label,
 		stateDir: resolve(dataDir, doc.t3.state_dir ?? "t3-auth"),
 		tokenTtlSeconds: doc.t3.token_ttl_days * 86_400,
-		corsOrigins: doc.t3.cors_origins ?? (doc.web === undefined ? [] : [originOf(doc.web)]),
+		corsOrigins: doc.t3.cors_origins,
 	};
-}
-
-/** The scheme://host:port of a URL, for use as a CORS origin; if `web` is not a parseable URL, fall back to the raw value. */
-function originOf(url: string): string {
-	try {
-		return new URL(url).origin;
-	} catch {
-		return url.replace(/\/$/, "");
-	}
 }
 
 /** Read and validate the integrator's `config.toml` (at `configFile`), resolving every path under `dataDir`. A missing

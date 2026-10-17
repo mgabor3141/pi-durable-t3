@@ -1,15 +1,6 @@
-// Pure mapping from a durable pi Session (ConversationView of the head conversation + directory summary) to T3's
-// OrchestrationV2 thread projection and thread shell.
-//
-// Model:
-//   one Session            = one T3 thread (threadId = sessionId)
-//   one user turn (run)    = a user entry (pi.user, or this host's app.user) that starts a run; user entries inside a running run are steers
-//                            (entries are grouped into runs by ./runs.ts)
-//   checkpoints            = one synthetic "ready" checkpoint per settled run (no file snapshot) + a baseline
-//                            (the checkpoint ids are ./undo.ts's scheme)
-//   aborted partials       = an assistant entry with stopReason "aborted" that a later assistant entry of the same
-//                            run supersedes (crash + resume) is hidden; a trailing one (user interrupt) is shown and
-//                            the run is "interrupted".
+// Pure mapping from a pi conversation (the head's `ConversationView` plus the thread's directory row) to T3's thread
+// projection and shell: one user turn per run (`runs.ts`), one synthetic "ready" checkpoint per settled run plus a
+// baseline (`undo.ts`'s ids), and an aborted assistant partial hidden when a later entry of the run supersedes it.
 import type {
 	OrchestrationV2Checkpoint,
 	OrchestrationV2CheckpointScope,
@@ -27,7 +18,7 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
-import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
+import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
@@ -59,7 +50,8 @@ export interface ThreadMeta {
 
 /** Bridge-side memory needed for a faithful projection. */
 interface ThreadMemory {
-	/** Runs removed by rewinds, kept as `rolled_back` so the client can confirm the rewind. */
+	/** Runs removed by rewinds, kept as `rolled_back` so a client looking at a forked head reads them as history —
+	 * load-bearing, not cosmetic (design.md, Invariants). */
 	readonly rolledBack: readonly RolledBackRun[];
 	readonly rollbackRequestId?: string | undefined;
 	readonly rollbackFailure?: { requestId: string; message: string } | null | undefined;
@@ -70,7 +62,7 @@ interface ProjectedRun {
 	readonly ordinal: number;
 	/** Entry ID of the user message that started the run. */
 	readonly userEntryId: number;
-	/** Entry ID of the run's last durable entry; rewinding to the run's checkpoint forks here. */
+	/** Entry ID of the run's last durable entry (the checkpoint's `ref`). */
 	readonly lastEntryId: number;
 	readonly status: OrchestrationV2Run["status"];
 }
@@ -98,13 +90,12 @@ export function projectThread(
 	const providerThreadId = `pt-${threadId}`;
 	const live = view?.docs["pi.live"];
 	const busy = view === undefined ? meta.running : live?.run !== undefined;
-	// The thread's selection, reported as the client named it: the model, plus the `thinking` level the conversation
-	// carries (the option T3's pi driver declares). A thread with no model is the `"default"` slug, which answers no
-	// catalog entry — the picker shows nothing selected (see docs/capabilities.md).
+	// The thread's selection, reported as the client named it: the model and the `thinking` level the conversation
+	// carries. No model yet is the `"default"` slug, which answers no catalog entry (capabilities.md).
 	const modelSelection: Any = {
 		instanceId: PROVIDER_INSTANCE_ID,
 		model: meta.model === null ? "default" : modelSlug(meta.model),
-		...(meta.thinkingLevel === undefined ? {} : { options: [{ id: THINKING_OPTION, value: meta.thinkingLevel }] }),
+		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
 	};
 	const drafts = groupRuns(view?.entries ?? []);
 
@@ -192,8 +183,7 @@ export function projectThread(
 		const lastEntry = draft.steps.at(-1) ?? u;
 		const completedMs = running ? null : (firstMessage(lastEntry)?.timestamp ?? requestedAt);
 		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
-		// The run's model, read from the assistant message pi recorded for it: this host has no provider session
-		// for T3's server to read a run's selection from, so the conversation's own record is the honest source.
+		// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
 		const runModel: Any = (() => {
 			const m = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
 			return m?.role === "assistant" && m.provider !== undefined && m.model !== undefined
@@ -473,7 +463,7 @@ export function projectThread(
 		}
 	});
 
-	// Runs removed by rewinds stay as rolled back so the client can confirm the rewind; their items stay hidden.
+	// Runs removed by rewinds stay as rolled back; their items stay hidden (design.md, Invariants).
 	const known = new Set(runs.map((run) => run.id as string));
 	for (const rolled of memory.rolledBack) {
 		if (known.has(rolled.run.id as string)) continue;
@@ -498,8 +488,7 @@ export function projectThread(
 		}));
 
 	const updatedAt = time(lastActivity);
-	// One provider session with honest capabilities, so clients hide what pi cannot do (e.g. mobile "fork from
-	// response") instead of offering it and failing.
+	// One provider session with honest capabilities, so clients hide what pi cannot do instead of offering it and failing.
 	const providerSessionId = `ps-${threadId}`;
 	const providerSessions: OrchestrationV2ProviderSession[] = [
 		{

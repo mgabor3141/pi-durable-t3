@@ -1,11 +1,6 @@
-// The plain-data shapes the T3 facet reads off a pi-durable head conversation. These are just the view/message/entry
-// structures the projection and bridge consume — they mirror pi-durable's real `ConversationView` (whose `docs` are
-// built-in documents keyed by kind, and whose entries carry their messages in `model`). A mirrored shape is typed
-// with the fields the facet reads; where it stands for one of pi's encodings (a message's content blocks, a live
-// run) it also carries the fields of that encoding the facet ignores, so the mirror stays recognizable against pi's
-// view. No service/transport API lives here; writes go through the chord2 objects in `../objects.ts`. The
-// `provider/model` slug helpers live here too: the host's config parser and the facet's projection share one
-// splitter, and a leaf both sides may import is what keeps that shared code off a facet→host edge.
+// The plain-data mirrors of pi-durable's view shapes that the facet reads — no service or transport API lives here;
+// writes go through the chord objects in `../objects.ts`. The `provider/model` slug helpers live here too: a leaf both
+// sides may import keeps that shared code off a facet→host edge.
 
 /** A `{ provider, modelId }` reference (pi-durable `ModelRef`). */
 export interface ModelRef {
@@ -24,9 +19,10 @@ export function splitSlug(slug: string): ModelRef | undefined {
 	return { provider: slug.slice(0, index), modelId: slug.slice(index + 1) };
 }
 
-/** T3's pi driver's model-option id (`piThinkingCapabilities.ts` at the pin). Its values ARE pi's thinking levels,
- * so the bridge maps them by name, and `PiModels.selectThinking` answers a level the ladder does not have. */
+/** T3's pi driver's model-option id (`piThinkingCapabilities.ts` at the pin); its values ARE pi's thinking levels. */
 export const THINKING_OPTION = "thinking";
+/** One spelling for the array a model declares its levels in, a selection's change carries, and a head reports. */
+export const thinkingOption = (level: string) => [{ id: THINKING_OPTION, value: level }];
 
 /** The thinking level a T3 `modelSelection` carries (the contract's canonical `{ id, value }` array). */
 export function thinkingOf(options: readonly { id: string; value: string | boolean }[] | undefined): string | undefined {
@@ -90,10 +86,4 @@ export interface ConversationView {
 		"pi.agent"?: { model?: ModelRef; thinkingLevel?: string; cwd?: string };
 		[key: string]: unknown;
 	};
-}
-
-/** A `pi.models` state, as the objects assemble it for the catalog. */
-export interface ModelsState {
-	catalog: { revision: number; availableModels: (ModelRef & { name: string })[] };
-	configuration: { model: ModelRef | null; thinkingLevel: string };
 }

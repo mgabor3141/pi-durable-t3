@@ -1,8 +1,5 @@
-// The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. The bridge adds the
-// threads layer (named pointers over the Harness's conversations), serves the chord objects on a chord host, and
-// speaks T3's wire protocol over HTTP + `/ws`. It decides nothing about the agent: a fresh thread carries its
-// project's cwd and nothing else, the client names the model on every create/launch/prompt, and the caller hands
-// in the model catalog (the picker list) — the bridge computes no defaults of its own.
+// The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. Ownership of models and
+// projects follows docs/design.md's north star: the bridge computes no defaults of its own.
 import { createHost } from "@earendil-works/chord";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
@@ -15,20 +12,24 @@ import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
 
+/** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
+export const DESKTOP_APP_ORIGIN = "t3code://app";
+
 export type AttachT3Options = {
-	/** The model catalog: T3's picker list and the list `server.refreshProviders` answers. The bridge selects nothing. */
+	/** The model catalog: T3's picker list and the list `server.refreshProviders` answers (availability is the Harness's). */
 	readonly models: Models;
 	/** The project registry (the bridge's own file-backed store; `FileProjectRegistry` is the shipped implementation). */
 	readonly projects: ProjectRegistry;
 	readonly listen: { readonly host: string; readonly port: number };
 	/** Directory for facet state (the auth store's `auth.json`). */
 	readonly stateDir: string;
-	/** The data dir: T3's server settings (`settings.json`, the UI's document) live here, stored as T3's server stores them. */
+	/** The data dir: T3's `settings.json` and the bridge's `projects.json` live here (state.md). */
 	readonly dataDir: string;
 	/** Environment name T3 shows. Default `"pi"`. */
 	readonly label?: string;
-	/** Web app base URL: prints a ready-to-open pairing link and pins CORS to its origin when `corsOrigins` is unset. */
+	/** Web app base URL: prints a ready-to-open pairing link, and its origin joins the default CORS list. */
 	readonly webAppUrl?: string;
+	/** Browser origins allowed to call. Default: the desktop app plus `webAppUrl`. `[]` allows any origin. */
 	readonly corsOrigins?: readonly string[];
 	/** Bearer-token lifetime, seconds. Default 90 days. */
 	readonly tokenTtlSeconds?: number;
@@ -40,6 +41,8 @@ export type AttachT3Options = {
 export type T3Attachment = {
 	/** Resolves when the facet is listening; rejects with the bind error (e.g. `EADDRINUSE`). */
 	readonly ready: Promise<void>;
+	/** Resolves when the facet stops serving on its own. Exiting over that is the integrator's policy. */
+	readonly closed: Promise<void>;
 	/** A fresh single-use pairing code. */
 	pairingCode(): string;
 	/** `Add environment` links (`http://<host>:<port>/pair#token=<code>`). */
@@ -57,7 +60,7 @@ function originOf(url: string): string {
 }
 
 /** Attach T3 to `harness`: the threads layer, the objects facet, a chord host, and the T3 facet. Boot repair and
- * `harness.resume()` run here — finishing interrupted runs is the bridge's crash story. */
+ * `harness.resume()` run here (crash resume: capabilities.md). */
 export async function attachT3(harness: Harness, options: AttachT3Options): Promise<T3Attachment> {
 	const log = options.log ?? nullLogger;
 	const threads = new Threads({
@@ -76,7 +79,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		provider: model.provider,
 		modelId: model.id,
 		name: model.name,
-		// pi's own rule for which thinking levels a model has — the picker declares exactly these.
+		// pi-ai's own rule for which thinking levels a model has — the picker declares exactly these (capabilities.md).
 		thinkingLevels: getSupportedThinkingLevels(model),
 	})));
 	await catalog.refresh();
@@ -90,11 +93,12 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		stateDir: options.stateDir,
 		pairingToken: options.pairingToken,
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
-		corsOrigins: options.corsOrigins ?? (options.webAppUrl === undefined ? [] : [originOf(options.webAppUrl)]),
+		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN, ...(options.webAppUrl === undefined ? [] : [originOf(options.webAppUrl)])],
 	};
 	const facet = startFacet({ host: server, catalog, log, config });
 	return {
 		ready: facet.ready,
+		closed: facet.closed,
 		pairingCode: () => facet.pairingCode(),
 		pairingUrls: (code) => facet.pairingUrls(code),
 		close: async () => {

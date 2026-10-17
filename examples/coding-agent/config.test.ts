@@ -39,8 +39,7 @@ describe("config.toml", () => {
 	});
 
 	it("CORS is the web origin by default, none without it, and an override wins; the pairing token is env-only (S4)", () => {
-		expect(parseConfigToml(`web = "http://127.0.0.1:5733"\n`, root).corsOrigins).toEqual(["http://127.0.0.1:5733"]);
-		expect(parseConfigToml(``, root).corsOrigins).toEqual([]);
+		expect(parseConfigToml(``, root).corsOrigins, "unset: the bridge's default (desktop app + web)").toBeUndefined();
 		expect(parseConfigToml(`web = "http://127.0.0.1:5733"\n[t3]\ncors_origins = ["http://a"]\n`, root).corsOrigins).toEqual(["http://a"]);
 		expect(() => parseConfigToml(`[t3]\npairing_token = "s3cr3t"\n`, root)).toThrow(/unknown key "pairing_token"/);
 	});

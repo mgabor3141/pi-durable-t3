@@ -1,7 +1,5 @@
-// Bridge core: the T3 view over the host's threads. It is a local client of the chord2 objects — it reads the thread
-// directory from `pi.threads`, each thread's head view from `pi.transcript` and model state from `pi.models`, and
-// writes through `pi.controller` (prompt/steer/followUp/abort/rewind). It holds the per-thread projection memory
-// (rolled-back runs) and the monotonic sequence counter.
+// The T3 view over the host's threads: a local client of the chord objects (`pi.threads`, `pi.transcript`,
+// `pi.models`, `pi.controller`). It holds the per-thread projection memory (rolled-back runs) and the sequence counter.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
@@ -13,7 +11,8 @@ import type {
 	OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
-import { ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
+import type { Project } from "../config.ts";
+import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
@@ -67,9 +66,8 @@ export type ProjectMutation = {
 	readonly force?: boolean;
 };
 
-/** How many client-chosen command ids the bridge remembers for dispatch idempotency: it is the only memory a
- * client-chosen id can cost, so a client cannot grow the bridge by inventing ids. Past it the oldest entry is
- * dropped, and a very old retry is treated as a fresh request — the same answers a fresh request gets. */
+/** How many client-chosen command ids the bridge remembers for dispatch idempotency: the only memory a client-chosen
+ * id can make the host spend (state.md). Past it the oldest entry is dropped, and an old retry is a fresh request. */
 export const DEDUP_ENTRY_LIMIT = 2_000;
 
 
@@ -80,14 +78,12 @@ export class Bridge {
 	readonly #threads = new Map<string, ThreadState>();
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
-	/** The project ids last shown to clients, so a registry change emits only the added/removed shells. */
+	/** The project ids last shown to clients, so a registry change emits the removed shells. */
 	#projectIds = new Set<string>();
-	/** The project shells last shown, so a registry EDIT (rename, root move) re-emits only the shells that changed. */
-	readonly #shownProjects = new Map<string, OrchestrationProjectShell>();
 	readonly #commandResults = new Map<string, Promise<number>>();
 	#directory: Thread[] = [];
 	/** The `pi.threads` handle, so a create/remove can refresh the directory synchronously: the thread-existence check
-	 * (unknown threads are a typed not-found, everywhere) must never race the subscription that mirrors the document. */
+	 * must never race the subscription that mirrors the document. */
 	#threadsHandle: Handle<typeof PiThreads> | undefined;
 	#directoryStop: (() => void) | undefined;
 	#registryStop: (() => void) | undefined;
@@ -109,15 +105,9 @@ export class Bridge {
 		};
 		this.#directoryStop = handle.threads.subscribe(publish);
 		publish();
-		// A UI edit to the instance file (add/remove/rename a project) lands through the registry: emit the added and
-		// removed project shells, drop a now-registered folder from the discovered set, and republish thread shells.
+		// A UI edit to the registry (add/remove/rename/move) lands here: removed ids emit a removal and every current
+		// project shell is re-emitted — a client keys shells by id, so an unchanged re-emission is a no-op.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
-		// Seed the shown-project map with the boot registry (store finding #5). The shell snapshot is the baseline a client
-		// renders at connect, and `#onRegistryChange` emits a rename/move only when it can DIFF the new shell against the last
-		// SHOWN one. A project that was in the file at boot was never `#emitShell`-ed, so its `shown` was `undefined`, the
-		// guard `shown !== undefined` skipped the emission, and a rename/move of a boot-loaded project reached no connected
-		// sidebar (`p8`/`p5`/`v1 V4a` saw `shell items: []`). Seeding is silent (the snapshot is the baseline, not a delta).
-		for (const project of this.#configured()) this.#shownProjects.set(project.id, this.#projectShell(project));
 		this.#registryStop = this.config.registry.subscribe(() => this.#onRegistryChange());
 		this.#log.info("bridge started (over the objects)");
 	}
@@ -130,15 +120,7 @@ export class Bridge {
 			this.#emitShell({ kind: "project.removed", sequence: this.nextSequence(), projectId: id });
 		}
 		for (const project of current) {
-			if (!this.#projectIds.has(project.id)) {
-				this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: this.#projectShell(project) });
-				continue;
-			}
-			// A registered project's title/path changed (a rename is free; a move keeps the id): live shells follow.
-			const shown = this.#shownProjects.get(project.id);
-			if (shown !== undefined && JSON.stringify(shown) !== JSON.stringify(this.#projectShell(project))) {
-				this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: this.#projectShell(project) });
-			}
+			this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: this.#projectShell(project) });
 		}
 		this.#projectIds = currentIds;
 		this.#refreshShells();
@@ -154,14 +136,6 @@ export class Bridge {
 	/** The registered projects (from the live registry), shaped for the shell. */
 	#configured(): { id: string; title: string; path: string }[] {
 		return this.config.registry.list().map((project) => ({ id: project.id, title: project.name, path: project.cwd }));
-	}
-
-	/** The project that covers `cwd`, from the registry only: an exact root or a path under it. An unregistered folder
-	 * maps to NO project — the shell projects registered folders and nothing else (H2: the invented `(other)` project
-	 * used to leak into every client's sidebar). */
-	projectForCwd(cwd: string | undefined): { id: string; title: string; path: string } | undefined {
-		if (cwd === undefined) return undefined;
-		return this.#configured().find((project) => cwd === project.path || cwd.startsWith(`${project.path}/`));
 	}
 
 	/** A project shell with the fixed fields T3 expects, stamped at the bridge's start time. */
@@ -183,10 +157,7 @@ export class Bridge {
 	}
 
 		/**
-	 * One project mutation. No receipt store: a retry after a lost response re-plans against the current
-	 * state and gets the honest answer — a retried create meets the duplicate-path refusal for the project it
-	 * created, a retried delete the not-found. (T3's ProjectService replays accepted receipts from its database; this
-	 * host keeps no per-command durable state, and the operator's rule is that the honest error beats the machinery.)
+	 * One project mutation, answered from the state — no receipt store (design.md, Invariants).
 	 */
 	mutateProject(mutation: ProjectMutation): Promise<Record<string, unknown>> {
 		return this.#applyMutation(mutation);
@@ -197,10 +168,8 @@ export class Bridge {
 			case "project.create": {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
 				await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), mutation.createWorkspaceRootIfMissing === true);
-				// Honor the id the client minted (T3's UI generates a project UUID and navigates to it, exactly as it
-				// mints thread ids): the registry stores it when it has the minted shape, and derives from the normalized
-				// path for everything else. The PATH stays the uniqueness key.
-				const added = this.config.registry.add(mutation.title, mutation.workspaceRoot, { clientId: mutation.projectId });
+				// Honor the id the client minted; the registry derives from the normalized path for everything else (design.md, IDs).
+				const added = this.#createProject(mutation.title, mutation.workspaceRoot, mutation.projectId);
 				return this.#projectResult(added, null);
 			}
 			case "project.update": {
@@ -217,16 +186,13 @@ export class Bridge {
 				if (entry === undefined) throw new CommandError(`Project ${mutation.projectId} was not found.`);
 				const targets = this.#directory.filter((thread) => thread.projectId === mutation.projectId);
 				if (targets.length > 0 && mutation.force !== true) throw new CommandError(`Project ${mutation.projectId} is not empty.`);
-				// Drop the threads FIRST (aborts each head, then removes the pointer), then the entry. pi-durable has no
-				// delete, so conversations stay; a directory on disk is never part of this operation.
+				// Drop the threads FIRST (aborts each head, then removes the pointer), then the entry: files on disk are never
+				// part of this operation (design.md, Invariants).
 				for (const thread of targets) await this.deleteThread(thread.threadId);
 				this.config.registry.remove(mutation.projectId);
-				// Drain late arrivals. The target list above is a snapshot taken before the entry was removed, and a
-				// `thread.create` whose commit landed in that window — or whose in-flight facet publish lands a beat
-				// after — wrote a row for a project that is now gone; the dialog promised the project's threads go
-				// WITH it. Read the CELL (authoritative after each awaited delete), not the mirror, and drain until
-				// it is empty: every row landing from `registry.remove` onward is refused by the threads layer's
-				// commit-time FK check, so the drain terminates at the rows that landed in the window.
+				// Drain late arrivals: read the CELL (authoritative after each awaited delete) until it shows no rows under
+				// the id. Rows landing from `registry.remove` onward are refused by the commit-time FK check, so the drain
+				// terminates (design.md, Invariants).
 				for (;;) {
 					if (this.#threadsHandle === undefined) break;
 					const late = (this.#threadsHandle.threads.value?.threads ?? []).filter((thread) => thread.projectId === mutation.projectId);
@@ -239,10 +205,27 @@ export class Bridge {
 	}
 
 	/**
-	 * Validate (and when asked, create) a workspace root — the checks T3's own server runs before registering a project
-	 * (`apps/server/src/workspace/WorkspacePaths.ts`): a path that exists and is not a directory is refused naming the
-	 * path; a missing path is created only when the mutation asked, and a failed creation surfaces as a typed refusal.
-	 * Every failure happens BEFORE the registry stores anything.
+	 * Register a project, answering a RETRY honestly: a create whose minted id AND path both name a stored entry is the
+	 * command whose commit landed and whose ack the client never saw, so the stored entry is the answer — the state is the
+	 * dedup record, and this survives a restart. Anything else is the registry's own conflict (design.md, Invariants).
+	 */
+	#createProject(title: string | undefined, workspaceRoot: string, clientId: string | undefined): Project {
+		try {
+			return this.config.registry.add(title, workspaceRoot, { ...(clientId === undefined ? {} : { clientId }) });
+		} catch (error) {
+			if (!(error instanceof ProjectConflict) && !(error instanceof ProjectIdConflict)) throw error;
+			const minted = clientId?.trim();
+			if (minted === undefined || minted === "") throw error;
+			const cwd = this.config.registry.resolvePath(workspaceRoot);
+			const stored = this.config.registry.list().find((project) => project.id === minted && project.cwd === cwd);
+			if (stored === undefined) throw error;
+			return stored;
+		}
+	}
+
+	/**
+	 * Validate (and when asked, create) a workspace root with T3's own checks, every failure BEFORE the registry stores
+	 * anything (design.md, Invariants).
 	 */
 	async #ensureWorkspaceRoot(path: string, createIfMissing: boolean): Promise<void> {
 		const info = await stat(path).catch((error: NodeJS.ErrnoException) => {
@@ -283,20 +266,17 @@ export class Bridge {
 		return this.#directory.find((thread) => thread.threadId === threadId);
 	}
 
-	/** Does this host know the thread? Every read/write path answers a thread absent from the threads document with
-	 * the typed not-found (REST 404 `EnvironmentResourceNotFoundError`; WS `OrchestrationV2GetThreadProjectionError`). */
+	/** Does this host know the thread? A thread absent from the threads document is the typed not-found on every path
+	 * (design.md, Invariants): REST 404, WS the contract's typed error. */
 	hasThread(threadId: string): boolean {
 		return this.#summary(threadId) !== undefined;
 	}
 
 	#meta(threadId: string, thread: Thread | undefined, state: ThreadState | undefined): ThreadMeta {
-		// A thread's cwd comes from its project, then from the conversation's own `pi.agent.cwd`. A thread whose project
-		// is not registered is reported with its `projectId` and NO invented project (H2: the `"/"` fallback minted a
-		// permanent `(other)` project at `/` and injected it into every client's shell).
-		const byForeignKey = thread === undefined ? undefined : this.#configured().find((project) => project.id === thread.projectId);
-		const agentCwd = state?.view?.docs["pi.agent"]?.cwd;
-		const project = byForeignKey ?? this.projectForCwd(agentCwd);
-		const cwd = project?.path ?? agentCwd ?? "";
+		// The FK is the only lookup: an unregistered `projectId` is reported as it is, with NO invented project, and no row
+		// exists without a registered project (design.md, IDs), so this resolves.
+		const project = thread === undefined ? undefined : this.#configured().find((candidate) => candidate.id === thread.projectId);
+		const cwd = project?.path ?? state?.view?.docs["pi.agent"]?.cwd ?? "";
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
 		return {
@@ -341,9 +321,6 @@ export class Bridge {
 	}
 
 	#emitShell(item: ShellItem): void {
-		// Track what clients have been shown, so a registry edit re-emits only the shells that changed.
-		if (item.kind === "project.updated") this.#shownProjects.set(item.project.id as string, item.project);
-		else if (item.kind === "project.removed") this.#shownProjects.delete(item.projectId);
 		for (const listener of this.#shellListeners) listener(item);
 	}
 
@@ -487,7 +464,7 @@ export class Bridge {
 	}
 
 	/** Wait until the thread's transcript is loaded and return its projection. A thread absent from the threads
-	 * document is the typed not-found — never a fabricated empty thread (H2). */
+	 * document is the typed not-found — never a fabricated empty thread (design.md, Invariants). */
 	async projection(threadId: string, timeoutMs = 30_000): Promise<ProjectionResult> {
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		const release = this.acquire(threadId);
@@ -545,17 +522,15 @@ export class Bridge {
 	}
 
 	/**
-	 * Wait until the thread's head conversation is actually loaded and return its id. A freshly created thread's
-	 * transcript cell resolves a few awaits after `acquire`, and its initial value is the empty view with a `0` id — so a
-	 * write that read `conversationId` directly could see `undefined`/`0` and lose the message (or aim at conversation 0).
-	 * Every write path awaits the real head first: no cold message loss, and no reliance on some earlier call having
-	 * warmed the transcript.
+	 * Wait until the thread's head conversation is loaded and return its id: a freshly created thread's transcript cell
+	 * resolves a few awaits after `acquire`, and its initial value is the empty view, so every write path awaits the real
+	 * head first — no cold message loss, and no reliance on an earlier call having warmed the transcript (design.md).
 	 */
 	async #awaitHead(state: ThreadState, timeoutMs = 15_000): Promise<number> {
 		const deadline = Date.now() + timeoutMs;
 		for (;;) {
 			const id = state.conversationId;
-			if (id !== undefined && id !== 0) return id;
+			if (id !== undefined) return id;
 			if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${state.threadId}`);
 			if (Date.now() > deadline) throw new CommandError(`The thread ${state.threadId} is still loading; send again in a moment.`);
 			await new Promise((resolve) => setTimeout(resolve, 25));
@@ -583,8 +558,8 @@ export class Bridge {
 
 	/**
 	 * T3's selection, applied: the model it names and the `thinking` level it carries. The client owns the choice, the
-	 * catalog owns availability (an unknown model is refused by name); a selection with no `thinking` option leaves the
-	 * thread's level alone, because the bridge computes no defaults of its own.
+	 * catalog owns availability (an unknown model is refused by name); no `thinking` option leaves the level alone,
+	 * because the bridge computes no defaults (design.md, north star).
 	 */
 	async applySelection(threadId: string, selection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined): Promise<void> {
 		const model = selection?.model === undefined ? undefined : splitSlug(selection.model);
@@ -618,8 +593,8 @@ export class Bridge {
 			const state = this.#state(input.threadId);
 			const head = await this.#awaitHead(state);
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
-			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`), so the projection reads it
-			// back from the entry it is already reading; `requestId` stays the commandId for durable dedup.
+			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
+			// commandId for durable dedup (design.md, Invariants).
 			const request = { conversationId: head, requestId: input.commandId, message: input.text, messageId: input.messageId };
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.
@@ -670,7 +645,7 @@ export class Bridge {
 			const expectedHead = await this.#awaitHead(state);
 
 			const rolled = rolledBackRuns(projection, target.keepOrdinal);
-			// The commandId is the rewind's requestId, so the host dedups a retry (and a lost connection) to one fork.
+			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
 			await this.#call(input.threadId, (controller, _models, c) =>
 				controller.rewind({ expectedHead, entryId: target.entryId, requestId: input.commandId }, c),
 			);

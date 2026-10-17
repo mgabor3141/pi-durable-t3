@@ -44,8 +44,7 @@ export class AuthStore {
 	}
 
 	// A store that is missing (deleted after start) or unparseable starts over, persisted at once so the environmentId
-	// does not change on every read. `auth.json` is the facet's OWN credential state with a documented start-over; the
-	// UI's documents are parsed strictly (see `json-store.ts`).
+	// does not change on every read. The UI's documents are parsed strictly (`json-store.ts`); this one is the facet's own.
 	#read(): AuthFile {
 		const stored = readJson<AuthFile | undefined>(this.#file, undefined);
 		if (stored !== undefined) return stored;
@@ -62,14 +61,14 @@ export class AuthStore {
 		return this.#read().environmentId;
 	}
 
-	/** A one-time pairing code valid for `ttlSeconds`. */
-	createPairingCode(ttlSeconds = 15 * 60): string {
+	/** A one-time pairing code. */
+	createPairingCode(): string {
 		const code = newSecret(12);
 		const now = Date.now();
 		const data = this.#read();
 		this.#write({
 			...data,
-			pairings: [...data.pairings.filter((pairing) => pairing.expiresAt > now), { hash: hash(code), expiresAt: now + ttlSeconds * 1000 }],
+			pairings: [...data.pairings.filter((pairing) => pairing.expiresAt > now), { hash: hash(code), expiresAt: now + PAIRING_CODE_TTL_SECONDS * 1000 }],
 		});
 		return code;
 	}
@@ -122,20 +121,20 @@ export class AuthStore {
 	}
 }
 
-/** Failed pairing attempts per client address: at most `limit` per `windowMs`, then 429 until the window passes. */
+/** How long a minted pairing code stays exchangeable: long enough to copy by hand, short enough to be spent. */
+const PAIRING_CODE_TTL_SECONDS = 15 * 60;
+
+/** Failed pairing attempts per client address: at most 10 per minute, then 429 until the window passes. */
+const ATTEMPT_LIMIT = 10;
+const WINDOW_MS = 60_000;
+
 export class PairingRateLimit {
 	readonly #failures = new Map<string, number[]>();
-	readonly limit: number;
-	readonly windowMs: number;
-	constructor(limit = 10, windowMs = 60_000) {
-		this.limit = limit;
-		this.windowMs = windowMs;
-	}
 	blocked(address: string): boolean {
 		const now = Date.now();
-		const recent = (this.#failures.get(address) ?? []).filter((at) => at > now - this.windowMs);
+		const recent = (this.#failures.get(address) ?? []).filter((at) => at > now - WINDOW_MS);
 		this.#failures.set(address, recent);
-		return recent.length >= this.limit;
+		return recent.length >= ATTEMPT_LIMIT;
 	}
 	fail(address: string): void {
 		this.#failures.set(address, [...(this.#failures.get(address) ?? []), Date.now()]);

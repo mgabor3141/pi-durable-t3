@@ -10,9 +10,17 @@ type ReplyModel = {
 };
 
 export function createReplyModel(text = "OK — this is the offline reply model.", provider = "reply"): ReplyModel {
-	// A reasoning model, so the offline demo shows what a real catalog shows: T3 renders the thinking control from
-	// the levels pi-ai reports, and a chosen level travels the whole path to the conversation.
-	const faux = fauxProvider({ provider, models: [{ id: "reply-1", name: "Offline reply", reasoning: true }] });
+	// Two models, the way a real catalog has more than one: a reasoning one (so the offline demo shows the thinking
+	// control pi-ai's levels drive, with a chosen level travelling the whole path to the conversation) and a plain one
+	// (which declares no thinking control at all). The FIRST is the host's model — what a launch that names no
+	// model runs on.
+	const faux = fauxProvider({
+		provider,
+		models: [
+			{ id: "reply-1", name: "Offline reply", reasoning: true },
+			{ id: "reply-2", name: "Offline reply (no reasoning)", reasoning: false },
+		],
+	});
 	const message = fauxAssistantMessage(text);
 	// One canned reply per generation; a generous queue covers an interactive session.
 	faux.setResponses(Array.from({ length: 256 }, () => message));

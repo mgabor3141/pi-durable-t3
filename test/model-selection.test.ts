@@ -105,6 +105,38 @@ it("the picker declares the model's thinking levels; a chosen level reaches the 
 		);
 		expect(String(failure.message), "the refusal names the model").toContain("ghost/not-a-model");
 		expect(await settledRuns(threadId), "the refused prompt did not run").toHaveLength(1);
+
+		// 5. The client's choice is the thread's model — the bridge defaults to nothing. The catalog is the host's
+		//    list IN ORDER, so the picker's default is its FIRST entry; select a NON-first model and the projection
+		//    must report that one. A bridge that adopted its own default (the host's model, the first catalog entry,
+		//    a remembered last choice) reports `reply/reply-1` here.
+		const slugs = provider!.models.map((entry) => entry.slug);
+		expect(slugs.length, `the host offers more than one model: ${JSON.stringify(slugs)}`).toBeGreaterThan(1);
+		const second = provider!.models[1]!;
+		const plainThread = "sel-second";
+		exitValue(
+			await ws.call("orchestration.launchThread", {
+				commandId: "cmd-sel-second",
+				threadId: plainThread,
+				projectId: "p-alpha",
+				title: "Second model",
+				modelSelection: { instanceId: provider!.instanceId, model: second.slug, options: [] },
+				runtimeMode: "full-access",
+				interactionMode: "default",
+				workspaceStrategy: { type: "root" },
+			}),
+			"launchThread naming the catalog's second model",
+		);
+		expect((await selectionOf(plainThread)).model, "the model the client named, not the catalog's first").toBe(second.slug);
+		expect((await selectionOf(threadId)).model, "the first thread keeps the model it was given").toBe(model.slug);
+
+		// 6. Availability is per model: the non-reasoning model declares no thinking control (pi-ai answers `["off"]`
+		//    for it, and a control with one choice is not a choice).
+		const plain = provider!.models.find((entry) => entry.slug === second.slug)!;
+		expect(
+			plain.capabilities?.optionDescriptors?.find((option) => option.id === "thinking"),
+			`a model with no reasoning declares nothing: ${JSON.stringify(plain).slice(0, 300)}`,
+		).toBeUndefined();
 	} finally {
 		ws.close();
 		host.child.kill("SIGKILL");

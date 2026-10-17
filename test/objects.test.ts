@@ -38,10 +38,10 @@ describe("objects (in-process)", () => {
 		await directory.ready;
 
 		// Create a thread and see it arrive through the eager directory cell.
-		await server.root((ctx) => directory.create({ threadId: "t", projectId: "p", title: "First" }, ctx));
+		await server.root((ctx) => directory.create({ threadId: "t", projectId: "p" }, ctx));
 		await waitFor(directory.threads, (value) => (value?.threads.length ?? 0) >= 1);
 		const created = directory.threads.value?.threads.find((thread) => thread.threadId === "t");
-		expect(created?.title).toBe("First");
+		expect(created?.title, "a thread starts untitled; T3 sends no title on create").toBe("");
 		const head = created?.head;
 		expect(head).toBeTypeOf("number");
 

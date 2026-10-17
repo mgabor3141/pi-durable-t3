@@ -1,8 +1,5 @@
-// The "pi" provider's model list for T3's ServerConfig: the provider's models as the caller's catalog reports them
-// (`Models.getAvailable()`), each carrying the thinking levels pi-ai says it supports. A reasoning model gets the
-// same `thinking` select descriptor T3's own pi provider declares, so the composer renders the control with only
-// the choices that model has; a model with no reasoning declares nothing. The bridge selects nothing, remembers no
-// default, and adopts no thread's model.
+// The "pi" provider's model list for T3's ServerConfig: the caller's catalog, each model declaring pi's `thinking`
+// ladder for the levels pi-ai says it supports (capabilities.md). The bridge selects nothing and remembers no default.
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
@@ -20,8 +17,7 @@ const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
 	max: "Max",
 };
 
-/** The picker capabilities: pi's ladder, restricted to the levels this model supports. pi-ai answers `["off"]` for
- * a model with no reasoning, and T3 declares no control for such a model — so nothing is declared here. */
+/** The picker capabilities: pi's ladder, restricted to the model's levels; fewer than two declares no control. */
 export function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapabilities | null {
 	if (levels.length < 2) return null;
 	return {
@@ -39,30 +35,20 @@ export function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): Mod
 export class ModelCatalog {
 	#models: CatalogModel[] = [];
 	readonly #listeners = new Set<() => void>();
-	readonly #source: (() => Promise<CatalogModel[]>) | undefined;
+	readonly #source: () => Promise<CatalogModel[]>;
 	#checkedAt = new Date().toISOString();
 
-	/**
-	 * `source` supplies the provider's models (the host passes its own model runtime, kept under the host root so
-	 * `~/.pi` is never written). Without one the catalog only follows what `adopt` sees from a thread.
-	 */
-	constructor(source?: () => Promise<CatalogModel[]>) {
+	/** The catalog's source — the host's model runtime, kept under the host root so `~/.pi` is never written. */
+	constructor(source: () => Promise<CatalogModel[]>) {
 		this.#source = source;
 	}
 
 	async refresh(): Promise<void> {
-		if (this.#source === undefined) return;
 		try {
-			const models = await this.#source();
-			if (this.#models.length === 0 || models.length > 0) this.#set(models);
+			this.#set(await this.#source());
 		} catch (error) {
 			console.error("model catalog refresh failed:", error);
 		}
-	}
-
-	/** The catalog's models: the list a new-thread default is validated against, and the list a refusal names. */
-	available(): CatalogModel[] {
-		return this.#models.map((model) => ({ ...model }));
 	}
 
 	#set(models: CatalogModel[]): void {

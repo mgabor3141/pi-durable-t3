@@ -1,7 +1,5 @@
-// Small shared pieces the bridge needs from "configuration": the typed config error (its message is meant for the
-// user as is), the `~`-expanding path resolver the project registry shares with callers, and the path-derived
-// `Project` record. The integrator's config FILE (TOML, XDG, `--root`) is not the bridge's concern — `attachT3`
-// takes plain options; see `examples/coding-agent/config.ts` for a file loader that fills them.
+// Small shared pieces the bridge needs from "configuration": the typed config error, the `~`-expanding path resolver,
+// and the path-derived `Project` record. The integrator's config FILE is not the bridge's concern (design.md, The split).
 import { isAbsolute, resolve } from "node:path";
 
 /** A configuration refusal; its message is meant for the user as is. */

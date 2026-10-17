@@ -1,43 +1,18 @@
-# pi-durable-t3 integrator config: `config.toml`, read from the config dir. It is the INTEGRATOR's tier —
-# what a UI must not set (the listen address, the web origin, the facet's own settings, the instructions
-# file). Everything the T3 UI edits lives in the DATA dir — the project registry (`projects.json`)
-# and T3's server settings (`settings.json`, T3's own document; see below). Data (storage, models store,
-# facet state, the UI-edited files, project cwd roots) goes under the data dir. Default (XDG) locations:
-#   ~/.config/pi-durable-t3/config.toml   ($XDG_CONFIG_HOME, default ~/.config)
-#   ~/.local/share/pi-durable-t3/         ($XDG_DATA_HOME,   default ~/.local/share)
-# Copy it into the config dir:
-#   mkdir -p ~/.config/pi-durable-t3 && cp config.example.toml ~/.config/pi-durable-t3/config.toml
-# `--root <dir>` overrides both, so an instance is one directory: config <dir>/config.toml, all data under
-# <dir>/ (durable.db, models-store.json, settings.json, projects.json, t3-auth/):
-#   mkdir -p <dir> && cp config.example.toml <dir>/config.toml && pnpm start -- --root <dir>
-# Unknown keys are rejected, naming the file, the key path, and what was expected. A key that moved to the
-# instance file (`[[projects]]`, `default_model`) is refused by name, naming where it belongs.
-# An empty file is also valid (defaults only); a missing file is an error.
-# Keys are listed in TOML order: root scalars, then [t3]. Uncomment in place.
+# pi-durable-t3 example host config.
+#
+# Location: ~/.config/pi-durable-t3/config.toml ($XDG_CONFIG_HOME), or <dir>/config.toml with --root <dir>.
+# Data (storage, settings.json, projects.json, credentials) goes to ~/.local/share/pi-durable-t3/
+# ($XDG_DATA_HOME), or <dir> with --root.
+#
+# Every key is optional; the values shown are the defaults. Unknown keys are an error.
+# Projects and the default model are not set here: T3's UI edits them.
 
-# Optional — every key below defaults to the commented value.
-# listen = "127.0.0.1:3774"                 # str  "host:port"; the facet address (the T3 app uses 3773)
-# web = "http://127.0.0.1:5733"             # str? your T3 web app URL; setting it prints a ready pairing link
-#                                           #      and pins CORS to it; `pnpm web` serves on 5733
-# instructions = "AGENTS.md"                # str? file whose text becomes new threads' instructions; read at
-#                                           #      thread create (new threads only); `~` ok, relative to the
-#                                           #      data dir; a missing file fails at start
-# [t3]                                      # the facet's own settings — every key optional
-# label = "pi"                              # str    environment name shown in T3
-# state_dir = "t3-auth"                     # str?   auth dir, under the data dir
-# token_ttl_days = 90                       # int    bearer-token lifetime
-# cors_origins = ["http://127.0.0.1:5733"]  # [str]  allowed CORS origins (default: the `web` origin)
+# listen = "127.0.0.1:3774"                 # facet address; a tailnet IP to reach it over Tailscale
+# web = "http://127.0.0.1:5733"             # your T3 web app: a ready pairing link, and its origin may call
+# instructions = "AGENTS.md"                # file added to every thread's system prompt, re-read each turn (relative to the data dir)
 
-# Projects and the model default are NOT set here. Projects live in the registry file
-# `projects.json`, in the DATA dir (a project is a directory; the T3 UI edits it through the
-# host, and the running host writes it atomically). The model default lives in T3's server
-# settings, the data dir's `settings.json` - T3's own document, stored and patched exactly as
-# T3's server stores and patches it; the UI's model picker writes it and the client names the
-# model on every new thread. Missing files are valid (no projects, T3's contract defaults).
-# The shapes are documented in `docs/state.md` and the README. Writing `projects` or
-# `default_model` into this file is refused, naming where each belongs.
-
-# Notes: a fixed, reusable pairing token is test-only — set the PI_DURABLE_T3_PAIRING_TOKEN env var,
-# there is no key for it. The facet binds to loopback by default and requests with a non-loopback `Host`
-# header are rejected. With neither `web` nor `cors_origins` set the facet answers
-# `Access-Control-Allow-Origin: *`; every call needs a bearer token.
+# [t3]
+# label = "pi"                              # environment name shown in T3
+# state_dir = "t3-auth"                     # pairing credentials, under the data dir
+# token_ttl_days = 90                       # bearer-token lifetime
+# cors_origins = ["t3code://app"]           # default: the desktop app plus `web`; [] allows any origin

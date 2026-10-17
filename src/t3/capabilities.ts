@@ -1,6 +1,5 @@
-// What pi supports, in T3's capability vocabulary: one static manifest the projection hands every thread, so T3
-// renders only the controls this host can answer. A `false` here is a refusal the UI never shows; a `true` is a promise
-// the bridge must keep. It is data, not policy — the refusals that answer a call live in rpc.ts.
+// What pi supports, in T3's capability vocabulary: one static manifest, so T3 renders only the controls this host
+// answers. It is data, not policy — the refusals that answer a call live in `rpc.ts`, the statuses in capabilities.md.
 import type { OrchestrationV2ProviderCapabilities } from "@t3tools/contracts";
 
 const no = false;

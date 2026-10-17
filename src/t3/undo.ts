@@ -1,11 +1,6 @@
-// Undo: the checkpoint id scheme, the map from a T3 checkpoint to the pi entry to fork at, and the overlay that lets a
-// client confirm the revert it asked for.
-//
-// A checkpoint is `cp-baseline` (keeps nothing, exists for every thread) or `cp<userEntryId>` (keeps the run that user
-// entry started and every run before it). The projection writes those ids and `undoTarget` reads them back, so the
-// scheme is owned here. The entry arithmetic belongs to the threads layer: a pi-durable fork is inclusive of its fork
-// entry, so a rewind forks at the entry just before the reverted user turn, dropping that message with its reply.
-// Undo never rewrites history — it moves the head to a fork.
+// Undo: the checkpoint id scheme (`cp-baseline`, `cp<userEntryId>`) owned here, the map from a T3 checkpoint to the pi
+// entry to fork at, and the rolled-back overlay. The entry arithmetic belongs to the threads layer, and undo never
+// rewrites history — it moves the head to a fork (design.md, Invariants).
 import type {
 	OrchestrationV2CheckpointScope,
 	OrchestrationV2ConversationMessage,
@@ -21,7 +16,7 @@ import type {
 export const BASELINE_CHECKPOINT_ID = "cp-baseline";
 
 /** A run removed by a rewind, with every row that references it: T3 reads a reverted run by its rows, so they all carry
- * the `rolled_back` status, not just the run. */
+ * the `rolled_back` status. */
 export interface RolledBackRun {
 	readonly run: OrchestrationV2Run;
 	readonly items: readonly OrchestrationV2TurnItem[];
@@ -53,14 +48,9 @@ export function rolledBackRuns(projection: OrchestrationV2ThreadProjection, keep
 export const MAX_ROLLED_BACK_RUNS = 200;
 
 /**
- * Map a T3 rollback to the pi rewind target. `entryId` is the **user turn being reverted** — the entry whose whole run
- * (message and reply) disappears. `keepOrdinal` is the number of runs the checkpoint retains (for the rolled-back
- * overlay). `Threads.rewind` does the entry arithmetic: because a pi-durable fork is inclusive of its fork entry, it
- * forks at the entry just before `entryId` (dropping the reverted user message too), or — when `entryId` is the very
- * first entry and nothing precedes it — creates a fresh conversation carrying the head's agent config.
- * - Baseline keeps nothing: revert the first run's user entry → an empty conversation.
- * - `cp<userEntryId>` (run N) keeps runs 1..N: revert run N+1's user entry; if run N+1 does not exist, the checkpoint
- *   already keeps every run, so there is nothing to revert.
+ * Map a T3 rollback to the pi rewind target: `entryId` is the **user turn being reverted**, `keepOrdinal` the runs the
+ * checkpoint retains (for the rolled-back overlay). Baseline reverts the first run's user entry; `cp<userEntryId>`
+ * (run N) reverts run N+1's user entry, and a checkpoint that already keeps every run has nothing to revert.
  */
 export function undoTarget(
 	runs: readonly { ordinal: number; userEntryId: number }[],

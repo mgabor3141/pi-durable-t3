@@ -76,6 +76,19 @@ export function createNamed(threads: Threads, harness: Harness, model: ScriptedM
 	};
 }
 
+/**
+ * The restart: close the harness and reopen storage + harness over the SAME directory, then hand back a fresh threads
+ * layer, which runs no repair until asked. Everything the state stores has to survive is on disk, so a test that
+ * reopens is testing the durable bytes, not an in-memory cache.
+ */
+export async function restart(f: ThreadsFixture): Promise<{ threads: Threads; harness: Harness }> {
+	await f.harness.close(ctx);
+	const storage = await openNodeSqliteStorage(join(f.root, "durable.db"));
+	// The harness registry is pi-durable's TOOL registry (a fresh one — the scripted model needs no tools).
+	const harness = await Harness.open(storage, { models: f.model.models, registry: createRegistry() }, ctx);
+	return { threads: new Threads({ harness, registry: f.registry }), harness };
+}
+
 export async function conversation(harness: Harness, id: number): Promise<Conversation> {
 	const found = await harness.conversation(id as ConversationId, ctx);
 	if (found === undefined) throw new Error(`no conversation ${id}`);

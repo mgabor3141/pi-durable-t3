@@ -1,6 +1,4 @@
-// What a run is, and what a steer is. A run is one user turn: the user entry that started it, plus the assistant
-// entries and tool results that followed. A user entry that lands inside a run still in progress is a steer of that
-// run, not a new run — and only the entries can say whether the run was in progress, which is what `groupRuns` decides.
+// What a run is, and what a steer is: one user turn — the user entry that started it plus the entries that followed.
 // A leaf: it reads entry shapes only, so the projection, a test, or any other reader groups a conversation the same way.
 import type { DurableMessage, EntryRecord } from "./model-types.ts";
 
@@ -11,9 +9,8 @@ export interface RunDraft {
 
 export const firstMessage = (entry: EntryRecord): DurableMessage | undefined => entry.model?.[0];
 /**
- * Entry kinds that carry a user turn. `pi.user` is pi-durable's default placement for an input; `app.user` is this
- * host's, which rides the client's message id in the entry's `data` (see `Threads.submit`). A user-entry test accepts
- * both, so threads created before and after that change project identically.
+ * Entry kinds that carry a user turn: pi-durable's default placement, and this host's `app.user`, which rides the
+ * client's message id in the entry's `data` (see `Threads.submit`).
  */
 export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user"]);
 export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
@@ -39,9 +36,8 @@ export const isAbortedToolResult = (entry: EntryRecord) =>
 
 /**
  * Split active entries into runs. A user entry is a steer of the current run only when the run was demonstrably
- * still going: its last step is a completed tool round (every call of the last assistant entry has a result, none
- * of them aborted). Steers are applied at that boundary. After an interrupted tool round (aborted results, or calls
- * without results) the run has ended, so the next user entry starts a new run.
+ * still going: its last step is a completed tool round (every call of the last assistant entry has a result, none of
+ * them aborted). After an interrupted tool round the run has ended, so the next user entry starts a new one.
  */
 export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 	const runs: RunDraft[] = [];

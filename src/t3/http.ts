@@ -4,6 +4,7 @@ import { arch, platform } from "node:os";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import {
 	AuthAccessTokenType,
+	authScopeResponse,
 	AuthStandardClientScopes,
 	type ExecutionEnvironmentDescriptor,
 	ORCHESTRATION_PROTOCOL_HEADER,
@@ -51,34 +52,15 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnviron
 		}) as Any;
 }
 
-/**
- * The address a pairing attempt is counted against: the socket it arrived on, and nothing a client wrote.
- *
- * A rate limiter's bucket key has to be something the caller cannot choose. `x-forwarded-for` is a client-supplied
- * header, and on the default (loopback) bind every connection is loopback, so trusting it when the socket is loopback
- * — the previous rule — let any caller mint a fresh bucket per attempt by setting a header: ten thousand guesses at a
- * pairing code, ten thousand fresh counters, and the limiter existed only for callers that did not think of it. Per
- * review sec F7 / conc F4 the header is not consulted.
- *
- * The proxy case the header was there for (`tailscale serve` forwarding a tailnet client through loopback) is not
- * forgotten: it now shares one bucket per proxy, which fails CLOSED — a flood through the proxy locks out the proxy's
- * clients, instead of unlocking the limiter for everyone. Per-client accounting behind a proxy needs an explicit
- * "this deployment is behind a proxy" setting, so the operator, not the request, decides which header to believe.
- */
-function clientAddress(remote: string): string {
-	return remote;
-}
 
-/** `/api/auth/session` for a paired client: legacy `scopes` plus the full `permissions` list T3 gates actions on. */
+/** `/api/auth/session` for a paired client: the contract's own projection of a grant — legacy `scopes` (the frozen
+ * vocabulary) plus the full `permissions` list T3 gates actions on. */
 function authenticatedSession(expiresAt: number) {
-	const permissions = [...AuthStandardClientScopes];
 	return {
 		authenticated: true,
 		auth: authDescriptor,
-		scopes: permissions.filter((s) =>
-			["orchestration:read", "orchestration:operate", "terminal:operate", "relay:read"].includes(s),
-		),
-		permissions,
+		...authScopeResponse([...AuthStandardClientScopes]),
+		permissions: [...AuthStandardClientScopes],
 		sessionMethod: "bearer-access-token",
 		expiresAt: new Date(expiresAt).toISOString(),
 	};
@@ -92,14 +74,14 @@ export const authDescriptor = {
 };
 
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
+const text = (body: string) => HttpServerResponse.text(body);
 const encode = <S extends Schema.Top>(schema: S, value: unknown) => Schema.encodeUnknownSync(schema as Any)(value);
 
 /** The commandId of a body that failed to decode, for the `commandId` the contract's error carries (an empty string when
- * the body has none — the field is required, and its absence is part of what the refusal says). */
+ * the body has none; the field is required, and its absence is part of what the refusal says). */
 const commandIdOf = (raw: unknown): string => (typeof raw === "object" && raw !== null && typeof (raw as Any).commandId === "string" ? String((raw as Any).commandId) : "");
 
-/** A schema refusal in the route's shape: the contract's own error tree, flattened to one readable line. The full
- * structure is in the log; a client gets the first path that failed. */
+/** A schema refusal in the route's shape: the contract's own error tree, flattened to one readable line. */
 function decodeMessage(error: unknown): string {
 	const detail = error instanceof Error ? error.message : String(error);
 	return `Not a valid project mutation: ${detail.replace(/\s+/g, " ").slice(0, 400)}`;
@@ -118,9 +100,8 @@ export function makeServerLayer(deps: {
 	const scopeList = [...AuthStandardClientScopes];
 	const pairingLimit = new PairingRateLimit();
 
-	// DNS-rebinding guard: when bound to loopback, serve only requests addressed to a loopback `Host`. A page that
-	// rebinds its own hostname to 127.0.0.1 must not reach this host (its CORS/origin checks are bypassed as same-origin).
-	// A non-loopback bind is left alone (it may legitimately serve real hostnames).
+	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
+	// story is the README's); a non-loopback bind may legitimately serve real hostnames.
 	const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 	const boundLoopback = LOOPBACK_HOSTS.has(bridge.config.host);
 	const hostGuard = HttpRouter.middleware(
@@ -146,9 +127,8 @@ export function makeServerLayer(deps: {
 			return yield* handler(request);
 		});
 
-	// The two `/api/orchestration/threads/:threadId*` routes share their whole preamble: read the route's threadId, await
-	// its projection, and answer a thread this host does not know with the 404 T3 renders as a missing resource. They
-	// differ only in the snapshot they encode.
+	// The two `/api/orchestration/threads/:threadId*` routes share their preamble: read the route's threadId, await its
+	// projection, and answer an unknown thread with the 404 T3 renders as a missing resource (design.md, Invariants).
 	const withProjection = (render: (projection: ProjectionResult) => HttpServerResponse.HttpServerResponse) =>
 		authorized(() =>
 			Effect.gen(function* () {
@@ -161,22 +141,31 @@ export function makeServerLayer(deps: {
 
 	const routes = Layer.mergeAll(
 		HttpRouter.add("GET", "/.well-known/t3/environment", Effect.sync(() => json(descriptor()))),
-		// Printed pairing URLs point here; a desktop browser opening one gets a pairing screen instead of a 404.
-		HttpRouter.add(
-			"GET",
-			"/pair",
-			Effect.succeed(
-				HttpServerResponse.html(
-					`<!doctype html><title>pi-durable-t3 pairing</title><body style="font-family:sans-serif;max-width:40em;margin:3em auto"><h1>pi-durable-t3 pairing link</h1><p>This address is a pairing link for the T3 Code apps, not a web page. In the T3 mobile app choose <b>Add environment</b> and paste this URL (or scan its QR code). For the web app, open your T3 web build at <code>/pair?host=&lt;this server&gt;#token=&lt;code&gt;</code>.</p></body>`,
-				),
-			),
-		),
+		// Printed pairing URLs point here: the pairing endpoint takes a POST, so a browser opening one needs a pairing
+		// screen, not a 404. The token rides in the hash, never the query string.
+		HttpRouter.add("GET", "/pair", Effect.sync(() => text(
+			`<!doctype html><meta charset=utf-8><title>Pair with ${"pi"} coding-agent</title>
+<style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:0 1rem}code{background:#eee;padding:2px 4px;border-radius:4px}</style>
+<h3>Pair this browser with the bridge</h3>
+<p id=s>Checking the pairing code…</p>
+<script>
+const token = new URL(location.href).hash.replace(/^#/, "");
+fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({ subject_token: token, client_label: "browser pairing screen" }) })
+  .then((r) => r.json())
+  .then((j) => { document.getElementById("s").textContent = j.access_token
+    ? "Pairing code accepted. Open the T3 app and sign in with this environment — it is now paired."
+    : "Pairing failed: the code was already used or has expired. Start the host again for a new one."; });
+</script>`,
+		))),
 		HttpRouter.add(
 			"POST",
 			"/oauth/token",
 			Effect.gen(function* () {
 				const request = yield* HttpServerRequest.HttpServerRequest;
-				const address = clientAddress(Option.getOrElse(request.remoteAddress, () => "unknown"));
+				// The limiter keys on the SOCKET, never on a header (design.md): a proxy behind loopback shares one bucket,
+				// which fails CLOSED.
+				const address = Option.getOrElse(request.remoteAddress, () => "unknown");
 				if (pairingLimit.blocked(address)) {
 					log.warn("pairing rate limited", { address });
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "rate_limited", message: "Too many pairing attempts; wait a minute." }, 429);
@@ -257,19 +246,16 @@ export function makeServerLayer(deps: {
 			"/api/projects",
 			authorized(() => Effect.sync(() => json({ projects: bridge.projects() }))),
 		),
-		// REST parity with the documented HTTP surface (`EnvironmentProjectsHttpApi`): the web client reaches projects
-		// over `/ws`, but the same mutation is served here over the same bearer-token guard, sharing one store.
+		// REST parity with the documented HTTP surface (`EnvironmentProjectsHttpApi`): the same mutation, the same bearer
+		// guard, one store.
 		HttpRouter.add(
 			"POST",
 			"/api/projects/mutate",
 			authorized((request) =>
 				Effect.gen(function* () {
 					const raw = yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)));
-					// Parity with the RPC means parity of VALIDATION, not just of route: `projects.mutate` decodes its
-					// payload with the contract's `ProjectMutation`, so the same JSON has to mean the same thing on both
-					// transports. Passed through unchecked, a body the RPC refuses reached the bridge's switch — `{}` matched
-					// no case and the route answered 200 with an empty body (a create that did nothing, reported as success),
-					// and a `projectId` outside the contract's brand took a bridge-minted id, so one JSON made two projects.
+					// Parity is parity of VALIDATION, not just of URL: decode with the contract's `ProjectMutation`, so one JSON
+					// means one thing on `/ws` and over REST (design.md, T3 facet).
 					const decoded = yield* Effect.try({
 						try: () => Schema.decodeUnknownSync(ProjectMutation)(raw),
 						catch: (error) => decodeMessage(error),
@@ -285,9 +271,8 @@ export function makeServerLayer(deps: {
 					}).pipe(
 						Effect.map((project) => json(project)),
 						Effect.catch((error) =>
-							// A duplicate path (a workspace owned by another project) and a duplicate minted id are both
-							// conflicts (409); classify by the error's `name` so it holds across module boundaries, not only
-							// by `instanceof`.
+							// A duplicate path and a duplicate minted id are both conflicts (409); classify by the error's `name`,
+							// which holds across module boundaries where `instanceof` may not.
 							Effect.succeed(json({ _tag: "ProjectMutationError", commandId: mutation.commandId, message: error.message || String(error) }, error.name === ProjectConflict.name || error.name === ProjectIdConflict.name ? 409 : 400)),
 						),
 					);
@@ -324,8 +309,8 @@ export function makeServerLayer(deps: {
 					);
 					return httpEffect;
 				}).pipe(Effect.provide(RpcSerialization.layerJson));
-				// If the client's bearer token stops being active — it expires, or `auth.json` is edited out — close this
-				// connection, so a client cannot keep its live WebSocket after its token is gone.
+				// A client whose bearer token stops being active — it expires, or `auth.json` is edited out — loses its live
+				// WebSocket: a token cannot buy a connection after it is gone.
 				const revoked = Effect.gen(function* () {
 					while (auth.isTokenActive(tokenHash)) yield* Effect.sleep("2 seconds");
 					log.info("token no longer active; closing WebSocket");

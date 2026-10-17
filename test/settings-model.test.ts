@@ -38,7 +38,7 @@ describe("the settings store (T3's patch + persistence semantics)", () => {
 		const providers = store.current().providers as unknown as Record<string, { enabled?: boolean } | undefined>;
 		expect(providers.codex?.enabled, "Codex is answered OFF — this host runs no Codex").toBe(false);
 		expect(providers.claudeAgent?.enabled, "Claude is answered OFF, as every other driver").toBe(false);
-		expect(providers.pi, "the driver this host serves is left at its own defaults").toEqual(expect.objectContaining({}));
+		expect(providers.pi?.enabled, "pi is answered ON: T3's contract defaults it off, and the UI would show it Disabled").toBe(true);
 		// A write AT the contract default writes no byte (T3's default-stripping), so the host's answer for that key
 		// stands: the pane cannot light up a provider this host does not run. A write that DIFFERS is stored, and the
 		// document owns it (see the instance-map test: a client's map, emptied or not, keeps its bytes).
