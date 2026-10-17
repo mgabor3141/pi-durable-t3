@@ -1,17 +1,13 @@
-# Dependencies and build output.
-node_modules/
+# Dependencies, build output, and T3 artifacts from `pnpm setup:t3` (reproducible from the pin). Bare names, no
+# trailing slash, so the symlinks grove workspaces use are ignored too.
+node_modules
 dist/
 *.log
+vendor
+web-dist
+.t3-cache
 
 # Scratch notes; never published.
 .memory/
 
-# T3 artifacts produced by `pnpm setup:t3` — all reproducible from the pinned commit
-# (dev/setup-t3.sh), so they are never committed.
-/vendor/
-/web-dist/
-/.t3-cache/
-
-# Test roots are created under $TMPDIR, never in the repo. A run's durable.db, models-store.json,
-# and t3-auth/ live under the env root (~/.pi/durable-t3), not here.
 .DS_Store

@@ -21,12 +21,15 @@ import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
 import { ProviderInstanceExists } from "../settings.ts";
+import { accessChangeEvent, accessSnapshot } from "./access.ts";
+import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { CurrentAuthSession } from "./session-context.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -96,6 +99,7 @@ interface RpcDeps {
 	readonly catalog: ModelCatalog;
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
 	readonly authDescriptor: Any;
+	readonly auth: AuthStore;
 	readonly log: Logger;
 }
 
@@ -304,6 +308,20 @@ export function makeRpcLayer(deps: RpcDeps) {
 						stopCatalog();
 						stopSettings();
 					};
+				}),
+			),
+		// The Connections access stream (T3's `subscribeAuthAccess`): the snapshot first (links + sessions, `current` for
+		// this socket's session), then the store's changes as incremental events at an increasing revision (the client
+		// reducer folds each into the snapshot; it never re-reads the store). `current` is the viewer's own client.
+		subscribeAuthAccess: () =>
+			Stream.unwrap(
+				Effect.map(CurrentAuthSession, ({ sessionId }) => {
+					let revision = 1;
+					const snapshot = { version: 1 as const, revision: 1, type: "snapshot" as const, payload: accessSnapshot(deps.auth, sessionId) };
+					return Stream.concat(
+						Stream.make(snapshot),
+						fromListener<Any>((emit) => deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }))),
+					);
 				}),
 			),
 		[`orchestration.subscribeShell`]: (input: Any) =>

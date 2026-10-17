@@ -1,10 +1,19 @@
-// HTTP surface (discovery, pairing, tickets, snapshots) and the `/ws` RPC endpoint.
+// HTTP surface (discovery, pairing, tickets, snapshots, Connections) and the `/ws` RPC endpoint.
 import { type Server } from "node:http";
+import { randomUUID } from "node:crypto";
 import { arch, platform } from "node:os";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import {
+	AuthAccessReadScope,
+	AuthAccessWriteScope,
 	AuthAccessTokenType,
+	AuthClientSessionRevokeResult,
+	AuthClientSession,
 	authScopeResponse,
+	AuthOtherClientSessionsRevokeResult,
+	AuthPairingCredentialResult,
+	AuthPairingLinkRevokeResult,
+	AuthPairingLink,
 	AuthStandardClientScopes,
 	type ExecutionEnvironmentDescriptor,
 	ORCHESTRATION_PROTOCOL_HEADER,
@@ -16,6 +25,7 @@ import {
 	ProjectMutation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -26,12 +36,14 @@ import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 import { WsRpcGroup } from "@t3tools/contracts";
 import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
-import { type AuthStore, PairingRateLimit } from "./auth.ts";
+import { listClientSessions, listPairingLinks } from "./access.ts";
+import { type AuthStore, type ClientMetadata, PairingRateLimit } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
+import { CurrentAuthSession } from "./session-context.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/setup-t3.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -98,8 +110,7 @@ export function makeServerLayer(deps: {
 }) {
 	const { bridge, auth, log, httpServer } = deps;
 	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, log });
-	const scopeList = [...AuthStandardClientScopes];
+	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log });
 	const pairingLimit = new PairingRateLimit();
 
 	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
@@ -128,6 +139,26 @@ export function makeServerLayer(deps: {
 			}
 			return yield* handler(request);
 		});
+
+	// The Connections endpoints are gated on a scope, not just a bearer. T3's handler shape: a missing credential is
+	// `auth_invalid`; a token without the scope is `insufficient_scope`. Both carry a traceId (a UUID we mint: the
+	// contract requires the field and the client surfaces it). Every standard grant holds access:read/write, so a
+	// paired browser passes; a scope-narrowed grant does not.
+	const traceId = () => randomUUID();
+	const scopeOf = (header: string | undefined) => auth.verifyBearer(header);
+	const authorizedScope =
+		(scope: string, handler: (request: HttpServerRequest.HttpServerRequest, token: NonNullable<ReturnType<AuthStore["verifyBearer"]>>) => Any) =>
+			Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
+				const token = scopeOf(request.headers.authorization);
+				if (token === undefined) {
+					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", reason: "missing_credential", traceId: traceId(), message: "Pair this client first." }, 401);
+				}
+				if (!token.scopes.includes(scope)) {
+					return json({ _tag: "EnvironmentScopeRequiredError", code: "insufficient_scope", requiredScope: scope, requiredPermission: scope, traceId: traceId(), message: `This request needs the ${scope} scope, which this client does not have.` }, 403);
+				}
+				return yield* handler(request, token);
+			});
 
 	// The two `/api/orchestration/threads/:threadId*` routes share their preamble: read the route's threadId, await its
 	// projection, and answer an unknown thread with the 404 T3 renders as a missing resource (design.md, Invariants).
@@ -175,23 +206,42 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 				const body = yield* request.urlParamsBody.pipe(Effect.orElseSucceed(() => [] as Any));
 				const params = new URLSearchParams(body as Any);
 				const code = params.get("subject_token")?.trim() ?? "";
-				const label = params.get("client_label") ?? params.get("client_device_type") ?? "T3 client";
-				const issued = code.length > 0 ? auth.exchange(code, label) : undefined;
-				if (issued === undefined) {
+				// What the exchange knows about the client asking (T3 records it on the session): a label, a UA-derived device
+				// shape, and the SOCKET address (never a header — design.md). The label is the client's own; the device type is
+				// only accepted when it is one of the contract's literals.
+				const clientLabel = params.get("client_label")?.trim();
+				const deviceType = params.get("client_device_type");
+				const clientOs = params.get("client_os")?.trim();
+				const userAgentHeader = request.headers["user-agent"];
+				const scopeParam = params.get("scope")?.trim();
+				const requestedScopes = scopeParam === undefined || scopeParam === "" ? undefined : scopeParam.split(/\s+/).filter(Boolean);
+				// A device type is accepted only when it is one of the contract's literals; anything else is left unset (the
+				// store defaults the session to "unknown").
+				const isDeviceType = (value: string | null): value is NonNullable<ClientMetadata["deviceType"]> =>
+					value === "desktop" || value === "mobile" || value === "tablet" || value === "bot" || value === "unknown";
+				const presented = {
+					ipAddress: address,
+					...(clientLabel === undefined || clientLabel === "" ? {} : { label: clientLabel }),
+					...(typeof userAgentHeader === "string" && userAgentHeader !== "" ? { userAgent: userAgentHeader } : {}),
+					...(isDeviceType(deviceType) ? { deviceType } : {}),
+					...(clientOs === undefined || clientOs === "" ? {} : { os: clientOs }),
+				};
+				const exchanged = code.length > 0 ? auth.exchange(code, presented, requestedScopes) : { refused: "invalid-credential" as const };
+				if ("session" in exchanged === false) {
 					pairingLimit.fail(address);
-					log.warn("pairing rejected", { address });
-					return json(
-						{ _tag: "EnvironmentAuthInvalidError", code: "invalid_grant", message: "Invalid or expired pairing code." },
-						401,
-					);
+					log.warn("pairing rejected", { address, refused: exchanged.refused });
+					return exchanged.refused === "scope-not-granted"
+						? json({ _tag: "EnvironmentRequestInvalidError", code: "invalid_request", reason: "scope_not_granted", traceId: traceId(), message: "The pairing code does not grant the requested scopes." }, 400)
+						: json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", reason: "invalid_credential", message: "Invalid or expired pairing code." }, 401);
 				}
-				log.info("client paired", { label });
+				const issued = exchanged.session;
+				log.info("client paired", { label: issued.session.label ?? issued.session.deviceType });
 				return json({
 					access_token: issued.token,
 					issued_token_type: AuthAccessTokenType,
 					token_type: "Bearer",
 					expires_in: issued.expiresIn,
-					scope: scopeList.join(" "),
+					scope: issued.scopes.join(" "),
 				});
 			}),
 		),
@@ -215,6 +265,72 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 					return json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
 				}),
 			),
+		),
+		// ── Connections (Settings → Connections). T3's owner mints a pairing link, lists paired devices and revokes
+		// them. Each handler mirrors `apps/server/src/auth/http.ts`: the scope it requires, the request-validity checks,
+		// the contract's own success shape (encoded, so one JSON means one thing here and over `/ws`).
+		HttpRouter.add(
+			"POST",
+			"/api/auth/pairing-token",
+			authorizedScope(AuthAccessWriteScope, (request, token) =>
+				Effect.gen(function* () {
+					const raw = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
+					const label = typeof raw?.label === "string" && raw.label.trim() !== "" ? raw.label.trim() : undefined;
+					const delegated: string[] = Array.isArray(raw?.scopes) ? [...raw.scopes] : [...AuthStandardClientScopes];
+					// T3's mint: an empty grant is invalid, and a repeated scope is invalid (the client sends a set; a hand-built
+					// request that repeats one is refused, not silently de-duplicated).
+					if (delegated.length === 0 || new Set(delegated).size !== delegated.length) {
+						return json({ _tag: "EnvironmentRequestInvalidError", code: "invalid_request", reason: "invalid_scope", traceId: traceId(), message: "A pairing link needs at least one scope, and no scope twice." }, 400);
+					}
+					const missing = delegated.find((scope) => !token.scopes.includes(scope));
+					if (missing !== undefined) {
+						return json({ _tag: "EnvironmentScopeRequiredError", code: "insufficient_scope", requiredScope: missing, requiredPermission: missing, traceId: traceId(), message: `This client cannot delegate the ${missing} scope, which it does not have.` }, 403);
+					}
+					const issued = auth.createPairingLink({ scopes: delegated, ...(label === undefined ? {} : { label }) });
+					return json(encode(AuthPairingCredentialResult, { id: issued.id, credential: issued.credential, ...(label === undefined ? {} : { label }), expiresAt: DateTime.makeUnsafe(issued.expiresAt) }));
+				}),
+			),
+		),
+		HttpRouter.add(
+			"GET",
+			"/api/auth/pairing-links",
+			authorizedScope(AuthAccessReadScope, () => Effect.sync(() => json(encode(Schema.Array(AuthPairingLink), listPairingLinks(auth))))),
+		),
+		HttpRouter.add(
+			"POST",
+			"/api/auth/pairing-links/revoke",
+			authorizedScope(AuthAccessWriteScope, (request) =>
+				Effect.gen(function* () {
+					const raw = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
+					const revoked = auth.revokePairingLink(typeof raw?.id === "string" ? raw.id : "");
+					return json(encode(AuthPairingLinkRevokeResult, { revoked }));
+				}),
+			),
+		),
+		HttpRouter.add(
+			"GET",
+			"/api/auth/clients",
+			authorizedScope(AuthAccessReadScope, (request, token) => Effect.sync(() => json(encode(Schema.Array(AuthClientSession), listClientSessions(auth, token.id))))),
+		),
+		HttpRouter.add(
+			"POST",
+			"/api/auth/clients/revoke",
+			authorizedScope(AuthAccessWriteScope, (request, token) =>
+				Effect.gen(function* () {
+					const raw = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
+					const sessionId = typeof raw?.sessionId === "string" ? raw.sessionId : "";
+					// A client cannot revoke the very session it is calling with — the UI hides that row; T3 refuses it (403).
+					if (sessionId === token.id) {
+						return json({ _tag: "EnvironmentOperationForbiddenError", code: "operation_forbidden", reason: "current_session_revoke_not_allowed", traceId: traceId(), message: "The environment refused this operation (current_session_revoke_not_allowed)." }, 403);
+					}
+					return json(encode(AuthClientSessionRevokeResult, { revoked: auth.revokeClientSession(sessionId) }));
+				}),
+			),
+		),
+		HttpRouter.add(
+			"POST",
+			"/api/auth/clients/revoke-others",
+			authorizedScope(AuthAccessWriteScope, (request, token) => Effect.sync(() => json(encode(AuthOtherClientSessionsRevokeResult, { revokedCount: auth.revokeOtherClientSessions(token.id) })))),
 		),
 		HttpRouter.add(
 			"GET",
@@ -302,22 +418,39 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", message: "Invalid WebSocket ticket." }, 401);
 				}
 				log.info("client connected");
-				const httpEffect = yield* Effect.gen(function* () {
-					const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-					yield* RpcServer.make(WsRpcGroup, { disableTracing: true, disableFatalDefects: true } as Any).pipe(
-						Effect.provideService(RpcServer.Protocol, protocol),
-						Effect.provide(rpcLayer),
-						Effect.forkScoped,
-					);
-					return httpEffect;
-				}).pipe(Effect.provide(RpcSerialization.layerJson));
-				// A client whose bearer token stops being active — it expires, or `auth.json` is edited out — loses its live
-				// WebSocket: a token cannot buy a connection after it is gone.
-				const revoked = Effect.gen(function* () {
-					while (auth.isTokenActive(tokenHash)) yield* Effect.sleep("2 seconds");
-					log.info("token no longer active; closing WebSocket");
-				});
-				return yield* Effect.raceFirst(httpEffect, revoked.pipe(Effect.as(HttpServerResponse.empty({ status: 401 }))));
+				// The socket's session: the Connections list marks this client `current`, and the access stream filters by it.
+				const session = auth.sessionOfTokenHash(tokenHash);
+				const sessionId = session?.id ?? "";
+				// `connected` is the live-socket count in the store: mark this one on acquire, drop it on release (the stream
+				// pushes the connect/disconnect so the Connections list updates without a re-poll).
+				const connection = yield* Effect.acquireUseRelease(
+					Effect.sync(() => auth.markConnected(tokenHash)),
+					() =>
+						Effect.gen(function* () {
+							const httpEffect = yield* Effect.gen(function* () {
+								const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
+								// `CurrentAuthSession` is provided OUTSIDE `Effect.provide(rpcLayer)`: the rpc layer's handlers
+								// (the access stream) require it, so the layer must launch with it in context — not have it injected
+								// downstream of where the layer is built.
+								yield* RpcServer.make(WsRpcGroup, { disableTracing: true, disableFatalDefects: true } as Any).pipe(
+									Effect.provideService(RpcServer.Protocol, protocol),
+									Effect.provide(rpcLayer),
+									Effect.provideService(CurrentAuthSession, { sessionId }),
+									Effect.forkScoped,
+								);
+								return httpEffect;
+							}).pipe(Effect.provide(RpcSerialization.layerJson));
+							// A client whose bearer token stops being active — it expires, is revoked from the Connections list, or
+							// has `auth.json` edited out — loses its live WebSocket: a token cannot buy a connection after it is gone.
+							const revoked = Effect.gen(function* () {
+								while (auth.isTokenActive(tokenHash)) yield* Effect.sleep("2 seconds");
+								log.info("token no longer active; closing WebSocket");
+							});
+							return yield* Effect.raceFirst(httpEffect, revoked.pipe(Effect.as(HttpServerResponse.empty({ status: 401 }))));
+						}),
+					() => Effect.sync(() => auth.markDisconnected(tokenHash)),
+				);
+				return connection;
 			}),
 		),
 	);

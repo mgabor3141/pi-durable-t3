@@ -64,6 +64,8 @@ export async function wsTicket(port: number, token: string): Promise<string> {
 }
 
 export type WsRpc = {
+	/** Whether the socket has closed (the server reaps it when the token stops being active — expiry or revocation). */
+	isClosed(): boolean;
 	/** Every frame received so far (JSON-decoded). */
 	frames(): Frame[];
 	/** Frames of one tag (e.g. the stream events of a `Chunk`). */
@@ -82,6 +84,10 @@ export async function connectWs(port: number, token: string): Promise<WsRpc> {
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(ticket)}`);
 	const frames: Frame[] = [];
 	const byRequest = new Map<number, Frame[]>();
+	let closed = false;
+	ws.addEventListener("close", () => {
+		closed = true;
+	});
 	ws.addEventListener("message", (event) => {
 		const frame = JSON.parse(String(event.data)) as Frame;
 		frames.push(frame);
@@ -113,6 +119,7 @@ export async function connectWs(port: number, token: string): Promise<WsRpc> {
 		throw new Error(`no answer to ${tag} (id ${id}) within ${timeoutMs}ms; frames: ${JSON.stringify(frames).slice(0, 600)}`);
 	};
 	return {
+		isClosed: () => closed,
 		frames: () => frames.slice(),
 		chunks: (requestId) => (byRequest.get(requestId) ?? []).slice(),
 		call,

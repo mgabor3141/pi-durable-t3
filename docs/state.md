@@ -37,7 +37,7 @@ the two together; a mismatched pair shows an empty sidebar, and nothing repairs 
 |---|---|---|
 | `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
 | `projects.json` (the state dir) | The project registry: id, path, title | Project names; threads keep their `cwd` |
-| `auth.json` (the state dir) | Environment id, hashed pairing codes and tokens | Every client re-pairs |
+| `auth.json` (the state dir) | Environment id, hashed pairing links and hashed bearer tokens (client sessions), each with its id, grant, scopes and client metadata | Every client re-pairs; minted links are lost |
 | The scratch dir (the integrator's `scratchDir`, if set) | T3's "No project" folder: one subfolder per thread launched without a project | Nothing — the folder is re-made by the next `projects.ensureScratch`, and every thread keeps the `cwd` its conversation recorded |
 
 The JSON files are written atomically, mode 0600; the scratch dir is a plain directory, created on demand
@@ -51,7 +51,7 @@ All of it is safe to lose:
 - Per-thread view caches and the undo overlay.
 - The thread list.
 - A bounded map of recent prompt command ids.
-- Pairing tickets and rate-limit buckets.
+- Pairing tickets, rate-limit buckets, and the live-socket count per client session (which drives a device's `connected` badge).
 
 ## Known gaps
 
