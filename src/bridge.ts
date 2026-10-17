@@ -1,11 +1,11 @@
 // The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. The bridge adds the
 // threads layer (named pointers over the Harness's conversations), serves the chord objects on a chord host, and
-// speaks T3's wire protocol over HTTP + `/ws`. It decides nothing about the agent: the client names the model it
-// sends, the caller hands in the model catalog (picker list only), and per-thread configuration for new threads
-// comes from the caller's `newThread` hook — the bridge computes no defaults of its own.
+// speaks T3's wire protocol over HTTP + `/ws`. It decides nothing about the agent: a fresh thread carries its
+// project's cwd and nothing else, the client names the model on every create/launch/prompt, and the caller hands
+// in the model catalog (the picker list) — the bridge computes no defaults of its own.
 import { createHost } from "@earendil-works/chord";
-import type { Models } from "@earendil-works/pi-ai";
-import type { AgentChange, Harness } from "@earendil-works/pi-durable";
+import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
+import type { Harness } from "@earendil-works/pi-durable";
 import { createServerFacet } from "./objects.ts";
 import type { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
@@ -34,9 +34,6 @@ export type AttachT3Options = {
 	readonly tokenTtlSeconds?: number;
 	/** Fixed reusable pairing token (tests only; production mints single-use codes). */
 	readonly pairingToken?: string;
-	/** Configure a newly created thread's conversation (model, prompt text, …). The bridge passes the project's
-	 * `cwd` and stores what the hook returns — it interprets nothing. */
-	readonly newThread?: (info: { readonly projectId: string; readonly cwd: string }) => AgentChange | undefined;
 	readonly log?: Logger;
 };
 
@@ -66,7 +63,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	const threads = new Threads({
 		harness,
 		registry: options.projects,
-		...(options.newThread === undefined ? {} : { newThread: options.newThread }),
 		onWarn: (message) => log.warn(message),
 	});
 	await threads.repair();
@@ -76,7 +72,13 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	await server.load([createServerFacet(threads, options.models)]);
 	await server.ready();
 
-	const catalog = new ModelCatalog(async () => (await options.models.getAvailable()).map((model) => ({ provider: model.provider, modelId: model.id, name: model.name })));
+	const catalog = new ModelCatalog(async () => (await options.models.getAvailable()).map((model) => ({
+		provider: model.provider,
+		modelId: model.id,
+		name: model.name,
+		// pi's own rule for which thinking levels a model has — the picker declares exactly these.
+		thinkingLevels: getSupportedThinkingLevels(model),
+	})));
 	await catalog.refresh();
 
 	const config: BridgeConfig = {

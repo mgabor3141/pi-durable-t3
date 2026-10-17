@@ -5,7 +5,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { HostError } from "../src/host-errors.ts";
 import { scanConversations } from "../src/threads.ts";
-import { conversation, errored, firstUserEntry, gated, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, errored, firstUserEntry, gated, idle, makeThreads } from "./threads-harness.ts";
 
 const code = (error: unknown): string => (error instanceof HostError ? error.code : `not-a-HostError: ${String(error)}`);
 const rejectCode = async (promise: Promise<unknown>): Promise<string> => promise.then(() => "resolved", code);
@@ -14,9 +14,10 @@ const seed = fauxAssistantMessage("seed");
 
 describe("create", () => {
 	it("a retried create adds one thread and one conversation", async () => {
-		const { threads, harness } = await makeThreads();
-		const first = await threads.create({ threadId: "t", projectId: "p" });
-		const second = await threads.create({ threadId: "t", projectId: "p" });
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		const first = await create({ threadId: "t", projectId: "p" });
+		const second = await create({ threadId: "t", projectId: "p" });
 		expect(second.threadId).toBe("t");
 		expect(second.head).toBe(first.head);
 		expect(await threads.list()).toHaveLength(1);
@@ -27,8 +28,9 @@ describe("create", () => {
 	});
 
 	it("an unknown project is refused before any write", async () => {
-		const { threads, harness } = await makeThreads();
-		expect(await rejectCode(threads.create({ threadId: "t", projectId: "nope" }))).toBe("unknown_project");
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		expect(await rejectCode(create({ threadId: "t", projectId: "nope" }))).toBe("unknown_project");
 		const conversations = await harness.commit((tx) => scanConversations(tx), BACKGROUND_CONTEXT);
 		expect(conversations).toHaveLength(0); // no conversation created (the reserved root is not scanned).
 	});
@@ -37,7 +39,8 @@ describe("create", () => {
 describe("prompt racing undo — both orders", () => {
 	it("undo first: a later prompt to the old head spawns a child thread, not a lost turn", async () => {
 		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const oldHead = thread.head;
 
 		model.respond(seed);
@@ -60,7 +63,8 @@ describe("prompt racing undo — both orders", () => {
 
 	it("prompt first: a rewind while that run is live is refused, leaving the head and the live run", async () => {
 		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const head = thread.head;
 
 		const run = gated("running");
@@ -79,7 +83,8 @@ describe("prompt racing undo — both orders", () => {
 describe("undo", () => {
 	it("a retried undo returns the same fork and does not fork again", async () => {
 		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const oldHead = thread.head;
 		model.respond(seed);
 		await threads.submit({ threadId: "t", conversationId: oldHead, requestId: "seed", message: "hi" }, undefined);
@@ -98,7 +103,8 @@ describe("undo", () => {
 
 	it("undo refusals: a non-user entry is not rewindable; a failed run with a queued follow-up stays owed", async () => {
 		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const head = thread.head;
 		model.respond(seed);
 		await threads.submit({ threadId: "t", conversationId: head, requestId: "seed", message: "hi" }, undefined);
@@ -131,7 +137,8 @@ describe("undo", () => {
 describe("promotion", () => {
 	it("concurrent promotions of one conversation add exactly one thread", async () => {
 		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const oldHead = thread.head;
 		model.respond(seed);
 		await threads.submit({ threadId: "t", conversationId: oldHead, requestId: "seed", message: "hi" }, undefined);
@@ -147,8 +154,9 @@ describe("promotion", () => {
 
 describe("remove", () => {
 	it("drops the pointer but keeps the conversation", async () => {
-		const { threads, harness } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		await threads.remove("t");
 		expect(await threads.thread("t")).toBeUndefined();
 		expect(await conversation(harness, thread.head).catch(() => undefined)).toBeDefined();

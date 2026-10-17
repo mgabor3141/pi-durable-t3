@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
+import { ProviderInstanceExists } from "../settings.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
@@ -139,9 +140,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 		const run = async (): Promise<number> => {
 			switch (command.type) {
 				case "message.dispatch": {
-					if (command.modelSelection?.model !== undefined) {
-						await bridge.selectModel(command.threadId, command.modelSelection.model);
-					}
+					await bridge.applySelection(command.threadId, command.modelSelection);
 					// With serverResolvedCommandContext the client sends start_immediately plus a deliveryIntent
 					// (steer/restart/auto); queued sends are queue_after_active. Older clients name the mode directly.
 					const modeType = command.dispatchMode?.type ?? "start_immediately";
@@ -168,7 +167,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					await bridge.interrupt(command.threadId);
 					break;
 				case "thread.model-selection.set":
-					await bridge.selectModel(command.threadId, command.modelSelection.model);
+					await bridge.applySelection(command.threadId, command.modelSelection);
 					break;
 				case "checkpoint.rollback":
 					await bridge.rollback({
@@ -183,9 +182,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					break;
 				case "thread.create":
 					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId });
-					if (command.modelSelection?.model !== undefined) {
-						await bridge.selectModel(command.threadId, command.modelSelection.model);
-					}
+					await bridge.applySelection(command.threadId, command.modelSelection);
 					break;
 				case "thread.runtime-mode.set":
 					if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
@@ -225,14 +222,22 @@ export function makeRpcLayer(deps: RpcDeps) {
 				// The contract's error for this call, BUILT as the contract's class: `settingsPath` and `operation` are
 				// required fields, and the hand-rolled `{_tag, message}` shape used to fail the schema encode at the RPC
 				// boundary — the client received a `Die` defect, not a refusal. The specific reason rides in `cause`,
-				// which the contract declares as an optional defect.
+				// which the contract declares as an optional defect. A `create` for an instance the document has is
+				// T3's own refusal, with T3's own operation and instance id.
 				catch: (error) =>
-					new ServerSettingsError({
-						settingsPath: deps.bridge.config.settings.path,
-						operation: "write-file",
-						providerInstanceId: PROVIDER_INSTANCE_ID,
-						cause: error,
-					}),
+					error instanceof ProviderInstanceExists
+						? new ServerSettingsError({
+								settingsPath: deps.bridge.config.settings.path,
+								operation: "create-provider-instance",
+								providerInstanceId: error.instanceId,
+								cause: error,
+							})
+						: new ServerSettingsError({
+								settingsPath: deps.bridge.config.settings.path,
+								operation: "write-file",
+								providerInstanceId: PROVIDER_INSTANCE_ID,
+								cause: error,
+							}),
 				}).pipe(
 					Effect.tapError((error: ServerSettingsError) => Effect.sync(() => log.warn("settings update refused", { operation: error.operation, cause: error.cause instanceof Error ? error.cause.message : String(error.cause) }))),
 				),
@@ -333,7 +338,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 			toPromiseEffect(
 				async () => {
 					const threadId = await bridge.createThread({ threadId: input.threadId, projectId: input.projectId });
-					if (input.modelSelection?.model !== undefined) await bridge.selectModel(threadId, input.modelSelection.model);
+					await bridge.applySelection(threadId, input.modelSelection);
 					if (input.initialMessage !== undefined && input.initialMessage.text.trim().length > 0) {
 						await bridge.idempotent(input.commandId, async () => {
 							await bridge.sendMessage({

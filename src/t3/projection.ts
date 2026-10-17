@@ -27,7 +27,7 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
-import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef } from "./model-types.ts";
+import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
 import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
@@ -49,6 +49,8 @@ export interface ThreadMeta {
 	readonly updatedAt: number;
 	/** The Session's model, for the thread's model selection. */
 	readonly model: ModelRef | null;
+	/** The Session's thinking level, reported back as the selection's `thinking` option. */
+	readonly thinkingLevel?: string;
 	/** When this thread was promoted/forked from another, that thread's id (lineage → a "fork"). */
 	readonly parentThreadId?: string;
 	/** Directory status, used when no transcript is loaded. */
@@ -96,9 +98,13 @@ export function projectThread(
 	const providerThreadId = `pt-${threadId}`;
 	const live = view?.docs["pi.live"];
 	const busy = view === undefined ? meta.running : live?.run !== undefined;
+	// The thread's selection, reported as the client named it: the model, plus the `thinking` level the conversation
+	// carries (the option T3's pi driver declares). A thread with no model is the `"default"` slug, which answers no
+	// catalog entry — the picker shows nothing selected (see docs/capabilities.md).
 	const modelSelection: Any = {
 		instanceId: PROVIDER_INSTANCE_ID,
 		model: meta.model === null ? "default" : modelSlug(meta.model),
+		...(meta.thinkingLevel === undefined ? {} : { options: [{ id: THINKING_OPTION, value: meta.thinkingLevel }] }),
 	};
 	const drafts = groupRuns(view?.entries ?? []);
 
@@ -186,6 +192,8 @@ export function projectThread(
 		const lastEntry = draft.steps.at(-1) ?? u;
 		const completedMs = running ? null : (firstMessage(lastEntry)?.timestamp ?? requestedAt);
 		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
+		// The run's model, read from the assistant message pi recorded for it: this host has no provider session
+		// for T3's server to read a run's selection from, so the conversation's own record is the honest source.
 		const runModel: Any = (() => {
 			const m = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
 			return m?.role === "assistant" && m.provider !== undefined && m.model !== undefined

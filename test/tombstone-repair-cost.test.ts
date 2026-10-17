@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads } from "../src/threads.ts";
-import { idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,8 +42,9 @@ describe("the removal wins the run", () => {
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		});
-		const threads = new Threads({ harness: widened, registry: f.registry, newThread: () => ({ model: model.modelRef }) });
-		const t = await threads.create({ threadId: "doomed", projectId: "p" });
+		const threads = new Threads({ harness: widened, registry: f.registry });
+		const create = createNamed(threads, f.harness, model);
+		const t = await create({ threadId: "doomed", projectId: "p" });
 		// Run one is quick to interrupt; run two is a 200 s stream that only an abort can end.
 		model.respond(fauxAssistantMessage("ack"), fauxAssistantMessage("y".repeat(400)));
 

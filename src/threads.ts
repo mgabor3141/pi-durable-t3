@@ -5,7 +5,6 @@
 // a new child thread — conflicts become forks, never "stale" errors.
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
 	type AgentChange,
@@ -79,15 +78,6 @@ type ThreadsDeps = {
 	/** The live project registry (the bridge's file). A project's id is derived from its path, so a UI add/remove is
 	 * visible without rebuilding this layer; threads look their project's cwd up here at create. */
 	readonly registry: ProjectRegistry;
-	readonly context?: Context;
-	/**
-	 * Configures a newly created thread's conversation: called at create with the project's id and cwd, and its return
-	 * is stored on `pi.agent` (so forks and undo copies inherit it). The bridge interprets nothing — the caller decides
-	 * the model, prompt text, and everything else a fresh thread starts with.
-	 */
-	readonly newThread?: (info: { readonly projectId: string; readonly cwd: string }) => AgentChange | undefined;
-	/** Injectable clock, for a deterministic `createdAt` in tests. */
-	readonly now?: () => number;
 	/**
 	 * Called when a prompt's run is committed but its promote-into-a-thread step fails. The turn is running and will be
 	 * adopted by `repair()` on the next start or by a later write to the conversation; the submit itself succeeded.
@@ -147,22 +137,12 @@ async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> 
 export class Threads {
 	readonly #harness: Harness;
 	readonly #registry: ProjectRegistry;
-	readonly #context: Context;
-	readonly #threadConfig: ((info: { projectId: string; cwd: string }) => AgentChange | undefined) | undefined;
-	readonly #now: () => number;
 	readonly #onWarn: (message: string, error: unknown) => void;
 
 	constructor(deps: ThreadsDeps) {
 		this.#harness = deps.harness;
 		this.#registry = deps.registry;
-		this.#context = deps.context ?? BACKGROUND_CONTEXT;
-		this.#threadConfig = deps.newThread;
-		this.#now = deps.now ?? (() => Date.now());
 		this.#onWarn = deps.onWarn ?? (() => {});
-	}
-
-	get context(): Context {
-		return this.#context;
 	}
 
 	/** The integrator's Harness; the objects layer reads/watches conversation views through it. */
@@ -176,7 +156,7 @@ export class Threads {
 
 	/** The threads as stored (a read of the doc). Order is creation order. */
 	async list(): Promise<Thread[]> {
-		const state = await this.#harness.snapshot(ThreadsDoc, this.#context);
+		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 		return state?.threads.map((thread) => ({ ...thread })) ?? [];
 	}
 
@@ -189,7 +169,7 @@ export class Threads {
 	 * promoted or forked off another; a plain `create` names its own threadId and does not go through here.
 	 */
 	#newThread(head: number, projectId: string, title: string, parent?: ThreadParent): Thread {
-		return { threadId: randomUUID(), projectId, head, title, createdAt: this.#now(), ...(parent === undefined ? {} : { parent }) };
+		return { threadId: randomUUID(), projectId, head, title, createdAt: Date.now(), ...(parent === undefined ? {} : { parent }) };
 	}
 
 	/**
@@ -225,24 +205,24 @@ export class Threads {
 			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			// The caller's hook configures a fresh thread; the bridge itself contributes only the project's cwd.
-			const change = this.#threadConfig?.({ projectId: committed.id, cwd: committed.cwd }) ?? {};
-			await configure(tx, conversation.id, { cwd: committed.cwd, ...change });
+			// A fresh thread carries the project's cwd and nothing else: the bridge decides nothing about the agent,
+			// and the client names the model on the create/launch/prompt that follows (`t3/bridge.ts`).
+			await configure(tx, conversation.id, { cwd: committed.cwd });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,
 				head: conversation.id,
 				title: input.title ?? "",
-				createdAt: this.#now(),
+				createdAt: Date.now(),
 			};
 			doc.threads.push(thread);
 			return { ...thread };
-		}, this.#context);
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/** A prompt: submit to the named conversation (deduped by `requestId`), then promote it. `whenBusy` is steer/followUp. */
 	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission> {
-		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, this.#context);
+		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
 		const images = input.images ?? [];
 		const content =
@@ -261,7 +241,7 @@ export class Threads {
 				// Carry the client's message id in the entry's data: an application entry the projection reads the id back from.
 				...(input.messageId === undefined ? {} : { entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } }),
 			},
-			this.#context,
+			BACKGROUND_CONTEXT,
 		);
 		// The turn is committed and running. Promoting it into a thread is best-effort: if that commit fails, the prompt
 		// still succeeded (the run is live), and it is adopted by `repair()` on the next start or a later write — so do
@@ -309,14 +289,14 @@ export class Threads {
 			}
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
 			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId, entryId: null }));
-		}, this.#context);
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/** Aborts the named conversation; never promotes. */
 	async abort(input: { threadId: string; conversationId: number }): Promise<void> {
-		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, this.#context);
+		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		await conversation.abort(this.#context);
+		await conversation.abort(BACKGROUND_CONTEXT);
 	}
 
 	/**
@@ -330,9 +310,9 @@ export class Threads {
 	 */
 	async rewind(input: RewindInput): Promise<number> {
 		const expectedHead = input.expectedHead as ConversationId;
-		const head = await this.#harness.conversation(expectedHead, this.#context);
+		const head = await this.#harness.conversation(expectedHead, BACKGROUND_CONTEXT);
 		if (head === undefined) throw hostError("unknown_thread", `no such conversation: ${input.expectedHead}`);
-		const active = (await head.context(this.#context)).entries;
+		const active = (await head.context(BACKGROUND_CONTEXT)).entries;
 		const targetIndex = active.findIndex((entry) => entry.id === input.entryId);
 		const target = targetIndex < 0 ? undefined : active[targetIndex]!;
 		if (target === undefined || !USER_ENTRY_KINDS.has(target.kind)) {
@@ -342,7 +322,7 @@ export class Threads {
 		// If the reverted turn is the first entry there is nothing before it to fork at: create a fresh conversation
 		// that copies the head's agent config (model, tools, prompt text, cwd) instead, so undo to baseline is empty.
 		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
-		const headAgent = forkAt === undefined ? await head.agent(this.#context) : undefined;
+		const headAgent = forkAt === undefined ? await head.agent(BACKGROUND_CONTEXT) : undefined;
 		return this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const applied = doc.undos.find((undo) => undo.requestId === input.requestId);
@@ -381,7 +361,7 @@ export class Threads {
 			doc.threads.push(this.#newThread(fork.id, projectId, thread.title, { threadId: input.threadId, entryId: input.entryId }));
 			doc.undos.push({ requestId: input.requestId, head: fork.id });
 			return fork.id;
-		}, this.#context);
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/**
@@ -392,8 +372,8 @@ export class Threads {
 	async remove(threadId: string): Promise<void> {
 		const thread = await this.thread(threadId);
 		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
-		const head = await this.#harness.conversation(thread.head as ConversationId, this.#context);
-		await head?.abort(this.#context);
+		const head = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
+		await head?.abort(BACKGROUND_CONTEXT);
 		await this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const index = doc.threads.findIndex((candidate) => candidate.threadId === threadId);
@@ -403,12 +383,12 @@ export class Threads {
 			// boot repair skip tombstoned conversations — a prompt racing this removal can never resurrect the thread.
 			const removed = (doc.removed ??= []);
 			if (!removed.includes(thread.head)) removed.push(thread.head);
-		}, this.#context);
+		}, BACKGROUND_CONTEXT);
 		// The abort above ran BEFORE the commit, and a prompt admitted in that window — the row was still there, so
 		// its admission succeeded — is a live turn on a thread the document has just removed. The tombstone keeps it
 		// from resurrecting the thread; the removal must also win the RUN: interrupt the head again so no admitted
 		// turn streams on after the deletion. A removed thread has no live turn.
-		await head?.abort(this.#context);
+		await head?.abort(BACKGROUND_CONTEXT);
 	}
 
 	/**
@@ -450,7 +430,7 @@ export class Threads {
 				const ids = [...removed].slice(0, 8).join(", ");
 				this.#onWarn(`boot repair: ${tombstoned} removed conversation${tombstoned === 1 ? "" : "s"} (tombstoned) stayed unthreaded: ${ids}${tombstoned > 8 ? ` (+${tombstoned - 8} more)` : ""}`, undefined);
 			}
-		}, this.#context);
+		}, BACKGROUND_CONTEXT);
 	}
 }
 

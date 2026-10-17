@@ -59,8 +59,21 @@ export async function makeThreads(
 	// The threads layer resolves a thread's `projectId` through the registry; the test registry keeps the readable ids
 	// (`"p"`, `"one"`) so a test names its project directly.
 	const projectRegistry = testRegistry(projects);
-	const threads = new Threads({ harness, registry: projectRegistry, newThread: () => ({ model: model.modelRef }) });
+	const threads = new Threads({ harness, registry: projectRegistry });
 	return { threads, harness, model, root: dir, projects, registry: projectRegistry };
+}
+
+/**
+ * A create that a turn can run on: the thread's head, then the model named on it. The threads layer gives a fresh
+ * thread its project's cwd and nothing else — the bridge applies the model the CLIENT names on create/launch/prompt —
+ * so a test that runs a turn names it here, the way the wire does.
+ */
+export function createNamed(threads: Threads, harness: Harness, model: ScriptedModel): (input: { threadId: string; projectId: string; title?: string }) => Promise<Awaited<ReturnType<Threads["create"]>>> {
+	return async (input) => {
+		const thread = await threads.create(input);
+		await (await conversation(harness, thread.head)).configure({ model: model.modelRef }, ctx);
+		return thread;
+	};
 }
 
 export async function conversation(harness: Harness, id: number): Promise<Conversation> {

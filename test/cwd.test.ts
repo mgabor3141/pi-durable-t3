@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { idle, makeThreads, markerSteps } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, markerSteps } from "./threads-harness.ts";
 
 describe("cwd isolation", () => {
 	it("two threads in different projects run in their own directories", async () => {
@@ -13,14 +13,15 @@ describe("cwd isolation", () => {
 		onTestFinished(() => rm(root, { recursive: true, force: true }));
 		const one = join(root, "one");
 		const two = join(root, "two");
-		const { threads, harness } = await makeThreads({
+		const { threads, harness, model } = await makeThreads({
 			projects: [{ id: "one", cwd: one }, { id: "two", cwd: two }],
 			responses: markerSteps(10),
 			coding: true,
 		});
+		const create = createNamed(threads, harness, model);
 
-		const a = await threads.create({ threadId: "a", projectId: "one" });
-		const b = await threads.create({ threadId: "b", projectId: "two" });
+		const a = await create({ threadId: "a", projectId: "one" });
+		const b = await create({ threadId: "b", projectId: "two" });
 
 		// Each turn's model writes the turn's text into `marker.txt` via `bash`, run in that conversation's env cwd.
 		await Promise.all([

@@ -17,7 +17,7 @@ import { ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspace
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
-import { type ConversationView, type ModelRef, splitSlug } from "./model-types.ts";
+import { type ConversationView, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
@@ -298,6 +298,7 @@ export class Bridge {
 		const project = byForeignKey ?? this.projectForCwd(agentCwd);
 		const cwd = project?.path ?? agentCwd ?? "";
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
+		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
 		return {
 			threadId,
 			projectId: project?.id ?? thread?.projectId ?? "",
@@ -306,6 +307,7 @@ export class Bridge {
 			createdAt: thread?.createdAt ?? Date.now(),
 			updatedAt: thread?.createdAt ?? Date.now(),
 			model,
+			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(thread?.parent?.threadId === undefined ? {} : { parentThreadId: thread.parent.threadId }),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 		};
@@ -579,15 +581,26 @@ export class Bridge {
 		return id;
 	}
 
-	async selectModel(threadId: string, slug: string): Promise<void> {
-		const model = splitSlug(slug);
+	/**
+	 * T3's selection, applied: the model it names and the `thinking` level it carries. The client owns the choice, the
+	 * catalog owns availability (an unknown model is refused by name); a selection with no `thinking` option leaves the
+	 * thread's level alone, because the bridge computes no defaults of its own.
+	 */
+	async applySelection(threadId: string, selection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined): Promise<void> {
+		const model = selection?.model === undefined ? undefined : splitSlug(selection.model);
 		if (model === undefined) return;
+		const thinking = thinkingOf(selection?.options);
 		const release = this.acquire(threadId);
 		try {
-			const state = this.#state(threadId);
-			const current = state.configuration?.model;
-			if (current?.provider === model.provider && current.modelId === model.modelId) return;
-			await this.#call(threadId, (_controller, models, c) => models.select({ provider: model.provider, modelId: model.modelId }, c));
+			const current = this.#state(threadId).configuration;
+			const modelChanged = current?.model?.provider !== model.provider || current?.model?.modelId !== model.modelId;
+			const thinkingChanged = thinking !== undefined && current?.thinkingLevel !== thinking;
+			if (!modelChanged && !thinkingChanged) return;
+			// The model first: an unknown one is refused, and the level is applied to the thread the model landed on.
+			await this.#call(threadId, async (_controller, models, c) => {
+				if (modelChanged) await models.select({ provider: model.provider, modelId: model.modelId }, c);
+				if (thinkingChanged) await models.selectThinking({ level: thinking }, c);
+			});
 		} finally {
 			release();
 		}

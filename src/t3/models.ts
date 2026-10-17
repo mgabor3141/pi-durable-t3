@@ -1,11 +1,40 @@
 // The "pi" provider's model list for T3's ServerConfig: the provider's models as the caller's catalog reports them
-// (`Models.getAvailable()`). The picker list and the answer to `server.refreshProviders` — the bridge selects
-// nothing, remembers no default, and adopts no thread's model.
-import type { ServerProvider } from "@t3tools/contracts";
-import { modelSlug, type ModelRef } from "./model-types.ts";
+// (`Models.getAvailable()`), each carrying the thinking levels pi-ai says it supports. A reasoning model gets the
+// same `thinking` select descriptor T3's own pi provider declares, so the composer renders the control with only
+// the choices that model has; a model with no reasoning declares nothing. The bridge selects nothing, remembers no
+// default, and adopts no thread's model.
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
+import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
 import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 
-type CatalogModel = ModelRef & { name: string };
+export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[] };
+
+const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
+	off: "Off",
+	minimal: "Minimal",
+	low: "Low",
+	medium: "Medium",
+	high: "High",
+	xhigh: "Extra High",
+	max: "Max",
+};
+
+/** The picker capabilities: pi's ladder, restricted to the levels this model supports. pi-ai answers `["off"]` for
+ * a model with no reasoning, and T3 declares no control for such a model — so nothing is declared here. */
+export function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapabilities | null {
+	if (levels.length < 2) return null;
+	return {
+		optionDescriptors: [
+			{
+				id: THINKING_OPTION,
+				label: "Thinking",
+				type: "select",
+				options: levels.map((level) => ({ id: level, label: LEVEL_LABELS[level] })),
+			},
+		],
+	};
+}
 
 export class ModelCatalog {
 	#models: CatalogModel[] = [];
@@ -68,7 +97,7 @@ export class ModelCatalog {
 					shortName: model.modelId,
 					subProvider: model.provider,
 					isCustom: false,
-					capabilities: null,
+					capabilities: thinkingCapabilities(model.thinkingLevels),
 				})),
 				slashCommands: [],
 				skills: [],

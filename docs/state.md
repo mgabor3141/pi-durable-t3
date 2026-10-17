@@ -35,7 +35,7 @@ We read all of it and keep no copy. The projection is rebuilt from the view on e
 | the threads document: one row per thread, pointing at the conversation that is its head | forever | an empty sidebar; conversations are intact and boot repair promotes the heads |
 | the removal record in that document: one id (the removed thread's head conversation) per removal — truth, not a cache: it is what makes "a deleted thread stays deleted" survive a restart; the promote path, the undo fork, and boot repair all read it | forever, append-only (one number per removal) | a prompt admitted before a delete could resurrect the thread at the next promote, undo, or boot repair |
 | applied undos, remembered so a retry does not fork twice | forever, append-only | a retried undo forks again |
-| `pi.agent` per thread: model, thinking level, working directory, instructions | with the thread; forks and undos inherit it | the thread configures from the caller's `newThread` hook |
+| `pi.agent` per thread: model, thinking level, working directory, instructions | with the thread; forks and undos inherit it | a new thread starts at its project's `cwd`; the client names the model and level, the integrator's extensions carry the rest |
 
 Applied undos and the removal record are the fields we write that grow with use (one entry per undo / per removal).
 The document checkpoints on every write, so growth costs rows in one base write, never a delta per mutation.
@@ -57,9 +57,14 @@ the defaults would not produce is what the file holds). `server.updateSettings` 
 the same decode the next boot performs, persists atomically, answers the FULL settings, and emits
 `settingsUpdated` on the config stream. `providerInstanceMutation` mutates the instance map (upsert/create
 set, delete removes). The bridge interprets nothing in it — a value the UI wrote is answered back as written.
-The one deviation from the contract's defaults: a document that does not name its `providerInstances` serves
-the `pi` instance enabled (T3's web app disables instances absent from the map; the entry is the one fact
-about this host's driver, and it disappears the moment a `providerInstanceMutation` names the instances).
+The deviation from the contract's defaults is one sentence about this host: **it serves one provider, pi.** A
+document that does not name its `providerInstances` serves the `pi` instance enabled (the picker follows the
+instance map: without it the web app shows "no provider" and sends no `launchThread` — probe-verified), and a
+document that does not name a driver's legacy `providers.<driver>.enabled` is answered `false` for every driver
+except `pi` (the contract enables them all, and T3's provider pane lists its driver catalogue from that map, so
+an untouched document shows Codex and Claude as live providers with an editor for a CLI this host does not run;
+answered `false`, the rows read `Disabled`). Both answers vanish the moment the document names the key — a UI
+write owns it.
 
 Missing is valid (the contract defaults); unparseable is a fatal `ConfigError` naming the file — the host
 does not boot over the UI's document, and does not write over a document it cannot read (a mutation against a

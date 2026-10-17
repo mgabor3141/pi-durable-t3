@@ -1,33 +1,52 @@
-// T3's server settings, stored the way T3's server stores them: the same document as T3's server (the contracts'
-// `ServerSettings`), the same persistence (a SPARSE JSON file — the file decodes over the schema's defaults, and
-// T3's own persisted file is exactly "what the defaults would not produce"), the same write (`server.updateSettings`
-// applies a PATCH — keys deep-merged into the stored document, `undefined` keys skipped, everything else replaced —
-// validates the result against the schema, persists atomically, and answers the FULL settings), and the same signal
-// (a settings change re-emits the full settings, which is what carries `settingsUpdated` on the config stream). The
-// project registry is NOT here — it is the bridge's own file (`registry.ts`); this file holds exactly what T3's
-// server keeps in its `settings.json`.
-//
-// Deliberately not replicated from T3's settings service: the patch's per-key special cases (legacy project-override
-// maps, background-activity profiles, per-entry replacements), secret redaction, provider-history folding, and the
-// secret-store indirection. The bridge answers what the client wrote; it interprets nothing.
+// T3's server settings, stored as T3's server stores them: the contracts' `ServerSettings` as a SPARSE file that
+// decodes over the schema's defaults, patched by `server.updateSettings` with T3's merge rule, validated by the
+// decode the next boot performs, answered FULL, and announced on the change signal. The bytes are T3's bytes: a
+// write persists the materialized document with the contract's defaults stripped, so a key written back at its
+// default costs no bytes. The project registry is NOT here (`registry.ts`); this is what T3's server keeps in
+// `settings.json`. The bridge interprets none of it — it answers what the client wrote — except the provider facts
+// in `HOST_PROVIDER_FACTS`, which answer keys a fresh document leaves silent.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Schema } from "effect";
-import { ServerSettings, type ProviderInstanceMutation, type ServerSettingsPatch } from "@t3tools/contracts";
+import { Equal, Schema } from "effect";
+import { DEFAULT_SERVER_SETTINGS, ServerSettings, type ProviderInstanceMutation, type ServerSettingsPatch } from "@t3tools/contracts";
 import { ConfigError, fail } from "./config.ts";
 import { writeJsonAtomic } from "./t3/json-store.ts";
 
 /** The settings file's name, in the data dir — T3's server's own file name. */
 export const SETTINGS_FILE = "settings.json";
 
-/** T3's web app treats a provider instance absent from `settings.providerInstances` as DISABLED
- * (`applyProviderInstanceSettings`), so a host whose file carries NO `providerInstances` key serves the `pi`
- * instance — the one fact about this host's driver. It is the only deviation from the contract's defaults, and it
- * disappears the moment the document names its instances (a UI `providerInstanceMutation` is an explicit edit). */
-const PI_INSTANCE = { driver: "pi", displayName: "pi", enabled: true };
+/** This host serves one provider: pi. T3's web app reads the instance map for the picker (an instance absent from it
+ * is DISABLED) and the legacy `providers` map for its provider pane (a driver's `enabled` is that row's switch).
+ * The contract's defaults leave every driver off EXCEPT Codex and Claude Agent — so an untouched document tells the
+ * composer "no provider" and the pane "Codex and Claude are live here", with an editor for a CLI this host does not
+ * run. A document that names neither key is answered the other way round: the `pi` instance on, those two drivers
+ * off. A document that names a key owns it, and a write AT a contract default writes no byte (T3's stripping), so
+ * the answer for an unnamed key stands — the pane cannot light up a provider this host does not run. */
+const HOST_PROVIDER_FACTS = {
+	instance: { driver: "pi", displayName: "pi", enabled: true },
+	/** The drivers whose contract default is ENABLED, minus `pi` (whose own defaults are left alone). */
+	offDrivers: ["codex", "claudeAgent"] as const,
+};
+
+/** T3's persisted defaults — what a write is compared against. These three drivers' `enabled` is deliberately not
+ * a default to strip: provider history cannot recover a new opt-in. */
+const PERSISTED_DEFAULTS = {
+	...DEFAULT_SERVER_SETTINGS,
+	providers: {
+		...(DEFAULT_SERVER_SETTINGS.providers as unknown as Record<string, Record<string, unknown>>),
+		cursor: { ...(DEFAULT_SERVER_SETTINGS.providers.cursor as unknown as Record<string, unknown>), enabled: undefined },
+		grok: { ...(DEFAULT_SERVER_SETTINGS.providers.grok as unknown as Record<string, unknown>), enabled: undefined },
+		opencode: { ...(DEFAULT_SERVER_SETTINGS.providers.opencode as unknown as Record<string, unknown>), enabled: undefined },
+	},
+} as unknown as Record<string, unknown>;
+
+/** Values under these keys are compared whole, never field by field (T3's `ATOMIC_SETTINGS_KEYS`). */
+const ATOMIC_KEYS = new Set(["backgroundActivity", "automaticGitFetchInterval", "providerHealthRefreshInterval", "sourceControlWriterModelSelection", "textGenerationModelSelection", "pullRequestMergeMethod"]);
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** T3's patch rule (`packages/shared/src/Struct.ts`): recursive plain-object merge; `undefined` keys are skipped,
- * arrays and non-objects (including `null`) replace. This is the semantics of `server.updateSettings`. */
+ * arrays and non-objects (including `null`) replace. */
 function deepMerge(current: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
 	const next: Record<string, unknown> = { ...current };
 	for (const [key, value] of Object.entries(patch)) {
@@ -38,31 +57,85 @@ function deepMerge(current: Record<string, unknown>, patch: Record<string, unkno
 	return next;
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+/** T3's `stripDefaultServerSettings`: a value equal to its default is not written, an object whose keys all strip
+ * disappears, arrays and atomic keys are compared as a whole. */
+function stripDefaults(current: unknown, defaults: unknown): unknown | undefined {
+	if (Array.isArray(current) || Array.isArray(defaults)) return Equal.equals(current, defaults) ? undefined : current;
+	if (isPlainObject(current) && isPlainObject(defaults)) {
+		const next: Record<string, unknown> = {};
+		for (const key of Object.keys(current)) {
+			if (ATOMIC_KEYS.has(key)) {
+				if (!Equal.equals(current[key], defaults[key])) next[key] = current[key];
+				continue;
+			}
+			const stripped = stripDefaults(current[key], defaults[key]);
+			if (stripped !== undefined) next[key] = stripped;
+		}
+		return Object.keys(next).length > 0 ? next : undefined;
+	}
+	return Object.is(current, defaults) ? undefined : current;
+}
 
-/** The full settings a stored document means: decoded over the schema's defaults, with the `pi` provider instance
- * applied when the document does not name its instances (see `PI_INSTANCE`). Throws on a document the schema
- * refuses — the same decode the next boot performs. */
-function materialize(raw: Record<string, unknown>): ServerSettings {
-	const settings = Schema.decodeUnknownSync(ServerSettings)(raw) as ServerSettings;
-	if (raw.providerInstances === undefined) (settings as { providerInstances: Record<string, unknown> }).providerInstances = { pi: PI_INSTANCE };
+/** The document to write: T3's default-stripping. `clientWroteInstances` is the host rule: an emptied
+ * `providerInstances` equals the contract's `{}` and would strip to nothing, and a stripped key hands the map back
+ * to the host's provider fact — so a map the client mutated keeps its bytes, and a delete of the `pi` instance
+ * stays deleted. A patch that never touched instances leaves the map to the stripping, so the fact survives a
+ * theme change. */
+function persisted(merged: Record<string, unknown>, clientWroteInstances: boolean): Record<string, unknown> {
+	const sparse = (stripDefaults(merged, PERSISTED_DEFAULTS) ?? {}) as Record<string, unknown>;
+	if (clientWroteInstances) sparse.providerInstances = merged.providerInstances ?? {};
+	return sparse;
+}
+
+function decodeSettings(raw: Record<string, unknown>): Record<string, unknown> {
+	return Schema.decodeUnknownSync(Schema.toCodecJson(ServerSettings))(raw) as Record<string, unknown>;
+}
+
+/** The settings a stored document answers: the decoded document, with the provider facts filled in where the file
+ * is silent (see `HOST_PROVIDER_FACTS`). */
+function withProviderFacts(full: Record<string, unknown>, raw: Record<string, unknown>): ServerSettings {
+	// A copy: the facts answer this host, they do not edit the document a patch merges into.
+	const settings = { ...full } as ServerSettings;
+	if (raw.providerInstances === undefined) (settings as { providerInstances: Record<string, unknown> }).providerInstances = { pi: HOST_PROVIDER_FACTS.instance };
+	const stored = isPlainObject(raw.providers) ? (raw.providers as Record<string, unknown>) : {};
+	const providers = { ...(settings.providers as unknown as Record<string, Record<string, unknown>>) };
+	for (const driver of HOST_PROVIDER_FACTS.offDrivers) {
+		const blob = stored[driver];
+		if (isPlainObject(blob) && blob.enabled !== undefined) continue;
+		providers[driver] = { ...providers[driver], enabled: false };
+	}
+	(settings as unknown as { providers: Record<string, unknown> }).providers = providers;
 	return settings;
 }
 
-/** The live `ServerSettings` document: the sparse file read at start, kept in memory (raw + materialized), every
- * mutation validated, persisted, and announced. A missing file is the defaults (a valid first run); an unparseable
- * or undecodable file is a fatal `ConfigError` naming the file — the settings are the UI's document, and the host
- * refuses to boot over damage it cannot show back. */
+/** A `create` for an instance id the document already has (T3's `ensureProviderInstanceMutationAllowed`). */
+export class ProviderInstanceExists extends Error {
+	readonly instanceId: string;
+	constructor(instanceId: string) {
+		super(`Provider instance ${instanceId} already exists`);
+		this.instanceId = instanceId;
+	}
+}
+
+/** The live `ServerSettings` document: the sparse file read at start, kept in memory (the stored document, and the
+ * settings it answers), every mutation validated, persisted, and announced. A missing file is the defaults (a valid
+ * first run); an unparseable or undecodable file is a fatal `ConfigError` naming the file. */
 export class ServerSettingsStore {
 	readonly #file: string;
+	/** Exactly the file's content: the sparse document. */
 	#raw: Record<string, unknown>;
+	/** The stored document decoded over the defaults — the merge base. The provider facts are answers, not bytes: a
+	 * patch merges without them, so a client's write decides whether the document names the key. */
+	#full: Record<string, unknown>;
+	/** The settings the document answers, provider facts included. */
 	#settings: ServerSettings;
 	readonly #listeners = new Set<() => void>();
 
 	private constructor(file: string, raw: Record<string, unknown>) {
 		this.#file = file;
 		this.#raw = raw;
-		this.#settings = materialize(raw);
+		this.#full = decodeSettings(raw);
+		this.#settings = withProviderFacts(this.#full, raw);
 	}
 
 	static open(dataDir: string): ServerSettingsStore {
@@ -81,33 +154,30 @@ export class ServerSettingsStore {
 			fail(file, (error as Error).message);
 		}
 		if (!isPlainObject(raw)) fail(file, "the settings file must contain a JSON object");
-		const store = new ServerSettingsStore(file, raw); // materialize() validates the decode; a refusal names the file.
-		return store;
+		return new ServerSettingsStore(file, raw); // materialize() validates the decode; a refusal names the file.
 	}
 
 	get path(): string {
 		return this.#file;
 	}
 
-	/** The current full settings (what `server.getSettings` and the config snapshot answer). */
 	current(): ServerSettings {
 		return this.#settings;
 	}
 
-	/** `server.updateSettings`: patch the stored document, validate the result (the decode the NEXT boot performs —
-	 * a document the host could not read is a refusal, never a write), persist, notify, and return the full settings. */
+	/** `server.updateSettings`: patch the materialized settings (T3 merges into the decoded document, not the file). */
 	update(patch: ServerSettingsPatch): ServerSettings {
-		return this.#commit(deepMerge(this.#raw, patch as Record<string, unknown>));
+		return this.#commit(deepMerge(this.#full, patch as Record<string, unknown>), false);
 	}
 
-	/** `providerInstanceMutation` + patch against one snapshot (T3's `updateProviderInstance`): the instance map is
-	 * mutated by the contract's operation (`upsert`/`create` set, `delete` removes), and the patch merges the same way. */
+	/** `providerInstanceMutation` + patch against one snapshot (T3's `updateProviderInstance`): a `create` for an id
+	 * the document has is refused, `upsert`/`create` set, `delete` removes. */
 	updateProviderInstance(mutation: ProviderInstanceMutation, patch: ServerSettingsPatch = {}): ServerSettings {
-		const nextRaw = deepMerge(this.#raw, patch as Record<string, unknown>);
-		const providerInstances: Record<string, unknown> = { ...this.#settings.providerInstances };
-		if (mutation.operation === "upsert" || mutation.operation === "create") providerInstances[mutation.instanceId] = mutation.instance;
-		else delete providerInstances[mutation.instanceId];
-		return this.#commit({ ...nextRaw, providerInstances });
+		const instances: Record<string, unknown> = isPlainObject(this.#full.providerInstances) ? { ...this.#full.providerInstances } : {};
+		if (mutation.operation === "create" && instances[mutation.instanceId] !== undefined) throw new ProviderInstanceExists(mutation.instanceId);
+		if (mutation.operation === "upsert" || mutation.operation === "create") instances[mutation.instanceId] = mutation.instance;
+		else delete instances[mutation.instanceId];
+		return this.#commit({ ...deepMerge(this.#full, patch as Record<string, unknown>), providerInstances: instances }, true);
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -115,18 +185,19 @@ export class ServerSettingsStore {
 		return () => this.#listeners.delete(listener);
 	}
 
-	#commit(nextRaw: Record<string, unknown>): ServerSettings {
-		let next: ServerSettings;
+	#commit(merged: Record<string, unknown>, clientWroteInstances: boolean): ServerSettings {
+		const sparse = persisted(merged, clientWroteInstances);
+		let full: Record<string, unknown>;
 		try {
-			next = materialize(nextRaw);
+			full = decodeSettings(sparse); // the decode the NEXT boot performs; a refusal leaves the file alone.
 		} catch (error) {
 			fail(this.#file, (error as Error).message);
 		}
-		writeJsonAtomic(this.#file, nextRaw);
-		this.#raw = nextRaw;
-		this.#settings = next;
+		writeJsonAtomic(this.#file, sparse);
+		this.#raw = sparse;
+		this.#full = full;
+		this.#settings = withProviderFacts(full, sparse);
 		for (const listener of this.#listeners) listener();
-		return next;
+		return this.#settings;
 	}
 }
-

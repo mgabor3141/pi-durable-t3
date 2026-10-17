@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 import { ServerConfigStreamEvent, ServerSettingsError } from "@t3tools/contracts";
-import { ServerSettingsStore, SETTINGS_FILE } from "../src/settings.ts";
+import { ServerSettingsStore, SETTINGS_FILE, ProviderInstanceExists } from "../src/settings.ts";
 import { ConfigError } from "../src/config.ts";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched } from "./host-process-harness.ts";
@@ -32,6 +32,19 @@ describe("the settings store (T3's patch + persistence semantics)", () => {
 		const store = ServerSettingsStore.open(dir);
 		expect((store.current().providerInstances as Record<string, { enabled?: boolean } | undefined>).pi?.enabled).toBe(true);
 		expect(store.current().defaultModelSelection).toBeNull();
+		// One provider: pi. T3's settings pane lists its driver catalogue from the legacy `providers` map, whose
+		// contract default ENABLES every driver; the host answers OFF for the ones it does not serve, and the web app
+		// honors the flag on the row's switch. The document owns a key it names, so a UI toggle wins.
+		const providers = store.current().providers as unknown as Record<string, { enabled?: boolean } | undefined>;
+		expect(providers.codex?.enabled, "Codex is answered OFF — this host runs no Codex").toBe(false);
+		expect(providers.claudeAgent?.enabled, "Claude is answered OFF, as every other driver").toBe(false);
+		expect(providers.pi, "the driver this host serves is left at its own defaults").toEqual(expect.objectContaining({}));
+		// A write AT the contract default writes no byte (T3's default-stripping), so the host's answer for that key
+		// stands: the pane cannot light up a provider this host does not run. A write that DIFFERS is stored, and the
+		// document owns it (see the instance-map test: a client's map, emptied or not, keeps its bytes).
+		expect((store.update({ providers: { codex: { enabled: true } } } as never).providers as unknown as Record<string, { enabled?: boolean } | undefined>).codex?.enabled, "a write at the default is not a byte, and the answer stands").toBe(false);
+		const written = JSON.parse(await readFile(join(dir, SETTINGS_FILE), "utf8")) as Record<string, unknown>;
+		expect(written.providers, "the file names no codex key (T3's persisted defaults deliberately keep the three drivers' enabled flags, and no others)").toEqual({ cursor: { enabled: false }, grok: { enabled: false }, opencode: { enabled: false } });
 		await writeFile(join(dir, SETTINGS_FILE), "{ nope");
 		expect(() => ServerSettingsStore.open(dir)).toThrow(new RegExp(SETTINGS_FILE));
 	});
@@ -60,15 +73,29 @@ describe("the settings store (T3's patch + persistence semantics)", () => {
 		// The document persists whole: a fresh store reads what the first one wrote.
 		const reopened = ServerSettingsStore.open(dir);
 		expect(reopened.current().responseStreamingMode).toBe("turn");
+
+		// The bytes are T3's bytes: the file is the materialized document with the defaults stripped, so a key
+		// written back AT its default costs no bytes, and one that differs is stored whole.
+		const sparse = JSON.parse(await readFile(join(dir, SETTINGS_FILE), "utf8")) as Record<string, unknown>;
+		expect(Object.keys(sparse).sort(), "only what differs from the contract defaults is written").toEqual(["providers", "responseStreamingMode"]);
+		expect(sparse.responseStreamingMode, "the non-default value is stored whole").toBe("turn");
+		expect(JSON.stringify(sparse), "a key written at its default (the re-opened null default model selection) is not written").not.toContain("defaultModelSelection");
 	});
 
-	it("providerInstanceMutation deletes an instance and upserts one (T3's instance-map operations)", async () => {
+	it("providerInstanceMutation deletes an instance and upserts one (T3's instance-map operations), and refuses a create that collides", async () => {
 		const dir = join(scratch, "store-instances");
 		await mkdir(dir);
 		const store = ServerSettingsStore.open(dir);
 		expect((store.updateProviderInstance({ operation: "delete", instanceId: "pi" } as never).providerInstances as Record<string, unknown>).pi).toBeUndefined();
+		// A map the client wrote keeps its bytes: the emptied map is the client's answer, and a stripped key would
+		// hand the map back to the host's provider fact.
+		expect((JSON.parse(await readFile(join(dir, SETTINGS_FILE), "utf8")) as Record<string, unknown>).providerInstances).toEqual({});
+		expect((ServerSettingsStore.open(dir).current().providerInstances as Record<string, unknown>).pi, "a deleted pi instance stays deleted across a restart").toBeUndefined();
 		const up = store.updateProviderInstance({ operation: "upsert", instanceId: "pi", instance: { driver: "pi", displayName: "pi", enabled: true } } as never);
 		expect((up.providerInstances as Record<string, { enabled?: boolean } | undefined>).pi?.enabled).toBe(true);
+		// T3's `ensureProviderInstanceMutationAllowed`: a `create` for an id the document has is refused.
+		expect(() => store.updateProviderInstance({ operation: "create", instanceId: "pi", instance: { driver: "pi", displayName: "pi", enabled: true } } as never)).toThrow(ProviderInstanceExists);
+		expect(() => store.updateProviderInstance({ operation: "create", instanceId: "fresh", instance: { driver: "pi", displayName: "pi", enabled: true } } as never)).not.toThrow();
 	});
 });
 

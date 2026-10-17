@@ -6,7 +6,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { UserEntry } from "@earendil-works/pi-durable";
 import { undoTarget } from "../src/t3/undo.ts";
-import { conversation, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 // Three settled runs. Checkpoints are `cp<userEntryId>`; the baseline keeps nothing.
 const RUNS = [
@@ -32,7 +32,8 @@ describe("rewind keeps exactly the mapped turns", () => {
 	// the reverted user message too. Undo to baseline (nothing before the first turn) creates a fresh conversation.
 	async function threeTurns() {
 		const { threads, harness, model, projects } = await makeThreads({ projects: [{ id: "p" }] });
-		const t = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const t = await create({ threadId: "t", projectId: "p" });
 		for (let i = 1; i <= 3; i++) {
 			model.respond(fauxAssistantMessage(`reply ${i}`));
 			await threads.submit({ threadId: "t", conversationId: t.head, requestId: `s${i}`, message: `turn ${i}` }, undefined);
@@ -69,6 +70,7 @@ describe("rewind keeps exactly the mapped turns", () => {
 
 	it("baseline undo leaves an empty conversation in the same dir with the same model", async () => {
 		const { threads, harness, model, projects, head, runs } = await threeTurns();
+		const create = createNamed(threads, harness, model);
 		const target = undoTarget(runs, "cp-baseline");
 		if ("entryId" in target === false) throw new Error("expected a fork target");
 		const next = await threads.rewind({ threadId: "t", expectedHead: head, entryId: target.entryId, requestId: "u" });
@@ -81,6 +83,7 @@ describe("rewind keeps exactly the mapped turns", () => {
 
 	it("the next prompt after an undo gets a normal reply", async () => {
 		const { threads, harness, model, head, runs, counts, view } = await threeTurns();
+		const create = createNamed(threads, harness, model);
 		const target = undoTarget(runs, `cp${runs[0]!.userEntryId}`);
 		if ("entryId" in target === false) throw new Error("expected a fork target");
 		const next = await threads.rewind({ threadId: "t", expectedHead: head, entryId: target.entryId, requestId: "u" });

@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId } from "@earendil-works/pi-durable";
 import { Threads } from "../src/threads.ts";
-import { makeThreads, idle } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -17,6 +17,7 @@ describe("a removal is durable (F1)", () => {
 	it("(a) a prompt in flight racing a removal: the thread does not resurrect — not now, not after a restart", async () => {
 		const f = await makeThreads({ projects: [{ id: "p0" }] });
 		const { threads, harness, model } = f;
+		const create = createNamed(threads, harness, model);
 
 		// The bridge's race is the removal's commit landing BETWEEN the submit's commit and its promote — the
 		// prompt's write arriving a beat after the delete starts (the bridge's `#awaitHead` produces that beat).
@@ -29,7 +30,7 @@ describe("a removal is durable (F1)", () => {
 			// A fresh project nested inside `p0`'s root (the one the delete removes), and a thread in it.
 			const project = `r${round}`;
 			f.registry.add(project, join(f.root, "p0", project));
-			const t = await threads.create({ threadId: `t${round}`, projectId: project });
+			const t = await create({ threadId: `t${round}`, projectId: project });
 			model.append(fauxAssistantMessage("ok"));
 			const removing = (async () => {
 				await threads.remove(`t${round}`);
@@ -56,7 +57,8 @@ describe("a removal is durable (F1)", () => {
 	it("(b) boot repair with a TOMBSTONED conversation promotes nothing", async () => {
 		const f = await makeThreads({ projects: [{ id: "p" }], tokensPerSecond: 40 });
 		const { threads, harness, model } = f;
-		const t = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const t = await create({ threadId: "t", projectId: "p" });
 
 		// The thread is removed (tombstoned) while a turn is in flight.
 		model.respond(fauxAssistantMessage("token ".repeat(2000)), fauxAssistantMessage("token ".repeat(2000)));

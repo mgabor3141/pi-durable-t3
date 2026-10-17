@@ -14,7 +14,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { projectThread, type ThreadMeta } from "../src/t3/projection.ts";
-import { conversation, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const seed = fauxAssistantMessage("seed reply");
 
@@ -25,8 +25,9 @@ const userEntries = (entries: readonly EntryRecord[]): EntryRecord[] => entries.
 
 describe("the message id the host writes", () => {
 	it("submit places the client's id in the user entry, and the projection reads that same id (F1)", async () => {
-		const { threads, harness } = await makeThreads({ projects: [{ id: "p" }], responses: [seed] });
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const { threads, harness, model } = await makeThreads({ projects: [{ id: "p" }], responses: [seed] });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		const clientMessageId = "6f0f9c1e-2b3d-4c5a-9e7f-8a1b2c3d4e5f"; // what the web app generates for its optimistic message
 		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "hello there", messageId: clientMessageId }, undefined);
 		await idle(harness, thread.head);
@@ -46,8 +47,9 @@ describe("the message id the host writes", () => {
 	}, 60_000);
 
 	it("a submit with no client id writes no data-carrying entry, and the projection falls back", async () => {
-		const { threads, harness } = await makeThreads({ projects: [{ id: "p" }], responses: [seed] });
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
+		const { threads, harness, model } = await makeThreads({ projects: [{ id: "p" }], responses: [seed] });
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
 		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "no id here" }, undefined);
 		await idle(harness, thread.head);
 		const entries = (await (await conversation(harness, thread.head)).context(BACKGROUND_CONTEXT)).entries as unknown as EntryRecord[];

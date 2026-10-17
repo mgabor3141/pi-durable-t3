@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads, scanConversations } from "../src/threads.ts";
-import { makeThreads, firstUserEntry, idle } from "./threads-harness.ts";
+import { createNamed, firstUserEntry, idle, makeThreads } from "./threads-harness.ts";
 
 const seed = fauxAssistantMessage("seed");
 
@@ -18,7 +18,8 @@ it("(a) a conversation whose cwd matches no project is NOT promoted, and the log
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
 	const { harness, model } = f;
 	const warnings: string[] = [];
-	const threads = new Threads({ harness, registry: f.registry, newThread: () => ({ model: model.modelRef }), onWarn: (m) => warnings.push(m) });
+	const threads = new Threads({ harness, registry: f.registry, onWarn: (m) => warnings.push(m) });
+	const create = createNamed(threads, harness, model);
 
 	// A fresh conversation whose cwd belongs to no registered project (the registry lost it, or it was hand-made).
 	const conversationId = await harness.commit(async (tx) => {
@@ -35,8 +36,9 @@ it("(a) a conversation whose cwd matches no project is NOT promoted, and the log
 it("a promoted conversation lands in the project that covers ITS cwd — never the first registered one", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
 	const { threads, harness, model } = f;
+	const create = createNamed(threads, harness, model);
 	// Registry order is [p, q]; the conversation lives in q. List-order attribution would say `p`.
-	const t = await threads.create({ threadId: "t", projectId: "q" });
+	const t = await create({ threadId: "t", projectId: "q" });
 	const head = t.head;
 	model.respond(seed);
 	await threads.submit({ threadId: "t", conversationId: head, requestId: "seed", message: "hi" }, undefined);
@@ -56,12 +58,13 @@ it("a promoted conversation lands in the project that covers ITS cwd — never t
 it("(b) after creates, prompts, promotes and an undo whose cwd is uncovered, NO thread carries an unknown or empty projectId", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
 	const { threads, harness, model } = f;
+	const create = createNamed(threads, harness, model);
 	const warnings: string[] = [];
-	const layer = new Threads({ harness, registry: f.registry, newThread: () => ({ model: model.modelRef }), onWarn: (m) => warnings.push(m) });
+	const layer = new Threads({ harness, registry: f.registry, onWarn: (m) => warnings.push(m) });
 
 	// Creates and prompts in both projects.
-	const a = await threads.create({ threadId: "a", projectId: "p" });
-	const b = await threads.create({ threadId: "b", projectId: "q" });
+	const a = await create({ threadId: "a", projectId: "p" });
+	const b = await create({ threadId: "b", projectId: "q" });
 	model.respond(seed);
 	model.respond(seed);
 	await threads.submit({ threadId: "a", conversationId: a.head, requestId: "a1", message: "one" }, undefined);

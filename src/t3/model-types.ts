@@ -24,6 +24,16 @@ export function splitSlug(slug: string): ModelRef | undefined {
 	return { provider: slug.slice(0, index), modelId: slug.slice(index + 1) };
 }
 
+/** T3's pi driver's model-option id (`piThinkingCapabilities.ts` at the pin). Its values ARE pi's thinking levels,
+ * so the bridge maps them by name, and `PiModels.selectThinking` answers a level the ladder does not have. */
+export const THINKING_OPTION = "thinking";
+
+/** The thinking level a T3 `modelSelection` carries (the contract's canonical `{ id, value }` array). */
+export function thinkingOf(options: readonly { id: string; value: string | boolean }[] | undefined): string | undefined {
+	const found = options?.find((option) => option.id === THINKING_OPTION);
+	return typeof found?.value === "string" ? found.value : undefined;
+}
+
 /** Durable message content as pi-ai encodes it (the subset the projection reads). */
 export type ContentBlock =
 	| { type: "text"; text: string }

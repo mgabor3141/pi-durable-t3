@@ -21,7 +21,9 @@ ownership rules follow from it:
 
 - **Model SELECTION is T3's.** The client names the model on every create/launch/prompt (`thread.create` and
   `launchThread` require `modelSelection` in the contract — verified in the vendored schemas); the bridge
-  applies the named model. It computes no defaults, adopts nothing, and second-guesses nothing.
+  applies the named model. It computes no defaults, adopts nothing, and second-guesses nothing. The thinking
+  level travels with it: T3's pi driver declares a `thinking` model option whose values are pi's own levels, and
+  the bridge applies the one the client names (see [`capabilities.md`](capabilities.md)).
 - **Model AVAILABILITY is the Harness's.** The caller hands in a `Models` catalog; the bridge projects it to
   T3's picker list and refuses a model the catalog does not have, naming it. Which models exist, and their
   credentials, are the integrator's, made once in code.
@@ -34,7 +36,7 @@ ownership rules follow from it:
 const t3 = await attachT3(harness, {
         models, projects, dataDir, listen, stateDir,       // required
         label, webAppUrl, corsOrigins, tokenTtlSeconds,    // optional
-        pairingToken, newThread, log,                      // optional
+        pairingToken, log,                                 // optional
       });
       // → { ready, pairingCode(), pairingUrls(code), close() }
 ```
@@ -42,8 +44,9 @@ const t3 = await attachT3(harness, {
 The boundary is checked by a test (`test/boundary.test.ts`): `src/` never mentions `pi-coding-agent`, the
 agent dir, instructions files, reply models, coding tools, or the execution env. Those are the test agent's
 (`examples/coding-agent/`): its config file, its base prompt, its model runtime, its shutdown. The bridge
-decides nothing about the agent; a new thread's configuration comes from the caller's `newThread` hook, and
-the bridge stores what the hook returns.
+decides nothing about the agent: a fresh thread's `pi.agent` carries its project's `cwd` and nothing else, and
+everything a thread has beyond that — model, thinking level, instructions — arrives from the client or the
+integrator's extensions.
 
 ## Principles
 
@@ -88,16 +91,19 @@ Where a setting lives is decided by who edits it.
 | Host | `config.toml` | the integrator, by hand |
 | Server settings | `settings.json`, in the data dir | T3's UI, through the host — **T3's own document** |
 | Projects | `projects.json`, in the data dir | T3's UI, through the host — the bridge's own file |
-| Thread | pi-durable (`pi.agent`) | the client (model picker), and the `newThread` hook |
+| Thread | pi-durable (`pi.agent`) | the client (model and thinking pickers), and the integrator's extensions |
 
-`settings.json` is the contracts' `ServerSettings` **stored the way T3's server stores it**: a sparse JSON
-document that decodes over the schema's defaults; `server.updateSettings` applies T3's PATCH merge (nested
-keys merge, `undefined` keys skipped, everything else replaced); the merged document is validated by the same
-decode the next boot performs; a write answers the FULL settings and the change signal emits
-`settingsUpdated` on the config stream. `providerInstanceMutation` applies T3's instance-map operations. The
-bridge interprets none of it — it answers what the client wrote. (Deliberately not replicated at this scale:
-the patch's per-key special cases, secret redaction, provider-history folding — see
-[`docs/capabilities.md`](capabilities.md).)
+`settings.json` is the contracts' `ServerSettings` **stored the way T3's server stores it, bytes included**: a
+sparse JSON document that decodes over the schema's defaults; `server.updateSettings` applies T3's PATCH merge to
+the MATERIALIZED settings (nested keys merge, `undefined` keys skipped, everything else replaced); the merged
+document is validated by the same decode the next boot performs; a write answers the FULL settings and the change
+signal emits `settingsUpdated` on the config stream. What lands in the file is the materialized document with the
+contract's defaults stripped (T3's `stripDefaultServerSettings`, its atomic keys compared whole, and the three
+drivers whose `enabled` flag provider history cannot recover) — so a key written back at its default costs no
+bytes. `providerInstanceMutation` applies T3's instance-map operations, including its refusal of a `create` for an
+id the document already has. The bridge interprets none of it — it answers what the client wrote, and the host's
+own provider facts fill only keys the file leaves silent. (Deliberately not replicated at this scale: the patch's
+per-key special cases, secret redaction, provider-history folding — see [`docs/capabilities.md`](capabilities.md).)
 
 The bridge's own state lives in `projects.json`: the project registry, strict-parsed, one writer, atomic
 writes. Paths follow XDG (`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`), with `--root <dir>` overriding both so an
@@ -140,8 +146,12 @@ The code is the spec for the operations. These are the rules the code cannot sho
   unique temp file (`wx`), `chmod`ed 0600 and fsynced before the rename: a fixed temp name lets a crashed
   writer's leftover decide the published mode, since `open(2)` applies `mode` only when it creates.
 - **The instance answers emptiness, not damage.** A missing `projects.json` / `settings.json` is valid — an
-  empty registry, the contract defaults (with the `pi` provider instance enabled, the one fact about this
-  host's driver that keeps the picker populated). An unparseable one is a fatal `ConfigError` naming it.
+  empty registry, the contract defaults, with this host's ONE provider fact answered: the `pi` provider instance
+  enabled (T3's picker follows the instance map, so without it the app shows no provider at all and will not
+  launch a thread), and every driver this host does not serve answered `enabled: false` in the legacy map T3's
+  provider pane reads (the contract's default enables them all, and the pane would offer a CLI this host does not
+  run). Both facts disappear the moment the document names the key — the UI's own write owns it. An unparseable
+  file is a fatal `ConfigError` naming it.
 - **Promote is its own commit.** A submit carries nothing else, and commits serialize per Session, so racing
   promotes add one thread.
 - **Boot repair:** at start, one commit promotes every conversation with a run or queued input that is

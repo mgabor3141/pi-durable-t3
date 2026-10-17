@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
-import { makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -14,8 +14,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 describe("delete aborts the running turn (S3)", () => {
 	it("deleting a thread mid-run aborts it and repair() does not resurrect the thread", async () => {
 		// A turn that streams for ~100 s: unmistakably live when we delete.
-		const { threads, harness } = await makeThreads({ projects: [{ id: "p" }], responses: [fauxAssistantMessage("token ".repeat(4000))], tokensPerSecond: 40 });
-		const t = await threads.create({ threadId: "t", projectId: "p" });
+		const { threads, harness, model } = await makeThreads({ projects: [{ id: "p" }], responses: [fauxAssistantMessage("token ".repeat(4000))], tokensPerSecond: 40 });
+		const create = createNamed(threads, harness, model);
+		const t = await create({ threadId: "t", projectId: "p" });
 		await threads.submit({ threadId: "t", conversationId: t.head, requestId: "r1", message: "go" }, undefined);
 
 		const isLive = async (): Promise<boolean> => (await harness.snapshot(LiveDoc, t.head as ConversationId, ctx))?.run !== undefined;

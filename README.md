@@ -23,14 +23,14 @@ const t3 = await attachT3(harness, {
         dataDir,           // T3's settings.json + the registry file live here
         listen,            // { host, port }
         stateDir,          // facet credential state
-        label, webAppUrl, corsOrigins, tokenTtlSeconds, pairingToken, newThread, log,   // optional
+        label, webAppUrl, corsOrigins, tokenTtlSeconds, pairingToken, log,   // optional
       });
 await t3.ready;                       // listening (rejects with the bind error)
 console.log(t3.pairingUrls(t3.pairingCode()));
 ```
 
-`src/` is the bridge; it decides nothing about the agent — the client names the model on every create and
-prompt, the catalog is what you hand in, and a new thread's configuration comes from your `newThread` hook.
+`src/` is the bridge; it decides nothing about the agent — a fresh thread carries its project's cwd and nothing
+else, the client names the model on every create, launch, and prompt, and the catalog is what you hand in.
 A test enforces the boundary (`test/boundary.test.ts`).
 
 ## The example host

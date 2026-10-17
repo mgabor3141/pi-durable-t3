@@ -9,15 +9,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads } from "../src/threads.ts";
-import { firstUserEntry, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, firstUserEntry, idle, makeThreads } from "./threads-harness.ts";
 
 describe("the tombstone gates the undo fork", () => {
 	it("a rewind that lands after its thread was removed adds no row — not now, not after a restart", async () => {
 		const f = await makeThreads({ projects: [{ id: "p" }] });
 		const { threads, harness, model } = f;
+		const create = createNamed(threads, harness, model);
 
 		// A thread with one completed turn — the turn its undo would fork before.
-		const t = await threads.create({ threadId: "ghost", projectId: "p" });
+		const t = await create({ threadId: "ghost", projectId: "p" });
 		model.append(fauxAssistantMessage("ok"));
 		await threads.submit({ threadId: "ghost", conversationId: t.head, requestId: "r1", message: "go" }, undefined);
 		await idle(harness, t.head);

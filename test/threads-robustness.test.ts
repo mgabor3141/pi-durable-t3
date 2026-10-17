@@ -5,7 +5,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads, scanConversations } from "../src/threads.ts";
 import { testRegistry } from "./test-registry.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { firstUserEntry, gated, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, firstUserEntry, gated, idle, makeThreads } from "./threads-harness.ts";
 
 const seed = fauxAssistantMessage("seed");
 
@@ -20,9 +20,10 @@ describe("submit honesty (S3)", () => {
 	it("a failed thread-promote does not fail an already-committed prompt; repair adopts the run", async () => {
 		const f = await makeThreads({ projects: [{ id: "p" }] });
 		const { threads, harness, model } = f;
+		const create = createNamed(threads, harness, model);
 
 		// Put the thread on `oldHead`, finish a turn, then move the thread off it so `oldHead` is nobody's head.
-		const th = await threads.create({ threadId: "t", projectId: "p" });
+		const th = await create({ threadId: "t", projectId: "p" });
 		const oldHead = th.head;
 		model.respond(seed);
 		await threads.submit({ threadId: "t", conversationId: oldHead, requestId: "seed", message: "hi" }, undefined);
@@ -34,7 +35,7 @@ describe("submit honesty (S3)", () => {
 
 		// A prompt to the now-untracked head, with promote broken: the submit must SUCCEED (the run is live) and warn.
 		const warnings: string[] = [];
-		const brittle = new FailingPromoteThreads({ harness, registry: testRegistry(f.projects), newThread: () => ({ model: model.modelRef }), onWarn: (m) => warnings.push(m) });
+		const brittle = new FailingPromoteThreads({ harness, registry: testRegistry(f.projects), onWarn: (m) => warnings.push(m) });
 		const run = gated("still running");
 		model.respond(run.step);
 		const submission = await brittle.submit({ threadId: "t", conversationId: oldHead, requestId: "late", message: "two" }, undefined);
@@ -57,7 +58,8 @@ describe("undo ↔ prompt concurrency (S2 coverage)", () => {
 	it("a prompt and an undo in flight at once never strand the live run or duplicate a head", async () => {
 		const f = await makeThreads({ projects: [{ id: "p" }] });
 		const { threads, harness, model } = f;
-		const th = await threads.create({ threadId: "t", projectId: "p" });
+		const create = createNamed(threads, harness, model);
+		const th = await create({ threadId: "t", projectId: "p" });
 		const head = th.head;
 		model.respond(seed);
 		await threads.submit({ threadId: "t", conversationId: head, requestId: "seed", message: "hi" }, undefined);

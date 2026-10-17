@@ -16,6 +16,7 @@ type Projection = {
 	runs: Array<{ id?: string; status?: string }>;
 	turnItems: Array<{ runId?: string | null; type: string; text?: string }>;
 	liveRunCount: number;
+	thread?: { modelSelection?: { model?: string; options?: { id: string; value: string }[] } };
 };
 
 const token = await bridgeToken();
@@ -171,6 +172,23 @@ try {
 		return gone && kept ? { ok: true, value: texts } : { ok: false, value: texts };
 	});
 	console.log("undone: run 1's message and reply kept; run 2's message and reply both gone from the thread");
+
+	// 5. The thinking control. T3 renders it from the capabilities the host declares (pi's ladder, for the levels the
+	//    model supports), and a level picked on the composer rides the next message to the conversation — which the
+	//    projection then reports back. No control, no pass-through: this step fails the smoke.
+	const traits = page.getByRole("button", { name: "Off", exact: true }).first();
+	await traits.waitFor({ state: "visible", timeout: 15000 });
+	await traits.click();
+	await page.getByRole("menuitemradio", { name: "High", exact: true }).click();
+	const thinking = `smoke thinking ${Date.now()}`;
+	await send(thinking);
+	await until<unknown>("the chosen thinking level reached the conversation", Date.now() + launchTimeout, async () => {
+		const p = await projection(threadId as string).catch(() => undefined);
+		const options = p?.thread?.modelSelection?.options ?? [];
+		const level = options.find((option) => option.id === "thinking")?.value;
+		return level === "high" ? { ok: true, value: options } : { ok: false, value: { options, runs: p?.runs.map((run) => run.status) } };
+	});
+	console.log("thinking: the composer's High reached the conversation (projection reports thinking=high)");
 
 	await browser.close();
 	console.log("\nsmoke: PASS");
