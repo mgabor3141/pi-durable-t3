@@ -36,6 +36,9 @@ export interface ThreadMeta {
 	readonly projectId: string;
 	readonly title: string;
 	readonly cwd: string;
+	/** The project's root, for the shell's `worktreePath`: a thread running in a folder of its own (a Scratch thread) is
+	 * reported with it, exactly as T3 records a launch's folder on the thread. Absent, nothing is reported. */
+	readonly projectPath?: string;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 	/** The Session's model, for the thread's model selection. */
@@ -98,6 +101,9 @@ export function projectThread(
 		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
 	};
 	const drafts = groupRuns(view?.entries ?? []);
+	// The thread's folder of its own, as T3 spells it on a thread row: a folder UNDER the project root (the registry's
+	// cover rule, `Threads.#projectForConversation`), null for a thread running at the root itself.
+	const worktreePath = meta.projectPath === undefined || !meta.cwd.startsWith(`${meta.projectPath}/`) ? null : meta.cwd;
 
 	const runs: OrchestrationV2Run[] = [];
 	const attempts: OrchestrationV2RunAttempt[] = [];
@@ -539,7 +545,7 @@ export function projectThread(
 		runtimeMode: "full-access",
 		interactionMode: "default",
 		branch: null,
-		worktreePath: null,
+		worktreePath,
 		activeProviderThreadId: id(providerThreadId),
 		lineage: {
 			parentThreadId: meta.parentThreadId === undefined ? null : id(meta.parentThreadId),
@@ -595,7 +601,7 @@ export function projectThread(
 		runtimeMode: "full-access",
 		interactionMode: "default",
 		branch: null,
-		worktreePath: null,
+		worktreePath,
 		lineage: thread.lineage,
 		forkedFrom: null,
 		activeProviderThreadId: id(providerThreadId),

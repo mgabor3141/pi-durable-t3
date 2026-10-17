@@ -3,6 +3,7 @@
 import {
 	FilesystemBrowseError,
 	type ExecutionEnvironmentDescriptor,
+	OrchestrationDispatchCommandError,
 	OrchestrationV2DispatchCommandError,
 	OrchestrationV2GetThreadProjectionError,
 	OrchestrationV2ThreadLaunchError,
@@ -126,6 +127,9 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 		settings: serverSettings(deps),
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
+		// T3's client offers "New thread without a project" on an environment only when its config carries this folder
+		// (`availableScratchWorkspaceRoot`), and the same config answers `projects.ensureScratch` for it (rpc.ts).
+		scratchWorkspaceRoot: deps.bridge.scratchWorkspaceRoot,
 	} as Any;
 }
 
@@ -257,6 +261,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 						message: error instanceof ProjectConflict || error instanceof ProjectNotFound ? error.message : (error as Error).message || String(error),
 					}),
 			}),
+		// Finds or creates the "No project" project (`../scratch.ts`), answered as T3's server answers it: the folder is
+		// re-made, the project found-or-created, and the reply is its id. The declared failure is the dispatch error T3
+		// maps every Scratch failure to.
+		"projects.ensureScratch": () =>
+			toPromiseEffect(
+				() => bridge.ensureScratch(),
+				(message) => new OrchestrationDispatchCommandError({ message }),
+			),
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
 		"filesystem.browse": (input: Any) =>
 			Effect.tryPromise({
@@ -330,7 +342,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 		[`orchestration.launchThread`]: (input: Any) =>
 			toPromiseEffect(
 				async () => {
-					const threadId = await bridge.createThread({ threadId: input.threadId, projectId: input.projectId });
+					// A Scratch launch names the folder it claims: T3 names it from the first message, else the title.
+					const threadId = await bridge.createThread({
+						threadId: input.threadId,
+						projectId: input.projectId,
+						...(input.workspaceStrategy?.type === undefined || input.workspaceStrategy.type === "root"
+							? { launchText: input.initialMessage?.text ?? input.title }
+							: {}),
+					});
 					await bridge.applySelection(threadId, input.modelSelection);
 					if (input.initialMessage !== undefined && input.initialMessage.text.trim().length > 0) {
 						await bridge.idempotent(input.commandId, async () => {

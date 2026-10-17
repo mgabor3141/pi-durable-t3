@@ -9,6 +9,8 @@ export interface FacetConfig {
 	readonly port: number;
 	readonly label: string;
 	readonly stateDir: string;
+	/** The host's data dir (T3's `baseDir`): where its managed folders live — `<dataDir>/scratch` (`../scratch.ts`). */
+	readonly dataDir: string;
 	readonly pairingToken: string | undefined;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];

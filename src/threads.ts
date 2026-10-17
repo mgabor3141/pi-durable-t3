@@ -73,7 +73,7 @@ type ThreadsDeps = {
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
-type CreateInput = { readonly threadId: string; readonly projectId: string };
+type CreateInput = { readonly threadId: string; readonly projectId: string; readonly cwd?: string };
 type MessageInput = {
 	readonly threadId: string;
 	readonly conversationId: number;
@@ -161,20 +161,23 @@ export class Threads {
 	/**
 	 * One commit: a retried create is a no-op, and the `projectId` foreign key is checked AT COMMIT TIME (design.md,
 	 * IDs: the registry lives in the other store, so only a check inside the commit sees a project removed mid-call).
+	 * `cwd` overrides the project's root for a thread that runs in a folder of its own (a Scratch thread's folder); the
+	 * FK still resolves through the registry's cover rule, so the folder must live under a registered project.
 	 */
 	async create(input: CreateInput): Promise<Thread> {
 		const project = this.projects.find((candidate) => candidate.id === input.projectId);
 		if (project === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
-		// A registered path that exists as a non-directory cannot host a thread: refuse typed, naming the path
-		// (design.md, Invariants). A MISSING cwd is left alone: the integrator's boot creates registered folders.
+		const cwd = input.cwd ?? project.cwd;
+		// A thread's folder must exist as a directory: a caller that names one (the Scratch claim) creates it first, and
+		// anything else is a refusal naming the path (design.md, Invariants).
 		let cwdIsDirectory = true;
 		try {
-			cwdIsDirectory = statSync(project.cwd).isDirectory();
+			cwdIsDirectory = statSync(cwd).isDirectory();
 		}
 		catch {
-			/* missing/unreadable: boot's per-project mkdir (with its warning) owns that case. */
+			/* missing/unreadable: boot's per-project mkdir (with its warning) owns the missing-project case. */
 		}
-		if (!cwdIsDirectory) throw hostError("unknown_project", `project ${input.projectId} is not a directory: ${project.cwd}`);
+		if (!cwdIsDirectory) throw hostError("unknown_project", `thread folder is not a directory: ${cwd}`);
 		return this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
@@ -183,8 +186,9 @@ export class Threads {
 			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			// A fresh thread carries the project's cwd and nothing else (design.md: the bridge decides nothing about the agent).
-			await configure(tx, conversation.id, { cwd: committed.cwd });
+			// A fresh thread carries its own cwd — the project's root, or the folder claimed for it — and nothing else
+			// (design.md: the bridge decides nothing about the agent).
+			await configure(tx, conversation.id, { cwd });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,

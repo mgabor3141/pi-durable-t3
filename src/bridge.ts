@@ -91,6 +91,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		port: options.listen.port,
 		label: options.label ?? "pi",
 		stateDir: options.stateDir,
+		dataDir: options.dataDir,
 		pairingToken: options.pairingToken,
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN, ...(options.webAppUrl === undefined ? [] : [originOf(options.webAppUrl)])],

@@ -13,6 +13,7 @@ import type {
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
+import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON, scratchRootFor } from "../scratch.ts";
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
@@ -133,12 +134,27 @@ export class Bridge {
 
 	// ---- projects ---------------------------------------------------------------------------------------------
 
+	/** The folder of threads without a project (T3's `ServerConfig.scratchWorkspaceRoot`). */
+	get scratchWorkspaceRoot(): string {
+		return scratchRootFor(this.config.dataDir);
+	}
+
+	/**
+	 * `projects.ensureScratch`, answered exactly as T3's server answers it (design.md, replication rule): re-make the
+	 * folder, then find-or-create the project rooted at it, and answer its id. The client's `openScratch` atom then
+	 * waits for the project in its own store — which is what a registry change emits over the shell stream.
+	 */
+	ensureScratch(): Promise<{ readonly projectId: string }> {
+		return ensureScratchProject(this.config.registry, this.scratchWorkspaceRoot);
+	}
+
 	/** The registered projects (from the live registry), shaped for the shell. */
 	#configured(): { id: string; title: string; path: string }[] {
 		return this.config.registry.list().map((project) => ({ id: project.id, title: project.name, path: project.cwd }));
 	}
 
-	/** A project shell with the fixed fields T3 expects, stamped at the bridge's start time. */
+	/** A project shell with the fixed fields T3 expects, stamped at the bridge's start time. The Scratch project carries
+	 * T3's icon, derived from its root: this host stores no icons, so no stored choice can be overwritten. */
 	#projectShell(project: { id: string; title: string; path: string }): OrchestrationProjectShell {
 		return {
 			id: project.id,
@@ -146,6 +162,7 @@ export class Bridge {
 			workspaceRoot: project.path,
 			repositoryIdentity: null,
 			defaultModelSelection: null,
+			...(isScratchRoot(project.path, this.scratchWorkspaceRoot) ? { projectIcon: SCRATCH_PROJECT_ICON } : {}),
 			scripts: [],
 			createdAt: this.#startedAt,
 			updatedAt: this.#startedAt,
@@ -276,7 +293,10 @@ export class Bridge {
 		// The FK is the only lookup: an unregistered `projectId` is reported as it is, with NO invented project, and no row
 		// exists without a registered project (design.md, IDs), so this resolves.
 		const project = thread === undefined ? undefined : this.#configured().find((candidate) => candidate.id === thread.projectId);
-		const cwd = project?.path ?? state?.view?.docs["pi.agent"]?.cwd ?? "";
+		// A conversation runs where its own `pi.agent.cwd` says: a Scratch thread's folder of its own, every other thread
+		// its project's root (the same value, recorded per conversation). Absent a loaded view, the project's root.
+		const agentCwd = state?.view?.docs["pi.agent"]?.cwd;
+		const cwd = agentCwd ?? project?.path ?? "";
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
 		return {
@@ -284,6 +304,7 @@ export class Bridge {
 			projectId: project?.id ?? thread?.projectId ?? "",
 			title: thread?.title || "New thread",
 			cwd,
+			...(project === undefined ? {} : { projectPath: project.path }),
 			createdAt: thread?.createdAt ?? Date.now(),
 			updatedAt: thread?.createdAt ?? Date.now(),
 			model,
@@ -544,13 +565,22 @@ export class Bridge {
 		return this.#host.root((c) => fn(controller, models, c));
 	}
 
-	async createThread(options: { threadId?: string | undefined; projectId: string }): Promise<string> {
+	/**
+	 * A new thread. `launchText` is the launch's first message (or title): T3's server gives a thread launched in the
+	 * Scratch project a folder of its own, claimed at launch — a thread whose row already exists is a replayed create and
+	 * claims nothing, exactly T3's "only the first attempt claims one" (ManagedProjectFolders, ThreadLaunchService).
+	 */
+	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string }): Promise<string> {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
 		if (this.#summary(id) !== undefined) return id;
+		const cwd =
+			options.launchText === undefined || !isScratchRoot(project.cwd, this.scratchWorkspaceRoot)
+				? undefined
+				: await claimScratchThreadFolder(this.scratchWorkspaceRoot, id, options.launchText);
 		const handle = this.#host.get(PiThreads, {});
-		await this.#host.root((c) => handle.create({ threadId: id, projectId: project.id }, c));
+		await this.#host.root((c) => handle.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
 		this.#syncDirectory();
 		return id;

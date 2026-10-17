@@ -21,6 +21,7 @@ async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: 
 		port: 0,
 		label: "t",
 		stateDir: join(dataDir, "state"),
+		dataDir,
 		pairingToken: undefined,
 		tokenTtlSeconds: 60,
 		settings: ServerSettingsStore.open(dataDir),

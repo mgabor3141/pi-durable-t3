@@ -19,6 +19,7 @@ function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
 		port: 0,
 		label: "t",
 		stateDir: "/tmp/pi-durable-t3-project-id-unused",
+		dataDir: "/tmp/pi-durable-t3-project-id-unused",
 		pairingToken: undefined,
 		tokenTtlSeconds: 60,
 		settings: ServerSettingsStore.open("/tmp/pi-durable-t3-project-id-unused"),

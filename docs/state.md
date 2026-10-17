@@ -33,9 +33,11 @@ client's choices and the integrator's extensions.
 |---|---|---|
 | `settings.json` | T3's server settings, stored as T3's server stores them | T3's defaults |
 | `projects.json` | The project registry: id, path, title | Project names; threads keep their `cwd` |
+| `scratch/` (the data dir) | T3's "No project" folder: one subfolder per thread launched without a project | Nothing — the folder is re-made by the next `projects.ensureScratch`, and every thread keeps the `cwd` its conversation recorded |
 | `auth.json` (state dir) | Environment id, hashed pairing codes and tokens | Every client re-pairs |
 
-Written atomically, mode 0600. The bridge interprets nothing in `settings.json`. Its one deviation from T3's
+The JSON files are written atomically, mode 0600; `scratch/` is a plain directory, created on demand. The bridge
+interprets nothing in `settings.json`. Its one deviation from T3's
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.
 

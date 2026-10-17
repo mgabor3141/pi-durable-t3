@@ -68,7 +68,8 @@ export const PiThreads = local("pi.threads", {
 	members: {
 		threads: ThreadsCell,
 		// A thread starts untitled: the create command carries no title (capabilities.md; the 🔜 rename owns the field).
-		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String() }), ThreadSchema),
+		// `cwd` is a folder of its own under the project (a Scratch thread's); absent, the project's root.
+		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()) }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 	},
 });
