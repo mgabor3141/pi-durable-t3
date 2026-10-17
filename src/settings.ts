@@ -1,39 +1,33 @@
-// T3's server settings, stored as T3's server stores them (the replication is design.md's Configuration tiers and
-// state.md). The bridge interprets none of it — it answers what the client wrote — except `HOST_PROVIDER_FACTS`, which
-// answer the keys a fresh document leaves silent.
+// T3's server settings, stored as T3's server stores them (the replication is design.md's rule and state.md). The
+// bridge interprets none of it — it answers what the client wrote — except `HOST_PROVIDER_FACTS`, which answer the
+// provider instances a fresh document leaves silent.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Equal, Schema } from "effect";
-import { DEFAULT_SERVER_SETTINGS, ServerSettings, type ProviderInstanceMutation, type ServerSettingsPatch } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ServerSettings, type ProviderInstanceConfig, type ProviderInstanceMutation, type ServerSettingsPatch } from "@t3tools/contracts";
 import { ConfigError, fail } from "./config.ts";
 import { writeJsonAtomic } from "./t3/json-store.ts";
 
 /** The settings file's name, in the data dir — T3's server's own file name. */
 export const SETTINGS_FILE = "settings.json";
 
-/** This host serves one provider: pi. An unnamed `providerInstances` is answered the `pi` instance enabled, and an
- * unnamed driver `enabled` is answered `false` for the drivers this host does not serve — the instance answers
- * emptiness, not damage (design.md, Invariants; state.md). A document that names a key owns it. */
-const HOST_PROVIDER_FACTS = {
-	instance: { driver: "pi", displayName: "pi", enabled: true },
-	/** Driver `enabled` answers where the file is silent: pi on (T3 defaults it off), the enabled-by-default others off. */
-	driverEnabled: { pi: true, codex: false, claudeAgent: false } as const,
+/** This host serves one provider: pi. Where the file is silent on `providerInstances`, it is answered with these
+ * entries — the instance answers emptiness, not damage (design.md, Invariants; state.md). A document that names a
+ * key owns it, so a UI toggle wins. pi is answered enabled (T3 defaults it off, and the pane would show it Disabled);
+ * codex and claudeAgent are answered DISABLED: T3 defaults an unconfigured built-in instance of those drivers to
+ * ENABLED (`isUnconfiguredDefaultInstanceEnabled`), so on this host — which runs neither — the UI would probe them
+ * "Checking…" forever. Naming them disabled is the host's answer to that default. */
+const HOST_PROVIDER_FACTS: Record<string, ProviderInstanceConfig> = {
+	pi: { driver: ProviderDriverKind.make("pi"), displayName: "pi", enabled: true },
+	codex: { driver: ProviderDriverKind.make("codex"), enabled: false },
+	claudeAgent: { driver: ProviderDriverKind.make("claudeAgent"), enabled: false },
 };
 
-/** T3's persisted defaults — what a write is compared against. The three drivers' `enabled` is not a default to strip
- * (design.md: provider history cannot recover a new opt-in). */
-const PERSISTED_DEFAULTS = {
-	...DEFAULT_SERVER_SETTINGS,
-	providers: {
-		...(DEFAULT_SERVER_SETTINGS.providers as unknown as Record<string, Record<string, unknown>>),
-		cursor: { ...(DEFAULT_SERVER_SETTINGS.providers.cursor as unknown as Record<string, unknown>), enabled: undefined },
-		grok: { ...(DEFAULT_SERVER_SETTINGS.providers.grok as unknown as Record<string, unknown>), enabled: undefined },
-		opencode: { ...(DEFAULT_SERVER_SETTINGS.providers.opencode as unknown as Record<string, unknown>), enabled: undefined },
-	},
-} as unknown as Record<string, unknown>;
+/** T3's persisted defaults — what a write is compared against (T3's `stripDefaultServerSettings`). */
+const PERSISTED_DEFAULTS = DEFAULT_SERVER_SETTINGS as unknown as Record<string, unknown>;
 
 /** Values under these keys are compared whole, never field by field (T3's `ATOMIC_SETTINGS_KEYS`). */
-const ATOMIC_KEYS = new Set(["backgroundActivity", "automaticGitFetchInterval", "providerHealthRefreshInterval", "sourceControlWriterModelSelection", "textGenerationModelSelection", "pullRequestMergeMethod"]);
+const ATOMIC_KEYS = new Set(["backgroundActivity", "automaticGitFetchInterval", "providerHealthRefreshInterval", "sourceControlWriterModelSelection", "reviewGuideModelSelection", "textGenerationModelSelection", "pullRequestMergeMethod"]);
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -69,7 +63,7 @@ function stripDefaults(current: unknown, defaults: unknown): unknown | undefined
 }
 
 /** The document to write: T3's default-stripping. `clientWroteInstances` keeps a client-mutated instance map whole, so
- * a deleted instance stays deleted (design.md, Configuration tiers). */
+ * a deleted instance stays deleted (design.md: the bridge interprets nothing in the file). */
 function persisted(merged: Record<string, unknown>, clientWroteInstances: boolean): Record<string, unknown> {
 	const sparse = (stripDefaults(merged, PERSISTED_DEFAULTS) ?? {}) as Record<string, unknown>;
 	if (clientWroteInstances) sparse.providerInstances = merged.providerInstances ?? {};
@@ -83,17 +77,13 @@ function decodeSettings(raw: Record<string, unknown>): Record<string, unknown> {
 /** The settings a stored document answers: the decoded document, with the provider facts filled in where the file
  * is silent (`HOST_PROVIDER_FACTS`). */
 function withProviderFacts(full: Record<string, unknown>, raw: Record<string, unknown>): ServerSettings {
-	// A copy: the facts answer this host; they do not edit the document a patch merges into.
+	// A copy: the facts answer this host; they do not edit the document a patch merges into. An unnamed
+	// `providerInstances` is answered the host's instances; one the file names owns itself (a client-mutated map —
+	// emptied included — keeps its bytes, so a deleted instance stays deleted).
 	const settings = { ...full } as ServerSettings;
-	if (raw.providerInstances === undefined) (settings as { providerInstances: Record<string, unknown> }).providerInstances = { pi: HOST_PROVIDER_FACTS.instance };
-	const stored = isPlainObject(raw.providers) ? (raw.providers as Record<string, unknown>) : {};
-	const providers = { ...(settings.providers as unknown as Record<string, Record<string, unknown>>) };
-	for (const [driver, enabled] of Object.entries(HOST_PROVIDER_FACTS.driverEnabled)) {
-		const blob = stored[driver];
-		if (isPlainObject(blob) && blob.enabled !== undefined) continue;
-		providers[driver] = { ...providers[driver], enabled };
+	if (raw.providerInstances === undefined) {
+		(settings as { providerInstances: Record<string, ProviderInstanceConfig> }).providerInstances = { ...HOST_PROVIDER_FACTS };
 	}
-	(settings as unknown as { providers: Record<string, unknown> }).providers = providers;
 	return settings;
 }
 

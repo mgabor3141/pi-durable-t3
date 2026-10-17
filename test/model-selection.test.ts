@@ -109,7 +109,7 @@ it("the picker declares the model's thinking levels; a chosen level reaches the 
 		// 5. The client's choice is the thread's model — the bridge defaults to nothing. The catalog is the host's
 		//    list IN ORDER, so the picker's default is its FIRST entry; select a NON-first model and the projection
 		//    must report that one. A bridge that adopted its own default (the host's model, the first catalog entry,
-		//    a remembered last choice) reports `reply/reply-1` here.
+		//    a remembered last choice) reports the catalog's FIRST slug here.
 		const slugs = provider!.models.map((entry) => entry.slug);
 		expect(slugs.length, `the host offers more than one model: ${JSON.stringify(slugs)}`).toBeGreaterThan(1);
 		const second = provider!.models[1]!;

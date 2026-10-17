@@ -33,7 +33,9 @@ import type { Logger } from "./logging.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
 
-export const SERVER_VERSION = "0.0.45";
+/** The T3 release at our pin (`T3_TAG` in dev/setup-t3.sh). Never the client's version: T3's update banner then says
+ * truthfully how far the pin is behind the app. */
+export const SERVER_VERSION = "0.1.1-nightly.20261017.3238";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;

@@ -35,7 +35,10 @@ trap cleanup EXIT
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/state"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
+web = "http://127.0.0.1:$WEB_PORT"
 TOML
+# `web` names the web app's origin: the nightly fetches /.well-known/t3/environment over HTTP (cross-origin), so the
+# bridge must reflect that origin in CORS. The desktop app (t3code://app) is allowed by default; the served SPA needs it.
 # The project registry lives in the data dir, NOT config.toml. `settings.json` (T3's server settings) is absent:
 # the host answers the contract's defaults, with the pi provider instance enabled.
 cat > "$root/projects.json" <<JSON

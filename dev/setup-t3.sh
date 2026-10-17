@@ -9,7 +9,9 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 # The single source of truth for the pinned T3 Code commit (protocol 2). MIT, "Copyright (c) 2026 T3 Tools Inc.".
-PIN=a4c9494b0e3606775cc5fc929fc138399288bd43
+PIN=70d60e03a7a35c6fa131825bbfa05ec893e69912
+# The release tag at PIN: the version the bridge reports as `serverVersion` (src/t3/http.ts; a test keeps them equal).
+T3_TAG=v0.1.1-nightly.20261017.3238
 T3_URL="https://github.com/pingdotgg/t3code"
 # The pnpm the T3 monorepo builds with.
 T3_PNPM="pnpm@11.10.0"

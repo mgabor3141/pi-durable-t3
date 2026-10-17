@@ -72,6 +72,12 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.metadata.update": "Renaming threads is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
+	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
+	// relaunch command and never sends these; if one arrives (a hand-built client, a future default), refuse it
+	// honestly: the bridge is not a T3 install and updates by updating itself on the host, not over the wire.
+	"server.updateServer": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
+	"server.updateServerWithProgress": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
+	"server.commitDesktopUpdate": "This server is not supervised by the T3 Code desktop app; there is no desktop update to commit.",
 };
 
 /**
@@ -209,6 +215,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.getConfig": () => Effect.sync(() => serverConfig(deps)),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
+		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
+		// agent's conversations live in pi-durable, not in a Codex/Claude home directory — so it is answered truthfully
+		// with an empty scan. The rest of `agentSessions.*` (import) stays refused (capabilities.md).
+		"agentSessions.scan": () => Effect.sync(() => ({ candidates: [], scannedAt: new Date().toISOString() })),
 		// T3's settings write, replicated (design.md): a PATCH merged into the current settings, optionally with one
 		// provider-instance mutation applied to the same snapshot.
 		"server.updateSettings": (input: Any) =>

@@ -9,16 +9,18 @@ type ReplyModel = {
 	readonly modelRef: ModelRef;
 };
 
-export function createReplyModel(text = "OK — this is the offline reply model.", provider = "reply"): ReplyModel {
+export function createReplyModel(text = "OK — this is the offline reply model.", provider = "offline"): ReplyModel {
 	// Two models, the way a real catalog has more than one: a reasoning one (so the offline demo shows the thinking
 	// control pi-ai's levels drive, with a chosen level travelling the whole path to the conversation) and a plain one
 	// (which declares no thinking control at all). The FIRST is the host's model — what a launch that names no
-	// model runs on.
+	// model runs on. The provider slug is deliberately NOT a prefix of the model ids: T3's picker strips a leading
+	// sub-provider qualifier off the display name (`stripLeadingQualifier(shortName, subProvider)`), so a provider
+	// "reply" would render the id "reply-1" as "1".
 	const faux = fauxProvider({
 		provider,
 		models: [
-			{ id: "reply-1", name: "Offline reply", reasoning: true },
-			{ id: "reply-2", name: "Offline reply (no reasoning)", reasoning: false },
+			{ id: "reply-1", name: "Reply model", reasoning: true },
+			{ id: "reply-2", name: "Reply model (no reasoning)", reasoning: false },
 		],
 	});
 	const message = fauxAssistantMessage(text);
