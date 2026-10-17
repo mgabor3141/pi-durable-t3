@@ -38,6 +38,7 @@ import { WsRpcGroup } from "@t3tools/contracts";
 import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import { listClientSessions, listPairingLinks } from "./access.ts";
 import { type AuthStore, type ClientMetadata, PairingRateLimit } from "./auth.ts";
+import type { AttachmentStore } from "./attachment-store.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
@@ -107,10 +108,11 @@ export function makeServerLayer(deps: {
 	catalog: ModelCatalog;
 	log: Logger;
 	httpServer: Server;
+	attachments: AttachmentStore;
 }) {
-	const { bridge, auth, log, httpServer } = deps;
+	const { bridge, auth, log, httpServer, attachments } = deps;
 	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log });
+	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments });
 	const pairingLimit = new PairingRateLimit();
 
 	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
@@ -396,6 +398,28 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 					);
 				}),
 			),
+		),
+		// The asset route (T3's `layerAssetRoute`): serve a signed attachment URL's bytes. The signature in the URL is
+		// the credential — no bearer — so a browser `<img>` (which sends no auth header) loads it. Resolve verifies
+		// signature + expiry, and that the file exists; anything else is the 404 T3 answers for a missing asset.
+		HttpRouter.add(
+			"GET",
+			"/api/assets/*",
+			Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
+				const path = new URL(request.url, "http://bridge").pathname;
+				const suffix = path.slice("/api/assets/".length);
+				const slash = suffix.indexOf("/");
+				if (slash <= 0) return HttpServerResponse.text("Not Found", { status: 404 });
+				const token = suffix.slice(0, slash);
+				const filename = decodeURIComponent(suffix.slice(slash + 1));
+				const asset = attachments.resolveAsset(token, filename);
+				if (asset === null) return HttpServerResponse.text("Not Found", { status: 404 });
+				return HttpServerResponse.uint8Array(asset.bytes, {
+					contentType: asset.mimeType,
+					headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
+				});
+			}),
 		),
 		HttpRouter.add(
 			"GET",

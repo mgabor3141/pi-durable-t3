@@ -19,8 +19,8 @@ import type {
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
-import { firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { textOf } from "./thread-search.ts";
+import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
 export const PROVIDER_INSTANCE_ID = "pi";
@@ -307,6 +307,8 @@ export function projectThread(
 			const messageId = messageIdOf(entry) ?? `m${entry.id}`;
 			const at = message.timestamp ?? requestedAt;
 			const text = textOf(message.role === "user" ? message.content : undefined);
+			// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
+			const attachments = attachmentsOf(entry);
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
 				createdBy: "user",
@@ -315,7 +317,7 @@ export function projectThread(
 				messageId: id(messageId),
 				inputIntent: intent,
 				text,
-				attachments: [],
+				attachments,
 			} as Any);
 			messages.push({
 				createdBy: "user",
@@ -326,7 +328,7 @@ export function projectThread(
 				nodeId: id(nodeId),
 				role: "user",
 				text,
-				attachments: [],
+				attachments,
 				streaming: false,
 				createdAt: time(at),
 				updatedAt: time(at),

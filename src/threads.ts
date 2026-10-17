@@ -19,10 +19,13 @@ import {
 	type Submission,
 	type Tx,
 	UserEntry,
+	type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Harness } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
+import type { ContentBlock } from "./t3/model-types.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import type { ProjectRegistry } from "./registry.ts";
@@ -82,6 +85,10 @@ type MessageInput = {
 	readonly message: string;
 	/** The client's id for this message, placed in the entry's `data` (state.md: no side store). */
 	readonly messageId?: string;
+	/** Extra content blocks (an image) appended after the text block, so the model receives the image inline. */
+	readonly blocks?: readonly ContentBlock[];
+	/** The message's persisted images, placed in the entry's `data` (the projection shows them after a restart). */
+	readonly attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[];
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -238,15 +245,23 @@ export class Threads {
 	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission> {
 		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		const content = input.message;
+		// Text-only keeps a plain-string content (unchanged prompt-cache shape); an image appends its block after the
+		// text block, so the model receives [text, image] exactly as pi-ai's user content carries an image.
+		const content: UserInput =
+			input.blocks === undefined || input.blocks.length === 0
+				? input.message
+				: ([{ type: "text", text: input.message }, ...input.blocks] as UserInput);
+		// The entry's data carries the message id and the message's images (state.md: no side store — the entry is the record).
+		const data: Record<string, JsonValue> = {};
+		if (input.messageId !== undefined) data.messageId = input.messageId;
+		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		const submission = await conversation.submit(
 			{
 				type: "input",
 				requestId: input.requestId,
 				content,
 				...(whenBusy === undefined ? {} : { whenBusy }),
-				// The client's message id rides in the entry's data (state.md: no side store).
-				...(input.messageId === undefined ? {} : { entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } }),
+				...(Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }),
 			},
 			BACKGROUND_CONTEXT,
 		);

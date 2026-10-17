@@ -21,6 +21,25 @@ export const messageIdOf = (entry: EntryRecord): string | undefined => {
 	const id = (data as { messageId?: unknown }).messageId;
 	return typeof id === "string" ? id : undefined;
 };
+
+/** A persisted image on a message, as the projection reports it (T3's `ChatImageAttachment`). */
+export type UserAttachment = { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number };
+
+/** The images a user entry carries in its `data` (`app.user` entries set them — `Threads.submit`); empty for a
+ * message with none. The projection reports these as the message's attachments, so the thread shows them after a
+ * restart (the record is durable; the bytes live in the bridge's attachment store). */
+export const attachmentsOf = (entry: EntryRecord): UserAttachment[] => {
+	const data = entry.data;
+	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return [];
+	const list = (data as { attachments?: unknown }).attachments;
+	if (!Array.isArray(list)) return [];
+	return list.flatMap((item): UserAttachment[] => {
+		if (typeof item !== "object" || item === null) return [];
+		const a = item as Record<string, unknown>;
+		if (a.type !== "image" || typeof a.id !== "string") return [];
+		return [{ type: "image", id: a.id, name: String(a.name ?? "image"), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }];
+	});
+};
 export const isAssistantEntry = (entry: EntryRecord) => firstMessage(entry)?.role === "assistant";
 export const stopReason = (entry: EntryRecord | undefined) => {
 	const message = entry === undefined ? undefined : firstMessage(entry);

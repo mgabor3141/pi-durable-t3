@@ -16,13 +16,36 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import type { Thread } from "../threads.ts";
+import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
-import { type ConversationView, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
+import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
 export class CommandError extends Error {}
+
+/** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
+ * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
+ * attachment is still recorded on the entry for display. pi-ai accepts image content only for image-input models. */
+export function selectImageBlocks(
+	catalog: readonly { provider: string; modelId: string; input: string[] }[],
+	model: { provider: string; modelId: string } | null,
+	attachments: readonly AttachmentRecord[] | undefined,
+	read: (attachmentId: string) => { data: string; mimeType: string } | null,
+): ContentBlock[] | undefined {
+	if (attachments === undefined || attachments.length === 0) return undefined;
+	const entry = model === null ? undefined : catalog.find((m) => m.provider === model.provider && m.modelId === model.modelId);
+	if (entry === undefined || !entry.input.includes("image")) return undefined;
+	const blocks: ContentBlock[] = [];
+	for (const attachment of attachments) {
+		if (attachment.type !== "image") continue;
+		const image = read(attachment.id);
+		if (image === null) continue;
+		blocks.push({ type: "image", data: image.data, mimeType: attachment.mimeType });
+	}
+	return blocks.length === 0 ? undefined : blocks;
+}
 
 interface ThreadState {
 	readonly threadId: string;
@@ -44,7 +67,8 @@ interface ThreadState {
 	conversationId: number | undefined;
 	view: ConversationView | undefined;
 	configuration: { model: ModelRef | null; thinkingLevel: string } | undefined;
-	catalog: ModelRef[];
+	/** The catalog entries, each with its input modalities, so the send path knows which models accept images. */
+	catalog: { provider: string; modelId: string; input: string[] }[];
 }
 
 type ShellItem =
@@ -77,6 +101,7 @@ export class Bridge {
 	readonly config: BridgeConfig;
 	readonly #host: Host;
 	readonly #log: Logger;
+	readonly #attachments: AttachmentStore | undefined;
 	readonly #threads = new Map<string, ThreadState>();
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
@@ -92,10 +117,11 @@ export class Bridge {
 	#sequence = 0;
 	#startedAt = new Date().toISOString();
 
-	constructor(config: BridgeConfig, log: Logger, host: Host) {
+	constructor(config: BridgeConfig, log: Logger, host: Host, attachments?: AttachmentStore) {
 		this.config = config;
 		this.#log = log;
 		this.#host = host;
+		this.#attachments = attachments;
 	}
 
 	start(): void {
@@ -417,7 +443,7 @@ export class Bridge {
 		const fire = (): void => {
 			state.view = transcript.transcript.value?.view as ConversationView | undefined;
 			state.conversationId = transcript.transcript.value?.conversationId;
-			state.catalog = (models.catalog.value ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId }));
+			state.catalog = (models.catalog.value ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [] }));
 			const configuration = models.configuration.value;
 			if (configuration !== undefined) state.configuration = { model: configuration.model ?? null, thinkingLevel: configuration.thinkingLevel };
 			this.#recompute(state);
@@ -641,12 +667,20 @@ export class Bridge {
 		}
 	}
 
+	/** The image content blocks for a prompt, gated on the head's model (see `selectImageBlocks`). */
+	#imageBlocks(state: ThreadState, attachments: readonly AttachmentRecord[] | undefined): ContentBlock[] | undefined {
+		if (this.#attachments === undefined) return undefined;
+		const model = state.configuration?.model ?? state.view?.docs["pi.agent"]?.model ?? null;
+		return selectImageBlocks(state.catalog, model, attachments, (id) => this.#attachments!.readForModel(id));
+	}
+
 	async sendMessage(input: {
 		threadId: string;
 		commandId: string;
 		messageId: string;
 		text: string;
 		mode: "start" | "queue" | "steer" | "restart";
+		attachments?: readonly AttachmentRecord[] | undefined;
 	}): Promise<void> {
 		const release = this.acquire(input.threadId);
 		try {
@@ -654,8 +688,17 @@ export class Bridge {
 			const head = await this.#awaitHead(state);
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
-			// commandId for durable dedup (design.md, Invariants).
-			const request = { conversationId: head, requestId: input.commandId, message: input.text, messageId: input.messageId };
+			// commandId for durable dedup (design.md, Invariants). Images ride along as content blocks (model) and entry
+			// data (display), only when the model accepts them.
+			const blocks = this.#imageBlocks(state, input.attachments);
+			const request = {
+				conversationId: head,
+				requestId: input.commandId,
+				message: input.text,
+				messageId: input.messageId,
+				...(blocks === undefined ? {} : { blocks }),
+				...(input.attachments === undefined || input.attachments.length === 0 ? {} : { attachments: [...input.attachments] }),
+			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.
 			await this.#call(input.threadId, async (controller, _models, c) => {

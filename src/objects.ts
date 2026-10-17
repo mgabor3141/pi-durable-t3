@@ -18,6 +18,11 @@ import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentChange, ConversationId, ConversationView, ConversationWatch } from "@earendil-works/pi-durable";
 import { HostError } from "./host-errors.ts";
 import { ThreadsDoc, type Thread, type Threads } from "./threads.ts";
+import type { ContentBlock } from "./t3/model-types.ts";
+
+/** A persisted image record the client sent, placed in the entry's data (the projection reads it back). Mirrors
+ * `AttachmentStore`'s record shape; declared here so the objects layer stays free of a facet→objects import. */
+type AttachmentRecord = { readonly id: string; readonly name: string; readonly mimeType: string; readonly sizeBytes: number };
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -50,12 +55,18 @@ const ThreadSearchMatchSchema = Type.Object({
 const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown() });
 
 const ThreadKey = Type.Object({ threadId: Type.String() });
+/** A persisted image, shaped for the entry's data (the projection reads it back as the message's attachments). */
+const AttachmentRecordSchema = Type.Object({ id: Type.String(), name: Type.String(), mimeType: Type.String(), sizeBytes: Type.Number() });
 const MessageArgs = Type.Object({
 	conversationId: Type.Number(),
 	requestId: Type.String(),
 	message: Type.String(),
 	/** The client's id for this message; it rides in the `app.user` entry's data (state.md: no side store). */
 	messageId: Type.Optional(Type.String()),
+	/** Extra pi-ai content blocks (an image) appended after the text block — supplied only when the model accepts images. */
+	blocks: Type.Optional(Type.Array(Type.Unknown())),
+	/** The message's persisted images, placed in the entry's data so the thread shows them after a restart. */
+	attachments: Type.Optional(Type.Array(AttachmentRecordSchema)),
 });
 const AbortArgs = Type.Object({ conversationId: Type.Number() });
 const RewindArgs = Type.Object({ expectedHead: Type.Number(), entryId: Type.Number(), requestId: Type.String() });
@@ -63,7 +74,7 @@ const SubmissionRef = Type.Object({ submissionId: Type.Number() });
 const ConversationRef = Type.Object({ conversationId: Type.Number() });
 
 const ModelRefSchema = Type.Object({ provider: Type.String(), modelId: Type.String() });
-const Catalog = Type.Array(Type.Object({ provider: Type.String(), modelId: Type.String() }));
+const Catalog = Type.Array(Type.Object({ provider: Type.String(), modelId: Type.String(), input: Type.Array(Type.String()) }));
 const ConfigurationSchema = Type.Object({ model: Type.Union([ModelRefSchema, Type.Null()]), thinkingLevel: Type.String() });
 
 // Mirrors pi-ai's model thinking levels (the array is not exported from the package index).
@@ -229,12 +240,20 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 	api.serve(PiController, ({ threadId }, _principal, _self) => {
 		const submit = async (
-			args: { conversationId: number; requestId: string; message: string; messageId?: string },
+			args: { conversationId: number; requestId: string; message: string; messageId?: string; blocks?: unknown[]; attachments?: AttachmentRecord[] },
 			whenBusy: "steer" | "followUp" | undefined,
 		): Promise<{ submissionId: number }> => {
 			try {
 				const submission = await threads.submit(
-					{ threadId, conversationId: args.conversationId, requestId: args.requestId, message: args.message, ...(args.messageId === undefined ? {} : { messageId: args.messageId }) },
+					{
+						threadId,
+						conversationId: args.conversationId,
+						requestId: args.requestId,
+						message: args.message,
+						...(args.messageId === undefined ? {} : { messageId: args.messageId }),
+						...(args.blocks === undefined ? {} : { blocks: args.blocks as ContentBlock[] }),
+						...(args.attachments === undefined ? {} : { attachments: args.attachments }),
+					},
 					whenBusy,
 				);
 				return { submissionId: submission.id };
@@ -265,7 +284,7 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 	});
 
 	api.serve(PiModels, ({ threadId }, _principal, self) => {
-		const catalog = models.getModels().map((model) => ({ provider: model.provider, modelId: model.id }));
+		const catalog = models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input] }));
 		const state = self.state({
 			catalog: cell(Catalog, catalog),
 			configuration: cell(ConfigurationSchema, { model: null, thinkingLevel: "off" }),

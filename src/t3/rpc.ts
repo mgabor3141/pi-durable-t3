@@ -1,7 +1,10 @@
 // T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup). The minimal viable surface is implemented; every other method
 // gets a stub: streams stay open and silent, and unary calls answer with a benign value or a clear failure.
 import {
+	AssetAttachmentNotFoundError,
+	AssetPreviewTypeValidationError,
 	FilesystemBrowseError,
+	PersistChatAttachmentsError,
 	type ExecutionEnvironmentDescriptor,
 	OrchestrationDispatchCommandError,
 	OrchestrationSearchThreadsError,
@@ -33,6 +36,7 @@ import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
+import type { AttachmentStore } from "./attachment-store.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -103,6 +107,7 @@ interface RpcDeps {
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
 	readonly authDescriptor: Any;
 	readonly auth: AuthStore;
+	readonly attachments: AttachmentStore;
 	readonly log: Logger;
 }
 
@@ -139,6 +144,16 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 		// with no scratch dir advertises nothing, and the client offers no such thread.
 		...(deps.bridge.scratchRoot === undefined ? {} : { scratchWorkspaceRoot: deps.bridge.scratchRoot }),
 	} as Any;
+}
+
+/** The image attachments of a command (the persisted records the client sent), shaped for `Bridge.sendMessage`. Files
+ * are dropped: this host sends only images to the model (the file-attachment path needs the upload store, refused). */
+function imageRecords(attachments: unknown): { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number }[] | undefined {
+	if (!Array.isArray(attachments)) return undefined;
+	const records = attachments
+		.filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null && a.type === "image" && typeof a.id === "string")
+		.map((a) => ({ type: "image" as const, id: a.id as string, name: String(a.name ?? "image"), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }));
+	return records.length > 0 ? records : undefined;
 }
 
 const toPromiseEffect = <A>(run: () => Promise<A>, onError: (message: string) => Any) =>
@@ -178,6 +193,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						messageId: command.messageId,
 						text: command.text,
 						mode,
+						...(imageRecords(command.attachments) === undefined ? {} : { attachments: imageRecords(command.attachments) }),
 					});
 					break;
 				}
@@ -309,6 +325,30 @@ export function makeRpcLayer(deps: RpcDeps) {
 						: new UsageReadError({ reason: "scanFailed", detail: (error as Error).message || "The usage scan failed.", cause: error }),
 			}),
 		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
+		// Image attachments, the data-URL path (capabilities.md): the client sends the bytes inline, this host stores
+		// them under the bridge's dir and answers a persisted record; display is served by `assets.createUrl` + the
+		// `/api/assets/*` HTTP route (signature-authed, no bearer — like T3). The upload-URL path (`attachments.*`) is
+		// refused: this host does not advertise `attachmentUploads`, so the client never calls it.
+		"assets.persistChatAttachments": (input: Any) =>
+			Effect.try({
+				try: () => ({ attachments: deps.attachments.persist(input.threadId, input.messageId, input.attachments ?? []) }),
+				catch: (error) => new PersistChatAttachmentsError({ message: (error as Error).message || String(error) }),
+			}),
+		"assets.createUrl": (input: Any) => {
+			const resource = input.resource;
+			// Only the `attachment` resource is served: every other asset resource names a host file (workspace/media/
+			// favicon/tool-output/github), and this host refuses file reads (capabilities.md), so the client gets the
+			// contract's typed preview refusal rather than a fabricated URL.
+			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource } as Any));
+			const minted = deps.attachments.mintAssetUrl({
+				attachmentId: resource.attachmentId,
+				...(typeof resource.fileName === "string" ? { fileName: resource.fileName } : {}),
+				...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+			});
+			return minted === null
+				? Effect.fail(new AssetAttachmentNotFoundError({ resource } as Any))
+				: Effect.succeed(minted);
+		},
 		// The config stream: the store's change signal is what emits `settingsUpdated`, the event on which the projection
 		// replaces `config.settings` (capabilities.md).
 		subscribeServerConfig: () =>
@@ -388,6 +428,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					});
 					await bridge.applySelection(threadId, input.modelSelection);
 					if (input.initialMessage !== undefined && input.initialMessage.text.trim().length > 0) {
+						const launchAttachments = imageRecords(input.initialMessage.attachments);
 						await bridge.idempotent(input.commandId, async () => {
 							await bridge.sendMessage({
 								threadId,
@@ -395,6 +436,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 								messageId: input.initialMessage.messageId ?? `launch-${input.commandId}`,
 								text: input.initialMessage.text,
 								mode: "start",
+								...(launchAttachments === undefined ? {} : { attachments: launchAttachments }),
 							});
 							return bridge.nextSequence();
 						});

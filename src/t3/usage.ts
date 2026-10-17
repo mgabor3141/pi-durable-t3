@@ -290,7 +290,8 @@ export async function readVolumeId(path: string): Promise<string> {
 	}
 }
 
-/** This host's single usage source: pi, rooted at the bridge's state dir (where its conversations are stored). */
+/** This host's single usage source: pi. The fingerprint must identify it across machines (T3 de-duplicates sources
+ * by it), so it names the bridge's state dir and its `device:inode`, which pair one-to-one with the harness storage. */
 function piSource(stateDir: string, volumeId: string, sessions: number, scannedFiles: number, skippedFiles: number): UsageSource {
 	return {
 		fingerprint: { hostId: hostname(), provider: "pi", resolvedHomePath: stateDir, volumeId },

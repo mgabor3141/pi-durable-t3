@@ -3,7 +3,7 @@
 // single-use; a host mints one with `mintPairingCode` (`../bridge.ts`), and a paired client mints, lists and
 // revokes them over the Connections endpoints (`./http.ts`), which read and write this one store.
 import { AuthStandardClientScopes } from "@t3tools/contracts";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeJsonAtomic } from "./json-store.ts";
@@ -58,6 +58,9 @@ interface AuthFile {
 	environmentId: string;
 	pairings: StoredPairing[];
 	tokens: StoredToken[];
+	/** The HMAC key (base64url, 32 bytes) that signs attachment-upload and asset-access tokens. Generated on first
+	 * read and persisted here, so a minted link survives a restart (one host per dir). */
+	assetKey?: string;
 }
 
 /** One change to the access state, as the `subscribeAuthAccess` stream projects it. The record rides along: a
@@ -88,7 +91,7 @@ export interface IssuedSession {
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const newSecret = (bytes = 24) => randomBytes(bytes).toString("base64url");
-const newAuthFile = (): AuthFile => ({ environmentId: `pi-${newSecret(9)}`, pairings: [], tokens: [] });
+const newAuthFile = (): AuthFile => ({ environmentId: `pi-${newSecret(9)}`, pairings: [], tokens: [], assetKey: newSecret(32) });
 const standardScopes = () => [...AuthStandardClientScopes];
 
 /** Entries written before links and sessions carried ids, scopes and client metadata get them once, on read, and
@@ -158,6 +161,12 @@ export class AuthStore {
 			return fresh;
 		}
 		const { file, migrated } = normalize(stored);
+		// A store written before asset signing gets a key once, persisted: a minted link must not change across reads.
+		if (typeof file.assetKey !== "string" || file.assetKey.length === 0) {
+			file.assetKey = newSecret(32);
+			this.#write(file);
+			return file;
+		}
 		if (migrated) this.#write(file);
 		return file;
 	}
@@ -371,6 +380,20 @@ export class AuthStore {
 	/** Whether the token with this hash is still stored and unexpired (revocation removes it). */
 	isTokenActive(tokenHash: string): boolean {
 		return this.#read().tokens.some((t) => t.expiresAt > Date.now() && sameHash(t.hash, tokenHash));
+	}
+
+	/** Sign a token payload with the store's asset key (HMAC-SHA256, base64url) — the `<payload>.<signature>`
+	 * format T3 mints for attachment-upload and asset-access URLs (`auth/utils.ts` at the pin). */
+	signPayload(payload: string): string {
+		return createHmac("sha256", Buffer.from(this.#read().assetKey!, "base64url")).update(payload).digest("base64url");
+	}
+
+	/** Verify a token's signature, in constant time, against its canonical encoding: a signature that differs only
+	 * in base64url padding bits is refused, not decoded to the same bytes. */
+	verifySignature(payload: string, signature: string): boolean {
+		const expected = Buffer.from(this.signPayload(payload));
+		const given = Buffer.from(signature);
+		return given.length === expected.length && timingSafeEqual(given, expected);
 	}
 }
 
