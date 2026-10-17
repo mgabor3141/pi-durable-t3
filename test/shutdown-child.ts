@@ -4,7 +4,7 @@
 // Hermetic: a scripted faux model, a temp root, no network, no `~/.pi`.
 //
 // Run: node --experimental-strip-types test/shutdown-child.ts <root> <project> <port> [tool-sleep-ms]
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
@@ -14,9 +14,9 @@ import { attachT3 } from "../src/bridge.ts";
 import { Threads } from "../src/threads.ts";
 import { FileProjectRegistry } from "../src/registry.ts";
 import { nullLogger } from "../src/t3/logging.ts";
-import { openCodingHarness } from "../examples/coding-agent/host-runtime.ts";
-import { parseConfigToml } from "../examples/coding-agent/config.ts";
-import { installShutdown } from "../examples/coding-agent/shutdown.ts";
+import { openCodingHarness } from "../examples/coding-agent/src/host-runtime.ts";
+import { parseConfigToml } from "../examples/coding-agent/src/config.ts";
+import { installShutdown } from "../examples/coding-agent/src/shutdown.ts";
 import { createScriptedModel } from "./fake-model.ts";
 
 const [root, project, portArg, sleepArg] = process.argv.slice(2);
@@ -37,21 +37,23 @@ const slowTool = defineTool({
 });
 
 const config = parseConfigToml(`listen = "127.0.0.1:${port}"\n`, root);
-// The instance file the host edits on the UI's behalf: a project at `<root>/p` (its id is derived from that path).
-writeFileSync(join(root, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "p"), title: project }] }) + "\n");
-const registry = FileProjectRegistry.open(root);
+// The bridge dir it owns: the instance file the host edits on the UI's behalf, a project at `<root>/p` (its id is
+// derived from that path).
+mkdirSync(config.stateDir, { recursive: true });
+writeFileSync(join(config.stateDir, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "p"), title: project }] }) + "\n");
+const registry = FileProjectRegistry.open(config.stateDir);
 // Generation 1 is a `tool_use` for `slow`; nothing is queued after, so the run sits inside the tool until the signal.
 const model = createScriptedModel([fauxAssistantMessage([fauxToolCall("slow", {})], { stopReason: "toolUse" })]);
-const runtime = await openCodingHarness(config, registry, model.models, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });
+const runtime = await openCodingHarness(config, model.models, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });
 const attach = await attachT3(runtime.harness, {
 	models: model.models,
-	projects: registry,
-	dataDir: root,
+	stateDir: config.stateDir,
+	scratchDir: config.scratchDir,
 	listen: config.listen,
-	stateDir: join(root, "t3-auth"),
+	tokenTtlSeconds: config.tokenTtlSeconds,
 	log: nullLogger,
 });
-await attach.ready;
+runtime.harness.resume(); // the caller's, after the attach resolves — the host's exact wiring.
 
 const threads = new Threads({ harness: runtime.harness, registry });
 const thread = await threads.create({ threadId: "shutdown", projectId: registry.list()[0]!.id });

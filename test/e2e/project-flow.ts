@@ -8,7 +8,7 @@
 //      sends), over the REST parity route that shares the one store with `projects.mutate` on `/ws`,
 //   5. confirm the project's on-disk directory is untouched and the server no longer lists the project.
 //
-// Run via dev/browser-smoke.sh. Env: T3_WEB (web app), BRIDGE (facet), PAIR (fixed reusable pairing token),
+// Run via dev/browser-smoke.sh. Env: T3_WEB (web app), BRIDGE (facet), PAIR (a single-use pairing code),
 // PICK_TARGET (the directory to add), PICK_MARKER (a file inside it that must survive the removal).
 // Asserts on the DOM, the outgoing WS frames, the REST project list, and the filesystem.
 
@@ -16,7 +16,8 @@ import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
 const bridgeUrl = required("BRIDGE").replace(/\/$/, "");
-const pairToken = required("PAIR");
+// Codes are single-use: PAIR is this script's own exchange; PAIR2 is the browser's pairing screen.
+const pairToken = required("PAIR2");
 const pickTarget = required("PICK_TARGET").replace(/\/+$/, "");
 const pickMarker = required("PICK_MARKER");
 const launchTimeout = Number(process.env["E2E_LAUNCH_TIMEOUT_MS"] ?? 60000);
@@ -30,7 +31,8 @@ function required(name: string): string {
 	return value;
 }
 
-// Pair first (the fixed token is reusable across the web app's pairing and this exchange, as the smoke's other flows do).
+// Pair first: the code is exchanged once by this script and once by the web app's pairing screen, and codes are
+// single-use, so this flow uses TWO codes (the smoke script mints both: PAIR for here, PAIR2 for the browser).
 const token = await bridgeToken();
 async function bridgeToken(): Promise<string> {
 	const response = await fetch(`${bridgeUrl}/oauth/token`, {
@@ -38,7 +40,7 @@ async function bridgeToken(): Promise<string> {
 		headers: { "content-type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
 			grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-			subject_token: pairToken,
+			subject_token: required("PAIR"),
 			subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
 			requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
 		}).toString(),

@@ -1,6 +1,6 @@
 // The bridge's project registry: the list T3's UI edits, in the bridge's own `projects.json`. The rules it enforces —
 // the normalized path as the uniqueness key, an id assigned once and never re-derived, the boot parser as the
-// definition of writable, one host per data dir — are docs/design.md's (IDs, Invariants).
+// definition of writable, one host per state dir — are docs/design.md's (IDs, Invariants).
 import { readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { Type } from "typebox";
@@ -133,7 +133,7 @@ const ProjectsFileSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-/** The registry file's name, in the data dir. */
+/** The registry file's name, in the state dir. */
 export const PROJECTS_FILE = "projects.json";
 
 /** Parse and validate `projects.json` text for `dataDir` (JSON → defaults → schema → checks). STRICT: this parser is

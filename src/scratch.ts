@@ -1,19 +1,14 @@
-// T3's Scratch project ("No project") — the folders its server makes for the user under the server's data dir,
-// replicated from `apps/server/src/project/ManagedProjectFolders.ts` (pinned T3): the root, the title, the icon, the
-// find-or-create rule behind `projects.ensureScratch`, and the per-thread folder a Scratch launch claims. The rules
-// these enforce are T3's; the storage is our project registry (`registry.ts`).
+// T3's Scratch project ("No project") — the folders its server makes for the user under its scratch root, replicated
+// from `apps/server/src/project/ManagedProjectFolders.ts` (pinned T3): the title, the icon, the find-or-create rule
+// behind `projects.ensureScratch`, and the per-thread folder a Scratch launch claims. The rules these enforce are
+// T3's; the storage is our project registry (`registry.ts`) and the root is the integrator's `scratchDir` option.
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { ProjectConflict, type ProjectRegistry } from "./registry.ts";
 
 /** What T3 titles the project (`title: "No project"` in `ensureScratchProject`). */
 const SCRATCH_TITLE = "No project";
-
-/** The folder under the host's data dir: T3's `path.resolve(config.baseDir, "scratch")`. */
-export function scratchRootFor(dataDir: string): string {
-	return resolve(join(dataDir, "scratch"));
-}
 
 /** The dashed chat bubble T3 gives the Scratch project, set once at create. */
 export const SCRATCH_PROJECT_ICON = { kind: "lucide", name: "message-square-dashed", color: "gray" } as const;

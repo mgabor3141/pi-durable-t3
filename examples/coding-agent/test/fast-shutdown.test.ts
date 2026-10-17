@@ -1,7 +1,7 @@
 // A SIGINT (and SIGTERM) mid-turn must stop the example host fast: print "stopping", exit 0 within ~2 s, even when a
 // turn is in flight on work that ignores its abort signal (a real provider's lingering HTTP stream — here a non-abortable
 // tool). A second signal exits immediately. This is the bounded shutdown `installShutdown` installs; the graceful
-// close alone can hang on a non-abortable in-flight invocation (see examples/coding-agent/shutdown.ts). Hermetic: a child process on its
+// close alone can hang on a non-abortable in-flight invocation (see examples/coding-agent/src/shutdown.ts). Hermetic: a child process on its
 // own loopback port, a scripted faux model, a temp `PI_CODING_AGENT_DIR` (never `~/.pi`), no network.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
-const childScript = new URL("../../test/shutdown-child.ts", import.meta.url).pathname;
+const childScript = new URL("../../../test/shutdown-child.ts", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-shutdown-"));
@@ -26,10 +26,6 @@ type Child = { child: ChildProcessByStdio<null, Readable, Readable>; out: () => 
 async function launch(name: string, port: number): Promise<Child> {
 	const root = join(scratch, name);
 	await mkdir(root, { recursive: true });
-	// Only `listen` belongs in `config.toml`. This fixture used to write a `[[projects]]` block too — a key the current
-	// parser refuses by name (projects live in the instance file, `settings.json`, which the child writes itself). It
-	// passed only because the child builds its own config string and never reads this file, which makes it a trap for
-	// whoever points the child at the file on disk.
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	const child = spawn(process.execPath, ["--experimental-strip-types", childScript, root, "alpha", String(port), "60000"], {
 		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_DURABLE_T3_FAKE: undefined },

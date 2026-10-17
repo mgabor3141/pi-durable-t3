@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { getJson, pair, postJson, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, pairCode, t3Dir, type Launched } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-rest-"));
 const agentDir = join(scratch, "agent");
@@ -33,17 +33,17 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const TOKEN = "probe-token-rest-0123456789abcdef";
-
 async function start(name: string, port: number) {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
+	await mkdir(t3Dir(root), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [] }), "utf8");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	if (!(await waitListening(port))) throw new Error(`host did not bind ${port}: ${host.out()}`);
-	const token = await pair(port, TOKEN);
+	// A single-use code minted against the bridge dir, as the `pair` command does.
+	const token = await pair(port, pairCode(root));
 	return { root, host, token };
 }
 
@@ -77,7 +77,7 @@ const exchangeForm = (subject: string) => ({
 it("the REST mutate route answers the contract's schema, not the bridge's switch (wire M6)", async () => {
 	const { host, root } = await start("rest", 4937);
 	try {
-		const token = (await pair(4937, TOKEN)) ?? "";
+		const token = await pair(4937, pairCode(root));
 		const uuid = "7d1c93a4-5b1f-4e3a-9c2d-0a1b2c3d4e5f";
 		const target = join(root, "projects", "rest-create");
 
@@ -143,7 +143,7 @@ it("the REST mutate route answers the contract's schema, not the bridge's switch
 }, 90_000);
 
 it("rotating x-forwarded-for does not mint a fresh rate-limit bucket (sec F7, conc F4)", async () => {
-	const { host } = await start("limit", 4938);
+	const { host, root } = await start("limit", 4938);
 	try {
 		// Every attempt comes from loopback with a DIFFERENT x-forwarded-for. Keyed on the header, each is its own
 		// bucket and the limiter never fires; keyed on the socket, the failures accumulate and the caller is blocked.
@@ -159,7 +159,7 @@ it("rotating x-forwarded-for does not mint a fresh rate-limit bucket (sec F7, co
 		expect(statuses.length, `the limiter fired at attempt ${statuses.length}, not after 30 guesses`).toBeLessThanOrEqual(12);
 		// The block is not global: it is the address that guessed. A correct code from the same socket is now blocked
 		// too — that is what a rate limit is — so check the shape of the answer, and that pairing works on a fresh host.
-		const blocked = await formPost(4938, "/oauth/token", exchangeForm(TOKEN), { "x-forwarded-for": "203.0.113.200" });
+		const blocked = await formPost(4938, "/oauth/token", exchangeForm(pairCode(root)), { "x-forwarded-for": "203.0.113.200" });
 		expect(blocked.status, `the blocked socket is answered with a rate limit: ${JSON.stringify(blocked)}`).toBe(429);
 		expect(blocked.body.code).toBe("rate_limited");
 	} finally {

@@ -1,7 +1,6 @@
 // Boot the T3 facet beside the host's objects: the auth store, model catalog and bridge, then the Effect HTTP/`/ws`
 // server. The bridge is a local client of the chord objects — no socket, no separate process.
 import { createServer } from "node:http";
-import { networkInterfaces } from "node:os";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -14,10 +13,6 @@ import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 
 type FacetHandle = {
-	readonly auth: AuthStore;
-	readonly bridge: Bridge;
-	pairingCode(): string;
-	pairingUrls(code: string): string[];
 	/** Resolves once the HTTP server is listening; rejects with the bind error (e.g. `EADDRINUSE`) if it cannot start. */
 	readonly ready: Promise<void>;
 	/** Resolves when the server fiber ENDS on its own after `ready`; what to do about it is the integrator's policy —
@@ -33,7 +28,7 @@ export function startFacet(deps: {
 	config: BridgeConfig;
 }): FacetHandle {
 	const { host, catalog, log, config } = deps;
-	const auth = new AuthStore(config.stateDir, { ...(config.pairingToken === undefined ? {} : { pairingToken: config.pairingToken }), tokenTtlSeconds: config.tokenTtlSeconds });
+	const auth = new AuthStore(config.stateDir, { tokenTtlSeconds: config.tokenTtlSeconds });
 
 	const bridge = new Bridge(config, log, host);
 	bridge.start();
@@ -59,23 +54,7 @@ export function startFacet(deps: {
 		);
 	});
 
-	const pairingCode = (): string => auth.createPairingCode();
-	const pairingUrls = (code: string): string[] => {
-		const hosts =
-			config.host === "0.0.0.0" || config.host === "::"
-				? Object.values(networkInterfaces())
-						.flat()
-						.filter((n) => n !== undefined && n.family === "IPv4" && !n.internal)
-						.map((n) => n!.address)
-				: [config.host];
-		return hosts.map((h) => `http://${h}:${config.port}/pair#token=${code}`);
-	};
-
 	return {
-		auth,
-		bridge,
-		pairingCode,
-		pairingUrls,
 		ready,
 		closed,
 		close: async () => {

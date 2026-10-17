@@ -12,11 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const PORT_A = 4893;
 const PORT_B = 4894;
-const TOKEN = "project-mutate-token-0123456789";
 let root: string;
 let agentDir: string;
 let hostA: Launched | undefined;
@@ -31,7 +30,8 @@ beforeAll(async () => {
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	// The registry starts with one project, so the shell is non-empty and the new one is distinguishable.
 	await mkdir(join(root, "projects", "alpha"), { recursive: true });
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
 	// The two hosts take turns on ONE root (the restart shape): each binds its own port, so the config is rewritten
 	// per launch.
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT_A}"\n`, "utf8");
@@ -57,9 +57,9 @@ const createMutation = (root2: string) => ({
 it("a retried create answers the project it created — across a restart; a different mint at the same path is refused", async () => {
 	// Host A, first attempt: the create lands and answers the project.
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT_A}"\n`, "utf8");
-	hostA = launch(root, PORT_A, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	hostA = launch(root, PORT_A, {}, agentDir);
 	expect(await waitListening(PORT_A), hostA.out().slice(-2000)).toBe(true);
-	const wsA = await connectWs(PORT_A, await pair(PORT_A, TOKEN));
+	const wsA = await connectWs(PORT_A, await pair(PORT_A, pairCode(root)));
 	const firstFrame = await wsA.call("projects.mutate", createMutation(projectDir()));
 	const first = exitValue(firstFrame, `the first create — frame: ${JSON.stringify(firstFrame).slice(0, 500)}`) as ProjectAnswer;
 	expect(first.id, "the client's minted id is the project's id").toBe("minted-beta-0001");
@@ -70,9 +70,9 @@ it("a retried create answers the project it created — across a restart; a diff
 
 	// Host B: the same root, a new process, the same command resent.
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT_B}"\n`, "utf8");
-	hostB = launch(root, PORT_B, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	hostB = launch(root, PORT_B, {}, agentDir);
 	expect(await waitListening(PORT_B), hostB.out().slice(-2000)).toBe(true);
-	const wsB = await connectWs(PORT_B, await pair(PORT_B, TOKEN));
+	const wsB = await connectWs(PORT_B, await pair(PORT_B, pairCode(root)));
 	try {
 		const retry = exitValue(await wsB.call("projects.mutate", createMutation(projectDir())), "the retried create") as ProjectAnswer;
 		// The project the first call created, named the same way: id, title, root. (Times are per-answer — `createdAt`
@@ -83,7 +83,7 @@ it("a retried create answers the project it created — across a restart; a diff
 		).toEqual({ id: first.id, title: first.title, workspaceRoot: first.workspaceRoot, deletedAt: first.deletedAt });
 
 		// One entry, not two: the registry file is the state, and the retry must not have written a second one.
-		const registryFile = JSON.parse(await readFile(join(root, "projects.json"), "utf8")) as { projects: { path: string }[] };
+		const registryFile = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { path: string }[] };
 		expect(registryFile.projects.map((entry) => entry.path), "the retry stored nothing new").toEqual([
 			join(root, "projects", "alpha"),
 			projectDir(),

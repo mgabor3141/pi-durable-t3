@@ -8,7 +8,7 @@
 // proves nothing. The host process is owned by dev/browser-smoke.sh, which does the kill and the restart: this script
 // and the shell hand off through files (SENT_FILE → the shell kills + restarts → RESTARTED_FILE → this script checks).
 //
-// Run via dev/browser-smoke.sh, which sets T3_WEB (web app), BRIDGE (facet), PAIR (fixed pairing token), plus:
+// Run via dev/browser-smoke.sh, which sets T3_WEB (web app), BRIDGE (facet), PAIR (a single-use pairing code), plus:
 //   CRASH_TEXT  the unique message text to send
 //   CRASH_FILE  where to write the captured threadId + client messageId (tab-separated)
 //   SENT_FILE   written once the message is on screen and the run is live (the shell kills on seeing it)
@@ -18,7 +18,8 @@ import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
 const bridgeUrl = required("BRIDGE").replace(/\/$/, "");
-const pairToken = required("PAIR");
+// Codes are single-use: PAIR is this script's own exchange; PAIR2 is the browser's pairing screen.
+const pairToken = required("PAIR2");
 const crashText = required("CRASH_TEXT");
 const crashFile = required("CRASH_FILE");
 const sentFile = required("SENT_FILE");
@@ -59,7 +60,7 @@ async function bridgeToken(): Promise<string> {
 		headers: { "content-type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
 			grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-			subject_token: pairToken,
+			subject_token: required("PAIR"),
 			subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
 			requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
 		}).toString(),

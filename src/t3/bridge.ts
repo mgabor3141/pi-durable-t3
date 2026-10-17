@@ -13,7 +13,7 @@ import type {
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
-import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON, scratchRootFor } from "../scratch.ts";
+import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
@@ -134,18 +134,21 @@ export class Bridge {
 
 	// ---- projects ---------------------------------------------------------------------------------------------
 
-	/** The folder of threads without a project (T3's `ServerConfig.scratchWorkspaceRoot`). */
-	get scratchWorkspaceRoot(): string {
-		return scratchRootFor(this.config.dataDir);
+	/** The folder of threads without a project (T3's `ServerConfig.scratchWorkspaceRoot`), when the host configured one. */
+	get scratchRoot(): string | undefined {
+		return this.config.scratchDir;
 	}
 
 	/**
 	 * `projects.ensureScratch`, answered exactly as T3's server answers it (design.md, replication rule): re-make the
 	 * folder, then find-or-create the project rooted at it, and answer its id. The client's `openScratch` atom then
-	 * waits for the project in its own store — which is what a registry change emits over the shell stream.
+	 * waits for the project in its own store — which is what a registry change emits over the shell stream. With no
+	 * scratch dir configured the feature is off: refused with a message the UI shows.
 	 */
 	ensureScratch(): Promise<{ readonly projectId: string }> {
-		return ensureScratchProject(this.config.registry, this.scratchWorkspaceRoot);
+		const root = this.config.scratchDir;
+		if (root === undefined) throw new CommandError("This host has no Scratch folder (no scratch dir is configured).");
+		return ensureScratchProject(this.config.registry, root);
 	}
 
 	/** The registered projects (from the live registry), shaped for the shell. */
@@ -162,7 +165,7 @@ export class Bridge {
 			workspaceRoot: project.path,
 			repositoryIdentity: null,
 			defaultModelSelection: null,
-			...(isScratchRoot(project.path, this.scratchWorkspaceRoot) ? { projectIcon: SCRATCH_PROJECT_ICON } : {}),
+			...(this.config.scratchDir !== undefined && isScratchRoot(project.path, this.config.scratchDir) ? { projectIcon: SCRATCH_PROJECT_ICON } : {}),
 			scripts: [],
 			createdAt: this.#startedAt,
 			updatedAt: this.#startedAt,
@@ -575,10 +578,11 @@ export class Bridge {
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
 		if (this.#summary(id) !== undefined) return id;
+		const scratchRoot = this.config.scratchDir;
 		const cwd =
-			options.launchText === undefined || !isScratchRoot(project.cwd, this.scratchWorkspaceRoot)
+			options.launchText === undefined || scratchRoot === undefined || !isScratchRoot(project.cwd, scratchRoot)
 				? undefined
-				: await claimScratchThreadFolder(this.scratchWorkspaceRoot, id, options.launchText);
+				: await claimScratchThreadFolder(scratchRoot, id, options.launchText);
 		const handle = this.#host.get(PiThreads, {});
 		await this.#host.root((c) => handle.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.

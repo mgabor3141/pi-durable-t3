@@ -6,7 +6,7 @@
 //       fabricated, and no shell item is emitted for it (the same answer the REST routes turn into 404 and the WS
 //       handlers into `OrchestrationV2GetThreadProjectionError`);
 //   (b) after 20 bogus probes, the shell's project list is BYTE-IDENTICAL to before (no phantom `/ (other)` project).
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -23,13 +23,11 @@ const log: Logger = { info: () => {}, warn: () => {} };
 async function openBridge(): Promise<{ bridge: Bridge; close: () => Promise<void> }> {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-unknown-"));
-	const stateDir = join(scratch, "state");
-	await mkdir(stateDir, { recursive: true });
 	const host = createHost({ name: "server" });
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir, dataDir: scratch, pairingToken: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
 		log,
 		host,
 	);

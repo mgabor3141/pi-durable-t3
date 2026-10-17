@@ -17,7 +17,7 @@ Projections are rebuilt from it on every change.
 
 | What | If lost |
 |---|---|
-| The threads document: one pointer per thread to its head conversation | Empty sidebar; boot repair re-promotes conversations with outstanding work |
+| The threads document: one pointer per thread to its head conversation | Empty sidebar. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
 | Removed threads, in the same document | A deleted thread could come back |
 | Applied undos, so a retried undo doesn't fork twice | A retried undo forks again |
 
@@ -29,17 +29,21 @@ client's choices and the integrator's extensions.
 
 ## The bridge, on disk
 
+The bridge owns one directory — `attachT3`'s `stateDir` — and creates it if missing. It PAIRS with pi-durable's
+storage: the Harness's threads point at project ids in this directory's `projects.json`. Back up and move
+the two together; a mismatched pair shows an empty sidebar, and nothing repairs the combination.
+
 | File | What | If lost |
 |---|---|---|
-| `settings.json` | T3's server settings, stored as T3's server stores them | T3's defaults |
-| `projects.json` | The project registry: id, path, title | Project names; threads keep their `cwd` |
-| `scratch/` (the data dir) | T3's "No project" folder: one subfolder per thread launched without a project | Nothing — the folder is re-made by the next `projects.ensureScratch`, and every thread keeps the `cwd` its conversation recorded |
-| `auth.json` (state dir) | Environment id, hashed pairing codes and tokens | Every client re-pairs |
+| `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
+| `projects.json` (the state dir) | The project registry: id, path, title | Project names; threads keep their `cwd` |
+| `auth.json` (the state dir) | Environment id, hashed pairing codes and tokens | Every client re-pairs |
+| The scratch dir (the integrator's `scratchDir`, if set) | T3's "No project" folder: one subfolder per thread launched without a project | Nothing — the folder is re-made by the next `projects.ensureScratch`, and every thread keeps the `cwd` its conversation recorded |
 
-The JSON files are written atomically, mode 0600; `scratch/` is a plain directory, created on demand. The bridge
-interprets nothing in `settings.json`. Its one deviation from T3's
-defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
-because this host serves only pi.
+The JSON files are written atomically, mode 0600; the scratch dir is a plain directory, created on demand
+— it is agent work output, not bridge state. The bridge interprets nothing in `t3-settings.json`. Its one deviation
+from T3's defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers
+are off, because this host serves only pi.
 
 ## In memory
 

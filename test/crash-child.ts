@@ -1,8 +1,8 @@
 // Crash child: the example's EXACT wiring — the projects file + `openCodingHarness` (storage under
 // the root, coding tools, env builder) + a `Threads` layer. It creates a thread, submits a turn whose generation
 // streams for minutes, prints the conversation id once the submit is committed, and parks until the parent SIGKILLs
-// it, so the run is in flight at crash time. The parent restarts the bridge over the same storage and the turn
-// finishes (boot repair + resume, see test/crash-restart.test.ts).
+// it, so the run is in flight at crash time. The thread row is written BEFORE the submit, so the restart's
+// `harness.resume()` finishes the turn (see examples/coding-agent/test/crash-restart.test.ts).
 //
 // Run: node --experimental-strip-types test/crash-child.ts <root> <project-title> <out-file>
 import { writeFileSync } from "node:fs";
@@ -12,7 +12,7 @@ import { type ConversationId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads } from "../src/threads.ts";
 import { FileProjectRegistry } from "../src/registry.ts";
-import { openCodingHarness } from "../examples/coding-agent/host-runtime.ts";
+import { openCodingHarness } from "../examples/coding-agent/src/host-runtime.ts";
 import { createScriptedModel } from "./fake-model.ts";
 
 const [root, project, outFile] = process.argv.slice(2);
@@ -23,7 +23,7 @@ writeFileSync(join(root, "projects.json"), JSON.stringify({ projects: [{ path: j
 const registry = FileProjectRegistry.open(root);
 // ~5 minutes of streaming at this rate: the generation is unmistakably mid-flight when the parent kills us.
 const model = createScriptedModel([fauxAssistantMessage("token ".repeat(2000))], { tokensPerSecond: 6 });
-const runtime = await openCodingHarness({ dataDir: root }, registry, model.models);
+const runtime = await openCodingHarness({ dataDir: root }, model.models);
 const threads = new Threads({ harness: runtime.harness, registry });
 const projectId = registry.list()[0]!.id;
 const thread = await threads.create({ threadId: "crash", projectId });

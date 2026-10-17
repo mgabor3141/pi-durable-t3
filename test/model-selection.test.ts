@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-selection-"));
 const agentDir = join(scratch, "agent");
@@ -19,7 +19,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const TOKEN = "probe-token-select-0123456789ab";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type ProviderModel = { slug: string; capabilities: { optionDescriptors?: { id: string; type: string; options?: { id: string }[] }[] } | null };
@@ -30,12 +29,13 @@ it("the picker declares the model's thinking levels; a chosen level reaches the 
 	const projectDir = join(root, "projects", "alpha");
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: projectDir }] }), "utf8");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: projectDir }] }), "utf8");
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
 
-	const ws = await connectWs(port, await pair(port, TOKEN));
+	const ws = await connectWs(port, await pair(port, pairCode(root)));
 	const projection = async (threadId: string): Promise<Record<string, unknown>> =>
 		exitValue(await ws.call("orchestration.getThreadProjection", { threadId }), "getThreadProjection") as Record<string, unknown>;
 	const selectionOf = async (threadId: string): Promise<{ model: string; options?: { id: string; value: string }[] }> =>

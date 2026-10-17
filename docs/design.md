@@ -43,7 +43,8 @@ touches any of those, and a test enforces the boundary.
   hides them. A panel that pretends to work is worse than none.
 - **Strict files.** A file the host cannot read stops it at boot, naming the file. The host never writes a
   file it could not read back.
-- **One host per data dir.** No cross-process locking.
+- **One host per state dir.** No cross-process locking. The state dir pairs with the Harness's storage —
+  the Harness's threads point at project ids in the dir's `projects.json` — so back up and move them together.
 
 ## The model
 
@@ -76,11 +77,8 @@ The code shows what each operation does. These are the rules it cannot show on i
   thread as busy.
 - **Undo of a head that already moved on adds a child thread** instead of failing.
 - **A delete wins.** Deleting a thread aborts its run, and the removal is recorded in the threads document.
-  Promotion, undo and boot repair all skip removed threads, so a deleted thread stays deleted across
-  restarts.
+  Promotion and undo skip removed threads, so a deleted thread stays deleted across restarts.
 - **Removing a project removes its threads** and never touches files on disk.
-- **Boot repair.** At start, any conversation with outstanding work that no thread points at becomes a thread.
-  This closes the crash window between a submit and its promotion.
 - **Unknown threads are a typed not-found** on every path, never an empty thread made up on the spot.
 - **Storage only grows.** pi-durable has no delete. Removing drops pointers, never data.
 

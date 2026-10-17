@@ -2,20 +2,20 @@
 // instructions file as an `instructions` section). Drives the real `openCodingHarness` path with the faux model and
 // inspects the SYSTEM messages the model actually receives (via a response factory that captures `context.messages`).
 // Temp roots only; never `~/.pi`.
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it } from "vitest";
 import { type ConversationId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { Threads } from "../../src/threads.ts";
-import { CodingExtension } from "./base-prompt.ts";
-import { loadConfig, parseConfigToml } from "./config.ts";
-import { openCodingHarness } from "./host-runtime.ts";
-import { createScriptedModel } from "../../test/fake-model.ts";
-import { testRegistry } from "../../test/test-registry.ts";
-import { firstUserEntry, idle } from "../../test/threads-harness.ts";
+import { Threads } from "../../../src/threads.ts";
+import { CodingExtension } from "../src/base-prompt.ts";
+import { loadConfig, parseConfigToml } from "../src/config.ts";
+import { openCodingHarness } from "../src/host-runtime.ts";
+import { createScriptedModel } from "../../../test/fake-model.ts";
+import { testRegistry } from "../../../test/test-registry.ts";
+import { firstUserEntry, idle } from "../../../test/threads-harness.ts";
 
 type SysSection = { content: unknown; sections?: Record<string, string | null> };
 
@@ -55,7 +55,10 @@ describe("base prompt + instructions", () => {
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]);
-			const runtime = await openCodingHarness({ dataDir: root }, registry, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
+			// A thread runs where its project lives; the project dirs exist before its first turn.
+			await mkdir(join(root, "projects/alpha"), { recursive: true });
+			await mkdir(join(root, "projects/beta"), { recursive: true });
+			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
 			const threads = new Threads({ harness: runtime.harness, registry });
 			try {
 				await threads.create({ threadId: "a", projectId: "alpha" });
@@ -94,7 +97,8 @@ describe("base prompt + instructions", () => {
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }]);
-			const runtime = await openCodingHarness({ dataDir: root }, registry, model.models, { extensions: [CodingExtension()] });
+			await mkdir(join(root, "projects/alpha"), { recursive: true });
+			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension()] });
 			const threads = new Threads({ harness: runtime.harness, registry });
 			try {
 				await threads.create({ threadId: "a", projectId: "alpha" });
@@ -123,7 +127,8 @@ describe("base prompt + instructions", () => {
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
 			const registry = testRegistry([{ id: "alpha", cwd: join(root, "p") }]);
-			const runtime = await openCodingHarness({ dataDir: root }, registry, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
+			await mkdir(join(root, "p"), { recursive: true });
+			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
 			const threads = new Threads({ harness: runtime.harness, registry });
 			try {
 				const t = await threads.create({ threadId: "a", projectId: "alpha" });

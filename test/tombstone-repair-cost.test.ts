@@ -1,4 +1,4 @@
-// The removal's promises at the threads layer (review conc N4; the repair-side tombstone pins ride with
+// The removal's promises at the threads layer (review conc N4; the tombstone pins ride with
 // `threads-tombstone.test.ts`).
 //
 // The abort-before-commit window: `remove` interrupts the head, THEN commits the row-drop + tombstone. A

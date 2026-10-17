@@ -157,7 +157,7 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
   .then((r) => r.json())
   .then((j) => { document.getElementById("s").textContent = j.access_token
     ? "Pairing code accepted. Open the T3 app and sign in with this environment — it is now paired."
-    : "Pairing failed: the code was already used or has expired. Start the host again for a new one."; });
+    : "Pairing failed: the code was already used or has expired. Mint a new pairing code with the host's pair command."; });
 </script>`,
 		))),
 		HttpRouter.add(

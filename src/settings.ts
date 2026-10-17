@@ -8,8 +8,8 @@ import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ServerSettings, type Provi
 import { ConfigError, fail } from "./config.ts";
 import { writeJsonAtomic } from "./t3/json-store.ts";
 
-/** The settings file's name, in the data dir — T3's server's own file name. */
-export const SETTINGS_FILE = "settings.json";
+/** T3's server settings document, in the state dir: prefixed, as the one file there in T3's format rather than ours. */
+export const SETTINGS_FILE = "t3-settings.json";
 
 /** This host serves one provider: pi. Where the file is silent on `providerInstances`, it is answered with these
  * entries — the instance answers emptiness, not damage (design.md, Invariants; state.md). A document that names a

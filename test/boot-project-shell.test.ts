@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-shell5-"));
 const agentDir = join(scratch, "agent");
@@ -23,7 +23,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const TOKEN = "probe-token-shell5-0123456789";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type ShellItem = { kind: string; projectId?: string; project?: { id: string; title: string; workspaceRoot?: string } };
 const shellItems = (chunks: Frame[]): ShellItem[] => chunks.flatMap((frame) => (frame.values ?? []) as ShellItem[]);
@@ -48,11 +47,12 @@ it("a rename and a move of a BOOT-loaded project emit project.updated so a conne
 	await mkdir(alpha2, { recursive: true });
 	// The project is in the FILE at boot (no session create → #shownProjects is unseeded by the old code).
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: alpha, title: "Alpha" }] }), "utf8");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ path: alpha, title: "Alpha" }] }), "utf8");
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	if (!(await waitListening(port))) throw new Error(`host did not bind: ${host.out()}`);
-	const ws = await connectWs(port, await pair(port, TOKEN));
+	const ws = await connectWs(port, await pair(port, pairCode(root)));
 	try {
 		// The shell snapshot is the surface projects ride on, and the baseline a client renders at connect: the
 		// boot-loaded project is in it, under a path-derived id. (Archived shells are a typed refusal — archive is

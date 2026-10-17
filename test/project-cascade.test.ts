@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, getJson, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 import { createHost } from "@earendil-works/chord";
 import { createServerFacet } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -32,7 +32,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const TOKEN = "probe-token-cascade-0123456789";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const shellItems = (chunks: Frame[]): ShellItem[] => chunks.flatMap((frame) => (frame.values ?? []) as ShellItem[]);
 
@@ -46,12 +45,13 @@ it("project.delete removes the project's threads, refuses an unforced delete, an
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(marker, "the user's file\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }] }), "utf8");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }] }), "utf8");
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
 
-	const bearer = await pair(port, TOKEN);
+	const bearer = await pair(port, pairCode(root));
 	const ws = await connectWs(port, bearer);
 	try {
 		const projectId = "c0ffee00-1111-4111-8111-111111111111";
@@ -129,11 +129,12 @@ it("a project with no threads deletes without force (the guard is about threads,
 	const projectDir = join(root, "projects", "quiet");
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }] }), "utf8");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }] }), "utf8");
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port)).toBe(true);
-	const bearer = await pair(port, TOKEN);
+	const bearer = await pair(port, pairCode(root));
 	const ws = await connectWs(port, bearer);
 	try {
 		const projectId = "deadbeef-1111-4111-8111-111111111111";
@@ -158,7 +159,7 @@ it("a thread.create racing the forced delete leaves no row under the removed pro
 		await host.load([createServerFacet(f.threads, f.model.models)]);
 		await host.ready();
 		const bridge = new Bridge(
-			{ host: "127.0.0.1", port: 0, label: "t", stateDir: join(f.root, "state"), dataDir: f.root, pairingToken: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], registry: f.registry },
+			{ host: "127.0.0.1", port: 0, label: "t", stateDir: f.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], registry: f.registry },
 			{ info: () => {}, warn: () => {} },
 			host,
 		);

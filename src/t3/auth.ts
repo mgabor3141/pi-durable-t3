@@ -1,5 +1,6 @@
 // Pairing codes, bearer tokens and WebSocket tickets. Codes and tokens are stored as SHA-256 hashes in
-// <stateDir>/auth.json (mode 0600); tickets live in memory for 60 s.
+// <dir>/auth.json (mode 0600); tickets live in memory for 60 s. Codes are single-use; a host mints one with
+// `mintPairingCode` (`../bridge.ts`).
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -28,16 +29,14 @@ const newAuthFile = (): AuthFile => ({ environmentId: `pi-${newSecret(9)}`, pair
 
 export class AuthStore {
 	readonly #file: string;
-	readonly #fixedPairing: string | undefined;
 	readonly #ttlMs: number;
 	readonly #tickets = new Map<string, { expiresAt: number; tokenHash: string }>();
 
-	constructor(stateDir: string, options: { pairingToken?: string | undefined; tokenTtlSeconds: number }) {
-		mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+	constructor(dir: string, options: { tokenTtlSeconds: number }) {
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		// A pre-existing directory keeps whatever mode it had; tighten it (the files inside are 0600 anyway).
-		chmodSync(stateDir, 0o700);
-		this.#file = join(stateDir, "auth.json");
-		this.#fixedPairing = options.pairingToken;
+		chmodSync(dir, 0o700);
+		this.#file = join(dir, "auth.json");
 		this.#ttlMs = options.tokenTtlSeconds * 1000;
 		// A first run persists a store, so the environmentId is stable from the start; an existing store survives.
 		this.#read();
@@ -73,18 +72,17 @@ export class AuthStore {
 		return code;
 	}
 
-	/** Exchange a pairing code for a bearer token. Stored codes are single-use; the configured fixed token is reusable. */
+	/** Exchange a pairing code for a bearer token. Stored codes are single-use. */
 	exchange(code: string, label: string): { token: string; expiresIn: number } | undefined {
 		const now = Date.now();
 		const codeHash = hash(code);
 		const data = this.#read();
-		const fixed = this.#fixedPairing !== undefined && sameHash(hash(this.#fixedPairing), codeHash);
 		const index = data.pairings.findIndex((pairing) => pairing.expiresAt > now && sameHash(pairing.hash, codeHash));
-		if (!fixed && index < 0) return undefined; // refused: the file is left exactly as it was, codes included
+		if (index < 0) return undefined; // refused: the file is left exactly as it was, codes included
 		const token = newSecret(32);
 		this.#write({
 			...data,
-			pairings: index < 0 ? data.pairings : data.pairings.filter((_, at) => at !== index),
+			pairings: data.pairings.filter((_, at) => at !== index),
 			tokens: [...data.tokens.filter((stored) => stored.expiresAt > now), { hash: hash(token), label, createdAt: now, expiresAt: now + this.#ttlMs }],
 		});
 		return { token, expiresIn: Math.floor(this.#ttlMs / 1000) };

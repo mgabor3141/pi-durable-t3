@@ -8,11 +8,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it } from "vitest";
 import { type ConversationId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { Threads } from "../../src/threads.ts";
-import { openCodingHarness } from "./host-runtime.ts";
-import { createScriptedModel } from "../../test/fake-model.ts";
-import { testRegistry } from "../../test/test-registry.ts";
-import { idle } from "../../test/threads-harness.ts";
+import { Threads } from "../../../src/threads.ts";
+import { openCodingHarness } from "../src/host-runtime.ts";
+import { createScriptedModel } from "../../../test/fake-model.ts";
+import { testRegistry } from "../../../test/test-registry.ts";
+import { idle } from "../../../test/threads-harness.ts";
 
 describe("host runtime (example wiring)", () => {
 	it("a thread runs `pwd` in its project's directory", async () => {
@@ -27,7 +27,7 @@ describe("host runtime (example wiring)", () => {
 			async () => fauxAssistantMessage("done"),
 		];
 		const model = createScriptedModel(steps);
-		const runtime = await openCodingHarness({ dataDir: root }, registry, model.models);
+		const runtime = await openCodingHarness({ dataDir: root }, model.models);
 		const threads = new Threads({ harness: runtime.harness, registry });
 		try {
 			const thread = await threads.create({ threadId: "a", projectId: "alpha" });

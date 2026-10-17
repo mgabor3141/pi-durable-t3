@@ -17,7 +17,7 @@ import { afterAll, expect, it } from "vitest";
 import { Schema } from "effect";
 import { OrchestrationV2ThreadLaunchError, OrchestrationV2ThreadLaunchResult } from "@t3tools/contracts";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-launch-"));
 const agentDir = join(scratch, "agent");
@@ -29,7 +29,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const TOKEN = "probe-token-launch-0123456789ab";
 
 it("launchThread: an unregistered project refuses with the decodable typed error naming the project; a registered one answers the result", async () => {
 	const port = 4945;
@@ -38,16 +37,17 @@ it("launchThread: an unregistered project refuses with the decodable typed error
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(projectDir, ".keep"), "real project\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(
-		join(root, "projects.json"),
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(
+		join(t3Dir(root), "projects.json"),
 		JSON.stringify({ projects: [{ id: "p-registered-1", title: "Real", path: projectDir }] }),
 		"utf8",
 	);
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
 
-	const bearer = await pair(port, TOKEN);
+	const bearer = await pair(port, pairCode(root));
 	const ws = await connectWs(port, bearer);
 	try {
 		const providers = exitValue(await ws.call("server.refreshProviders", {}), "server.refreshProviders") as { providers: { instanceId: string; models: { slug: string }[] }[] };

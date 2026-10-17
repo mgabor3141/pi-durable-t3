@@ -1,16 +1,17 @@
 // Opt-in live-model smoke over the real model path (ModelRuntime + the example's wiring). It is skipped unless
 // PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> is set; when set, it reads that model's credentials from your pi config
 // in ~/.pi/agent and runs one short turn end to end. The automated suite (`pnpm test`) never hits the network.
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type ConversationId } from "@earendil-works/pi-durable";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { Threads } from "../../src/threads.ts";
-import { openCodingHarness } from "./host-runtime.ts";
-import { testRegistry } from "../../test/test-registry.ts";
-import { conversation, idle } from "../../test/threads-harness.ts";
-import { tempRoot } from "../../test/temp-root.ts";
+import { Threads } from "../../../src/threads.ts";
+import { openCodingHarness } from "../src/host-runtime.ts";
+import { testRegistry } from "../../../test/test-registry.ts";
+import { conversation, idle } from "../../../test/threads-harness.ts";
+import { tempRoot } from "../../../test/temp-root.ts";
 
 const live = process.env["PI_DURABLE_T3_LIVE_MODEL"];
 const slash = live === undefined ? -1 : live.indexOf("/");
@@ -21,12 +22,13 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 		const target = ref!;
 		const root = await tempRoot();
 		const registry = testRegistry([{ id: "live", cwd: join(root, "p") }]);
+		await mkdir(join(root, "p"), { recursive: true });
 
 		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
 		const available = await runtime.getAvailable();
 		expect(available.some((model) => model.provider === target.provider && model.id === target.modelId)).toBe(true);
 
-		const host = await openCodingHarness({ dataDir: root }, registry, runtime);
+		const host = await openCodingHarness({ dataDir: root }, runtime);
 		const threads = new Threads({ harness: host.harness, registry });
 		try {
 			const thread = await threads.create({ threadId: "t", projectId: "live" });

@@ -3,7 +3,7 @@
 // "ready" or a pairing link (B2); it must fail at start when there are no models; and the HTTP surface must answer as
 // T3 reads it (the Host guard, the thread-detail routes' auth and unknown-thread contracts).
 //
-// Each test spawns `node --experimental-strip-types examples/coding-agent/host.ts` with the offline reply model on a loopback port chosen
+// Each test spawns `node --experimental-strip-types examples/coding-agent/src/host.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
 // never read. Ports here are their own (4901-4905, 4908) and distinct, so the tests can run in parallel.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
-const main = new URL("../examples/coding-agent/host.ts", import.meta.url).pathname;
+const main = new URL("../examples/coding-agent/src/host.ts", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-host-proc-"));
@@ -44,9 +44,11 @@ function launch(root: string, port: number, extraEnv: NodeJS.ProcessEnv = {}): L
 async function writeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
-	// The integrator's `config.toml` (host-owned keys) and the instance file (the project registry the UI edits).
+	// The integrator's `config.toml` (host-owned keys) and the registry the UI edits, in the bridge dir (the documented
+	// hand-edit; the host creates the dir itself and starts with an empty registry).
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
+	await mkdir(join(root, "t3"), { recursive: true });
+	await writeFile(join(root, "t3", "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
 	return root;
 }
 

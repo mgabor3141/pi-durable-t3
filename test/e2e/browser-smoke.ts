@@ -1,13 +1,14 @@
 // One end-to-end browser smoke over the real T3 web app: pair → send a message → see the model reply → undo.
 // Drives the facet's real pairing, the web SPA's launchThread/prompt, and a "revert and keep" undo. It asserts on the
 // server projection (GET /api/orchestration/threads/:id) and the DOM.
-// Run via dev/browser-smoke.sh, which sets T3_WEB (web app), BRIDGE (facet), PAIR (fixed pairing token).
+// Run via dev/browser-smoke.sh, which sets T3_WEB (web app), BRIDGE (facet), PAIR (a single-use pairing code).
 
 import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
 const bridgeUrl = required("BRIDGE").replace(/\/$/, "");
-const pairToken = required("PAIR");
+// Codes are single-use: PAIR is this script's own exchange; PAIR2 is the browser's pairing screen.
+const pairToken = required("PAIR2");
 const launchTimeout = Number(process.env["E2E_LAUNCH_TIMEOUT_MS"] ?? 60000);
 const chrome = process.env["CHROMIUM"] ?? "/usr/bin/chromium";
 const heading = (message: string) => console.log(`\n=== ${message} ===`);
@@ -33,7 +34,7 @@ async function bridgeToken(): Promise<string> {
 		headers: { "content-type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
 			grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-			subject_token: pairToken,
+			subject_token: required("PAIR"),
 			subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
 			requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
 		}).toString(),

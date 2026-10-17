@@ -37,3 +37,14 @@ it("src/ never names the agent (no coding-agent package, credentials, prompt, to
 	}
 	expect(hits, `forbidden tokens in src/:\n${hits.join("\n")}`).toEqual([]);
 });
+
+it("the example's sources use the bridge only through src/bridge.ts, as any integrator would", () => {
+	const EXAMPLE = new URL("../examples/coding-agent/src", import.meta.url).pathname;
+	const hits: string[] = [];
+	for (const file of tsFiles(EXAMPLE)) {
+		for (const [, path] of readFileSync(file, "utf8").matchAll(/from "((?:\.\.\/)+src\/[^"]+)"/g)) {
+			if (!path!.endsWith("/src/bridge.ts")) hits.push(`${relative(EXAMPLE, file)}: ${path}`);
+		}
+	}
+	expect(hits, `example imports bridge internals:\n${hits.join("\n")}`).toEqual([]);
+});

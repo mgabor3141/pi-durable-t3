@@ -9,81 +9,73 @@ import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
-import { ConfigError, describeErrors, expandPath, fail } from "../../src/config.ts";
+import { ConfigError } from "../../../src/bridge.ts";
 
-export { ConfigError, expandPath, fail };
+export { ConfigError };
+
+function fail(file: string, message: string): never {
+	throw new ConfigError(`${file}: ${message}`);
+}
+
+/** TypeBox errors, one line each: the dotted key path and what was expected; unknown keys are named. */
+function describeErrors(file: string, errors: readonly { keyword: string; instancePath: string; message: string; params: object }[]): string {
+	const lines = errors.flatMap((e) => {
+		const at = e.instancePath.split("/").filter(Boolean).join(".");
+		if (e.keyword === "additionalProperties") return ((e.params as { additionalProperties?: string[] }).additionalProperties ?? []).map((k) => `${at ? `${at}.` : ""}unknown key "${k}"`);
+		return e.keyword === "boolean" && e.message === "schema is false" ? [] : [`${at || "(root)"}: ${e.message}`];
+	});
+	return lines.length === 0 ? `Invalid ${file}` : `Invalid ${file}:\n  ${lines.join("\n  ")}`;
+}
 
 /** The name of this app's directory under the XDG config/data bases. */
 const APP_DIR = "pi-durable-t3";
 
-/** Where the integrator's `config.toml` is read from, and the data dir every path (storage, models store, facet state,
- * project cwds) resolves under. `--root` sets both to one directory; the XDG default splits them. */
+/** Where the integrator's `config.toml` is read from, and the data dir every path (storage, models store, scratch
+ * root, relative keys) resolves under. `--root` sets both to one directory; the XDG default splits them. */
 export type Paths = { readonly configFile: string; readonly dataDir: string };
 
 export type HostConfig = {
 	readonly configFile: string; // the `config.toml` this config was read from (for logging and error messages).
-	readonly dataDir: string; // where durable storage, the models store, facet state, and project cwds live.
+	readonly dataDir: string; // where the harness files (durable storage, models store) live, and what relative paths resolve under.
 	readonly listen: { readonly host: string; readonly port: number };
 	readonly webAppUrl: string | undefined; // web app base URL; prints a ready-to-open pairing link at start.
 	readonly modelsStorePath: string; // pi-ai models store, under the data dir so `~/.pi/agent` is never written.
 	/** Absolute path to an explicit instructions file, if configured; its text joins every thread's system prompt, re-read each turn. */
 	readonly instructionsPath: string | undefined;
 	readonly label: string;
+	/** The bridge's dir (`attachT3`'s `stateDir`): t3-settings.json, projects.json, auth.json — the bridge owns it. */
 	readonly stateDir: string;
+	/** The Scratch project's root (agent work output); under the data dir by default. */
+	readonly scratchDir: string;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[] | undefined;
 };
 
-// One schema for the whole `config.toml`. This file holds ONLY what a UI must not set; UI-edited settings live in
-// the data dir - the registry (`projects.json`) and T3's server settings (`settings.json`) - so `[[projects]]` and
-// `default_model` are rejected below, naming where they belong.
+// One flat schema for `config.toml`: the example host's own options, mostly passed straight to `attachT3`. Projects and
+// the default model are not here: the T3 UI edits them (the bridge's projects.json and t3-settings.json).
 const HostTomlSchema = Type.Object(
 	{
-		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }), // the facet address; T3's own app uses 3773.
-		web: Type.Optional(Type.String({ minLength: 1 })), // web app URL, only to print a pairing link.
-		instructions: Type.Optional(Type.String({ minLength: 1 })), // path to a file whose text joins the system prompt.
-		t3: Type.Object(
-			{
-				label: Type.String({ default: "pi", minLength: 1 }),
-				state_dir: Type.Optional(Type.String({ minLength: 1 })), // facet state dir, relative to the data dir.
-				// `pairing_token` is intentionally not a config key: it is the `PI_DURABLE_T3_PAIRING_TOKEN` env var, for
-				// tests only. A reusable static token in a file is the wrong default for a control plane that runs `bash`
-				// with no approvals, so putting it in `config.toml` is now rejected here as an unknown key.
-				token_ttl_days: Type.Integer({ default: 90, minimum: 1 }),
-				// CORS origins: unset takes the `web` origin. With `web` unset the list is empty, and Effect's CORS router
-				// answers `Access-Control-Allow-Origin: *` — harmless while every call needs a bearer token and the Host
-				// check stands, but set `web` to pin it. Set this key to override either way.
-				cors_origins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-			},
-			{ additionalProperties: false, default: {} },
-		),
+		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }),
+		web: Type.Optional(Type.String({ minLength: 1 })),
+		instructions: Type.Optional(Type.String({ minLength: 1 })),
+		label: Type.String({ default: "pi", minLength: 1 }),
+		scratch_dir: Type.Optional(Type.String({ minLength: 1 })),
+		token_ttl_days: Type.Integer({ default: 90, minimum: 1 }),
+		cors_origins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 	},
 	{ additionalProperties: false },
 );
 type HostToml = Type.Static<typeof HostTomlSchema>;
 
-/** Parse and validate `config.toml` text for `dataDir` (TOML → defaults → schema → checks). Every path (models store,
- * facet state, relative `instructions`) resolves under `dataDir`; `file` names the source in messages. Empty is valid.
- * `[[projects]]` and `default_model` are refused with a message naming the instance file they belong in. */
+/** Parse and validate `config.toml` text for `dataDir` (TOML → defaults → schema → checks). Every relative path
+ * (models store, scratch dir, relative `instructions`) resolves under `dataDir`; `file` names the source in messages.
+ * Empty is valid; unknown keys are an error. */
 export function parseConfigToml(text: string, dataDir: string, file = "config.toml"): HostConfig {
 	let parsed: unknown;
 	try {
 		parsed = parse(text);
 	} catch (error) {
 		fail(file, (error as Error).message);
-	}
-	// These keys moved to the data dir, which the T3 UI edits through the host: projects to the registry file
-	// (`projects.json`), the model default to T3's server settings (`settings.json`, the UI's model picker writes it).
-	// Reject them by name with a message that says where they belong, before the generic unknown-key path.
-	if (parsed !== null && typeof parsed === "object") {
-		for (const key of ["projects", "default_model"] as const) {
-			if (key in (parsed as Record<string, unknown>)) {
-				const where = key === "projects"
-					? `projects (a [[projects]] block) belongs in the registry file projects.json in the data dir, which the T3 UI edits`
-					: `the new-thread model default (default_model) belongs in T3's server settings, the data dir's settings.json, which the UI's model picker writes`;
-				fail(file, `"${key}" is not a ${file} key: ${where} (see README)`);
-			}
-		}
 	}
 	const doc = Value.Default(HostTomlSchema, parsed) as HostToml;
 	const errors = [...Value.Errors(HostTomlSchema, doc)];
@@ -95,26 +87,24 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		listen: { host, port },
 		webAppUrl: doc.web,
 		modelsStorePath: join(dataDir, "models-store.json"),
-		instructionsPath: doc.instructions === undefined ? undefined : expandPath(doc.instructions, dataDir),
-		label: doc.t3.label,
-		stateDir: resolve(dataDir, doc.t3.state_dir ?? "t3-auth"),
-		tokenTtlSeconds: doc.t3.token_ttl_days * 86_400,
-		corsOrigins: doc.t3.cors_origins,
+		instructionsPath: doc.instructions === undefined ? undefined : resolve(dataDir, expandHome(doc.instructions, process.env)),
+		label: doc.label,
+		stateDir: join(dataDir, "t3"),
+		scratchDir: resolve(dataDir, doc.scratch_dir ?? "scratch"),
+		tokenTtlSeconds: doc.token_ttl_days * 86_400,
+		corsOrigins: doc.cors_origins,
 	};
 }
 
 /** Read and validate the integrator's `config.toml` (at `configFile`), resolving every path under `dataDir`. A missing
- * file is an error that names the path looked at and points at `--root`; an empty file is valid (defaults, no projects).
+ * or empty file is the defaults: every key is optional.
  * If an `instructions` file is configured, it must be readable here too, so a bad path fails at start, not at create. */
 export async function loadConfig(configFile: string, dataDir: string): Promise<HostConfig> {
-	let config: HostConfig;
-	try {
-		config = parseConfigToml(await readFile(configFile, "utf8"), dataDir, configFile);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT")
-			fail(configFile, `config.toml not found: write it there (see config.example.toml) or pass --root <dir> for a single-directory instance`);
+	const text = await readFile(configFile, "utf8").catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return "";
 		throw error;
-	}
+	});
+	const config = parseConfigToml(text, dataDir, configFile);
 	if (config.instructionsPath !== undefined) {
 		try {
 			await readFile(config.instructionsPath, "utf8");

@@ -1,6 +1,6 @@
 // No thread row without a registered project (review conc N1 + store N2). `Threads.create` validated the
 // projectId against the registry OUTSIDE its commit; the closure pushed the fixed id with no re-check, and
-// the project registry lives in the other store (`settings.json`, mutated synchronously), so
+// the project registry lives in the other store (`projects.json`, mutated synchronously), so
 // `thread.create ∥ project.delete` lands a thread row whose `projectId` exists nowhere — fully operable
 // (prompts run, projections serve), durable across a restart, and with no project to group it under.
 // The invariant is enforced where rows are written: at COMMIT time, the project must exist in the

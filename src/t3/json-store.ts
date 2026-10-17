@@ -1,4 +1,4 @@
-// One writer for the facet's JSON files: read tolerantly, write atomically and owner-only, one host per data dir.
+// One writer for the facet's JSON files: read tolerantly, write atomically and owner-only, one host per state dir.
 // The unique temp name, the `wx` create and the 0600 chmod are design.md's invariant (the files the host writes
 // always parse); a rename is atomic, but a crash after it publishes a zero-length file unless the bytes are fsynced first.
 import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";

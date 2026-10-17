@@ -11,7 +11,7 @@
 		"typecheck": "tsc --noEmit",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"start": "node --experimental-strip-types examples/coding-agent/host.ts",
+		"start": "node --experimental-strip-types examples/coding-agent/src/host.ts",
 		"web": "node dev/serve-static.mjs \"${WEB_DIST:-web-dist}\" \"${WEB_PORT:-5733}\"",
 		"setup:t3": "bash dev/setup-t3.sh",
 		"smoke": "bash dev/browser-smoke.sh"

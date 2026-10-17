@@ -128,8 +128,9 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
 		// T3's client offers "New thread without a project" on an environment only when its config carries this folder
-		// (`availableScratchWorkspaceRoot`), and the same config answers `projects.ensureScratch` for it (rpc.ts).
-		scratchWorkspaceRoot: deps.bridge.scratchWorkspaceRoot,
+		// (`availableScratchWorkspaceRoot`), and the same config answers `projects.ensureScratch` for it (rpc.ts). A host
+		// with no scratch dir advertises nothing, and the client offers no such thread.
+		...(deps.bridge.scratchRoot === undefined ? {} : { scratchWorkspaceRoot: deps.bridge.scratchRoot }),
 	} as Any;
 }
 

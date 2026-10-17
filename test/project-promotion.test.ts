@@ -1,7 +1,7 @@
 // A promoted conversation gets its project from its own cwd, never from list order (H3). The old code attached a
 // promoted thread to `via?.projectId ?? this.projects[0]?.id ?? ""` — the FIRST registered project, and the empty
 // string when there were none: a prompt racing a `project.delete` resurrected threads under an unrelated project,
-// and `thread.create` racing a delete stranded rows with a dangling FK. Promotion (and boot repair) now resolve the
+// and `thread.create` racing a delete stranded rows with a dangling FK. Promotion resolves the
 // project for a conversation from its own recorded `pi.agent.cwd` through the registry; if no project covers it, the
 // conversation is NOT promoted — it stays ownerless and the log names it. A thread never carries an empty `projectId`.
 import { join } from "node:path";
@@ -108,8 +108,8 @@ it("(b) after creates, prompts, promotes and an undo whose cwd is uncovered, NO 
 	expect(rows.some((row) => row.head === forked), "the undo of the removed thread's head added no ghost row").toBe(false);
 	expect(warnings.join("\n"), `the refusal names the conversation: ${JSON.stringify(warnings)}`).toContain(String(forked));
 
-	// Boot repair follows the same rule: b's head is owed? (no run/queue after the aborts —) nothing owed, nothing promoted.
-	await layer.repair();
+	// A promote naming b's head follows the same rule: the tombstone outranks it — nothing is added.
+	await layer.promote("b", b.head);
 	const after = await layer.list();
 	expect(after.map((row) => row.threadId).sort()).toEqual(rows.map((row) => row.threadId).sort());
 	const conversations = await harness.commit((tx) => scanConversations(tx), BACKGROUND_CONTEXT);

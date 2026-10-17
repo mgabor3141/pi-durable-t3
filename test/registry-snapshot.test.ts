@@ -1,7 +1,7 @@
 // One snapshot shape, resolved, everywhere (review conc N16). `FileProjectRegistry.open()` stored the RESOLVED document
 // (every project path expanded, resolved under the data dir, and normalized), while `#commit` — every mutation: a
 // defaults write, an add, a remove, a move — replaced it with the RAW document on disk. `list()` derives a path id from
-// the stored path string (`projectIdForPath` calls `resolve`), so for an entry whose `settings.json` path is RELATIVE
+// the stored path string (`projectIdForPath` calls `resolve`), so for an entry whose `projects.json` path is RELATIVE
 // (the documented "a relative path resolves under the data dir" form) the id recomputed from the un-resolved string
 // after the first mutation is a DIFFERENT id:
 //

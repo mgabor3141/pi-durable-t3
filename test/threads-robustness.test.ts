@@ -17,7 +17,7 @@ class FailingPromoteThreads extends Threads {
 }
 
 describe("submit honesty (S3)", () => {
-	it("a failed thread-promote does not fail an already-committed prompt; repair adopts the run", async () => {
+	it("a failed thread-promote does not fail an already-committed prompt; the next promote adopts the run", async () => {
 		const f = await makeThreads({ projects: [{ id: "p" }] });
 		const { threads, harness, model } = f;
 		const create = createNamed(threads, harness, model);
@@ -45,8 +45,8 @@ describe("submit honesty (S3)", () => {
 		// The run is live on `oldHead`, but promote failed, so nothing points at it yet.
 		expect((await threads.list()).some((candidate) => candidate.head === oldHead)).toBe(false);
 
-		// The self-heal: boot repair adopts the owed conversation.
-		await threads.repair();
+		// The self-heal: the next promote of the owed conversation adopts it (a later prompt's, a caller naming it).
+		await threads.promote("t", oldHead);
 		expect((await threads.list()).some((candidate) => candidate.head === oldHead)).toBe(true);
 
 		run.release();

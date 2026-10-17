@@ -1,7 +1,8 @@
 // A turn in flight when the host is SIGKILLed must finish after a restart, driven by the restart's own scheduler —
-// no new submit, no duplicated user turn. The wait loop uses READ-ONLY calls on purpose: `waitForIdle` and
-// `Submission.wait` enable task scheduling themselves and would hide a missing `harness.resume()`. This is the only
-// test that drives the example's wiring (`openCodingHarness` + `attachT3`) across a process boundary.
+// no new submit, no duplicated user turn. The restart calls `harness.resume()` itself, AFTER `attachT3` resolves —
+// the contract's (the bridge never resumes; the caller does). The wait loop uses READ-ONLY calls on purpose:
+// `waitForIdle` and `Submission.wait` enable task scheduling themselves and would hide a missing `harness.resume()`.
+// This is the only test that drives the example's wiring (`openCodingHarness` + `attachT3`) across a process boundary.
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,14 +11,14 @@ import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId, type EntryRecord, UserEntry } from "@earendil-works/pi-durable";
-import { attachT3 } from "../../src/bridge.ts";
-import { Threads } from "../../src/threads.ts";
-import { FileProjectRegistry } from "../../src/registry.ts";
-import { nullLogger } from "../../src/t3/logging.ts";
-import { openCodingHarness } from "./host-runtime.ts";
-import { createScriptedModel } from "../../test/fake-model.ts";
+import { attachT3 } from "../../../src/bridge.ts";
+import { Threads } from "../../../src/threads.ts";
+import { FileProjectRegistry } from "../../../src/registry.ts";
+import { nullLogger } from "../../../src/t3/logging.ts";
+import { openCodingHarness } from "../src/host-runtime.ts";
+import { createScriptedModel } from "../../../test/fake-model.ts";
 
-const childScript = new URL("../../test/crash-child.ts", import.meta.url).pathname;
+const childScript = new URL("../../../test/crash-child.ts", import.meta.url).pathname;
 const PORT = 4951; // its own port, clear of the host-process tests (4901-4905) and the smoke (4911/4920).
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const textOf = (entry: EntryRecord): string => {
@@ -57,16 +58,15 @@ describe("crash and restart (the example wiring)", () => {
 
 			// The restart: the same wiring, the same root, and nothing submitted here.
 			const model = createScriptedModel([fauxAssistantMessage("RESUMED-REPLY")]);
-			const registry = await FileProjectRegistry.open(root);
-			const runtime = await openCodingHarness({ dataDir: root }, registry, model.models);
+			const registry = FileProjectRegistry.open(root);
+			const runtime = await openCodingHarness({ dataDir: root }, model.models);
 			const attach = await attachT3(runtime.harness, {
 				models: model.models,
-				projects: registry,
-				dataDir: root,
+				stateDir: root,
 				listen: { host: "127.0.0.1", port: PORT },
-				stateDir: join(root, "t3-auth"),
 				log: nullLogger,
 			});
+			runtime.harness.resume(); // the caller's, after the attach resolves (the contract).
 			const threads = new Threads({ harness: runtime.harness, registry });
 			try {
 				const entriesAt = async (): Promise<readonly EntryRecord[]> => {
@@ -89,7 +89,6 @@ describe("crash and restart (the example wiring)", () => {
 				expect(model.faux.state.callCount).toBeGreaterThanOrEqual(1);
 				// The threads doc is unchanged by the restart: one thread, still pointing at the crashed head.
 				expect((await threads.list()).filter((thread) => thread.head === head)).toHaveLength(1);
-				await attach.ready;
 			} finally {
 				await attach.close();
 				await runtime.close();

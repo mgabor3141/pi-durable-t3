@@ -78,7 +78,7 @@ export function createNamed(threads: Threads, harness: Harness, model: ScriptedM
 
 /**
  * The restart: close the harness and reopen storage + harness over the SAME directory, then hand back a fresh threads
- * layer, which runs no repair until asked. Everything the state stores has to survive is on disk, so a test that
+ * layer, which adopts nothing at open. Everything the state stores has to survive is on disk, so a test that
  * reopens is testing the durable bytes, not an in-memory cache.
  */
 export async function restart(f: ThreadsFixture): Promise<{ threads: Threads; harness: Harness }> {

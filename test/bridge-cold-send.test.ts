@@ -2,7 +2,7 @@
 // not-yet-loaded head and threw "still loading" — the message was lost. It worked only when an earlier `selectModel` had
 // happened to warm the thread. Now every write awaits the loaded head (S2). This drives a real `Bridge` over the chord
 // objects in-process (no server): create a thread, then send as the FIRST write, and prove the user turn is not lost.
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,15 +24,13 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 it("sends the first message on a cold thread with no prior warming (S2)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-bridge-"));
-	const stateDir = join(scratch, "state");
-	await mkdir(stateDir, { recursive: true });
 	const host = createHost({ name: "server" });
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	fixture.model.respond(fauxAssistantMessage("pong"));
 
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir, dataDir: scratch, pairingToken: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
 		log,
 		host,
 	);

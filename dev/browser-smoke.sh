@@ -18,7 +18,6 @@ FACET_PORT="${FACET_PORT:-4911}"
 WEB_PORT="${WEB_PORT:-4920}"
 WEB_DIST="${WEB_DIST:-$here/web-dist}"
 CHROMIUM="${CHROMIUM:-/usr/bin/chromium}"
-PAIR_TOKEN="smoke-$$-$RANDOM"
 root="$(mktemp -d "${TMPDIR:-/tmp}/pi-durable-t3-smoke-XXXXXX")"
 pids=()
 HOST_PID=""
@@ -32,16 +31,16 @@ trap cleanup EXIT
 
 [ -d "$WEB_DIST" ] || { echo "web-dist not found at $WEB_DIST (set WEB_DIST to the built T3 web app)"; exit 2; }
 
-mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/state"
+mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/t3"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 web = "http://127.0.0.1:$WEB_PORT"
 TOML
 # `web` names the web app's origin: the nightly fetches /.well-known/t3/environment over HTTP (cross-origin), so the
 # bridge must reflect that origin in CORS. The desktop app (t3code://app) is allowed by default; the served SPA needs it.
-# The project registry lives in the data dir, NOT config.toml. `settings.json` (T3's server settings) is absent:
-# the host answers the contract's defaults, with the pi provider instance enabled.
-cat > "$root/projects.json" <<JSON
+# The project registry lives in the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server
+# settings) is absent: the host answers the contract's defaults, with the pi provider instance enabled.
+cat > "$root/t3/projects.json" <<JSON
 {
   "projects": [
     { "path": "$root/projects/alpha", "title": "alpha" },
@@ -50,11 +49,17 @@ cat > "$root/projects.json" <<JSON
 }
 JSON
 
+# A single-use pairing code, minted the way a user adds a device (the host's `pair` command against the bridge dir).
+mint_code() {
+  node --experimental-strip-types "$here/examples/coding-agent/src/host.ts" pair --root "$root" 2>/dev/null \
+    | sed -n 's/^Pairing code (single use): //p' | head -1
+}
+
 echo "root=$root  facet=127.0.0.1:$FACET_PORT  web=127.0.0.1:$WEB_PORT  web-dist=$WEB_DIST"
 
 start_host() {
-  PI_DURABLE_T3_FAKE=1 PI_DURABLE_T3_PAIRING_TOKEN="$PAIR_TOKEN" \
-    node --experimental-strip-types "$here/examples/coding-agent/host.ts" -- --root "$root" >> "$root/host.log" 2>&1 &
+  PI_DURABLE_T3_FAKE=1 \
+    node --experimental-strip-types "$here/examples/coding-agent/src/host.ts" -- --root "$root" >> "$root/host.log" 2>&1 &
   HOST_PID="$!"
   pids+=("$HOST_PID")
   for _ in $(seq 1 60); do
@@ -64,15 +69,19 @@ start_host() {
   return 1
 }
 
-# Start the host (offline reply model, fixed pairing token) and wait until it is listening.
+# Start the host (offline reply model) and wait until it is listening.
 start_host || { echo "facet did not start:"; cat "$root/host.log"; exit 1; }
+
+# Codes are single-use: mint one per browser flow, against the running host's bridge dir.
+PAIR_TOKEN="$(mint_code)"
+[ -n "$PAIR_TOKEN" ] || { echo "could not mint a pairing code"; cat "$root/host.log"; exit 1; }
 
 # Serve the pinned web app as an SPA.
 node "$here/dev/serve-static.mjs" "$WEB_DIST" "$WEB_PORT" > "$root/web.log" 2>&1 &
 pids+=("$!")
 
 set +e
-T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" CHROMIUM="$CHROMIUM" \
+T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
   node --experimental-strip-types "$here/test/e2e/browser-smoke.ts"
 status=$?
 set -e
@@ -84,7 +93,7 @@ if [ "$status" -eq 0 ]; then
   CRASH_TEXT="smoke crash $(date +%s)-$RANDOM"
   SENT_FILE="$root/crash-sent"; RESTARTED_FILE="$root/crash-restarted"; CRASH_FILE="$root/crash-thread"
   set +e
-  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" CHROMIUM="$CHROMIUM" \
+  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
     CRASH_TEXT="$CRASH_TEXT" CRASH_FILE="$CRASH_FILE" SENT_FILE="$SENT_FILE" RESTARTED_FILE="$RESTARTED_FILE" \
     node --experimental-strip-types "$here/test/e2e/crash-restart-browser.ts" &
   crash_pid="$!"
@@ -114,13 +123,13 @@ if [ "$status" -eq 0 ]; then
 fi
 
 # Smoke 3: the project-management flow — add a project from the directory picker, create a thread in it, remove it, and
-# confirm the files on disk are untouched. The target directory is NOT in settings.json (the picker adds it), and it
+# confirm the files on disk are untouched. The target directory is NOT in projects.json (the picker adds it), and it
 # holds a marker file that must survive the removal.
 if [ "$status" -eq 0 ]; then
   mkdir -p "$root/projects/newproj"
   printf 'do not delete me\n' > "$root/projects/newproj/keep.txt"
   set +e
-  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" CHROMIUM="$CHROMIUM" \
+  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
     PICK_TARGET="$root/projects/newproj" PICK_MARKER="$root/projects/newproj/keep.txt" \
     node --experimental-strip-types "$here/test/e2e/project-flow.ts"
   flow_status=$?

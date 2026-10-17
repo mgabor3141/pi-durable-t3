@@ -9,10 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const PORT = 4891;
-const TOKEN = "restore-files-token";
 let root: string;
 let agentDir: string;
 let host: Launched | undefined;
@@ -25,8 +24,9 @@ beforeAll(async () => {
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "p-real", title: "Real", path: projectDir }] }), "utf8");
-	host = launch(root, PORT, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-real", title: "Real", path: projectDir }] }), "utf8");
+	host = launch(root, PORT, {}, agentDir);
 }, 30_000);
 
 afterAll(async () => {
@@ -36,7 +36,7 @@ afterAll(async () => {
 
 it("a rewind with restoreFiles is refused on the projection, naming the option that exists", async () => {
 	expect(await waitListening(PORT), host?.out().slice(-2000)).toBe(true);
-	const ws = await connectWs(PORT, await pair(PORT, TOKEN));
+	const ws = await connectWs(PORT, await pair(PORT, pairCode(root)));
 	try {
 		const providers = exitValue(await ws.call("server.refreshProviders", {}), "server.refreshProviders") as { providers: { instanceId: string; models: { slug: string }[] }[] };
 		const provider = providers.providers.find((p) => p.models.length > 0);

@@ -11,10 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const PORT = 4892;
-const TOKEN = "replay-token-prompt-0123456789";
 let root: string;
 let agentDir: string;
 let host: Launched | undefined;
@@ -27,8 +26,9 @@ beforeAll(async () => {
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: projectDir }] }), "utf8");
-	host = launch(root, PORT, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: projectDir }] }), "utf8");
+	host = launch(root, PORT, {}, agentDir);
 }, 30_000);
 
 afterAll(async () => {
@@ -40,7 +40,7 @@ type Projection = { runs: { status: string; userMessageId?: string }[]; messages
 
 it("the same command sent twice — across a reconnect — runs the turn once", async () => {
 	expect(await waitListening(PORT), host?.out().slice(-2000)).toBe(true);
-	const token = await pair(PORT, TOKEN);
+	const token = await pair(PORT, pairCode(root));
 	const ws = await connectWs(PORT, token);
 	try {
 		const providers = exitValue(await ws.call("server.refreshProviders", {}), "server.refreshProviders") as { providers: { instanceId: string; models: { slug: string }[] }[] };

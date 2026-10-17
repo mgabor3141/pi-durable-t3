@@ -1,5 +1,5 @@
 // The T3 facet's configuration: the integrator-owned static fields from `attachT3`, the live project registry
-// (`../registry.ts`), and the live settings store over the data dir (`../settings.ts`). The facet reads them live.
+// (`../registry.ts`), and the live settings store over the state dir (`../settings.ts`). The facet reads them live.
 import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
 
@@ -8,10 +8,10 @@ export interface FacetConfig {
 	readonly host: string;
 	readonly port: number;
 	readonly label: string;
+	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `projects.json`, `auth.json` live here. */
 	readonly stateDir: string;
-	/** The host's data dir (T3's `baseDir`): where its managed folders live — `<dataDir>/scratch` (`../scratch.ts`). */
-	readonly dataDir: string;
-	readonly pairingToken: string | undefined;
+	/** The Scratch project's root, when the feature is on; `undefined` refuses `projects.ensureScratch`. */
+	readonly scratchDir: string | undefined;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];
 }

@@ -13,7 +13,7 @@ import { AgentSessionScanResult, ServerConfigStreamEvent, ServerSettingsError } 
 import { ServerSettingsStore, SETTINGS_FILE, ProviderInstanceExists } from "../src/settings.ts";
 import { ConfigError } from "../src/config.ts";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-settings-"));
 const agentDir = join(scratch, "agent");
@@ -116,21 +116,21 @@ describe("the settings store (T3's patch + persistence semantics)", () => {
 	});
 });
 
-const TOKEN = "probe-token-settings-0123456789";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A root with one project, the offline reply model, and a fixed pairing token. */
+/** A root with one project (the offline reply model pairs with minted codes). */
 async function makeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
 	return root;
 }
 
 /** Pair, open `/ws`, and read the provider catalog. */
-async function connect(port: number) {
-	const token = await pair(port, TOKEN);
+async function connect(root: string, port: number) {
+	const token = await pair(port, pairCode(root));
 	const ws = await connectWs(port, token);
 	const providers = exitValue(await ws.call("server.refreshProviders", {}), "server.refreshProviders") as { providers: { instanceId: string; models: { slug: string }[] }[] };
 	const provider = providers.providers.find((entry) => entry.instanceId === "pi") ?? providers.providers[0];
@@ -144,13 +144,13 @@ const eventsOf = (chunks: Frame[]) => chunks.flatMap((frame) => (frame.values ??
 it("a settings write answers the full settings, the stream emits settingsUpdated, and a failed write reaches the client as the typed ServerSettingsError (M2, M3)", async () => {
 	const port = 4932;
 	const root = await makeRoot("m2", port);
-	const file = join(root, SETTINGS_FILE);
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	const file = join(t3Dir(root), SETTINGS_FILE);
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	let ws: Awaited<ReturnType<typeof connect>> | undefined;
 	try {
 		expect(await waitListening(port)).toBe(true);
-		ws = await connect(port);
+		ws = await connect(root, port);
 		const streamId = await ws.ws.open("subscribeServerConfig", {});
 		for (let i = 0; i < 60 && eventsOf(ws.ws.chunks(streamId)).length === 0; i++) await sleep(50);
 		let events = eventsOf(ws.ws.chunks(streamId));
@@ -172,9 +172,9 @@ it("a settings write answers the full settings, the stream emits settingsUpdated
 		// And the write landed in the settings file, which stays T3's document shape.
 		expect((JSON.parse(await readFile(file, "utf8")) as { defaultModelSelection: { model: string } }).defaultModelSelection.model).toBe(good);
 
-		// M3 — a failed write is a typed refusal, not a defect: the data dir stops accepting creates, so the
+		// M3 — a failed write is a typed refusal, not a defect: the bridge dir stops accepting creates, so the
 		// store's atomic write fails. `exitError` throws on a `Defect` frame: that is exactly what this names.
-		await chmod(root, 0o500);
+		await chmod(t3Dir(root), 0o500);
 		try {
 			const answer = await ws.ws.call("server.updateSettings", { patch: { defaultModelSelection: { instanceId: "pi", model: "pi/two" } } });
 			const error = exitError(answer, "server.updateSettings(write failure)");
@@ -183,7 +183,7 @@ it("a settings write answers the full settings, the stream emits settingsUpdated
 			expect(typeof error.operation).toBe("string");
 			expect(() => Schema.decodeUnknownSync(ServerSettingsError)(error)).not.toThrow();
 		} finally {
-			await chmod(root, 0o700);
+			await chmod(t3Dir(root), 0o700);
 		}
 	} finally {
 		ws?.ws.close();
@@ -195,12 +195,12 @@ it("a settings write answers the full settings, the stream emits settingsUpdated
 it("agentSessions.scan answers an empty scan truthfully (onboarding step 3); the rest of agentSessions.* stays refused", async () => {
 	const port = 4933;
 	const root = await makeRoot("scan", port);
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	let ws: Awaited<ReturnType<typeof connect>> | undefined;
 	try {
 		expect(await waitListening(port)).toBe(true);
-		ws = await connect(port);
+		ws = await connect(root, port);
 		// The scan answers a contract-valid, empty AgentSessionScanResult — nothing is importable on this host, so the
 		// wizard shows an empty list rather than hanging on a refusal.
 		const scan = exitValue(await ws.ws.call("agentSessions.scan", {}), "agentSessions.scan") as { candidates: unknown[]; scannedAt: string };

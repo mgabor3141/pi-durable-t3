@@ -69,7 +69,7 @@ type ThreadsDeps = {
 	readonly harness: Harness;
 	/** The live project registry: the foreign key's target, and the source of a new thread's `cwd`. */
 	readonly registry: ProjectRegistry;
-	/** Notified when a prompt's commit lands and its promote fails; boot repair adopts the run (design.md). */
+	/** Notified when a prompt's commit lands and its promote fails; the run stays ownerless until a later promote adopts it. */
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
@@ -175,7 +175,7 @@ export class Threads {
 			cwdIsDirectory = statSync(cwd).isDirectory();
 		}
 		catch {
-			/* missing/unreadable: boot's per-project mkdir (with its warning) owns the missing-project case. */
+			/* missing/unreadable: the boot mkdir in `attachT3` (with its warning) owns the missing-project case. */
 		}
 		if (!cwdIsDirectory) throw hostError("unknown_project", `thread folder is not a directory: ${cwd}`);
 		return this.#harness.commit(async (tx) => {
@@ -222,7 +222,7 @@ export class Threads {
 		try {
 			await this.promote(input.threadId, input.conversationId);
 		} catch (error) {
-			this.#onWarn(`prompt committed but its thread promote failed (will be retried at repair/next write): ${String(error)}`, error);
+			this.#onWarn(`prompt committed but its thread promote failed (the run lives; the next promote of this conversation adopts it): ${String(error)}`, error);
 		}
 		return submission;
 	}
@@ -327,8 +327,8 @@ export class Threads {
 	}
 
 	/**
-	 * Delete a thread: abort its head first — so boot repair sees nothing owed — then drop the pointer and tombstone
-	 * the removal. Conversations stay: storage only grows (design.md, Invariants).
+	 * Delete a thread: abort its head first — so the abort→commit window leaves nothing owed running — then drop the
+	 * pointer and tombstone the removal. Conversations stay: storage only grows (design.md, Invariants).
 	 */
 	async remove(threadId: string): Promise<void> {
 		const thread = await this.thread(threadId);
@@ -340,48 +340,13 @@ export class Threads {
 			const index = doc.threads.findIndex((candidate) => candidate.threadId === threadId);
 			if (index < 0) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 			doc.threads.splice(index, 1);
-			// The removal is DURABLE: the promote path, the undo fork and boot repair skip tombstoned conversations.
+			// The removal is DURABLE: the promote path and the undo fork skip tombstoned conversations.
 			const removed = (doc.removed ??= []);
 			if (!removed.includes(thread.head)) removed.push(thread.head);
 		}, BACKGROUND_CONTEXT);
 		// The removal must also win the RUN: interrupt the head again after the commit, so a prompt admitted in the
 		// abort→commit window leaves no live turn on a thread the document has removed (design.md, Invariants).
 		await head?.abort(BACKGROUND_CONTEXT);
-	}
-
-	/**
-	 * Boot repair, one commit: promote every conversation that has a run or queued input and is nobody's head, taking
-	 * each project from its OWN recorded cwd and skipping tombstones (design.md, Invariants).
-	 */
-	async repair(): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const heads = new Set(doc.threads.map((thread) => thread.head));
-			// The tombstones are a SET: the scan is per conversation and the record only grows.
-			const removed = new Set(doc.removed ?? []);
-			let tombstoned = 0;
-			for (const record of await scanConversations(tx)) {
-				if (heads.has(record.id)) continue;
-				// A tombstoned conversation stays removed even when it owes work (design.md, Invariants).
-				if (removed.has(record.id)) {
-					tombstoned++;
-					continue;
-				}
-				if (!(await owedIn(tx, record.id))) continue;
-				const projectId = await this.#projectForConversation(tx, record.id);
-				if (projectId === undefined) {
-					this.#onWarn(`boot repair: not promoting conversation ${record.id}: its cwd matches no registered project; it stays ownerless`, undefined);
-					continue;
-				}
-				doc.threads.push(this.#newThread(record.id, projectId, ""));
-				heads.add(record.id);
-			}
-			if (tombstoned > 0) {
-				// One line: the count leads, capped ids follow (the ids are in the document).
-				const ids = [...removed].slice(0, 8).join(", ");
-				this.#onWarn(`boot repair: ${tombstoned} removed conversation${tombstoned === 1 ? "" : "s"} (tombstoned) stayed unthreaded: ${ids}${tombstoned > 8 ? ` (+${tombstoned - 8} more)` : ""}`, undefined);
-			}
-		}, BACKGROUND_CONTEXT);
 	}
 }
 

@@ -10,11 +10,15 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
+import { createHost } from "@earendil-works/chord";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched } from "./host-process-harness.ts";
+import { createServerFacet } from "../src/objects.ts";
+import { Bridge } from "../src/t3/bridge.ts";
+import { ServerSettingsStore } from "../src/settings.ts";
+import { makeThreads } from "./threads-harness.ts";
+import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
 const PORT = 4947;
-const TOKEN = "scratch-token-0123456789abcdef";
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-scratch-"));
 const root = join(scratch, "host");
 const agentDir = join(scratch, "agent");
@@ -40,11 +44,12 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 	await mkdir(agentDir, { recursive: true });
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
-	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
-	host = launch(root, PORT, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
+	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
+	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
+	host = launch(root, PORT, {}, agentDir);
 	expect(await waitListening(PORT), host.out().slice(-2000)).toBe(true);
 
-	const ws = await connectWs(PORT, await pair(PORT, TOKEN));
+	const ws = await connectWs(PORT, await pair(PORT, pairCode(root)));
 	try {
 		// 1. The advertisement: T3's client reads the folder off the server config, and offers the entry only when it is there.
 		const config = exitValue(await ws.call("server.getConfig", {}), "server.getConfig") as { scratchWorkspaceRoot?: string };
@@ -54,7 +59,7 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 		const ensured = exitValue(await ws.call("projects.ensureScratch", {}), "projects.ensureScratch") as { projectId: string };
 		expect(ensured.projectId, "the reply is the project's id (ProjectEnsureScratchResult)").toMatch(/^[0-9a-f-]{36}$/);
 		expect(await exists(scratchRoot), "the Scratch folder exists after the ensure").toBe(true);
-		const registry = JSON.parse(await readFile(join(root, "projects.json"), "utf8")) as { projects: { id?: string; title?: string; path: string }[] };
+		const registry = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { id?: string; title?: string; path: string }[] };
 		const entry = registry.projects.find((project) => project.path === scratchRoot);
 		expect(entry, `the project is registered at the Scratch root: ${JSON.stringify(registry.projects)}`).toBeDefined();
 		expect(entry!.id).toBe(ensured.projectId);
@@ -76,7 +81,7 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 		const afterDelete = exitValue(await ws.call("projects.ensureScratch", {}), "the ensure after the folder was deleted") as { projectId: string };
 		expect(afterDelete.projectId).toBe(ensured.projectId);
 		expect(await exists(scratchRoot), "the folder is re-made on every call").toBe(true);
-		const registryAfter = JSON.parse(await readFile(join(root, "projects.json"), "utf8")) as { projects: { path: string }[] };
+		const registryAfter = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { path: string }[] };
 		expect(registryAfter.projects.filter((project) => project.path === scratchRoot), "one Scratch project, not one per ensure").toHaveLength(1);
 
 		// 5. A thread launched there runs in a folder of its own, claimed under the Scratch root (T3's `folderForThread`,
@@ -138,3 +143,27 @@ async function waitForShellProject(ws: Awaited<ReturnType<typeof connectWs>>, pr
 	}
 	throw new Error(`the Scratch project ${projectId} never reached the shell stream`);
 }
+
+// The OFF switch (the integrator's): `attachT3` without a `scratchDir` — no root advertised, `projects.ensureScratch`
+// refused with a message the UI shows. The example host always configures one; the bridge owns the switch.
+it("no scratch dir: ensureScratch is refused, and the config carries no scratchWorkspaceRoot (the feature is off)", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	const host = createHost({ name: "server" });
+	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
+	await host.ready();
+	const bridge = new Bridge(
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir: fixture.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(fixture.root), corsOrigins: [], registry: fixture.registry },
+		{ info: () => {}, warn: () => {} },
+		host,
+	);
+	bridge.start();
+	try {
+		expect(bridge.scratchRoot, "no root, nothing to advertise").toBeUndefined();
+		const refusal = await Promise.resolve().then(() => bridge.ensureScratch()).then(() => undefined, (error: unknown) => error as Error);
+		expect(refusal, "ensureScratch is refused").toBeInstanceOf(Error);
+		expect((refusal as Error).message).toMatch(/no Scratch folder/i);
+	} finally {
+		await bridge.close();
+		await host.close();
+	}
+});
