@@ -1,14 +1,14 @@
-// The "pi" provider's model list for T3's ServerConfig. Read from pi's own model runtime (same agent dir and
-// models.json as the host) and replaced by a Session's `pi.models` catalog whenever the bridge sees one.
+// The "pi" provider's model list for T3's ServerConfig: the provider's models as the caller's catalog reports them
+// (`Models.getAvailable()`). The picker list and the answer to `server.refreshProviders` — the bridge selects
+// nothing, remembers no default, and adopts no thread's model.
 import type { ServerProvider } from "@t3tools/contracts";
-import { modelSlug, type ModelRef, type ModelsState } from "./model-types.ts";
+import { modelSlug, type ModelRef } from "./model-types.ts";
 import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 
 type CatalogModel = ModelRef & { name: string };
 
 export class ModelCatalog {
 	#models: CatalogModel[] = [];
-	#default: ModelRef | undefined;
 	readonly #listeners = new Set<() => void>();
 	readonly #source: (() => Promise<CatalogModel[]>) | undefined;
 	#checkedAt = new Date().toISOString();
@@ -36,23 +36,10 @@ export class ModelCatalog {
 		return this.#models.map((model) => ({ ...model }));
 	}
 
-	/** Adopt a Session's catalog and its selected model as the default for new threads. */
-	adopt(state: ModelsState | undefined): void {
-		if (state === undefined) return;
-		const models = state.catalog.availableModels.map((m) => ({ ...m }));
-		if (state.configuration.model !== null) this.#default = state.configuration.model;
-		if (models.length > 0 && JSON.stringify(models) !== JSON.stringify(this.#models)) this.#set(models);
-	}
-
 	#set(models: CatalogModel[]): void {
 		this.#models = models;
 		this.#checkedAt = new Date().toISOString();
 		for (const listener of this.#listeners) listener();
-	}
-
-	/** The model new or not-yet-loaded threads report: the last Session's model, else the first available one. */
-	defaultModel(): ModelRef | null {
-		return this.#default ?? this.#models[0] ?? null;
 	}
 
 	onChange(listener: () => void): () => void {
@@ -61,7 +48,6 @@ export class ModelCatalog {
 	}
 
 	providers(): ServerProvider[] {
-		const defaultSlug = this.#default === undefined ? undefined : modelSlug(this.#default);
 		return [
 			{
 				instanceId: PROVIDER_INSTANCE_ID,
@@ -82,7 +68,6 @@ export class ModelCatalog {
 					shortName: model.modelId,
 					subProvider: model.provider,
 					isCustom: false,
-					...(modelSlug(model) === defaultSlug ? { isDefault: true } : {}),
 					capabilities: null,
 				})),
 				slashCommands: [],

@@ -1,15 +1,16 @@
-// Opt-in live-model smoke over the real model path (ModelRuntime + the exact main.ts wiring). It is skipped unless
+// Opt-in live-model smoke over the real model path (ModelRuntime + the example's wiring). It is skipped unless
 // PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> is set; when set, it reads that model's credentials from your pi config
 // in ~/.pi/agent and runs one short turn end to end. The automated suite (`pnpm test`) never hits the network.
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { type ConversationId } from "@earendil-works/pi-durable";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { parseConfigToml } from "../src/config.ts";
-import { openHostRuntime } from "../src/host-runtime.ts";
-import { testRegistry } from "../src/testing/test-registry.ts";
-import { conversation, idle } from "./threads-harness.ts";
-import { tempRoot } from "./temp-root.ts";
+import { Threads } from "../../src/threads.ts";
+import { openCodingHarness } from "./host-runtime.ts";
+import { testRegistry } from "../../test/test-registry.ts";
+import { conversation, idle } from "../../test/threads-harness.ts";
+import { tempRoot } from "../../test/temp-root.ts";
 
 const live = process.env["PI_DURABLE_T3_LIVE_MODEL"];
 const slash = live === undefined ? -1 : live.indexOf("/");
@@ -19,17 +20,18 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 	it("answers one short turn", async () => {
 		const target = ref!;
 		const root = await tempRoot();
-		const config = parseConfigToml(`listen = "127.0.0.1:1"\n`, root);
 		const registry = testRegistry([{ id: "live", cwd: join(root, "p") }]);
 
 		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
 		const available = await runtime.getAvailable();
 		expect(available.some((model) => model.provider === target.provider && model.id === target.modelId)).toBe(true);
 
-		const host = await openHostRuntime(config, registry, runtime, target);
+		const host = await openCodingHarness({ dataDir: root }, registry, runtime);
+		const threads = new Threads({ harness: host.harness, registry });
 		try {
-			const thread = await host.threads.create({ threadId: "t", projectId: "live" });
-			await host.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "Reply with exactly: ok" }, undefined);
+			const thread = await threads.create({ threadId: "t", projectId: "live" });
+			await (await host.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: target }, BACKGROUND_CONTEXT); // the client names the model.
+			await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "Reply with exactly: ok" }, undefined);
 			await idle(host.harness, thread.head);
 
 			const entries = (await conversation(host.harness, thread.head).then((c) => c.context(BACKGROUND_CONTEXT))).entries;

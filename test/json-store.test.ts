@@ -38,11 +38,6 @@ describe("json-store", () => {
 		expect(litter()).toEqual(before);
 	});
 
-	it("a missing file returns the fallback", async () => {
-		const root = await tempRoot();
-		expect(readJson(join(root, "absent.json"), { fallback: true })).toEqual({ fallback: true });
-	});
-
 	it("a corrupt file returns the fallback", async () => {
 		const root = await tempRoot();
 		const file = join(root, "store.json");

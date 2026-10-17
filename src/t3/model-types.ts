@@ -24,31 +24,6 @@ export function splitSlug(slug: string): ModelRef | undefined {
 	return { provider: slug.slice(0, index), modelId: slug.slice(index + 1) };
 }
 
-/** How many models a refusal lists: enough to spot the right one, bounded so a large catalog cannot flood a toast. */
-export const REFUSAL_MODEL_LIMIT = 12;
-
-/**
- * A model the host cannot use: it is not in the catalog. The message names the refused model and a bounded list of
- * what IS available, so a typo is fixable from the refusal alone — a default outside the catalog is not a label, it
- * makes every new thread an interrupted turn, and the instance file is edited by hand as well as by the UI.
- */
-export class ModelNotAvailable extends Error {
-	readonly model: string;
-	readonly available: readonly string[];
-	constructor(model: string, available: readonly string[], limit = REFUSAL_MODEL_LIMIT) {
-		const shown = available.slice(0, limit);
-		const more = available.length > shown.length ? ` (+${available.length - shown.length} more)` : "";
-		super(`model ${model} is not available; available: ${shown.length > 0 ? `${shown.join(", ")}${more}` : "(none)"}`);
-		this.name = "ModelNotAvailable";
-		this.model = model;
-		this.available = available;
-	}
-}
-
-/** `provider/model` for a catalog entry, so the host's `{provider, id}` list and the facet's `{provider, modelId}`
- * catalog compare one spelling. */
-export const refSlug = (ref: { provider: string; id?: string; modelId?: string }): string => `${ref.provider}/${ref.modelId ?? ref.id}`;
-
 /** Durable message content as pi-ai encodes it (the subset the projection reads). */
 export type ContentBlock =
 	| { type: "text"; text: string }

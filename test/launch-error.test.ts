@@ -39,8 +39,8 @@ it("launchThread: an unregistered project refuses with the decodable typed error
 	await writeFile(join(projectDir, ".keep"), "real project\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await writeFile(
-		join(root, "settings.json"),
-		JSON.stringify({ projects: [{ id: "p-registered-1", title: "Real", path: projectDir }], defaults: {} }),
+		join(root, "projects.json"),
+		JSON.stringify({ projects: [{ id: "p-registered-1", title: "Real", path: projectDir }] }),
 		"utf8",
 	);
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);

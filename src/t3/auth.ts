@@ -3,8 +3,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
-import { readJson, updateJsonAtomic, withJsonLock, writeJsonAtomic } from "./json-store.ts";
+import { readJson, writeJsonAtomic } from "./json-store.ts";
 
 interface StoredToken {
 	hash: string;
@@ -40,33 +39,19 @@ export class AuthStore {
 		this.#file = join(stateDir, "auth.json");
 		this.#fixedPairing = options.pairingToken;
 		this.#ttlMs = options.tokenTtlSeconds * 1000;
-		this.#replaceStore("missing"); // a first run persists a store, so the environmentId is stable from the start
-	}
-
-	/**
-	 * Start the store over, under the write lock, and only for the reason asked: `"missing"` writes a fresh store when
-	 * there is no file, `"unreadable"` when the file is there and is not a document. The check belongs INSIDE the lock:
-	 * "no file? write one" is a whole-document write, and unserialized it deletes the codes and tokens a peer committed
-	 * between its read and its write — which is what a peer saw as "Invalid pairing code" for a code it had issued
-	 * milliseconds earlier, and the reason a fresh store must never be written over a document a peer just added.
-	 */
-	#replaceStore(reason: "missing" | "unreadable"): void {
-		withJsonLock(this.#file, () => {
-			if (!existsSync(this.#file)) {
-				writeJsonAtomic(this.#file, newAuthFile());
-				return;
-			}
-			if (reason === "unreadable" && readJson<AuthFile | undefined>(this.#file, undefined) === undefined) writeJsonAtomic(this.#file, newAuthFile());
-		});
+		// A first run persists a store, so the environmentId is stable from the start; an existing store survives.
+		this.#read();
 	}
 
 	// A store that is missing (deleted after start) or unparseable starts over, persisted at once so the environmentId
-	// does not change on every read.
+	// does not change on every read. `auth.json` is the facet's OWN credential state with a documented start-over; the
+	// UI's documents are parsed strictly (see `json-store.ts`).
 	#read(): AuthFile {
 		const stored = readJson<AuthFile | undefined>(this.#file, undefined);
 		if (stored !== undefined) return stored;
-		this.#replaceStore(existsSync(this.#file) ? "unreadable" : "missing");
-		return readJson<AuthFile>(this.#file, newAuthFile());
+		const fresh = newAuthFile();
+		this.#write(fresh);
+		return fresh;
 	}
 
 	#write(data: AuthFile): void {
@@ -77,22 +62,15 @@ export class AuthStore {
 		return this.#read().environmentId;
 	}
 
-	/**
-	 * A one-time pairing code valid for `ttlSeconds`.
-	 *
-	 * Pairing and token issuance are read-modify-write on one file, and the peers are processes: two hosts on one data
-	 * dir (the documented dev setup) each read the document, added their own entry, and wrote the whole thing back, so
-	 * the loser's pairing code or bearer token vanished — a client pairing against the other host got "Invalid pairing
-	 * code" for a code the file no longer held, and a token issued in the race verified as unknown. Both paths are one
-	 * `updateJsonAtomic` now: the document a writer starts from contains a peer's committed entry.
-	 */
+	/** A one-time pairing code valid for `ttlSeconds`. */
 	createPairingCode(ttlSeconds = 15 * 60): string {
 		const code = newSecret(12);
 		const now = Date.now();
-		updateJsonAtomic<AuthFile>(this.#file, newAuthFile(), (data) => ({
+		const data = this.#read();
+		this.#write({
 			...data,
 			pairings: [...data.pairings.filter((pairing) => pairing.expiresAt > now), { hash: hash(code), expiresAt: now + ttlSeconds * 1000 }],
-		}));
+		});
 		return code;
 	}
 
@@ -100,20 +78,17 @@ export class AuthStore {
 	exchange(code: string, label: string): { token: string; expiresIn: number } | undefined {
 		const now = Date.now();
 		const codeHash = hash(code);
-		let issued: { token: string; expiresIn: number } | undefined;
-		updateJsonAtomic<AuthFile>(this.#file, newAuthFile(), (data) => {
-			const fixed = this.#fixedPairing !== undefined && sameHash(hash(this.#fixedPairing), codeHash);
-			const index = data.pairings.findIndex((pairing) => pairing.expiresAt > now && sameHash(pairing.hash, codeHash));
-			if (!fixed && index < 0) return data; // refused: the file is left exactly as it was, codes included
-			const token = newSecret(32);
-			issued = { token, expiresIn: Math.floor(this.#ttlMs / 1000) };
-			return {
-				...data,
-				pairings: index < 0 ? data.pairings : data.pairings.filter((_, at) => at !== index),
-				tokens: [...data.tokens.filter((stored) => stored.expiresAt > now), { hash: hash(token), label, createdAt: now, expiresAt: now + this.#ttlMs }],
-			};
+		const data = this.#read();
+		const fixed = this.#fixedPairing !== undefined && sameHash(hash(this.#fixedPairing), codeHash);
+		const index = data.pairings.findIndex((pairing) => pairing.expiresAt > now && sameHash(pairing.hash, codeHash));
+		if (!fixed && index < 0) return undefined; // refused: the file is left exactly as it was, codes included
+		const token = newSecret(32);
+		this.#write({
+			...data,
+			pairings: index < 0 ? data.pairings : data.pairings.filter((_, at) => at !== index),
+			tokens: [...data.tokens.filter((stored) => stored.expiresAt > now), { hash: hash(token), label, createdAt: now, expiresAt: now + this.#ttlMs }],
 		});
-		return issued;
+		return { token, expiresIn: Math.floor(this.#ttlMs / 1000) };
 	}
 
 	verifyBearer(header: string | undefined): StoredToken | undefined {

@@ -1,35 +1,27 @@
-// The live project registry + new-thread defaults, backed by the instance file (`settings.json`). It is the single
-// source of truth for what a UI edits: the host, the threads layer, and the T3 facet all read through it, and the
-// running host writes it on the UI's behalf. Reading is in-memory (loaded at start); every mutation writes the file
-// atomically and notifies subscribers, so a facet projection reflects a UI edit at once. A thread never reaches it.
+// The bridge's project registry: the list of projects T3's UI edits, kept in the bridge's own file (`projects.json`
+// in the data dir). T3's server keeps projects in its database; this host keeps the same list in a file it writes on
+// the UI's behalf. The visible behavior is T3's: `projects.mutate` add/update/remove with the contract's typed
+// refusals, ids honored, and the normalized path as the uniqueness key. Reads are in-memory (loaded at start); every
+// mutation is applied to the document on disk and written atomically, then subscribers are notified — so a facet
+// projection reflects a UI edit at once. One host per data dir: the writer is a plain in-process read-modify-write.
 //
-// A project's UNIQUENESS KEY is its normalized path — compared normalized, so `…/alpha` and `…/alpha/` are one
-// project, not two sharing an id. Its ID is minted by whoever registers it: T3's UI mints a UUID before the project
-// exists and navigates to it, and the host honors it exactly as it honors client-minted thread ids; when no client id
-// is supplied (integrator-written entries, folders discovered from a conversation cwd), the id derives from the
-// normalized path, so nothing mints it and it survives a restart unchanged. The id is then opaque and stable: an id
-// is ASSIGNED ONCE and never re-derived from a path after that — a title rename is free, a root MOVE keeps the id
-// (the entry stores a derived id on the first update, so a move cannot split a project from its threads), and both
-// id and path are keys `add` guards: a duplicate path is refused (T3 refuses the same folder twice,
-// `ProjectWorkspaceConflictError`), and so is a minted id another project already owns (`ProjectIdConflict` — one id
-// naming two entries is a document the boot parser refuses, and the host never writes a file it cannot read).
+// A project's UNIQUENESS KEY is its normalized path — `…/alpha` and `…/alpha/` are one project, not two sharing an
+// id. Its ID is minted by whoever registers it: T3's UI mints a UUID before the project exists and navigates to it,
+// and the host honors it exactly as it honors client-minted thread ids; when no client id is supplied (an
+// integrator-written entry, a folder discovered from a conversation cwd), the id derives from the normalized path,
+// so nothing mints it and it survives a restart unchanged. The id is then opaque and stable: an id is ASSIGNED ONCE
+// and never re-derived from a path after that — a title rename is free, a root MOVE keeps the id (the entry stores a
+// derived id on the first update, so a move cannot split a project from its threads), and both id and path are keys
+// `add` guards: a duplicate path is refused (T3 refuses the same folder twice, `ProjectWorkspaceConflictError`), and
+// so is a minted id another project already owns (`ProjectIdConflict` — one id naming two entries is a document the
+// parser refuses, and the host never writes a file it cannot read).
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { ModelRef } from "@earendil-works/pi-durable";
-import { expandPath, type Project } from "./config.ts";
+import { basename, join, resolve } from "node:path";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
+import { type Project, ConfigError, describeErrors, expandPath, fail } from "./config.ts";
 import { projectIdForPath } from "./project-ids.ts";
-import {
-	INSTANCE_FILE,
-	THINKING_LEVELS,
-	type InstanceFile,
-	type InstanceProject,
-	type ResolvedInstance,
-	loadInstanceFile,
-	parseSettingsJson,
-} from "./settings.ts";
-import { splitSlug } from "./t3/model-types.ts";
-import { updateJsonAtomic } from "./t3/json-store.ts";
+import { writeJsonAtomic } from "./t3/json-store.ts";
 
 /** A mutation refused because the path already belongs to another project (T3: `ProjectWorkspaceConflictError`). */
 export class ProjectConflict extends Error {
@@ -43,10 +35,10 @@ export class ProjectConflict extends Error {
 	}
 }
 
-/** A mutation minted a project id that another project already owns. A minted id is a KEY, not data: the
- * boot parser refuses a document where one id names two entries, so the write path must refuse it too —
- * the host may never write a file it would refuse to read (the facet maps this to the contract's
- * `ProjectMutationError`; the REST parity route answers 409, as for a path conflict). */
+/** A mutation minted a project id that another project already owns. A minted id is a KEY, not data: the parser
+ * refuses a document where one id names two entries, so the write path must refuse it too — the host may never
+ * write a file it would refuse to read (the facet maps this to the contract's `ProjectMutationError`; the REST
+ * parity route answers 409, as for a path conflict). */
 export class ProjectIdConflict extends Error {
 	readonly projectId: string;
 	readonly conflictingPath: string;
@@ -58,12 +50,11 @@ export class ProjectIdConflict extends Error {
 	}
 }
 
-/** A client-minted project id the instance file cannot store. A minted id is honored as the client's identity
- * for the project, so it must fit the file's rules (the parser caps a stored id's length); refusing at mutation
- * time with a typed error keeps the host from writing what its own parser refuses, and keeps a ConfigError from
- * the write validator the last line, not the client refusal. A BLANK id is not an error: it is not a mint, and
- * the id simply derives from the path. (A blank id cannot reach here over the wire: the contract's ProjectId is
- * non-blank, so the boundary refuses it before the mutation.) */
+/** A client-minted project id the registry file cannot store. A minted id is honored as the client's identity for
+ * the project, so it must fit the file's rules (the parser caps a stored id's length); refusing at mutation time
+ * with a typed error keeps the host from writing what its own parser refuses. A BLANK id is not an error: it is not
+ * a mint, and the id simply derives from the path. (A blank id cannot reach here over the wire: the contract's
+ * ProjectId is non-blank, so the boundary refuses it before the mutation.) */
 export class ProjectIdInvalid extends Error {
 	readonly projectId: string;
 	constructor(projectId: string, reason: string) {
@@ -83,10 +74,10 @@ export class ProjectNotFound extends Error {
 	}
 }
 
-// A workspace root the filesystem refuses to make usable. These mirror T3's server-side checks
-// (`apps/server/src/workspace/WorkspacePaths.ts`: `WorkspaceRootNotDirectoryError`, `WorkspaceRootNotExistsError`,
-// `WorkspaceRootCreateFailedError`), each naming the path — a mutation must never store a root that would brick the
-// next boot, and the UI shows the message verbatim (the facet maps these to the contract's `ProjectMutationError`).
+// The workspace-root refusals mirror T3's server-side checks (`apps/server/src/workspace/WorkspacePaths.ts`:
+// `WorkspaceRootNotDirectoryError`, `WorkspaceRootNotExistsError`, `WorkspaceRootCreateFailedError`), each naming
+// the path — a mutation must never store a root that would brick the next boot, and the UI shows the message
+// verbatim (the facet maps these to the contract's `ProjectMutationError`).
 
 /** The path exists and is not a directory (T3: `WorkspaceRootNotDirectoryError`). */
 export class ProjectWorkspaceNotDirectory extends Error {
@@ -118,24 +109,20 @@ export class ProjectWorkspaceNotCreatable extends Error {
 	}
 }
 
-export type RegistryDefaults = { readonly model: ModelRef | undefined; readonly thinkingLevel: string };
-
-/** The cap the instance file enforces on a stored id (its parser refuses longer ones). An id the file cannot
- * store is refused at mutation time with `ProjectIdInvalid`, naming the limit. */
+/** The cap the registry file enforces on a stored id (its parser refuses longer ones). An id the file cannot store
+ * is refused at mutation time with `ProjectIdInvalid`, naming the limit. */
 export const MAX_STORED_ID_LENGTH = 128;
 
 /** The mutable registry the host, threads layer, and facet share. */
 export interface ProjectRegistry {
 	/** The registered projects (path-derived id, title label, absolute cwd). A snapshot, in registry order. */
 	list(): Project[];
-	/** The new-thread defaults a UI edits. */
-	defaults(): RegistryDefaults;
 	/** Register a change listener (a mutation fires it after the file is written); returns an unsubscribe. */
 	subscribe(listener: () => void): () => void;
 	/**
 	 * Register a project at `path` (absolute, `~` expanded). Refuses a path another project already owns.
-	 * `options.clientId` is the id the client minted (T3's UI sends a UUID); when it has the minted shape it is
-	 * honored exactly — the host navigates-with the client, not against it. Any other id (absent, a placeholder)
+	 * `options.clientId` is the id the client minted (T3's UI sends a UUID); any id the contract's `ProjectId`
+	 * accepts is honored exactly — the host navigates-with the client, not against it. Absent or blank, the id
 	 * derives from the normalized path.
 	 */
 	add(title: string | undefined, path: string, options?: { readonly clientId?: string }): Project;
@@ -148,93 +135,122 @@ export interface ProjectRegistry {
 	update(id: string, patch: { readonly title?: string; readonly path?: string }): Project;
 	/** Drop a project's entry. Returns the removed project, or `undefined` when it was not registered. */
 	remove(id: string): Project | undefined;
-	/** Set the new-thread model default (`provider/model`, or `null` to clear → first available). */
-	setModel(model: ModelRef | null): void;
-	/** Set the new-thread thinking level. */
-	setThinkingLevel(level: string): void;
-	/** Boot only: the catalog check found a default the host cannot call. Drop the IN-MEMORY model default (the file
-	 * keeps the user's value) so new threads fall back to the resolved default and the UI can set a good one. No write, no
-	 * listener — this is boot-time, before the facet binds, and the file is unchanged (the boot read never rewrites it). */
-	dropModelDefault(): void;
-	/** The instance file this registry writes (a refusal that cannot store a setting names it). */
+	/** The registry file this host writes (a refusal that cannot store an entry names it). */
 	readonly path: string;
 }
 
-/** The document an instance file holds when there is no file to read (a valid first run). */
-const EMPTY_INSTANCE: InstanceFile = { projects: [], defaults: {} };
+/** A project as stored in the registry file: a path the user chose (the uniqueness key, compared NORMALIZED), plus
+ * a free title label. The `id` is stored when one was assigned: a client minted it (T3's UI sends a UUID and
+ * navigates to it — the host honors it, exactly as it honors client-minted thread ids), or the first `update` of a
+ * client-less registration stored the id derived from the path at registration. An entry without an `id` derives it
+ * from the normalized path, so nothing mints it and it survives a restart unchanged. */
+type ProjectEntry = { readonly path: string; readonly title?: string; readonly id?: string };
+type ProjectsFile = { readonly projects: readonly ProjectEntry[] };
 
-/** The id of a stored entry: the id a client minted when it stored one, else derived from the path. One spelling, used
- * by every read and by every delta that looks an entry up, so an entry is found by the same id `list()` reports. The
- * path-derived id is derived from the RESOLVED path (`dataDir` supplied): the boot parser and `list()` derive from the
- * resolved path, and a delta applied to the RAW on-disk document (a relative path) must look an entry up by the SAME id
- * the client was given — deriving from the raw string would miss the entry. For an absolute (resolved) path, `dataDir`
- * is a no-op (resolve is idempotent), so `list()` on the resolved snapshot is unchanged. */
-function idOf(entry: InstanceProject, dataDir?: string): string {
-	// Trim a stored id the way the write path trims a minted one (store N6): a hand-edited padded id must be found by the
-	// id `list()` publishes. The contract's `ProjectId` is a trimmed brand, so a padded stored id is SHOWN trimmed; an
-	// untrimmed read compared the padded bytes, published the trimmed id, and then refused to edit/delete that project.
+/** A project entry: `{ path, title?, id? }` and nothing else. `path` is the uniqueness key (non-empty); `title` is a
+ * label (non-empty when present, else the folder's basename); `id` is a client-minted id (non-empty, ≤128 chars) —
+ * absent, the id is derived from the normalized path. */
+const ProjectEntrySchema = Type.Object(
+	{
+		path: Type.String({ minLength: 1 }),
+		title: Type.Optional(Type.String({ minLength: 1 })),
+		id: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_STORED_ID_LENGTH })),
+	},
+	{ additionalProperties: false },
+);
+
+const ProjectsFileSchema = Type.Object(
+	{
+		projects: Type.Array(ProjectEntrySchema, { default: [] }),
+	},
+	{ additionalProperties: false },
+);
+
+/** The registry file's name, in the data dir. */
+export const PROJECTS_FILE = "projects.json";
+
+/** Parse and validate `projects.json` text for `dataDir` (JSON → defaults → schema → checks). STRICT: this is the
+ * definition of writable — every rule checked here is enforced at mutation time too, so the host never writes a
+ * file it would refuse to read, and a file the host cannot read is a refusal naming it (the host does not boot).
+ * A project's `path` is expanded (`~`), resolved under `dataDir`, and NORMALIZED (the uniqueness key: `…/alpha`
+ * and `…/alpha/` are one path); the title defaults to the folder's basename; the id is the stored (client-minted)
+ * one, else derived from the normalized path. A duplicate normalized path is refused — a project is a path, and T3
+ * refuses the same folder twice — as is a stored id on two entries. `file` names the source in messages. */
+export function parseProjectsJson(text: string, dataDir: string, file = PROJECTS_FILE): Project[] {
+	let parsed: unknown;
+	try {
+		parsed = text.trim() === "" ? {} : JSON.parse(text);
+	} catch (error) {
+		fail(file, (error as Error).message);
+	}
+	const doc = Value.Default(ProjectsFileSchema, parsed) as { projects: readonly ProjectEntry[] };
+	const errors = [...Value.Errors(ProjectsFileSchema, doc)];
+	if (errors.length > 0) throw new ConfigError(describeErrors(file, errors));
+	const projects: Project[] = [];
+	const seen = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const [index, entry] of doc.projects.entries()) {
+		// Normalize: `resolve` collapses `…/alpha/` and `…/alpha/.` to `…/alpha`, so the path is one key, spelled one
+		// way. `path.resolve` accepts a NUL byte (it is just a string), but every file operation on the resolved path
+		// (`statSync`, `open`) rejects it with `ERR_INVALID_ARG_VALUE`, so a NUL path is not a usable project path.
+		let cwd: string;
+		try {
+			if (entry.path.includes("\u0000")) throw new Error("the path contains a NUL byte, which no file operation accepts");
+			cwd = resolve(expandPath(entry.path, dataDir));
+		} catch (error) {
+			fail(file, `projects[${index}].path "${entry.path}" is not a usable path (${(error as Error).message})`);
+		}
+		if (seen.has(cwd)) fail(file, `projects[${index}]: duplicate project path "${entry.path}" (resolved ${cwd}); a project is a path, and the title is a label`);
+		seen.add(cwd);
+		// The id is minted by whoever registers the project: a stored id (T3's UI mints a UUID) is honored and TRIMMED
+		// (the write path trims a minted id, and the contract's `ProjectId` trims on encode, so a hand-edited padded
+		// id must resolve to the same key the client is shown); absent, it derives from the normalized path.
+		const storedId = entry.id === undefined ? undefined : entry.id.trim();
+		const hasStoredId = storedId !== undefined && storedId !== "";
+		const id = hasStoredId ? storedId! : projectIdForPath(cwd);
+		if (seenIds.has(id)) fail(file, `projects[${index}]: duplicate project id "${id}"; a minted id is unique, and paths are already refused above`);
+		seenIds.add(id);
+		projects.push({ id, name: entry.title ?? (basename(cwd) || cwd), cwd });
+	}
+	return projects;
+}
+
+/** The id of a stored entry: the id a client minted when it stored one, else derived from the path. One spelling,
+ * used by every read and by every delta that looks an entry up, so an entry is found by the same id `list()`
+ * reports. The path-derived id is derived from the RESOLVED path (`dataDir` supplied): the parser and `list()`
+ * derive from the resolved path, and a delta applied to the RAW on-disk document (a relative path) must look an
+ * entry up by the SAME id the client was given — deriving from the raw string would miss the entry. */
+function idOf(entry: ProjectEntry, dataDir?: string): string {
 	return entry.id !== undefined ? entry.id.trim() : projectIdForPath(dataDir === undefined ? entry.path : resolveAbs(entry.path, dataDir));
 }
 
-/** The ONE snapshot shape the registry keeps in memory: a document with every project's path RESOLVED the way `open()`
- * resolves it (expanded, under the data dir, normalized) and the defaults normalized. `open()` and every `#commit` pass
- * their document through `instanceFileOf`, so `list()` derives every path id from the SAME spelling at every read. A
- * mutation that stored the RAW disk document (a relative path, exactly as the integrator wrote it) re-derived every
- * derived id from a string whose form changed under it: at boot the id was `projectIdForPath(resolve("rel", dataDir))`,
- * after the first write `projectIdForPath("rel")` — a different id. Existing thread rows (their FK is the boot id)
- * became rows naming an unregistered project, the shell re-published the project under the new id (the sidebar split),
- * and `thread.create` with the id the client navigated with was refused (review conc N16). Disk text is written raw
- * (a relative path stays relative); only the in-memory snapshot is resolved. Runs the STRICT boot parser, so a document
- * that would not boot throws — the write validator's rule, applied to the copy the host reads from. */
-function resolvedSnapshot(doc: InstanceFile, dataDir: string, file: string): InstanceFile {
-	return instanceFileOf(parseSettingsJson(JSON.stringify(doc), dataDir, file));
-}
-
-/** The instance-file document for a resolved instance: what a validated file means, written back in file shape. This is
- * the single mapping from a RESOLVED instance to the in-memory snapshot, shared by `open()` and `#commit` (so the two
- * can never disagree on a path's spelling, and hence on a derived id — conc N16). */
-function instanceFileOf(resolved: ResolvedInstance): InstanceFile {
-	return {
-		projects: resolved.projects.map((project) => ({ ...(project.storedId === undefined ? {} : { id: project.storedId }), path: project.cwd, ...(project.title === "" ? {} : { title: project.title }) })),
-		defaults: { ...(resolved.model === undefined ? {} : { model: `${resolved.model.provider}/${resolved.model.modelId}` }), thinkingLevel: resolved.thinkingLevel },
-	};
-}
-
-/** A `settings.json`-backed registry under `dataDir`. Synchronous reads (an in-memory snapshot); every mutation is a
- * delta applied to the document ON DISK, under a cross-process lock. */
+/** A `projects.json`-backed registry under `dataDir`. Synchronous reads (an in-memory snapshot); every mutation is
+ * a delta applied to the document on disk and written atomically. */
 export class FileProjectRegistry implements ProjectRegistry {
 	readonly #dataDir: string;
-	#file: InstanceFile;
+	#projects: Project[];
 	readonly #listeners = new Set<() => void>();
 
-	private constructor(dataDir: string, file: InstanceFile) {
+	private constructor(dataDir: string, projects: Project[]) {
 		this.#dataDir = dataDir;
-		this.#file = file;
+		this.#projects = projects;
 	}
 
-	/** Load the registry from the instance file. A missing file is an empty registry (a valid first run).
-	 * `onWarn` makes the BOOT read tolerant the way a bad project path is tolerated: an entry the parser
-	 * refuses (a duplicate id, a duplicate path) is skipped, and the warning naming the file is the user's
-	 * pointer. Without it the read is strict — that is the shape the write path validates with, and a
-	 * mutation must never publish a document that boot would need to skip. */
-	static async open(dataDir: string, onWarn?: (message: string) => void): Promise<FileProjectRegistry> {
-		return new FileProjectRegistry(dataDir, instanceFileOf(await loadInstanceFile(dataDir, onWarn === undefined ? {} : { onWarn })));
+	/** Load the registry from the file. A missing file is an empty registry (a valid first run). The parse is
+	 * STRICT: a file the host cannot read is a `ConfigError` naming it, and the host does not boot — the UI cannot
+	 * fix a file behind a host that serves an empty registry over a typo. */
+	static open(dataDir: string): FileProjectRegistry {
+		const file = join(dataDir, PROJECTS_FILE);
+		return new FileProjectRegistry(dataDir, parseProjectsJson(readText(file), dataDir, file));
 	}
 
 	/** The raw file path (for logging / a warning that names the file a UI writes). */
 	get path(): string {
-		return join(this.#dataDir, INSTANCE_FILE);
+		return join(this.#dataDir, PROJECTS_FILE);
 	}
 
 	list(): Project[] {
-		// A stored id (client-minted, durable) is the project's id; without one the id derives from the normalized path.
-		return this.#file.projects.map((project) => ({ id: idOf(project, this.#dataDir), name: project.title ?? basenameOf(project.path), cwd: project.path }));
-	}
-
-	defaults(): RegistryDefaults {
-		// Derived from the document, not from a copy of it: the defaults a UI reads are the ones in the file.
-		const model = this.#file.defaults.model;
-		return { model: model === undefined ? undefined : splitSlug(model), thinkingLevel: this.#file.defaults.thinkingLevel ?? "off" };
+		return this.#projects.map((project) => ({ ...project }));
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -246,30 +262,24 @@ export class FileProjectRegistry implements ProjectRegistry {
 		const cwd = resolveAbs(path, this.#dataDir);
 		// Honor the id the client minted: the contract's ProjectId is a branded TRIMMED NON-EMPTY STRING
 		// (`vendor/contracts/src/baseSchemas.ts`), and T3's own server commits the client's id VERBATIM
-		// (`apps/server/src/project/ProjectService.ts`: `create` commits `projectId: input.projectId`). Pre-fix
-		// this host honored only the UUID shape the T3 UI happens to mint and silently derived the rest: a client
-		// that minted "sso:project-7" sent X, navigated to X, and found a shell answering p-<sha> — the
-		// id-not-in-the-answer breakage, one shape wider (review wire NEW-2). Opaque thereafter: the host stores
-		// and compares it, never parses it. A blank id is not a mint — the id derives; a stored-length overflow
-		// is refused typed, because the file could never carry it back.
+		// (`apps/server/src/project/ProjectService.ts`: `create` commits `projectId: input.projectId`). Any such id
+		// is a mint — the host trims it, stores it, and answers with it. Opaque thereafter: the host stores and
+		// compares it, never parses it. A blank id is not a mint — the id derives; a stored-length overflow is
+		// refused typed, because the file could never carry it back.
 		const trimmed = options?.clientId?.trim();
 		const minted = trimmed !== undefined && trimmed !== "" ? trimmed : undefined;
-		if (minted !== undefined && minted.length > MAX_STORED_ID_LENGTH) throw new ProjectIdInvalid(minted, `the instance file stores at most ${MAX_STORED_ID_LENGTH} characters`);
-		const project: InstanceProject = { ...(minted === undefined ? {} : { id: minted }), path: cwd, ...(title === undefined || title === "" ? {} : { title }) };
-		// The duplicate-path check runs on the document as it is on disk, INSIDE the lock: a peer that registered this
-		// folder a moment ago is in it, and the refusal it gets is the one the client would get from a single host.
-		// The minted id gets the same check: it is a key, and a document where one id names two entries is one the
-		// boot parser refuses — refusing here is what keeps "the host never writes a file it cannot read" true.
+		if (minted !== undefined && minted.length > MAX_STORED_ID_LENGTH) throw new ProjectIdInvalid(minted, `the registry file stores at most ${MAX_STORED_ID_LENGTH} characters`);
+		const project: Project = { id: minted ?? projectIdForPath(cwd), name: title ?? basenameOf(cwd), cwd };
 		this.#commit((disk) => {
 			const owner = this.#ownerOf(disk, cwd);
 			if (owner !== undefined) throw new ProjectConflict(cwd, owner);
 			if (minted !== undefined) {
-				const idOwner = disk.projects.find((project) => idOf(project, this.#dataDir) === minted);
+				const idOwner = disk.projects.find((entry) => idOf(entry, this.#dataDir) === minted);
 				if (idOwner !== undefined) throw new ProjectIdConflict(minted, resolveAbs(idOwner.path, this.#dataDir));
 			}
-			return { ...disk, projects: [...disk.projects, project] };
+			return { ...disk, projects: [...disk.projects, entryOf(project, minted)] };
 		});
-		return { id: idOf(project, this.#dataDir), name: project.title ?? basenameOf(cwd), cwd };
+		return { ...project };
 	}
 
 	update(id: string, patch: { readonly title?: string; readonly path?: string }): Project {
@@ -278,23 +288,21 @@ export class FileProjectRegistry implements ProjectRegistry {
 		const title = patch.title;
 		let result: Project | undefined;
 		this.#commit((disk) => {
-			const index = disk.projects.findIndex((project) => idOf(project, dataDir) === id);
+			const index = disk.projects.findIndex((entry) => idOf(entry, dataDir) === id);
 			if (index < 0) throw new ProjectNotFound(id);
 			const current = disk.projects[index]!;
 			const cwd = moved ?? resolveAbs(current.path, dataDir);
 			const owner = this.#ownerOf(disk, cwd);
 			if (owner !== undefined && owner !== id) throw new ProjectConflict(cwd, owner);
 			// The id is opaque and stable: a move changes the PATH, never the id — the project's threads keep
-			// resolving to it. An entry whose id was only ever DERIVED (a client-less registration) gets that id
-			// STORED here: an id is assigned once and never re-derived from a path after that, so moving the
-			// folder cannot mint a new id and split the project from its threads (the split was conc N3 / store
-			// N5 / wire NEW-3: rows kept the old id, the registry answered a new one, and the old entry was
-			// unremovable — not registered, so the not-found refusal was correct and permanent).
-			const name = title ?? current.title;
-			const updated: InstanceProject = { id: idOf(current, dataDir), path: cwd, ...(name === undefined || name === "" ? {} : { title: name }) };
+			// resolving to it. An entry whose id was only ever DERIVED gets that id STORED here: an id is assigned
+			// once and never re-derived from a path after that, so moving the folder cannot mint a new id and split
+			// the project from its threads.
+			const name = title ?? current.title ?? basenameOf(cwd);
+			const updated: Project = { id, name, cwd };
 			const projects = [...disk.projects];
-			projects[index] = updated;
-			result = { id: idOf(updated, dataDir), name: updated.title ?? basenameOf(cwd), cwd };
+			projects[index] = { id, path: cwd, ...(name === undefined || name === "" ? {} : { title: name }) };
+			result = { ...updated };
 			return { ...disk, projects };
 		});
 		return result!;
@@ -308,125 +316,75 @@ export class FileProjectRegistry implements ProjectRegistry {
 		const dataDir = this.#dataDir;
 		let removed: Project | undefined;
 		this.#commit((disk) => {
-			const matching = disk.projects.filter((project) => idOf(project, dataDir) === id);
+			const matching = disk.projects.filter((entry) => idOf(entry, dataDir) === id);
 			if (matching.length === 0) return disk; // not registered: nothing to write, nothing to notify
 			const entry = matching[0]!;
 			const cwd = resolveAbs(entry.path, dataDir);
 			removed = { id, name: entry.title ?? basenameOf(cwd), cwd };
-			// Drop EVERY entry that shares this id, not just the first (store M11): a hand-written file can carry two entries
-			// under one DERIVED id (the same normalized path spelled two ways), the tolerant read shows one, and a delete of
-			// that project must remove the whole group it names — leaving a twin under the same id republishes the project the
-			// client just deleted (the delete answered `ok` while the path stayed registered, and the folder could not be
-			// re-added). Removing all of them is the faithful delete, and the result is dup-free, so the strict validator passes.
-			return { ...disk, projects: disk.projects.filter((project) => idOf(project, dataDir) !== id) };
+			// Drop EVERY entry that shares this id, not just the first: a hand-written file can carry two entries
+			// under one DERIVED id (the same normalized path spelled two ways), and a delete of that project must
+			// remove the whole group it names. Removing all of them is the faithful delete, and the result is
+			// dup-free, so the strict parser passes.
+			return { ...disk, projects: disk.projects.filter((entry) => idOf(entry, dataDir) !== id) };
 		});
 		return removed;
 	}
 
-	setModel(model: ModelRef | null): void {
-		// Only `model` is touched: the rest of the document, defaults included, comes from the file. A peer's thinking
-		// level is in that document, so it survives this write instead of being replaced by a snapshot taken at open().
-		this.#commit((disk) => {
-			const defaults = { ...disk.defaults } as Record<string, string | undefined>;
-			if (model === null) delete defaults.model;
-			else defaults.model = `${model.provider}/${model.modelId}`;
-			return { ...disk, defaults };
-		});
-	}
-
-	setThinkingLevel(level: string): void {
-		if (!THINKING_LEVELS.includes(level as (typeof THINKING_LEVELS)[number])) return;
-		this.#commit((disk) => ({ ...disk, defaults: { ...disk.defaults, thinkingLevel: level } }));
-	}
-
-	dropModelDefault(): void {
-		// Boot-time (the catalog check dropped the default). Clear the in-memory model default ONLY: the file keeps the
-		// user's value (the boot read never rewrites the UI's file), `defaults()` answers `undefined` so `Threads.create`
-		// uses the resolved default (the first catalog model), and the UI can set a good one through `setModel`.
-		this.#file = { ...this.#file, defaults: { ...this.#file.defaults, model: undefined } };
-	}
-
 	/** The id of the project that owns `cwd` in this document, comparing paths the way the parser does (expanded,
-	 * resolved, normalized) so a peer's relative spelling of the same folder is recognized as the same project. */
-	#ownerOf(disk: InstanceFile, cwd: string): string | undefined {
+	 * resolved, normalized) so a relative spelling of the same folder is recognized as the same project. */
+	#ownerOf(disk: ProjectsFile, cwd: string): string | undefined {
 		const dataDir = this.#dataDir;
-		// Compared the way the parser compares paths (expanded, resolved, normalized), and reported with the SAME id
-		// `list()` reports, so a refusal names the project the client can see.
-		for (const project of disk.projects) if (resolveAbs(project.path, dataDir) === cwd) return idOf(project, dataDir);
+		for (const entry of disk.projects) if (resolveAbs(entry.path, dataDir) === cwd) return idOf(entry, dataDir);
 		return undefined;
 	}
 
 	/**
-	 * The registry's ONE writer: apply this mutation as a delta to the document currently on disk, under a cross-process
-	 * lock, and write the result atomically. Pre-fix this took the whole file from the snapshot `open()` loaded and
-	 * rewrote it, so any write by another process (the documented two-hosts-on-one-data-dir dev setup) was silently
-	 * replaced by a stale copy of parts this mutation never touched — a title edit, a thinking level, a default model.
-	 * The delta form is what fixes that: the mutation names the part it changes and carries nothing else.
-	 *
-	 * `validate` is the parser the NEXT boot will use, so a merge that produces a document the host would refuse to
-	 * start on (a duplicate path a peer just registered, a malformed slug) is a refusal, never a write over a good file.
-	 * The snapshot and the listeners update only after the write lands, so a refused mutation changes nothing at all.
+	 * The registry's ONE writer: apply this mutation as a delta to the document on disk and write the result
+	 * atomically. The delta form means a mutation names the part it changes and carries nothing else. The validate
+	 * step is the parser the NEXT boot will use, so a mutation that would produce a document the host refuses to
+	 * start on is a refusal, never a write over a good file. The snapshot and the listeners update only after the
+	 * write lands, so a refused mutation changes nothing at all.
 	 */
-	#commit(delta: (disk: InstanceFile) => InstanceFile): void {
-		const dataDir = this.#dataDir;
-		const written = updateJsonAtomic<InstanceFile>(this.path, EMPTY_INSTANCE, delta, {
-			// Read the delta base with the STRICT boot parser, not the tolerant `readJson`. A write must never be based on
-			// a document the host could not read: an unparseable / boot-refused `settings.json` REFUSES the mutation naming
-			// the file and leaves it byte-identical, rather than treating it as empty and rewriting away every entry it held
-			// (review store M1). A MISSING file is the empty registry (a valid first run), so the reader returns the fallback.
-			read: (path) => readInstanceForWrite(dataDir, path),
-			validate: (doc) => {
-				parseSettingsJson(JSON.stringify(doc), dataDir, this.path);
-			},
-		});
-		// Store the RESOLVED snapshot, the same shape `open()` stores (see `resolvedSnapshot`). `written` is the raw
-		// disk document; storing it directly re-derived every path id from the raw string, flipping a relative-path
-		// entry's id at the first mutation (conc N16). The disk text is `written`, unchanged; only the snapshot resolves.
-		this.#file = resolvedSnapshot(written, dataDir, this.path);
+	#commit(delta: (disk: ProjectsFile) => ProjectsFile): void {
+		const file = this.path;
+		const disk = readDisk(file, this.#dataDir);
+		const next = delta(disk);
+		if (JSON.stringify(next) === JSON.stringify(disk)) return; // a no-op mutation writes nothing and notifies nobody.
+		// The validate step is the parser the NEXT boot will use, so a mutation that would produce a document the
+		// host refuses to start on is a refusal, never a write over a good file. The snapshot and the listeners
+		// update only after the write lands, so a refused mutation changes nothing at all.
+		const projects = parseProjectsJson(JSON.stringify(next), this.#dataDir, file);
+		writeJsonAtomic(file, next);
+		this.#projects = projects;
 		for (const listener of this.#listeners) listener();
 	}
 }
 
-/** Read the instance file as the STRICT base a delta applies to. A missing file is the empty registry (a valid first
- * run); a file that exists is parsed with the boot parser (no `onWarn`), which throws a `ConfigError` naming the file
- * and the key path on anything it would refuse to boot on. The delta operates on the RAW JSON (so a mutation never
- * rewrites a part of the document it did not name), guarded by that parse. A write must never be based on a document
- * the host could not read (review store M1): the tolerant boot read has the license to degrade an entry so it can bind
- * and be told to fix the file, the WRITE path does not — its base is the document it is about to overwrite. */
-function readInstanceForWrite(dataDir: string, file: string): InstanceFile {
-	let text: string;
+/** Read the registry file as the strict base a delta applies to. A missing file is the empty registry (a valid
+ * first run); a file that exists is parsed with the boot parser, which throws a `ConfigError` naming the file and
+ * key path — the base a delta applies to must be a document the host can read. */
+function readDisk(file: string, dataDir: string): ProjectsFile {
+	const text = readText(file);
+	parseProjectsJson(text, dataDir, file); // strict guard: a file the host would not boot on refuses the mutation.
+	return text.trim() === "" ? { projects: [] } : (JSON.parse(text) as ProjectsFile);
+}
+
+function readText(file: string): string {
 	try {
-		text = readFileSync(file, "utf8");
-	}
-	catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return EMPTY_INSTANCE;
+		return readFileSync(file, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
 		throw error;
-	}
-	// The base a delta applies to is read with the boot's ENTRY-LEVEL tolerance (store D-2 / M11): a document the boot read
-	// accepted (duplicate path/id entries it skips) must be readable here, so a mutation can act on it — in particular a
-	// delete of the duplicate group, which clears them and heals the file. A file the boot read would NOT accept is refused
-	// here, NAMING THE FILE, and left byte-identical (item 2's READ-ONLY). The strict parse is tried first — it names the
-	// file on every fatal cause; the tolerant parse is the fallback, and it accepts ONLY entry-level dups (it throws on a
-	// document-level shape, and a non-JSON file cannot be `JSON.parse`d at all). The strict guard on what is WRITTEN is
-	// `#commit`'s `validate` (the parser the next boot uses), so a merge that would write a document boot fatal-refuses is refused.
-	try {
-		parseSettingsJson(text, dataDir, file); // strict: the common case (no entry issues) and the file-naming refusal
-		return text.trim() === "" ? EMPTY_INSTANCE : (JSON.parse(text) as InstanceFile);
-	} catch (strictError) {
-		let raw: InstanceFile;
-		try {
-			raw = text.trim() === "" ? EMPTY_INSTANCE : (JSON.parse(text) as InstanceFile);
-		} catch {
-			throw strictError; // not JSON at all → the strict refusal, naming the file (READ-ONLY).
-		}
-		parseSettingsJson(text, dataDir, file, { onWarn: () => {} }); // entry-level dups pass; a document-level shape throws (fatal).
-		return raw; // JSON, strict refused only for entries the boot skips → the delta applies to the raw entries.
 	}
 }
 
-/** Resolve a project path to absolute under `dataDir` and NORMALIZE it (`resolve` collapses `…/alpha/` and `…/alpha/.`
- * to `…/alpha`): `~` expands, a relative path resolves under the data dir, an absolute path stays. Shared with the
- * instance-file parser, so an add and a hand-written file land the same folder under the same normalized key. */
+/** The registry-file entry for a project: the stored id (when one was minted) and the resolved path. */
+function entryOf(project: Project, minted: string | undefined): ProjectEntry {
+	return { ...(minted === undefined ? {} : { id: minted }), path: project.cwd, ...(project.name === basenameOf(project.cwd) ? {} : { title: project.name }) };
+}
+
+/** Resolve a project path to absolute under `dataDir` and NORMALIZE it (`resolve` collapses `…/alpha/` and
+ * `…/alpha/.` to `…/alpha`): `~` expands, a relative path resolves under the data dir, an absolute path stays. */
 function resolveAbs(value: string, dataDir: string): string {
 	return resolve(expandPath(value, dataDir));
 }
@@ -434,9 +392,4 @@ function resolveAbs(value: string, dataDir: string): string {
 function basenameOf(path: string): string {
 	const parts = path.replace(/\/+$/, "").split("/");
 	return parts[parts.length - 1] || path;
-}
-
-/** Read the current instance-file text from disk (a test helper to assert what the host wrote). */
-export async function readInstanceFileText(dataDir: string): Promise<string> {
-	return readFile(join(dataDir, INSTANCE_FILE), "utf8");
 }

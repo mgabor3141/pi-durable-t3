@@ -12,8 +12,8 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Project } from "../src/config.ts";
 import { Threads } from "../src/threads.ts";
-import { testRegistry } from "../src/testing/test-registry.ts";
-import { createScriptedModel, type ScriptedModel } from "../src/testing/fake-model.ts";
+import { testRegistry } from "./test-registry.ts";
+import { createScriptedModel, type ScriptedModel } from "./fake-model.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -58,8 +58,8 @@ export async function makeThreads(
 	});
 	// The threads layer resolves a thread's `projectId` through the registry; the test registry keeps the readable ids
 	// (`"p"`, `"one"`) so a test names its project directly.
-	const projectRegistry = testRegistry(projects, { model: model.modelRef });
-	const threads = new Threads({ harness, registry: projectRegistry, defaultModel: model.modelRef });
+	const projectRegistry = testRegistry(projects);
+	const threads = new Threads({ harness, registry: projectRegistry, newThread: () => ({ model: model.modelRef }) });
 	return { threads, harness, model, root: dir, projects, registry: projectRegistry };
 }
 

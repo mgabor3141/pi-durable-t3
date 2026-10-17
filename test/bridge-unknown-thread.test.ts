@@ -7,6 +7,7 @@
 //       handlers into `OrchestrationV2GetThreadProjectionError`);
 //   (b) after 20 bogus probes, the shell's project list is BYTE-IDENTICAL to before (no phantom `/ (other)` project).
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { ServerSettingsStore } from "../src/settings.ts";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +29,7 @@ async function openBridge(): Promise<{ bridge: Bridge; close: () => Promise<void
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir, pairingToken: undefined, tokenTtlSeconds: 60, corsOrigins: [], registry: fixture.registry },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir, pairingToken: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
 		log,
 		host,
 	);

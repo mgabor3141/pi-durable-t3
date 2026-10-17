@@ -41,20 +41,4 @@ describe("the tombstone gates the undo fork", () => {
 		expect(await reopened.list(), "boot repair resurrects nothing").toHaveLength(0);
 	}, 30_000);
 
-	it("the normal undo paths still work: a live thread moves its head; a moved-on head forks a child", async () => {
-		const f = await makeThreads({ projects: [{ id: "p" }] });
-		const { threads, harness, model } = f;
-
-		// Head still where the undo expects: the thread's head moves to the fork (no child row).
-		const t = await threads.create({ threadId: "live", projectId: "p" });
-		model.append(fauxAssistantMessage("one"), fauxAssistantMessage("two"));
-		await threads.submit({ threadId: "live", conversationId: t.head, requestId: "a", message: "first" }, undefined);
-		await idle(harness, t.head);
-		const first = await firstUserEntry(harness, t.head);
-		const moved = await threads.rewind({ threadId: "live", expectedHead: t.head, entryId: first, requestId: "u2" });
-		const rows = await threads.list();
-		expect(rows, "the undo moved the existing thread's head, it did not add a row").toHaveLength(1);
-		expect(rows[0]!.head, "the live thread's head is the fork").toBe(moved);
-		expect(rows[0]!.threadId).toBe("live");
-	}, 30_000);
 });

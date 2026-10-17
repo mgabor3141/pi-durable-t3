@@ -4,7 +4,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 
-const main = new URL("../src/main.ts", import.meta.url).pathname;
+const main = new URL("../examples/coding-agent/host.ts", import.meta.url).pathname;
 
 export type Launched = {
 	readonly child: ChildProcessByStdio<null, Readable, Readable>;
@@ -13,7 +13,7 @@ export type Launched = {
 	readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 };
 
-/** Start `src/main.ts --root <root>` on `port` (the root's `config.toml` decides the address; `env` adds the token). */
+/** Start `examples/coding-agent/host.ts --root <root>` on `port` (the root's `config.toml` decides the address; `env` adds the token). */
 export function launch(root: string, port: number, env: NodeJS.ProcessEnv = {}, agentDir?: string): Launched {
 	const child = spawn(process.execPath, ["--experimental-strip-types", main, "--root", root], {
 		env: { ...process.env, PI_DURABLE_T3_FAKE: "1", ...(agentDir === undefined ? {} : { PI_CODING_AGENT_DIR: agentDir }), ...env },

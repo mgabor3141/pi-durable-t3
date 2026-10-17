@@ -37,7 +37,7 @@ it("a rename and a move of a BOOT-loaded project emit project.updated so a conne
 	await mkdir(alpha2, { recursive: true });
 	// The project is in the FILE at boot (no session create → #shownProjects is unseeded by the old code).
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ path: alpha, title: "Alpha" }], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: alpha, title: "Alpha" }] }), "utf8");
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
 	launched.push(host);
 	if (!(await waitListening(port))) throw new Error(`host did not bind: ${host.out()}`);

@@ -8,9 +8,7 @@ import {
 	OrchestrationV2ThreadLaunchError,
 	ProjectMutationError,
 	RpcScopeAuthorization,
-	DEFAULT_SERVER_SETTINGS,
 	type ServerConfig,
-	type ServerSettings,
 	ServerSettingsError,
 	WsRpcGroup,
 } from "@t3tools/contracts";
@@ -21,7 +19,6 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
-import { ModelNotAvailable, modelSlug, refSlug, splitSlug } from "./model-types.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
@@ -92,18 +89,11 @@ interface RpcDeps {
 	readonly log: Logger;
 }
 
-// T3 treats provider instances that are not listed in settings as disabled. Start from the contracts' canonical
-// defaults (a partial decode would drop required-with-default keys) and enable the `pi` instance.
-const baseSettings: ServerSettings = {
-	...DEFAULT_SERVER_SETTINGS,
-	providerInstances: { [PROVIDER_INSTANCE_ID]: { driver: PROVIDER_INSTANCE_ID, displayName: "pi", enabled: true } },
-} as ServerSettings;
-
-/** The host-wide settings T3 reads: the canonical defaults plus the new-thread model default from the instance file.
- * The registry is the source of truth, so `getSettings`, `updateSettings`, and the config snapshot all agree. */
-function serverSettings(deps: RpcDeps): ServerSettings {
-	const model = deps.bridge.config.registry.defaults().model;
-	return { ...baseSettings, defaultModelSelection: model === undefined ? null : { instanceId: PROVIDER_INSTANCE_ID, model: `${model.provider}/${model.modelId}` } } as ServerSettings;
+/** The host-wide settings T3 reads: the settings store's current document (the file decoded over the contract's
+ * defaults, patched by `server.updateSettings`). The store is the source of truth, so `getSettings`,
+ * `updateSettings`, and the config snapshot all agree — exactly as T3's server answers from its settings service. */
+function serverSettings(deps: RpcDeps) {
+	return deps.bridge.config.settings.current();
 }
 
 function serverConfig(deps: RpcDeps): ServerConfig {
@@ -221,36 +211,25 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.getConfig": () => Effect.sync(() => serverConfig(deps)),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
-		// The new-thread model default lives in the instance file; `defaultModelSelection` sets it, `null` clears it.
-		// `providerInstanceMutation` (enabling a provider instance) is a no-op: pi is the only provider. Returns the full settings.
+		// T3's settings write: a PATCH merged into the current settings (`updateSettings`), optionally with one
+		// provider-instance mutation applied to the same snapshot (`updateProviderInstance`). The store persists, the
+		// full settings answer, and the change signal emits `settingsUpdated` — T3's semantics, interpreted nowhere:
+		// the bridge validates the model against no catalog, computes no defaults, and rewrites no keys.
 		"server.updateSettings": (input: Any) =>
 			Effect.try({
 				try: () => {
-					const selection = input?.patch?.defaultModelSelection;
-					const registry = bridge.config.registry;
-					if (selection === null) registry.setModel(null);
-					else if (selection?.model !== undefined) {
-						// The catalog is the only list of models this host can call, so a default outside it is not a label:
-						// every new thread becomes an interrupted turn. Refuse, naming the model and what IS available.
-						const requested = String(selection.model);
-						const ref = splitSlug(requested);
-						const available = deps.catalog.available().map(modelSlug);
-						if (ref === undefined) throw new ModelNotAvailable(requested, available);
-						if (!deps.catalog.available().some((model) => model.provider === ref.provider && model.modelId === ref.modelId)) {
-							throw new ModelNotAvailable(refSlug(ref), available);
-						}
-						registry.setModel(ref);
-					}
-					return serverSettings(deps);
+					const settings = deps.bridge.config.settings;
+					const patch = input?.patch ?? {};
+					return input?.providerInstanceMutation === undefined ? settings.update(patch) : settings.updateProviderInstance(input.providerInstanceMutation, patch);
 				},
 				// The contract's error for this call, BUILT as the contract's class: `settingsPath` and `operation` are
 				// required fields, and the hand-rolled `{_tag, message}` shape used to fail the schema encode at the RPC
-				// boundary — the client received a `Die` defect, not a refusal. The specific reason (the model named, the
-				// available list) rides in `cause`, which the contract declares as an optional defect.
+				// boundary — the client received a `Die` defect, not a refusal. The specific reason rides in `cause`,
+				// which the contract declares as an optional defect.
 				catch: (error) =>
 					new ServerSettingsError({
-						settingsPath: bridge.config.registry.path,
-						operation: error instanceof ModelNotAvailable ? "normalize" : "write-file",
+						settingsPath: deps.bridge.config.settings.path,
+						operation: "write-file",
 						providerInstanceId: PROVIDER_INSTANCE_ID,
 						cause: error,
 					}),
@@ -286,8 +265,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 					}),
 			}),
 		"server.reportClientActivity": () => Effect.succeed({}),
-		// The config stream a paired client reads its settings from. A settings write lands in the registry, so the
-		// registry's change signal is what makes the edit visible: without the `settingsUpdated` event the pane re-renders
+		// The config stream a paired client reads its settings from. A settings write lands in the store, so the
+		// store's change signal is what makes the edit visible: without the `settingsUpdated` event the pane re-renders
 		// from its connect-time snapshot and the saved change looks like it reverted (the projection replaces
 		// `config.settings` on exactly this event).
 		subscribeServerConfig: () =>
@@ -297,12 +276,12 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const stopCatalog = deps.catalog.onChange(() =>
 						emit({ version: 1, type: "providerStatuses", payload: { providers: deps.catalog.providers() } }),
 					);
-					const stopRegistry = bridge.config.registry.subscribe(() =>
+					const stopSettings = bridge.config.settings.subscribe(() =>
 						emit({ version: 1, type: "settingsUpdated", payload: { settings: serverSettings(deps) } }),
 					);
 					return () => {
 						stopCatalog();
-						stopRegistry();
+						stopSettings();
 					};
 				}),
 			),

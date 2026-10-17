@@ -1,22 +1,17 @@
-// The new-thread model, validated, and settings changes that reach the UI. Review M1/M2/M3 (anchor, wire):
-//   (a) M1 — `chooseDefaultModel` returned `configured ?? first` with no catalog check, and `server.updateSettings`
-//       wrote `splitSlug(...)` straight into the registry: a typo'd default made EVERY new thread an interrupted turn,
-//       the exact failure the config layer exists to prevent. Both paths now validate against the catalog and refuse
-//       with a typed error naming the model and a bounded list of what is available.
-//   (b) M2 — `subscribeServerConfig` emitted `snapshot` and `providerStatuses` only, never `settingsUpdated`, so a
-//       saved edit looked like it had reverted. The stream follows the registry's change signal now.
-//   (c) M3 — the catch path built `{_tag:"ServerSettingsError", message}` — missing the contract-required
-//       `settingsPath` and `operation` — so a write failure reached the client as a schema-encoding DEFECT.
-// Probes: a bad slug is refused and the registry is byte-unchanged; a good slug is stored and the subscriber receives
-// `settingsUpdated`; every error response decodes against the contract's `ServerSettingsError`.
-import { mkdtemp, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+// T3's server settings over the bridge: `server.updateSettings` applies a PATCH (T3's `deepMerge`: nested keys
+// merge, `undefined` is skipped, everything else — including `null` — replaces), answers the FULL settings, and the
+// change signal re-emits them as `settingsUpdated` on the config stream (M2: without the event, a saved edit looks
+// like it reverted). A failed write answers the contract's typed `ServerSettingsError`, BUILT as the contract's
+// class with the required `settingsPath`/`operation` (M3: the hand-rolled shape encoded as a Defect). The bridge
+// validates the model against no catalog and computes no defaults — it stores what the client sent.
+import { mkdir, mkdtemp, chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 import { ServerConfigStreamEvent, ServerSettingsError } from "@t3tools/contracts";
-import { ModelNotAvailable, modelSlug } from "../src/t3/model-types.ts";
-import { chooseDefaultModel } from "../src/config.ts";
+import { ServerSettingsStore, SETTINGS_FILE } from "../src/settings.ts";
+import { ConfigError } from "../src/config.ts";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched } from "./host-process-harness.ts";
 
@@ -27,8 +22,54 @@ const launched: Launched[] = [];
 afterAll(async () => {
 	for (const host of launched) host.child.kill("SIGKILL");
 	await Promise.allSettled(launched.map((host) => host.exited));
-	const { rm } = await import("node:fs/promises");
 	await rm(scratch, { recursive: true, force: true });
+});
+
+describe("the settings store (T3's patch + persistence semantics)", () => {
+	it("a missing file is the baseline: contract defaults with the pi provider instance enabled; an unparseable file is a refusal naming it", async () => {
+		const dir = join(scratch, "store-baseline");
+		await mkdir(dir);
+		const store = ServerSettingsStore.open(dir);
+		expect((store.current().providerInstances as Record<string, { enabled?: boolean } | undefined>).pi?.enabled).toBe(true);
+		expect(store.current().defaultModelSelection).toBeNull();
+		await writeFile(join(dir, SETTINGS_FILE), "{ nope");
+		expect(() => ServerSettingsStore.open(dir)).toThrow(new RegExp(SETTINGS_FILE));
+	});
+
+
+	it("update PATCHES: nested keys merge, siblings survive, null clears, and the write persists (re-readable whole)", async () => {
+		const dir = join(scratch, "store-patch");
+		await mkdir(dir);
+		const store = ServerSettingsStore.open(dir);
+		let notified = 0;
+		store.subscribe(() => notified++);
+
+		const patched = store.update({ defaultModelSelection: { instanceId: "pi", model: "pi/one" } as never });
+		expect(patched.defaultModelSelection).toEqual({ instanceId: "pi", model: "pi/one" });
+		expect((patched.providerInstances as Record<string, { enabled?: boolean } | undefined>).pi?.enabled, "the patch touches only the keys it names").toBe(true);
+		expect(notified).toBe(1);
+
+		// A second patch merges: the first key survives (the file is a document, not a per-key store).
+		const settings = store.update({ responseStreamingMode: "turn" } as never);
+		expect(settings.defaultModelSelection).toEqual({ instanceId: "pi", model: "pi/one" });
+		expect((settings as { responseStreamingMode?: string }).responseStreamingMode).toBe("turn");
+
+		// `null` clears (a nullable key replaces, per T3's merge).
+		expect(store.update({ defaultModelSelection: null }).defaultModelSelection).toBeNull();
+
+		// The document persists whole: a fresh store reads what the first one wrote.
+		const reopened = ServerSettingsStore.open(dir);
+		expect(reopened.current().responseStreamingMode).toBe("turn");
+	});
+
+	it("providerInstanceMutation deletes an instance and upserts one (T3's instance-map operations)", async () => {
+		const dir = join(scratch, "store-instances");
+		await mkdir(dir);
+		const store = ServerSettingsStore.open(dir);
+		expect((store.updateProviderInstance({ operation: "delete", instanceId: "pi" } as never).providerInstances as Record<string, unknown>).pi).toBeUndefined();
+		const up = store.updateProviderInstance({ operation: "upsert", instanceId: "pi", instance: { driver: "pi", displayName: "pi", enabled: true } } as never);
+		expect((up.providerInstances as Record<string, { enabled?: boolean } | undefined>).pi?.enabled).toBe(true);
+	});
 });
 
 const TOKEN = "probe-token-settings-0123456789";
@@ -39,11 +80,11 @@ async function makeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
 	return root;
 }
 
-/** Pair, open `/ws`, and read the provider catalog — the list a default model is validated against. */
+/** Pair, open `/ws`, and read the provider catalog. */
 async function connect(port: number) {
 	const token = await pair(port, TOKEN);
 	const ws = await connectWs(port, token);
@@ -56,41 +97,10 @@ async function connect(port: number) {
 
 const eventsOf = (chunks: Frame[]) => chunks.flatMap((frame) => (frame.values ?? []) as { type: string; payload?: { settings?: { defaultModelSelection?: { model?: string } | null } } }[]);
 
-it("a default model outside the catalog is refused naming it and what IS available; the registry is unchanged (M1)", async () => {
-	const port = 4931;
-	const root = await makeRoot("m1", port);
-	const file = join(root, "settings.json");
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
-	launched.push(host);
-	let ws: Awaited<ReturnType<typeof connect>> | undefined;
-	try {
-		expect(await waitListening(port)).toBe(true);
-		ws = await connect(port);
-		const before = await readFile(file, "utf8");
-		const bad = "pi/no-such-model-anywhere";
-		const answer = await ws.ws.call("server.updateSettings", { patch: { defaultModelSelection: { instanceId: "pi", model: bad } } });
-		// A typed refusal — `exitError` throws if the frame is a `Defect` (a schema-encode failure).
-		const error = exitError(answer, `server.updateSettings(${bad})`);
-		expect(error._tag).toBe("ServerSettingsError");
-		// It names the refused model and the available ones.
-		const detail = JSON.stringify(error);
-		expect(detail).toContain(bad);
-		for (const slug of ws.slugs) expect(detail).toContain(slug);
-		// The registry is unchanged: the file bytes, and what a reader sees.
-		expect(await readFile(file, "utf8")).toBe(before);
-		const settings = exitValue(await ws.ws.call("server.getSettings", {}), "server.getSettings") as { defaultModelSelection: unknown };
-		expect(settings.defaultModelSelection).toBeNull();
-	} finally {
-		ws?.ws.close();
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
-}, 60_000);
-
-it("a good slug is stored, and the subscriber receives settingsUpdated (M2)", async () => {
+it("a settings write answers the full settings, the stream emits settingsUpdated, and a failed write reaches the client as the typed ServerSettingsError (M2, M3)", async () => {
 	const port = 4932;
 	const root = await makeRoot("m2", port);
-	const file = join(root, "settings.json");
+	const file = join(root, SETTINGS_FILE);
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
 	launched.push(host);
 	let ws: Awaited<ReturnType<typeof connect>> | undefined;
@@ -98,7 +108,6 @@ it("a good slug is stored, and the subscriber receives settingsUpdated (M2)", as
 		expect(await waitListening(port)).toBe(true);
 		ws = await connect(port);
 		const streamId = await ws.ws.open("subscribeServerConfig", {});
-		// The connect-time snapshot arrives first.
 		for (let i = 0; i < 60 && eventsOf(ws.ws.chunks(streamId)).length === 0; i++) await sleep(50);
 		let events = eventsOf(ws.ws.chunks(streamId));
 		expect(events[0]?.type).toBe("snapshot");
@@ -116,30 +125,14 @@ it("a good slug is stored, and the subscriber receives settingsUpdated (M2)", as
 		expect(updated.at(-1)!.payload?.settings?.defaultModelSelection?.model).toBe(good);
 		// Every event on the stream is a contract-valid `ServerConfigStreamEvent`.
 		for (const event of events) expect(() => Schema.decodeUnknownSync(ServerConfigStreamEvent)(event)).not.toThrow();
-		// And the write landed in the instance file.
-		expect((JSON.parse(await readFile(file, "utf8")) as { defaults: { model?: string } }).defaults.model).toBe(good);
-	} finally {
-		ws?.ws.close();
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
-}, 60_000);
+		// And the write landed in the settings file, which stays T3's document shape.
+		expect((JSON.parse(await readFile(file, "utf8")) as { defaultModelSelection: { model: string } }).defaultModelSelection.model).toBe(good);
 
-it("a failed settings write reaches the client as the contract's typed ServerSettingsError, not a defect (M3)", async () => {
-	const port = 4933;
-	const root = await makeRoot("m3", port);
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
-	launched.push(host);
-	let ws: Awaited<ReturnType<typeof connect>> | undefined;
-	try {
-		expect(await waitListening(port)).toBe(true);
-		ws = await connect(port);
-		const good = ws.slugs[0]!;
-		// Make the registry's write fail: the data dir stops accepting creates, so the temp file cannot be made.
+		// M3 — a failed write is a typed refusal, not a defect: the data dir stops accepting creates, so the
+		// store's atomic write fails. `exitError` throws on a `Defect` frame: that is exactly what this names.
 		await chmod(root, 0o500);
 		try {
-			const answer = await ws.ws.call("server.updateSettings", { patch: { defaultModelSelection: { instanceId: "pi", model: good } } });
-			// `exitError` throws on a `Defect` frame: that is exactly the defect this probe names.
+			const answer = await ws.ws.call("server.updateSettings", { patch: { defaultModelSelection: { instanceId: "pi", model: "pi/two" } } });
 			const error = exitError(answer, "server.updateSettings(write failure)");
 			expect(error._tag).toBe("ServerSettingsError");
 			expect(typeof error.settingsPath).toBe("string");
@@ -155,25 +148,3 @@ it("a failed settings write reaches the client as the contract's typed ServerSet
 	}
 }, 60_000);
 
-it("chooseDefaultModel refuses a configured model the catalog does not have (M1, the boot path)", () => {
-	const available = [{ provider: "pi", id: "one" }, { provider: "pi", id: "two" }];
-	// A configured model the catalog has is used as-is; none configured is the first available.
-	expect(chooseDefaultModel(available, { provider: "pi", modelId: "two" })).toEqual({ provider: "pi", modelId: "two" });
-	expect(chooseDefaultModel(available, undefined)).toEqual({ provider: "pi", modelId: "one" });
-	// A configured model the catalog does not have is a typed refusal naming it and every model that IS available.
-	let refusal: unknown;
-	try {
-		chooseDefaultModel(available, { provider: "pi", modelId: "typo" });
-	} catch (error) {
-		refusal = error;
-	}
-	expect(refusal).toBeInstanceOf(ModelNotAvailable);
-	const message = (refusal as Error).message;
-	expect(message).toContain("pi/typo");
-	expect(message).toContain("pi/one");
-	expect(message).toContain("pi/two");
-	// No models at all keeps its own credential-naming failure.
-	expect(() => chooseDefaultModel([], undefined)).toThrow(/no models are available/);
-	expect(() => chooseDefaultModel([], { provider: "pi", modelId: "typo" })).toThrow(/no models are available/);
-	expect(modelSlug({ provider: "pi", modelId: "one" })).toBe("pi/one");
-});

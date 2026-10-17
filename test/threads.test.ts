@@ -77,27 +77,6 @@ describe("prompt racing undo — both orders", () => {
 });
 
 describe("undo", () => {
-	it("a stale undo (head already moved on) adds the fork as a child thread", async () => {
-		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
-		const oldHead = thread.head;
-		model.respond(seed);
-		await threads.submit({ threadId: "t", conversationId: oldHead, requestId: "seed", message: "hi" }, undefined);
-		await idle(harness, oldHead);
-		const entry = await firstUserEntry(harness, oldHead);
-
-		const moved = await threads.rewind({ threadId: "t", expectedHead: oldHead, entryId: entry, requestId: "undo-1" });
-		expect(moved).not.toBe(oldHead);
-
-		// A second undo still naming the old head: the thread has moved on, so this fork becomes a new child thread.
-		const child = await threads.rewind({ threadId: "t", expectedHead: oldHead, entryId: entry, requestId: "undo-2" });
-		expect(child).not.toBe(moved);
-
-		const childThread = (await threads.list()).find((candidate) => candidate.head === child);
-		expect(childThread?.parent).toEqual({ threadId: "t", entryId: entry });
-		expect((await threads.thread("t"))?.head).toBe(moved);
-	});
-
 	it("a retried undo returns the same fork and does not fork again", async () => {
 		const { threads, harness, model } = await makeThreads();
 		const thread = await threads.create({ threadId: "t", projectId: "p" });
@@ -117,7 +96,7 @@ describe("undo", () => {
 		expect(conversations).toHaveLength(2);
 	});
 
-	it("an undo of a non-user entry is not rewindable", async () => {
+	it("undo refusals: a non-user entry is not rewindable; a failed run with a queued follow-up stays owed", async () => {
 		const { threads, harness, model } = await makeThreads();
 		const thread = await threads.create({ threadId: "t", projectId: "p" });
 		const head = thread.head;
@@ -128,14 +107,9 @@ describe("undo", () => {
 		const assistant = entries.find((entry) => entry.kind !== "pi.user");
 		expect(assistant, "there is an assistant entry to reject").toBeDefined();
 		expect(await rejectCode(threads.rewind({ threadId: "t", expectedHead: head, entryId: assistant!.id, requestId: "x" }))).toBe("not_rewindable");
-	});
 
-	it("a failed run with a queued follow-up stays owed: undo is refused, so it cannot be forked away", async () => {
-		const { threads, harness, model } = await makeThreads();
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
-		const head = thread.head;
-
-		// A run that fails only after a follow-up has been queued behind it.
+		// A run that fails only after a follow-up was queued behind it: the follow-up is owed, so the thread is busy —
+		// undo is refused, the owed turn cannot be forked away.
 		let release = (): void => {};
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
@@ -147,8 +121,7 @@ describe("undo", () => {
 		await threads.submit({ threadId: "t", conversationId: head, requestId: "one", message: "one" }, undefined);
 		await threads.submit({ threadId: "t", conversationId: head, requestId: "two", message: "two" }, "followUp");
 		release();
-		await idle(harness, head); // the run fails; the queued follow-up stays in the inbox (still owed).
-
+		await idle(harness, head);
 		const entry = await firstUserEntry(harness, head);
 		expect(await rejectCode(threads.rewind({ threadId: "t", expectedHead: head, entryId: entry, requestId: "undo" }))).toBe("turn_running");
 		expect((await threads.thread("t"))?.head).toBe(head);

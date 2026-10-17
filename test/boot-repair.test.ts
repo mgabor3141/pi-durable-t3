@@ -9,11 +9,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { tempRoot } from "./temp-root.ts";
-import { createScriptedModel } from "../src/testing/fake-model.ts";
-import { testRegistry } from "../src/testing/test-registry.ts";
+import { createScriptedModel } from "./fake-model.ts";
+import { testRegistry } from "./test-registry.ts";
 import { Threads } from "../src/threads.ts";
 
-const childScript = new URL("../src/testing/repair-child.ts", import.meta.url).pathname;
+const childScript = new URL("./repair-child.ts", import.meta.url).pathname;
 
 function runChild(args: readonly string[]): Promise<number | null> {
 	return new Promise((resolve, reject) => {

@@ -15,6 +15,11 @@ import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, getJson, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched } from "./host-process-harness.ts";
+import { createHost } from "@earendil-works/chord";
+import { createServerFacet } from "../src/objects.ts";
+import { Bridge } from "../src/t3/bridge.ts";
+import { ServerSettingsStore } from "../src/settings.ts";
+import { makeThreads } from "./threads-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-cascade-"));
 const agentDir = join(scratch, "agent");
@@ -41,7 +46,7 @@ it("project.delete removes the project's threads, refuses an unforced delete, an
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(marker, "the user's file\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }] }), "utf8");
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
@@ -124,7 +129,7 @@ it("a project with no threads deletes without force (the guard is about threads,
 	const projectDir = join(root, "projects", "quiet");
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }] }), "utf8");
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
 	launched.push(host);
 	expect(await waitListening(port)).toBe(true);
@@ -140,3 +145,37 @@ it("a project with no threads deletes without force (the guard is about threads,
 		await host.exited;
 	}
 }, 90_000);
+
+// The late-arrival window, closed by ONE sweep pass (the delete) + the commit-time FK check (the create). The
+// cascade's target list is a snapshot taken before `registry.remove` lands; a create whose commit lands INSIDE that
+// window is invisible to the snapshot. One pass after the removal drains what landed; anything landing after the
+// removal is refused by the FK check (thread-fk.test.ts pins that half). This probe forces the window: an existing
+// thread gives the delete loop an await, and a second create is raced into it.
+it("a thread.create racing the forced delete leaves no row under the removed project (one-pass sweep + FK)", async () => {
+	for (let round = 0; round < 10; round++) {
+		const f = await makeThreads({ projects: [{ id: "racy" }] });
+		const host = createHost({ name: "server" });
+		await host.load([createServerFacet(f.threads, f.model.models)]);
+		await host.ready();
+		const bridge = new Bridge(
+			{ host: "127.0.0.1", port: 0, label: "t", stateDir: join(f.root, "state"), pairingToken: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], registry: f.registry },
+			{ info: () => {}, warn: () => {} },
+			host,
+		);
+		bridge.start();
+		const existing = await bridge.createThread({ projectId: "racy" });
+		expect(existing, "the project has a thread to force-delete").toBeTruthy();
+
+		// The race: the second create is in flight while the forced delete snapshots, deletes, and removes.
+		const racing = bridge.createThread({ threadId: `late-${round}`, projectId: "racy" }).then(() => "landed", () => "refused");
+		const removed = await bridge.mutateProject({ type: "project.delete", commandId: `cmd-race-${round}`, projectId: "racy", force: true });
+		expect(removed).toMatchObject({ id: "racy" });
+		const outcome = await racing;
+		expect(["landed", "refused"], `the racing create answered one way or the other: ${outcome}`).toContain(outcome);
+
+		// The invariant, in both outcomes: no row survives under a project that is gone.
+		const rows = (await f.threads.list()).filter((thread) => thread.projectId === "racy");
+		expect(rows.map((thread) => thread.threadId), `round ${round} (${outcome}): the cascade left no thread under the removed project`).toEqual([]);
+		expect(f.registry.list().map((project) => project.id)).not.toContain("racy");
+	}
+}, 120_000);

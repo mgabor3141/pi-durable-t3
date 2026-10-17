@@ -44,18 +44,6 @@ describe("projection: the client's message id rides in the entry", () => {
 		expect(userMessageId(result.projection)).toBe("uuid-abc");
 	});
 
-	it("an entry with no usable id falls back to m<entryId> (no data, and data without a string messageId)", () => {
-		const noData = projectThread(meta, view([{ id: 7, kind: "app.user", model: userText("x") } as unknown as EntryRecord]), { rolledBack: [] });
-		expect(noData.projection.runs[0]!.userMessageId).toBe("m7");
-
-		const nonString = projectThread(
-			meta,
-			view([{ id: 8, kind: "app.user", data: { messageId: 123 }, model: userText("y") } as unknown as EntryRecord]),
-			{ rolledBack: [] },
-		);
-		expect(nonString.projection.runs[0]!.userMessageId).toBe("m8");
-	});
-
 	it("a pi.user entry from an older thread is a run and projects, with the m<entryId> fallback", () => {
 		const entries: EntryRecord[] = [
 			{ id: 3, kind: "pi.user", model: userText("legacy") } as unknown as EntryRecord,

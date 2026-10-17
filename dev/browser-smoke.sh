@@ -36,14 +36,14 @@ mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/state"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 TOML
-# The instance file (the project registry the UI edits) lives in the data dir, NOT config.toml.
-cat > "$root/settings.json" <<JSON
+# The project registry lives in the data dir, NOT config.toml. `settings.json` (T3's server settings) is absent:
+# the host answers the contract's defaults, with the pi provider instance enabled.
+cat > "$root/projects.json" <<JSON
 {
   "projects": [
     { "path": "$root/projects/alpha", "title": "alpha" },
     { "path": "$root/projects/beta", "title": "beta" }
-  ],
-  "defaults": {}
+  ]
 }
 JSON
 
@@ -51,7 +51,7 @@ echo "root=$root  facet=127.0.0.1:$FACET_PORT  web=127.0.0.1:$WEB_PORT  web-dist
 
 start_host() {
   PI_DURABLE_T3_FAKE=1 PI_DURABLE_T3_PAIRING_TOKEN="$PAIR_TOKEN" \
-    node --experimental-strip-types "$here/src/main.ts" -- --root "$root" >> "$root/host.log" 2>&1 &
+    node --experimental-strip-types "$here/examples/coding-agent/host.ts" -- --root "$root" >> "$root/host.log" 2>&1 &
   HOST_PID="$!"
   pids+=("$HOST_PID")
   for _ in $(seq 1 60); do

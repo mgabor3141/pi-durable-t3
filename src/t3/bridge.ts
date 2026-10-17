@@ -17,7 +17,7 @@ import { ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspace
 import type { Thread } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
-import { type ConversationView, type ModelRef, type ModelsState, splitSlug } from "./model-types.ts";
+import { type ConversationView, type ModelRef, splitSlug } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
@@ -56,8 +56,7 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
 const EMIT_THROTTLE_MS = 60;
 
-/** One `projects.mutate` payload, as the facet decoded it. `commandId` is the client-chosen id the receipt store keys
- * on, and it is required by the contract (`ProjectMutation.commandId`), so the dedup has a key on every path. */
+/** One `projects.mutate` payload, as the facet decoded it. */
 export type ProjectMutation = {
 	readonly type: "project.create" | "project.update" | "project.delete";
 	readonly projectId: string;
@@ -68,16 +67,9 @@ export type ProjectMutation = {
 	readonly force?: boolean;
 };
 
-/** What the first attempt at a commandId did: its project id and command type (so a reuse for a different command is
- * visible), and the promise carrying its outcome. A SUCCESS is kept as the receipt; a REFUSAL is evicted on rejection
- * (store M4) so it is never replayed — the entry exists only for the in-flight window (to dedup a concurrent double-send). */
-type ProjectMutationReceipt = { readonly projectId: string; readonly commandType: string; readonly outcome: Promise<Record<string, unknown>> };
-
-/** How many client-chosen ids the bridge remembers, for both dedup maps (dispatch commands, project mutations). One
- * bound, one meaning: it is the only memory a client-chosen id can cost, so a client cannot grow the bridge by inventing
- * ids. Past it the oldest entry is dropped, and a very old retry is treated as a fresh request — for a create that
- * means the duplicate-path refusal, for a delete the not-found: the same answers a fresh request gets, not a corruption.
- * A restart clears both maps, the same repair the command map already had. */
+/** How many client-chosen command ids the bridge remembers for dispatch idempotency: it is the only memory a
+ * client-chosen id can cost, so a client cannot grow the bridge by inventing ids. Past it the oldest entry is
+ * dropped, and a very old retry is treated as a fresh request — the same answers a fresh request gets. */
 export const DEDUP_ENTRY_LIMIT = 2_000;
 
 
@@ -93,13 +85,6 @@ export class Bridge {
 	/** The project shells last shown, so a registry EDIT (rename, root move) re-emits only the shells that changed. */
 	readonly #shownProjects = new Map<string, OrchestrationProjectShell>();
 	readonly #commandResults = new Map<string, Promise<number>>();
-	/** Project mutations by commandId: what the first attempt produced (or the refusal it was refused with), so a retry
-	 * after a lost response replays that instead of re-planning. Bounded by `MUTATION_RECEIPT_LIMIT`. */
-	readonly #mutationReceipts = new Map<string, ProjectMutationReceipt>();
-	/** Called with every thread's `pi.models` state, so the provider catalog follows the host. */
-	onModels: ((models: ModelsState | undefined) => void) | undefined;
-	/** Model reported for threads whose transcript is not loaded. */
-	defaultModel: () => ModelRef | null = () => null;
 	#directory: Thread[] = [];
 	/** The `pi.threads` handle, so a create/remove can refresh the directory synchronously: the thread-existence check
 	 * (unknown threads are a typed not-found, everywhere) must never race the subscription that mirrors the document. */
@@ -197,47 +182,14 @@ export class Bridge {
 		return this.#configured().map((p) => this.#projectShell(p));
 	}
 
-		/** One project mutation, deduplicated by commandId the way T3's ProjectService dedups by receipt. A client whose
-	 * response was lost resends the SAME commandId, and the FIRST attempt's outcome — not a fresh plan — decides the
-	 * answer: a retried create returns the project it created, a retried delete returns the deletion it made (a delete of
-	 * a project that is already gone is idempotent, never "was not found"). A REFUSAL is NOT a receipt (store M4): it
-	 * records nothing durable, so a retry of a refused commandId re-plans against the CURRENT state — the transient cause
-	 * that refused it (a parent that was a file, a path a peer held, a conflict whose project has since gone) may be gone,
-	 * and a client obeying the contract's dedup rule (reuse the commandId) must be able to recover. T3's ProjectService
-	 * persists a rejected command as its receipt (`ProjectService.commit` → `commitRejectedProjectCommand`, lines 245-252)
-	 * and replays it on retry (lines 281-294); we keep T3's ACCEPTED-receipt idempotency (lines 278-280) and drop the
-	 * rejected-receipt. Pre-fix there was no dedup at all, so every one of those retries answered a fresh-plan conflict
-	 * naming a project the client had just created. A commandId that SUCCEEDED is remembered: reused for a DIFFERENT
-	 * command (type or project) it is T3's "was already used by" refusal. The store is bounded by `DEDUP_ENTRY_LIMIT`,
-	 * oldest first. */
+		/**
+	 * One project mutation. No receipt store: a retry after a lost response re-plans against the current
+	 * state and gets the honest answer — a retried create meets the duplicate-path refusal for the project it
+	 * created, a retried delete the not-found. (T3's ProjectService replays accepted receipts from its database; this
+	 * host keeps no per-command durable state, and the operator's rule is that the honest error beats the machinery.)
+	 */
 	mutateProject(mutation: ProjectMutation): Promise<Record<string, unknown>> {
-		const receipt = this.#mutationReceipts.get(mutation.commandId);
-		if (receipt !== undefined) {
-			if (receipt.projectId !== mutation.projectId || receipt.commandType !== mutation.type) {
-				return Promise.reject(
-					new CommandError(`Command ${mutation.commandId} was already used by ${receipt.commandType} for ${receipt.projectId}.`),
-				);
-			}
-			return receipt.outcome;
-		}
-		const outcome = this.#applyMutation(mutation);
-		// Store the in-flight outcome so a CONCURRENT double-send of the same commandId dedups (it lands while the promise
-		// is pending). A refusal is not a receipt (store M4): the `.catch` below evicts the entry when the outcome rejects,
-		// so a later retry of the same commandId re-plans against the current state. A SUCCESS stays, so a retried
-		// create/delete replays the result it produced (T3's accepted-receipt idempotency).
-		this.#mutationReceipts.set(mutation.commandId, { projectId: mutation.projectId, commandType: mutation.type, outcome });
-		while (this.#mutationReceipts.size > DEDUP_ENTRY_LIMIT) {
-			const oldest = this.#mutationReceipts.keys().next().value;
-			if (oldest === undefined) break;
-			this.#mutationReceipts.delete(oldest);
-		}
-		// A refusal records nothing durable: evict its entry so it is never replayed. (Handling the rejection here also
-		// keeps a refusal from being an unhandled rejection — the replayed promise is the caller's, not this store's.)
-		// `?.outcome === outcome` guards eviction against a later command that reused this id after the entry was evicted.
-		outcome.catch(() => {
-			if (this.#mutationReceipts.get(mutation.commandId)?.outcome === outcome) this.#mutationReceipts.delete(mutation.commandId);
-		});
-		return outcome;
+		return this.#applyMutation(mutation);
 	}
 
 	async #applyMutation(mutation: ProjectMutation): Promise<Record<string, unknown>> {
@@ -269,16 +221,17 @@ export class Bridge {
 				// delete, so conversations stay; a directory on disk is never part of this operation.
 				for (const thread of targets) await this.deleteThread(thread.threadId);
 				this.config.registry.remove(mutation.projectId);
-				// Sweep late arrivals. The target list above is a snapshot taken before the entry was removed, and a
-				// `thread.create` whose commit lands in that window wrote a row for a project that is now gone — the
-				// dialog promised the project's threads go WITH it. The registry entry is gone, so the threads layer's
-				// commit-time FK check refuses any NEW row under the id; draining what already landed closes the window.
-				for (let pass = 0; pass < 5; pass++) {
-					await new Promise((resolve) => setTimeout(resolve, 20));
-					this.#syncDirectory();
-					const late = this.#directory.filter((thread) => thread.projectId === mutation.projectId);
+				// Drain late arrivals. The target list above is a snapshot taken before the entry was removed, and a
+				// `thread.create` whose commit landed in that window — or whose in-flight facet publish lands a beat
+				// after — wrote a row for a project that is now gone; the dialog promised the project's threads go
+				// WITH it. Read the CELL (authoritative after each awaited delete), not the mirror, and drain until
+				// it is empty: every row landing from `registry.remove` onward is refused by the threads layer's
+				// commit-time FK check, so the drain terminates at the rows that landed in the window.
+				for (;;) {
+					if (this.#threadsHandle === undefined) break;
+					const late = (this.#threadsHandle.threads.value?.threads ?? []).filter((thread) => thread.projectId === mutation.projectId);
 					if (late.length === 0) break;
-					for (const thread of late) await this.deleteThread(thread.threadId);
+					for (const entry of late) await this.deleteThread(entry.threadId);
 				}
 				return this.#projectResult(entry, new Date().toISOString());
 			}
@@ -344,7 +297,7 @@ export class Bridge {
 		const agentCwd = state?.view?.docs["pi.agent"]?.cwd;
 		const project = byForeignKey ?? this.projectForCwd(agentCwd);
 		const cwd = project?.path ?? agentCwd ?? "";
-		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? this.defaultModel();
+		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		return {
 			threadId,
 			projectId: project?.id ?? thread?.projectId ?? "",
@@ -508,16 +461,8 @@ export class Bridge {
 		};
 	}
 
-	#buildModelsState(state: ThreadState): ModelsState {
-		return {
-			catalog: { revision: 1, availableModels: state.catalog.map((model) => ({ ...model, name: model.modelId })) },
-			configuration: { model: state.configuration?.model ?? null, thinkingLevel: state.configuration?.thinkingLevel ?? "off" },
-		};
-	}
-
 	#recompute(state: ThreadState): void {
 		if (state.view === undefined) return;
-		this.onModels?.(this.#buildModelsState(state));
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,

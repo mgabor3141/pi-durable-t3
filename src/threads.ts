@@ -76,20 +76,16 @@ export const ThreadsDoc = defineDoc<ThreadsState>({
 
 type ThreadsDeps = {
 	readonly harness: Harness;
-	/** The live project registry (the instance file). A project's id is derived from its path, so a UI add/remove is
+	/** The live project registry (the bridge's file). A project's id is derived from its path, so a UI add/remove is
 	 * visible without rebuilding this layer; threads look their project's cwd up here at create. */
 	readonly registry: ProjectRegistry;
 	readonly context?: Context;
-	/** The model a newly created thread starts on; absent leaves the model unset until `pi.models` selects one. */
-	readonly defaultModel?: ModelRef;
-	/** The thinking level a newly created thread starts on (from the instance file's defaults). */
-	readonly defaultThinkingLevel?: string;
 	/**
-	 * Provides the instructions text for a newly created conversation, read fresh at create time so a changed file
-	 * affects new threads only. Absent or empty leaves the conversation on just the base prompt. Stored on the
-	 * conversation, so forks and undo copies inherit it.
+	 * Configures a newly created thread's conversation: called at create with the project's id and cwd, and its return
+	 * is stored on `pi.agent` (so forks and undo copies inherit it). The bridge interprets nothing — the caller decides
+	 * the model, prompt text, and everything else a fresh thread starts with.
 	 */
-	readonly instructions?: () => string | undefined;
+	readonly newThread?: (info: { readonly projectId: string; readonly cwd: string }) => AgentChange | undefined;
 	/** Injectable clock, for a deterministic `createdAt` in tests. */
 	readonly now?: () => number;
 	/**
@@ -119,7 +115,7 @@ type RewindInput = {
 
 /**
  * Copy a resolved agent's configuration into an `AgentChange` for a fresh conversation. Only the fields the head
- * actually carries are set, so undo-to-baseline reproduces the same model, tools, instructions, and cwd.
+ * actually carries are set, so undo-to-baseline reproduces the same model, tools, prompt text, and cwd.
  */
 function agentCopy(agent: Awaited<ReturnType<Conversation["agent"]>>): AgentChange {
 	return {
@@ -152,9 +148,7 @@ export class Threads {
 	readonly #harness: Harness;
 	readonly #registry: ProjectRegistry;
 	readonly #context: Context;
-	readonly #defaultModel: ModelRef | undefined;
-	readonly #defaultThinkingLevel: string | undefined;
-	readonly #instructions: (() => string | undefined) | undefined;
+	readonly #threadConfig: ((info: { projectId: string; cwd: string }) => AgentChange | undefined) | undefined;
 	readonly #now: () => number;
 	readonly #onWarn: (message: string, error: unknown) => void;
 
@@ -162,9 +156,7 @@ export class Threads {
 		this.#harness = deps.harness;
 		this.#registry = deps.registry;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
-		this.#defaultModel = deps.defaultModel;
-		this.#defaultThinkingLevel = deps.defaultThinkingLevel;
-		this.#instructions = deps.instructions;
+		this.#threadConfig = deps.newThread;
 		this.#now = deps.now ?? (() => Date.now());
 		this.#onWarn = deps.onWarn ?? (() => {});
 	}
@@ -224,12 +216,6 @@ export class Threads {
 			/* missing/unreadable: boot's per-project mkdir (with its warning) owns that case. */
 		}
 		if (!cwdIsDirectory) throw hostError("unknown_project", `project ${input.projectId} is not a directory: ${project.cwd}`);
-		// New-thread defaults are read live (the instance file, edited by the UI), so a settings change affects threads
-		// created after it. The model falls back to the resolved default (first available) when the file sets none.
-		const defaults = this.#registry.defaults();
-		const model = defaults.model ?? this.#defaultModel;
-		const thinking = defaults.thinkingLevel ?? this.#defaultThinkingLevel;
-		const instructions = this.#instructions?.();
 		return this.#harness.commit(async (tx) => {
 			const doc = await tx.doc(ThreadsDoc);
 			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
@@ -239,7 +225,9 @@ export class Threads {
 			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-			await configure(tx, conversation.id, { cwd: committed.cwd, ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinkingLevel: thinking as never }), ...(instructions === undefined || instructions === "" ? {} : { instructions }) });
+			// The caller's hook configures a fresh thread; the bridge itself contributes only the project's cwd.
+			const change = this.#threadConfig?.({ projectId: committed.id, cwd: committed.cwd }) ?? {};
+			await configure(tx, conversation.id, { cwd: committed.cwd, ...change });
 			const thread: Thread = {
 				threadId: input.threadId,
 				projectId: input.projectId,
@@ -352,7 +340,7 @@ export class Threads {
 		}
 		// A fork is INCLUSIVE of its fork entry, so to drop the reverted user turn we fork at the entry just before it.
 		// If the reverted turn is the first entry there is nothing before it to fork at: create a fresh conversation
-		// that copies the head's agent config (model, tools, instructions, cwd) instead, so undo to baseline is empty.
+		// that copies the head's agent config (model, tools, prompt text, cwd) instead, so undo to baseline is empty.
 		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
 		const headAgent = forkAt === undefined ? await head.agent(this.#context) : undefined;
 		return this.#harness.commit(async (tx) => {

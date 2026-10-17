@@ -41,40 +41,29 @@ const intents = (entries: readonly EntryRecord[]) =>
 const statuses = (entries: readonly EntryRecord[]) => projectThread(meta, viewOf(entries), { rolledBack: [] }).projection.runs.map((run) => run.status);
 
 describe("groupRuns: where a run ends and a steer begins (F3)", () => {
-	it("an answered turn ends the run, so the next user entry is a new run — not a steer", () => {
-		const entries = [user(1, "first"), answered(2, "reply one"), user(3, "second")];
-		// Two runs, each with its own user entry. Forcing the steer rule collapses this into one run of three steps,
-		// and the projection then reports one turn, one checkpoint, one undo target for two user turns.
-		expect(shape(entries)).toEqual([
+	it("where a run ends: an answered turn and an interrupted tool round close it; only a completed tool round is a steer boundary", () => {
+		// Get the boundary wrong permissively and two turns merge into one run (one checkpoint, one undo target for
+		// two user turns); get it wrong strictly and a steer the model was told to fold in races the first run.
+		expect(shape([user(1, "first"), answered(2, "reply one"), user(3, "second")])).toEqual([
 			{ user: 1, steps: [2] },
 			{ user: 3, steps: [] },
 		]);
-		expect(intents(entries)).toEqual(["turn_start", "turn_start"]);
-	});
-
-	it("a completed tool round is the boundary a steer lands at", () => {
-		const entries = [user(1, "do it"), toolAsk(2, "call-1"), toolAnswer(3, "call-1"), user(4, "and then")];
-		const runs = shape(entries);
-		expect(runs).toEqual([{ user: 1, steps: [2, 3, 4] }]); // one run; entry 4 is a steer inside it
-		expect(intents(entries)).toEqual(["turn_start", "steer"]);
-	});
-
-	it("an interrupted tool round ends the run: aborted results and unanswered calls both close it", () => {
-		// The abort is the reason the run is over: a steer applied after it would be folded into a run whose tool
-		// call never completed, and the model would be asked to continue a turn the user already interrupted.
+		expect(intents([user(1, "first"), answered(2, "reply one"), user(3, "second")])).toEqual(["turn_start", "turn_start"]);
+		const steer = [user(1, "do it"), toolAsk(2, "call-1"), toolAnswer(3, "call-1"), user(4, "and then")];
+		expect(shape(steer)).toEqual([{ user: 1, steps: [2, 3, 4] }]); // one run; entry 4 is a steer inside it
+		expect(intents(steer)).toEqual(["turn_start", "steer"]);
+		// The abort is the reason the run is over: a steer after it would fold into a run whose tool call never
+		// completed. An unanswered call is not a completed round either.
 		expect(shape([user(1, "go"), toolAsk(2, "call-1"), toolAborted(3, "call-1"), user(4, "stop that, do this")])).toEqual([
 			{ user: 1, steps: [2, 3] },
 			{ user: 4, steps: [] },
 		]);
-		// A call with no result at all: the round is not completed, so it is not a steer boundary either.
 		expect(shape([user(1, "go"), toolAsk(2, "call-1"), user(3, "hmm")])).toEqual([
 			{ user: 1, steps: [2] },
 			{ user: 3, steps: [] },
 		]);
 		// One of several calls answered, one aborted: still interrupted — every call must be answered and none aborted.
-		expect(
-			shape([user(1, "go"), toolAsk(2, "a"), toolAsk(2, "b"), toolAnswer(3, "a"), toolAborted(4, "b"), user(5, "next")]),
-		).toEqual([
+		expect(shape([user(1, "go"), toolAsk(2, "a"), toolAsk(2, "b"), toolAnswer(3, "a"), toolAborted(4, "b"), user(5, "next")])).toEqual([
 			{ user: 1, steps: [2, 2, 3, 4] },
 			{ user: 5, steps: [] },
 		]);
@@ -97,17 +86,14 @@ describe("groupRuns: where a run ends and a steer begins (F3)", () => {
 		// A run whose last entry is the user entry (no reply yet, nothing running) is interrupted, not completed: the
 		// host is not in a state the client should render as a finished turn.
 		expect(statuses([user(1, "a"), answered(2, "ok"), user(3, "and?")])).toEqual(["completed", "interrupted"]);
-	});
-
-	it("an interrupted partial is superseded by the resumed answer, once", () => {
-		const entries = [user(1, "go"), partial(2, "half"), answered(3, "resumed")];
-		const projection = projectThread(meta, viewOf(entries), { rolledBack: [] }).projection;
-		expect(projection.runs).toHaveLength(1);
-		expect(projection.runs[0]!.status, "the resumed answer decides the status").toBe("completed");
-		const assistantTexts = projection.messages.filter((message) => message.role === "assistant") as { text: string }[];
-		expect(assistantTexts.map((message) => message.text), "the partial is not shown beside the answer that replaced it").toEqual(["resumed"]);
+		// An interrupted partial is superseded by the resumed answer, once: the partial is not shown beside the answer.
+		const resumed = projectThread(meta, viewOf([user(1, "go"), partial(2, "half"), answered(3, "resumed")]), { rolledBack: [] }).projection;
+		expect(resumed.runs).toHaveLength(1);
+		expect(resumed.runs[0]!.status, "the resumed answer decides the status").toBe("completed");
+		expect((resumed.messages.filter((m) => m.role === "assistant") as { text: string }[]).map((m) => m.text)).toEqual(["resumed"]);
 		// A trailing partial has nothing to supersede it, so it is the run's answer.
 		const trailing = projectThread(meta, viewOf([user(1, "go"), answered(2, "one"), user(3, "two"), partial(4, "half")]), { rolledBack: [] }).projection;
 		expect(trailing.runs.map((run) => run.status)).toEqual(["completed", "interrupted"]);
 	});
+
 });

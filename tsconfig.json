@@ -16,5 +16,5 @@
 		"rewriteRelativeImportExtensions": true,
 		"noEmit": true
 	},
-	"include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+	"include": ["src/**/*.ts", "test/**/*.ts", "examples/**/*.ts", "vitest.config.ts"]
 }

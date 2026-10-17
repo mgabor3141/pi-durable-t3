@@ -18,7 +18,7 @@ it("(a) a conversation whose cwd matches no project is NOT promoted, and the log
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
 	const { harness, model } = f;
 	const warnings: string[] = [];
-	const threads = new Threads({ harness, registry: f.registry, defaultModel: model.modelRef, onWarn: (m) => warnings.push(m) });
+	const threads = new Threads({ harness, registry: f.registry, newThread: () => ({ model: model.modelRef }), onWarn: (m) => warnings.push(m) });
 
 	// A fresh conversation whose cwd belongs to no registered project (the registry lost it, or it was hand-made).
 	const conversationId = await harness.commit(async (tx) => {
@@ -57,7 +57,7 @@ it("(b) after creates, prompts, promotes and an undo whose cwd is uncovered, NO 
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
 	const { threads, harness, model } = f;
 	const warnings: string[] = [];
-	const layer = new Threads({ harness, registry: f.registry, defaultModel: model.modelRef, onWarn: (m) => warnings.push(m) });
+	const layer = new Threads({ harness, registry: f.registry, newThread: () => ({ model: model.modelRef }), onWarn: (m) => warnings.push(m) });
 
 	// Creates and prompts in both projects.
 	const a = await threads.create({ threadId: "a", projectId: "p" });

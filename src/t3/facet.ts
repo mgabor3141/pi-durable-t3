@@ -33,8 +33,6 @@ export function startFacet(deps: {
 	const auth = new AuthStore(config.stateDir, { ...(config.pairingToken === undefined ? {} : { pairingToken: config.pairingToken }), tokenTtlSeconds: config.tokenTtlSeconds });
 
 	const bridge = new Bridge(config, log, host);
-	bridge.onModels = (models) => catalog.adopt(models);
-	bridge.defaultModel = () => catalog.defaultModel();
 	bridge.start();
 
 	// Bind the HTTP server eagerly so we can await "listening" before the host prints "ready", and surface a bind error

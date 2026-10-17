@@ -7,70 +7,73 @@ https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
 A turn survives a crash: the clip sends a message, kills the host mid-turn, restarts it, and the turn
 finishes after T3 reconnects — its socket reconnects on a ~75s backoff, so press **Retry** to skip the wait.
 
-Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness: storage, extensions, tools, execution env. This adds a small threads layer and a T3 facet that speaks T3's wire protocol. T3 then shows your Harness in the sidebar, with its projects and threads. Design: [`docs/design.md`](docs/design.md).
+Pair [T3 Code](https://github.com/pingdotgg/t3code)'s web app with a [pi-durable](https://github.com/earendil-works/pi) Harness. You set up the Harness — storage, extensions, tools, execution env — and call
+**`attachT3(harness, opts)`**, one entry point that adds a threads layer and a T3 facet speaking T3's wire
+protocol. T3 then shows your Harness in the sidebar, with its projects and threads. Design:
+[`docs/design.md`](docs/design.md) (its first section is the rule every feature is checked against).
 
-## Set up
+## The library
+
+```ts
+import { attachT3 } from "pi-durable-t3/bridge";
+
+const t3 = await attachT3(harness, {
+        models,            // the catalog: T3's picker list (the bridge selects nothing)
+        projects,          // the project registry (FileProjectRegistry is the shipped store)
+        dataDir,           // T3's settings.json + the registry file live here
+        listen,            // { host, port }
+        stateDir,          // facet credential state
+        label, webAppUrl, corsOrigins, tokenTtlSeconds, pairingToken, newThread, log,   // optional
+      });
+await t3.ready;                       // listening (rejects with the bind error)
+console.log(t3.pairingUrls(t3.pairingCode()));
+```
+
+`src/` is the bridge; it decides nothing about the agent — the client names the model on every create and
+prompt, the catalog is what you hand in, and a new thread's configuration comes from your `newThread` hook.
+A test enforces the boundary (`test/boundary.test.ts`).
+
+## The example host
+
+[`examples/coding-agent/`](examples/coding-agent/) is the integrator's recipe: a pi-durable Harness with the
+coding tools (`read`/`write`/`edit`/`bash`), a base prompt (+ optional instructions file), a model runtime
+from your pi config, config-file parsing, and bounded shutdown. It is what `pnpm start` runs.
 
 ```sh
 pnpm install
 pnpm setup:t3     # shallow-fetches t3code at the pin; vendors @t3tools/contracts (+ LICENSE) into gitignored
                   # vendor/ and builds the web app into gitignored web-dist/ (a few minutes, needs network)
+pnpm start        # XDG config/data dirs; add `-- --root <dir>` for a single-directory instance
 ```
+
+The host opens the Harness, serves the facet, and prints a one-time pairing code and link. Model catalog and
+credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials?
+Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start` (or with `-- --root …`).
 
 ## Configure
 
-There are **two files**, one per tier — each owns what it owns, and neither duplicates the other.
+Three files, three tiers (see [`docs/state.md`](docs/state.md) for the full map):
 
-```
-mkdir -p ~/.config/pi-durable-t3 && cp config.example.toml ~/.config/pi-durable-t3/config.toml
-```
+- **`config.toml` — the integrator's**, in `$XDG_CONFIG_HOME/pi-durable-t3` (default `~/.config/…`). What a
+  UI must not set: the listen address, the `web` origin, the facet's `[t3]` settings, the `instructions`
+  file. `--root <dir>` overrides config and data locations so an instance is one directory. Unknown keys are
+  rejected, naming the file, key path, and expectation; a missing file is an error, an empty one is valid.
+  [`config.example.toml`](config.example.toml) is the commented reference.
+- **`settings.json` — T3's server settings**, in the data dir. T3's own document (the contracts'
+  `ServerSettings`), stored and patched exactly as T3's server stores and patches it. The UI's settings
+  panes edit it through the host; the bridge interprets nothing in it.
+- **`projects.json` — the project registry**, in the data dir. The UI's Add-project picker edits it through
+  the host. A project is a directory; its **id is minted by whoever registers it** — the UI mints a UUID and
+  the host stores and answers it; a hand-written entry may carry an `id` or omit one (derived from the
+  normalized path, pinned on first mutation — an id is assigned once, never re-derived, so a root move keeps
+  its threads). The title is a label; **the path is the uniqueness key**. Missing files are valid (empty
+  registry, contract defaults); unparseable ones are a refusal naming the file — the host does not boot over
+  damage, and does not write over it. One host per data dir.
 
-**`config.toml` — the integrator's tier.** What a UI must not set: the listen address, the `web` origin, the
-facet's own settings (`[t3]`), and the `instructions` file. It lives in `$XDG_CONFIG_HOME/pi-durable-t3`
-(default `~/.config/…`); the data dir is `$XDG_DATA_HOME/pi-durable-t3` (default `~/.local/share/…`).
-`--root <dir>` overrides both, keeping this instance's config (`<dir>/config.toml`) and all its data in one
-directory. [`config.example.toml`](config.example.toml) is the commented reference. Unknown keys are rejected,
-naming the file, key path, and what was expected; a missing file is an error, an empty one is valid.
-
-**`settings.json` — the instance file, the UI's tier.** The project registry and the new-thread defaults (the
-model and thinking level a new thread starts on) live here, **in the data dir** — with `--root <dir>`,
-`<dir>/settings.json`. This is the file T3's **Add project** picker and model picker edit: you add a project in
-the UI, and the running host writes it on your behalf — atomically, and as an edit to the file as it is on disk, so
-an instance sharing a data dir with another host (the documented dev setup) does not lose either one's changes. A
-default model the catalog cannot call is refused from the model picker on the wire (naming the model and the models
-that are available); at start the same check is tolerant, like this file's other fields — a default absent from the
-catalog (credentials change between boots) warns naming it, is dropped, new threads start on the first catalog model,
-and the host binds so you can set a good one from the UI (a host that died before binding could not be told to fix
-the file it owns). A project is a directory (paths under the
-data dir; `~` and absolute paths expand). Its **id is minted by whoever registers it** — the UI mints a UUID and
-the host stores it; an entry you write by hand may carry an `id` (the host honors it) or omit one, and the host
-derives a stable id from the path. The title is only a label, and **the path is the uniqueness key**: the same
-folder can't be added twice. A missing file is valid (no projects, the first available model). The shape:
-
-```jsonc
-{
-  // path required; title optional (defaults to the folder); id optional — a client-minted id (the UI sends a
-  // UUID; any id the contract accepts is honored), stored and kept — an id is assigned once, never re-derived
-  "projects": [ { "path": "projects/alpha", "title": "alpha", "id": "e05053f2-9966-4b92-9886-5092481b9703" } ],
-  "defaults": { "model": "pi/…", "thinkingLevel": "off" }          // model optional; thinkingLevel one of off…max
-}
-```
-
-Writing `[[projects]]` or `default_model` into `config.toml` is refused by name, pointing at `settings.json`.
 Defaults keep the facet on loopback, requests with a non-loopback `Host` are rejected, and the fixed reusable
-pairing token is env-var-only, for tests. CORS is pinned to `web` when you set it; with `web` and `cors_origins`
-both unset the facet answers `Access-Control-Allow-Origin: *` — every call still needs a bearer token, so a
-browser can't read the API cross-site, but set `web` to pin it.
-
-## Run
-
-```sh
-pnpm start          # reads the XDG config above; add `-- --root <dir>` for a single-directory instance
-```
-
-The host opens a Harness with the coding tools (`read`/`write`/`edit`/`bash`), runs each thread in its project's directory, serves the T3 facet, and prints a one-time pairing code and link. Model catalog and credentials come from your pi config in `~/.pi/agent` (override with `PI_CODING_AGENT_DIR`). No credentials? Use the offline reply model: `PI_DURABLE_T3_FAKE=1 pnpm start` (or with `-- --root …`).
-
-New threads start on the instance file's default model, else the first available one, and from a built-in base prompt (coding agent, its working directory, the platform). `instructions` appends a file's text to it, read at thread create: editing the file affects new threads only, and a missing file fails at start.
+pairing token is env-var-only, for tests. CORS is pinned to `web` when you set it; with `web` and
+`cors_origins` both unset the facet answers `Access-Control-Allow-Origin: *` — every call still needs a
+bearer token, so set `web` to pin it.
 
 ## Pair
 
@@ -86,25 +89,35 @@ Open the pairing link the host printed at start. With `web` set it is exactly:
 <web>/pair?host=<facet>#token=<code>      e.g.  http://127.0.0.1:5733/pair?host=http%3A%2F%2F127.0.0.1%3A3774#token=AbCdEf
 ```
 
-(For the T3 **desktop/mobile** app, choose **Add environment** and paste the facet's `/pair#token=<code>` link the host also prints.) Mint another code with `pnpm start pair --root <root>`.
+(For the T3 **desktop/mobile** app, choose **Add environment** and paste the facet's `/pair#token=<code>`
+link the host also prints.) Mint another code with `pnpm start -- pair --root <root>`.
+
+New threads take the model the client names (the picker lists your catalog); prompts run in the project's
+directory.
 
 ## Layout
 
-`src/main.ts` is the **reference host**: config, models, shutdown, wiring. `src/host-runtime.ts` opens the Harness (coding tools, base prompt, per-thread cwd); `src/threads.ts` is the threads layer over pi-durable; `src/t3/` is the facet (the only place Effect lives). `dev/` holds the setup and smoke scripts.
+`src/bridge.ts` is the one entry point; `src/threads.ts` the threads layer over pi-durable; `src/registry.ts`
+and `src/settings.ts` the two data-dir files; `src/t3/` the facet (the only place Effect lives).
+`examples/coding-agent/` is the example host (config, models, prompt, shutdown). `dev/` holds the setup and
+smoke scripts.
 
 ## Tests
 
-`pnpm test` and `pnpm typecheck` need no credentials and never touch `~/.pi` or the network. `test/live-model.test.ts` runs one real-model turn end to end, only with `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model>` set; it is skipped otherwise.
+`pnpm test` and `pnpm typecheck` need no credentials and never touch `~/.pi` or the network.
+`examples/coding-agent/live-model.test.ts` runs one real-model turn end to end, only with
+`PI_DURABLE_T3_LIVE_MODEL=<provider>/<model>` set; it is skipped otherwise.
 
-`pnpm smoke` drives the real T3 web app in a browser (pair → prompt → reply → undo) against a throwaway root on its own ports. Needs `web-dist/` and Chromium.
+`pnpm smoke` drives the real T3 web app in a browser (pair → prompt → reply → undo) against a throwaway root
+on its own ports (facet 4911, web 4920; override `FACET_PORT`/`WEB_PORT`). Needs `web-dist/` and Chromium.
 
 ## Capabilities
 
 [T3's API calls and what this host answers](docs/capabilities.md), marked ✅ works, 🔜 soon, 🕐 later,
 ❌ never, each with its reason. The short version: threads, prompts, steering, interrupts, per-thread
-models, undo, and the project registry (add/remove from T3's picker, the model default) work today; forks and
-renames are next; git, terminals, file panels and previews are refused on purpose, because the agent has `bash`
-and works in real repos itself.
+models, undo, T3's server settings, and the project registry work today; forks and renames are next; git,
+terminals, file panels and previews are refused on purpose, because the agent has `bash` and works in real
+repos itself.
 
 A refused call answers T3 with a message, so the UI shows why, and state is never left half-changed.
 Refused *on purpose* says so; refused *for now* says "yet".

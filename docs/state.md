@@ -35,7 +35,7 @@ We read all of it and keep no copy. The projection is rebuilt from the view on e
 | the threads document: one row per thread, pointing at the conversation that is its head | forever | an empty sidebar; conversations are intact and boot repair promotes the heads |
 | the removal record in that document: one id (the removed thread's head conversation) per removal — truth, not a cache: it is what makes "a deleted thread stays deleted" survive a restart; the promote path, the undo fork, and boot repair all read it | forever, append-only (one number per removal) | a prompt admitted before a delete could resurrect the thread at the next promote, undo, or boot repair |
 | applied undos, remembered so a retry does not fork twice | forever, append-only | a retried undo forks again |
-| `pi.agent` per thread: model, thinking level, working directory, instructions | with the thread; forks and undos inherit it | the thread falls back to the configured defaults |
+| `pi.agent` per thread: model, thinking level, working directory, instructions | with the thread; forks and undos inherit it | the thread configures from the caller's `newThread` hook |
 
 Applied undos and the removal record are the fields we write that grow with use (one entry per undo / per removal).
 The document checkpoints on every write, so growth costs rows in one base write, never a delta per mutation.
@@ -44,37 +44,40 @@ The document checkpoints on every write, so growth costs rows in one base write,
 
 | what | lifetime | if it's lost | kind |
 |---|---|---|---|
-| `auth.json`: the environment id, and hashes of pairing codes and tokens | forever | every client re-pairs; no conversation is affected | credential |
-| `models-store.json`: the model catalog, owned by ModelRuntime | rewritten at will | re-fetched from the providers; without a path under the root it lands in the working directory | derived |
+| `auth.json` (in the facet's state dir): the environment id, and hashes of pairing codes and tokens | forever | every client re-pairs; no conversation is affected | credential |
+| `projects.json` (in the data dir): the project registry — id, path, title per project | until the UI edits it | an empty registry; conversations keep the `cwd` their own records — names, not work | input, host-written |
+| `models-store.json`: the model catalog, owned by ModelRuntime (the example's file) | rewritten at will | re-fetched from the providers | derived |
 
-## Configuration, input only
+## The UI owns, through the host
 
-Two files, two tiers. `config.toml` is the integrator's (a UI must not set it); `settings.json` — the
-instance file, in the data dir — is the UI's, and the running host writes it on the UI's behalf. Both are
-*input*, never the record of what happened.
+`settings.json`, in the data dir, is **T3's server settings document** — the contracts' `ServerSettings`,
+stored the way T3's server stores it: a SPARSE JSON document that decodes over the schema's defaults (what
+the defaults would not produce is what the file holds). `server.updateSettings` applies T3's patch merge
+(nested keys merge, `undefined` keys skipped, everything else replaced), validates the merged document with
+the same decode the next boot performs, persists atomically, answers the FULL settings, and emits
+`settingsUpdated` on the config stream. `providerInstanceMutation` mutates the instance map (upsert/create
+set, delete removes). The bridge interprets nothing in it — a value the UI wrote is answered back as written.
+The one deviation from the contract's defaults: a document that does not name its `providerInstances` serves
+the `pi` instance enabled (T3's web app disables instances absent from the map; the entry is the one fact
+about this host's driver, and it disappears the moment a `providerInstanceMutation` names the instances).
 
-| what | lifetime | if it's lost |
-|---|---|---|
-| `config.toml`: listen address, web origin, the facet's `[t3]` settings, per-thread `instructions` | until the integrator edits it | the host refuses to start |
-| `settings.json` (the instance file): the project registry and the new-thread model/thinking defaults, in the data dir | until the UI edits it (the running host writes it: a delta on the document on disk, under a cross-process lock, to a unique temp file, `chmod`ed before the rename) | an empty registry and the first available model — a missing file is valid |
-| the environment | one run | defaults apply |
+Missing is valid (the contract defaults); unparseable is a fatal `ConfigError` naming the file — the host
+does not boot over the UI's document, and does not write over a document it cannot read (a mutation against a
+document the parser refuses is refused, byte-identical). Every write goes to a unique temp file (`wx`),
+`chmod`ed 0600 and fsynced, then renamed.
 
-`config.toml` is written by nobody at runtime. The instance file is **host-owned state shaped as input**: the
-running host rewrites it when the UI adds a project or changes the default model. The write is atomic (a unique temp
-file, `chmod`ed and fsynced, then renamed) so a crash never leaves a half-written registry, and it is a
-**read-modify-write under a lock file** so a peer process's edit is in the document the writer starts from: two hosts
-on one data dir is the documented dev setup, and a writer that rewrote the whole file from the copy it loaded at boot
-deleted the peer's title edit, its thinking level, its default model, without a trace. A document that the boot parser
-would refuse is never written over a good one — the keys it enforces (the path, the id) are enforced at mutation
-time, typed, before the write; and a mutation run against a document the parser fatal-refuses (not JSON, a document-level
-shape) is REFUSED naming the file and leaves it byte-identical — over a file the host cannot read it serves an empty
-registry and mutates nothing, so the empty registry is never written over the entries the broken file holds. A thread
-never reaches it. A project's id is stored when it was assigned: the client
-minted it (T3's UI sends a UUID and navigates to it — the host must answer with the same id after a restart), or
-the first mutation of a client-less registration pinned the id derived from the registration path (an id is assigned
-once and never re-derived, so a move cannot mint a new one). An entry that has never been mutated stores no id and
-derives it at read from the normalized path, so nothing has to remember it. The path is the uniqueness key in both
-cases, and the id is a guarded key: a mint for an id that is already taken is refused.
+The same rules read/write apply to `projects.json` (strict parser, the parser is the definition of writable:
+uniqueness of normalized paths and ids is enforced at mutation time, typed, before the write). A project's id
+is stored when it was assigned: the client minted it, or the first mutation of a client-less registration
+pinned the id derived from the normalized path — an id is assigned once and never re-derived, so a move
+cannot mint a new one. The path is the uniqueness key.
+
+Both files live in the data dir beside `durable.db`. **One host per data dir:** there is no cross-process
+lock and no merge-on-write protocol; the writer is a plain in-process read-modify-write. Two hosts on one
+data dir is not a supported setup.
+
+`config.toml` (the integrator's tier: listen, web origin, `[t3]`, the instructions file — the example's) is
+written by nobody at runtime.
 
 ## The bridge owns, in memory — all of it correct to lose
 
@@ -82,44 +85,22 @@ cases, and the id is a guarded key: a mint for an id that is already taken is re
 |---|---|---|
 | the per-thread view cache, its subscribers, and the undo overlay | while a client is watching | clients re-subscribe and get a fresh snapshot |
 | the thread list, shells | process | rebuilt at start |
-| the live project registry (the instance file's projects; ids stored when client-minted, else derived from each normalized path) | process, kept in sync with `settings.json` by a subscription | reread from the instance file at the next projection: a minted id is stored, a derived id is a function of the folder's path, so T3's selection for it survives |
-| command id → the first result, so a retry returns it | process | the retry recomputes; durable dedup still stops the second write |
-| project mutation receipts: command id → the project it produced, the deletion it made, or the refusal it was refused with, so a retry after a lost response is not planned again | process, bounded (the same bound as the command-id map: a receipt key is a client-chosen id, and the bound is the only memory a client can make the host spend on ids) | an old retry is treated as a fresh request: a create then answers the duplicate-path refusal, a delete the not-found — the answers a fresh request gets, never a corrupted one |
+| the live project registry (the file's projects; ids stored when client-minted, else derived from each normalized path) | process, kept in sync with `projects.json` by subscription | reread at the next boot: a minted id is stored, a derived id is a function of the folder's path |
+| command id → the first result, so a retried prompt command is not run twice | process, bounded (a command id is a client-chosen id, and the bound is the only memory a client can make the host spend on ids) | an old retry is treated as a fresh request; durable dedup still stops the second write |
 | the projection sequence clock | process | projections get new sequence numbers |
 | pairing tickets and rate-limit buckets (the bucket key is the connection's peer address — a header a client writes cannot buy a fresh bucket) | seconds | the code is redeemed again; the window restarts |
 
+Project mutations have NO receipt store: a retried `projects.mutate` re-plans against current state and gets
+the honest answer (the duplicate-path refusal, the not-found) — see [design.md](design.md), Invariants.
+
 ## Gaps
 
-Three review rounds' findings are closed on this tip: the boot is tolerant to every hand-edit shape (a bad entry is
-skipped with a warning, a file that is not JSON is served as an empty registry and read-only), a mutation against an
-unreadable file is refused and never rewrites it, a catalog-absent default warns and drops at boot, only successful
-results become receipts, a
-rename/move of a boot-loaded project emits a shell item, and a stored id is normalized on read. Two that were here
-(stored design, not defects) are settled:
+- **Durable storage is world-readable** (N4): `durable.db`/`-wal`/`-shm` land 0644 (every conversation,
+  prompt, the removal record) while `auth.json` is 0600 in a 0700 dir, and the host's own writes to
+  `settings.json`/`projects.json` are 0600. The fix is a chmod on the SQLite side files at open — the SQLite
+  layer owns their creation, so it is not a one-liner here.
+- **Provider instance defaults** are one deviation from T3's contract defaults (the `pi` entry, documented
+  above); the browser smoke exercises the picker with it.
 
-- **The client's message id** rides in the entry the host places the prompt as (an `app.user` entry's data), and its
-  store is deleted.
-- **Project identity is settled**: the id is minted by whoever registers the project — any id the contract's
-  `ProjectId` accepts is honored (trimmed, and a hand-edited stored id is normalized on read, so the id shown is the
-  id that names it: the UI's UUID, or a client-less registration's `p-<first 16 hex of sha256(normalized path)>`)
-  — and the normalized path is the uniqueness key. An id is assigned once and never re-derived: the first
-  mutation pins a derived id, so a rename is free, a root move keeps the id, and the project's threads follow.
-
-**Open (LOW / documented — none breaks a promise the docs make):**
-
-- **Durable storage is world-readable** (N4): `durable.db`/`-wal`/`-shm` land 0644 (every conversation, prompt, the
-  removal record) while `t3-auth/auth.json` is 0600 and its dir 0700; a hand-created `settings.json` keeps 0644 until
-  the host's first write (only `writeJsonAtomic` chmods). The fix is a chmod on the SQLite side files at open — the
-  SQLite layer owns their creation, so it is not a one-liner here.
-- **The cross-process lock's stale-steal** (D-1 / M6 / M7): a writer frozen inside the critical section past the
-  staleness window loses its update silently (both writers report success), its `finally` unlinks the stealer's lock,
-  and a lock left by a killed writer is reclaimed only after the full 10 s window. The coherent fix (a lock epoch, an
-  ownership-checked unlink, a liveness-based immediate reclaim, a fail-loudly write) is safety-critical and >30 lines —
-  written up in `.memory/night-log.md`.
-- **A host that booted tolerantly over a hand-edited file with a duplicate id/path** is read-only for writes that keep
-  the duplicate; a delete of the duplicate group heals it (the recoverable path this tip adds). "Service every write"
-  (apply the delta to the tolerantly-resolved document, normalizing the file on write) is >30 lines and changes the
-  disk-text form — written up in `.memory/night-log.md`.
-
-What is left is a transcript we do not own, one document of pointers, a credential file, and caches that are correct
-to lose.
+What is left is a transcript we do not own, one document of pointers, two small files, a credential file, and
+caches that are correct to lose.

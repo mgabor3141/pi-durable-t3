@@ -1,7 +1,7 @@
-// A SIGINT (and SIGTERM) mid-turn must stop the reference host fast: print "stopping", exit 0 within ~2 s, even when a
+// A SIGINT (and SIGTERM) mid-turn must stop the example host fast: print "stopping", exit 0 within ~2 s, even when a
 // turn is in flight on work that ignores its abort signal (a real provider's lingering HTTP stream — here a non-abortable
 // tool). A second signal exits immediately. This is the bounded shutdown `installShutdown` installs; the graceful
-// close alone can hang on a non-abortable in-flight invocation (see src/shutdown.ts). Hermetic: a child process on its
+// close alone can hang on a non-abortable in-flight invocation (see examples/coding-agent/shutdown.ts). Hermetic: a child process on its
 // own loopback port, a scripted faux model, a temp `PI_CODING_AGENT_DIR` (never `~/.pi`), no network.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
-const childScript = new URL("../src/testing/shutdown-child.ts", import.meta.url).pathname;
+const childScript = new URL("../../test/shutdown-child.ts", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-shutdown-"));

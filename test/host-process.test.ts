@@ -3,7 +3,7 @@
 // "ready" or a pairing link (B2); it must fail at start when there are no models; and the HTTP surface must answer as
 // T3 reads it (the Host guard, the thread-detail routes' auth and unknown-thread contracts).
 //
-// Each test spawns `node --experimental-strip-types src/main.ts` with the offline reply model on a loopback port chosen
+// Each test spawns `node --experimental-strip-types examples/coding-agent/host.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
 // never read. Ports here are their own (4901-4905, 4908) and distinct, so the tests can run in parallel.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -14,7 +14,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
-const main = new URL("../src/main.ts", import.meta.url).pathname;
+const main = new URL("../examples/coding-agent/host.ts", import.meta.url).pathname;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-host-proc-"));
@@ -46,7 +46,7 @@ async function writeRoot(name: string, port: number): Promise<string> {
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	// The integrator's `config.toml` (host-owned keys) and the instance file (the project registry the UI edits).
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
 	return root;
 }
 
@@ -204,218 +204,6 @@ it("fails at start, before ready, when no models are available (S1)", async () =
 	expect(out).toMatch(/no models are available/);
 	expect(out).not.toContain("pi-durable-t3 ready");
 }, 30_000);
-
-it("the thread-detail routes answer pairing state and an unknown thread as T3 reads them", async () => {
-	// Both `/api/orchestration/threads/:threadId*` routes share one preamble, and its two contracts are only visible
-	// over HTTP: an unpaired request is refused before any projection is read, and a thread this host does not know
-	// is the resource-not-found T3 renders as a missing thread. A fixed pairing token (env-var-only, for tests) makes
-	// the token exchange repeatable.
-	const port = 4908;
-	const root = await writeRoot("routes", port);
-	const pairingToken = "test-pairing-code-0123456789";
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: pairingToken });
-	try {
-		expect(await waitListening(port)).toBe(true);
-		const paired = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
-			method: "POST",
-			headers: { "content-type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-				subject_token: pairingToken,
-				subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-				requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-			}).toString(),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(paired.status).toBe(200);
-		const token = (await paired.json() as { access_token: string }).access_token;
-		expect(token.length).toBeGreaterThan(20);
-		const bearer = { authorization: `Bearer ${token}`, "x-t3-orchestration-protocol": "2" };
-		// A thread this host cannot have: 404 with the error tag T3 renders, on both routes. A thread id the host
-		// cannot mint (here: a leading dot) is the fast path to that answer; a deleted thread — and ANY well-formed
-		// id the host has never seen — reach the same one (H2: `#state` used to fabricate state for these, answering 200).
-		for (const path of ["/api/orchestration/threads/.nope", "/api/orchestration/threads/.nope/bounded",
-			"/api/orchestration/threads/zzz-never-created", "/api/orchestration/threads/zzz-never-created/bounded",
-			"/api/orchestration/threads/6f2f1c9a-0b1d-4e5f-8a7c-9d0e1f2a3b4c", "/api/orchestration/threads/6f2f1c9a-0b1d-4e5f-8a7c-9d0e1f2a3b4c/bounded"]) {
-			const unknown = await getJson(port, path, bearer);
-			expect([path, unknown.status]).toEqual([path, 404]);
-			expect(unknown.body._tag).toBe("EnvironmentResourceNotFoundError");
-			expect(unknown.body.reason).toBe("thread_not_found"); // the contract's required reason field
-		}
-		// A bogus thread probe must not leak a project: the shell's project list names only the configured folder.
-		const shell = await getJson(port, "/api/orchestration/shell", bearer);
-		expect(shell.status).toBe(200);
-		const roots = ((shell.body.projects ?? []) as { workspaceRoot: string }[]).map((project) => project.workspaceRoot);
-		expect(roots).toEqual([join(root, "projects/alpha")]);
-		// Unpaired: refused with the auth error, before the thread is looked up.
-		const unpaired = await getJson(port, "/api/orchestration/threads/.nope");
-		expect(unpaired.status).toBe(401);
-		expect(unpaired.body.code).toBe("auth_invalid");
-	} finally {
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
-}, 40_000);
-
-it("REST /api/projects/mutate adds a project (honoring the client's id), refuses a duplicate path, and removes it (files untouched)", async () => {
-	// The reachable project-management surface over the documented HTTP route, sharing one store with `projects.mutate`
-	// over `/ws`. A fixed pairing token (env-var-only) makes the exchange repeatable, exactly as the routes test does.
-	const port = 4909;
-	const root = await writeRoot("projects", port);
-	const pairingToken = "test-pairing-code-projects-0123";
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: pairingToken });
-	const target = join(root, "projects", "added");
-	const marker = join(target, "keep.txt");
-	try {
-		expect(await waitListening(port)).toBe(true);
-		const paired = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
-			method: "POST",
-			headers: { "content-type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-				subject_token: pairingToken,
-				subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-				requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-			}).toString(),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(paired.status).toBe(200);
-		const bearer = (paired.json() as Promise<{ access_token: string }>).then((b) => b.access_token);
-		const token = await bearer;
-		const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-
-		// Unpaired is refused (the same bearer guard as every route).
-		const unpaired = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ type: "project.create", commandId: "c0", projectId: "x", title: "x", workspaceRoot: target }),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(unpaired.status).toBe(401);
-
-		// Create: a project at a new path. The mutation carries a client id and the host HONORS it — the contract's
-		// ProjectId is a branded trimmed non-empty string, and T3's server commits the client's id verbatim; the
-		// old shape derived the id from the path and silently dropped the client's (review wire NEW-2). It creates
-		// the directory (createWorkspaceRootIfMissing).
-		const created = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: auth,
-			body: JSON.stringify({ type: "project.create", commandId: "c1", projectId: "client-minted", title: "Added", workspaceRoot: target, createWorkspaceRootIfMissing: true }),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(created.status).toBe(200);
-		const project = (await created.json()) as { id: string; workspaceRoot: string; title: string; deletedAt: string | null };
-		expect(project.workspaceRoot).toBe(target);
-		expect(project.title).toBe("Added");
-		expect(project.id).toBe("client-minted"); // the id the client minted is the id the host answers with
-
-		// It appears in the project list, and the directory exists (a marker written into it).
-		const list1 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string }[] };
-		expect(list1.projects.some((entry) => entry.id === project.id)).toBe(true);
-		await writeFile(marker, "keep me\n", "utf8");
-
-		// A duplicate path is refused (T3 refuses it too): the same folder under a different title.
-		const dup = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: auth,
-			body: JSON.stringify({ type: "project.create", commandId: "c2", projectId: "y", title: "Dup", workspaceRoot: target }),
-			signal: AbortSignal.timeout(5000),
-		});
-		const dupBody = (await dup.json()) as { _tag: string; message: string };
-		expect([dup.status, dupBody._tag, dupBody.message]).toEqual([409, "ProjectMutationError", expect.stringMatching(/already belongs to project/)]);
-
-		// Remove (force:true) drops the entry; the files on disk are untouched (T3's dialog promises exactly this).
-		const removed = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: auth,
-			body: JSON.stringify({ type: "project.delete", commandId: "c3", projectId: project.id, force: true }),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(removed.status).toBe(200);
-		const list2 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string }[] };
-		expect(list2.projects.some((entry) => entry.id === project.id)).toBe(false);
-		expect((await readFile(marker, "utf8"))).toBe("keep me\n");
-
-		// (H1a) A create naming a path that exists as a FILE is refused — the typed project error names the path, the
-		// mkdir failure is not swallowed, and no entry is stored (a registered file must never brick the next boot).
-		const file = join(root, "projects", "afile");
-		await writeFile(file, "not a directory\n", "utf8");
-		const fileCreate = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: auth,
-			body: JSON.stringify({ type: "project.create", commandId: "c4", projectId: "z", title: "File", workspaceRoot: file, createWorkspaceRootIfMissing: true }),
-			signal: AbortSignal.timeout(5000),
-		});
-		const fileBody = (await fileCreate.json()) as { _tag: string; message: string };
-		expect([fileCreate.status, fileBody._tag]).toEqual([400, "ProjectMutationError"]);
-		expect(fileBody.message).toContain(file); // names the path
-		const list3 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { workspaceRoot: string }[] };
-		expect(list3.projects.some((entry) => entry.workspaceRoot === file)).toBe(false); // no entry stored
-	} finally {
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
-}, 40_000);
-
-it("a settings.json naming a FILE as a project: the host binds, warns naming the path, and the UI can delete the entry (H1b)", async () => {
-	// The bricking path (H1): the instance file names a path that is an existing file. The boot mkdir used to throw
-	// ENOTDIR before the listener bound — the process died at boot and the UI could not delete the entry that killed
-	// it. Now: boot catches per project, warns through onWarn, and continues to the bind.
-	const port = 4910;
-	const root = join(scratch, "boot-file");
-	await mkdir(join(root, "projects/alpha"), { recursive: true });
-	const bad = join(root, "abigfile");
-	await writeFile(bad, "I am a file\n", "utf8");
-	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [{ path: bad, title: "bad" }, { path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
-	const pairingToken = "test-pairing-code-boot-file-01";
-	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: pairingToken });
-	try {
-		// The host BINDS — the defect was dying before this line could ever pass.
-		expect(await waitListening(port)).toBe(true);
-		// It warns, naming the bricking path.
-		const out = host.out();
-		expect(out).toContain("warn");
-		expect(out).toContain(bad);
-		// The UI works: pair, list projects (both entries), and DELETE the entry that would have bricked it.
-		const paired = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
-			method: "POST",
-			headers: { "content-type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-				subject_token: pairingToken,
-				subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-				requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-			}).toString(),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(paired.status).toBe(200);
-		const token = (await paired.json() as { access_token: string }).access_token;
-		const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-		const list1 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { id: string; workspaceRoot: string }[] };
-		const badEntry = list1.projects.find((entry) => entry.workspaceRoot === bad);
-		expect(badEntry, "the registered file is listed (the UI can see what to delete)").toBeDefined();
-		// Other projects are listed and served (the shell answers over the bound listener).
-		expect(list1.projects.some((entry) => entry.workspaceRoot === join(root, "projects/alpha"))).toBe(true);
-		const shell = await fetch(`http://127.0.0.1:${port}/api/orchestration/shell`, { headers: auth, signal: AbortSignal.timeout(5000) });
-		expect(shell.status).toBe(200);
-		// Delete the bricking entry — the operation the defect made impossible.
-		const removed = await fetch(`http://127.0.0.1:${port}/api/projects/mutate`, {
-			method: "POST",
-			headers: auth,
-			body: JSON.stringify({ type: "project.delete", commandId: "d1", projectId: badEntry!.id, force: true }),
-			signal: AbortSignal.timeout(5000),
-		});
-		expect(removed.status).toBe(200);
-		const list2 = await (await fetch(`http://127.0.0.1:${port}/api/projects`, { headers: auth, signal: AbortSignal.timeout(5000) })).json() as { projects: { workspaceRoot: string }[] };
-		expect(list2.projects.some((entry) => entry.workspaceRoot === bad)).toBe(false);
-		// The file on disk is untouched (deletes never touch files).
-		expect(await readFile(bad, "utf8")).toBe("I am a file\n");
-	} finally {
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
-}, 40_000);
 
 it("on loopback, rejects a non-loopback Host header — DNS-rebinding guard (S4)", async () => {
 	const port = 4905;

@@ -1,12 +1,12 @@
-// A deterministic, network-free model for the running host (`PI_DURABLE_T3_FAKE=1`): replies to every turn with fixed text.
-// Used by the browser smoke so a prompt shows a reply offline. Not for tests (those use the scripted model directly).
+// A deterministic, network-free model for the running example (`PI_DURABLE_T3_FAKE=1`): replies to every turn with
+// fixed text. Used by the browser smoke so a prompt shows a reply offline. Not for tests (those use the scripted
+// model directly).
 import { createModels, fauxAssistantMessage, fauxProvider, type Models } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
 
 type ReplyModel = {
 	readonly models: Models;
 	readonly modelRef: ModelRef;
-	readonly catalog: { provider: string; modelId: string; name: string }[];
 };
 
 export function createReplyModel(text = "OK — this is the offline reply model.", provider = "reply"): ReplyModel {
@@ -20,6 +20,5 @@ export function createReplyModel(text = "OK — this is the offline reply model.
 	return {
 		models,
 		modelRef: { provider, modelId },
-		catalog: faux.models.map((model) => ({ provider, modelId: model.id, name: model.name ?? model.id })),
 	};
 }

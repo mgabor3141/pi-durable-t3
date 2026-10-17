@@ -161,7 +161,7 @@ export function makeServerLayer(deps: {
 
 	const routes = Layer.mergeAll(
 		HttpRouter.add("GET", "/.well-known/t3/environment", Effect.sync(() => json(descriptor()))),
-		// Printed pairing URLs point here; a desktop browser opening one gets instructions instead of a 404.
+		// Printed pairing URLs point here; a desktop browser opening one gets a pairing screen instead of a 404.
 		HttpRouter.add(
 			"GET",
 			"/pair",

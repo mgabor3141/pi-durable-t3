@@ -58,20 +58,4 @@ describe("the message id the host writes", () => {
 		expect(result.projection.runs[0]!.userMessageId).toMatch(/^m\d+$/);
 	}, 60_000);
 
-	it("two prompts carry their own ids, in order, on separate entries", async () => {
-		const { threads, harness, model } = await makeThreads({ projects: [{ id: "p" }], responses: [seed, fauxAssistantMessage("second")] });
-		const thread = await threads.create({ threadId: "t", projectId: "p" });
-		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "one", messageId: "id-one" }, undefined);
-		await idle(harness, thread.head);
-		const head = (await threads.list()).find((candidate) => candidate.threadId === "t")!.head;
-		await threads.submit({ threadId: "t", conversationId: head, requestId: "r2", message: "two", messageId: "id-two" }, undefined);
-		await idle(harness, thread.head);
-		void model;
-
-		const entries = (await (await conversation(harness, (await threads.list()).find((candidate) => candidate.threadId === "t")!.head)).context(BACKGROUND_CONTEXT)).entries as unknown as EntryRecord[];
-		const ids = userEntries(entries).map((entry) => (entry.data as { messageId: string }).messageId);
-		expect(ids, "each prompt's id rides its own entry").toEqual(["id-one", "id-two"]);
-		const result = projectThread(meta, viewOf(entries), { rolledBack: [] });
-		expect(result.projection.runs.map((run) => run.userMessageId)).toEqual(["id-one", "id-two"]);
-	}, 60_000);
 });

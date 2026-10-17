@@ -1,11 +1,7 @@
-// The removal's promises at the threads layer (review store N3 + conc N4).
+// The removal's promises at the threads layer (review conc N4; the repair-side tombstone pins ride with
+// `threads-tombstone.test.ts`).
 //
-// (a) Boot repair over a document with removals: the tombstone check was `removed.includes(id)` per scanned
-//     conversation — quadratic in removals for a store that only grows — and it logged one line per tombstoned
-//     conversation, each with an extra `owedIn` read. The scan's job is to SKIP tombstones; the operator's job is
-//     one line that says how many. Probe: three removed threads, one repair → exactly one summary warning
-//     naming the count; the document stays empty.
-// (b) The abort-before-commit window: `remove` interrupts the head, THEN commits the row-drop + tombstone. A
+// The abort-before-commit window: `remove` interrupts the head, THEN commits the row-drop + tombstone. A
 //     prompt admitted in that window — the row still exists, so admission succeeds — keeps streaming after the
 //     tombstone lands. The tombstone keeps it from resurrecting the thread; the removal must also win the run:
 //     a thread the document has removed has no live turn. Probe: start a long streaming run, begin the removal
@@ -17,25 +13,6 @@ import { Threads } from "../src/threads.ts";
 import { idle, makeThreads } from "./threads-harness.ts";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-describe("repair over tombstones", () => {
-	it("(a) one summary line names the count — not one line per tombstone; the document stays empty (store N3)", async () => {
-		const f = await makeThreads({ projects: [{ id: "p" }] });
-		const { threads } = f;
-		for (const id of ["gone-1", "gone-2", "gone-3"]) {
-			await threads.create({ threadId: id, projectId: "p" });
-			await threads.remove(id);
-		}
-
-		const warnings: string[] = [];
-		const reopening = new Threads({ harness: f.harness, registry: f.registry, defaultModel: f.model.modelRef, onWarn: (message) => warnings.push(message) });
-		await reopening.repair();
-
-		expect(await threads.list(), "nothing is adopted: the tombstones hold").toHaveLength(0);
-		expect(warnings, `the boot log says once what happened, naming the count — not once per tombstone: ${JSON.stringify(warnings)}`).toHaveLength(1);
-		expect(warnings[0], "the summary names the count").toContain("3");
-	}, 30_000);
-});
 
 describe("the removal wins the run", () => {
 	it("(b) a prompt admitted in the abort→commit window is interrupted by the removal (conc N4)", async () => {
@@ -65,7 +42,7 @@ describe("the removal wins the run", () => {
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		});
-		const threads = new Threads({ harness: widened, registry: f.registry, defaultModel: model.modelRef });
+		const threads = new Threads({ harness: widened, registry: f.registry, newThread: () => ({ model: model.modelRef }) });
 		const t = await threads.create({ threadId: "doomed", projectId: "p" });
 		// Run one is quick to interrupt; run two is a 200 s stream that only an abort can end.
 		model.respond(fauxAssistantMessage("ack"), fauxAssistantMessage("y".repeat(400)));

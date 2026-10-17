@@ -39,7 +39,7 @@ async function start(name: string, port: number) {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(root, "settings.json"), JSON.stringify({ projects: [], defaults: {} }), "utf8");
+	await writeFile(join(root, "projects.json"), JSON.stringify({ projects: [] }), "utf8");
 	const host = launch(root, port, { PI_DURABLE_T3_PAIRING_TOKEN: TOKEN }, agentDir);
 	launched.push(host);
 	if (!(await waitListening(port))) throw new Error(`host did not bind ${port}: ${host.out()}`);

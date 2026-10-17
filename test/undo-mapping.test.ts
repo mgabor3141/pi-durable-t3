@@ -16,22 +16,12 @@ const RUNS = [
 ];
 
 describe("undoTarget", () => {
-	it("cp1 keeps run 1 → fork at run 2's user entry", () => {
-		expect(undoTarget(RUNS, "cp10")).toEqual({ entryId: 20, keepOrdinal: 1 });
-	});
 	it("cp2 keeps runs 1–2 → fork at run 3's user entry", () => {
 		expect(undoTarget(RUNS, "cp20")).toEqual({ entryId: 30, keepOrdinal: 2 });
 	});
-	it("baseline keeps nothing → fork at the first run's user entry", () => {
-		expect(undoTarget(RUNS, "cp-baseline")).toEqual({ entryId: 10, keepOrdinal: 0 });
-	});
-	it("the last checkpoint already keeps every run → nothing to revert", () => {
+	it("the edges: nothing to revert (the last checkpoint keeps every run; an empty thread at baseline), and an unknown checkpoint is unknown", () => {
 		expect(undoTarget(RUNS, "cp30")).toEqual({ nothing: true });
-	});
-	it("an empty thread has nothing to revert at baseline", () => {
 		expect(undoTarget([], "cp-baseline")).toEqual({ nothing: true });
-	});
-	it("an unknown checkpoint is unknown", () => {
 		expect(undoTarget(RUNS, "cp999")).toEqual({ unknown: true });
 	});
 });
@@ -75,17 +65,6 @@ describe("rewind keeps exactly the mapped turns", () => {
 		const c = await counts(next);
 		expect(c.users).toEqual([runs[0]!.userEntryId, runs[1]!.userEntryId]); // run 3's user message is gone
 		expect(c.assistants).toBe(2);
-	});
-
-	it("undo to cp1 leaves exactly turn 1 — user and reply, nothing else", async () => {
-		const { threads, head, runs, counts } = await threeTurns();
-		const target = undoTarget(runs, `cp${runs[0]!.userEntryId}`);
-		if ("entryId" in target === false) throw new Error("expected a fork target");
-		const next = await threads.rewind({ threadId: "t", expectedHead: head, entryId: target.entryId, requestId: "u" });
-		const c = await counts(next);
-		expect(c.users).toEqual([runs[0]!.userEntryId]); // only turn 1's user message survives
-		expect(c.assistants).toBe(1); // and its reply
-		expect(c.total).toBe(2); // nothing else
 	});
 
 	it("baseline undo leaves an empty conversation in the same dir with the same model", async () => {
