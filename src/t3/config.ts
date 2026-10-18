@@ -14,6 +14,8 @@ export interface FacetConfig {
 	readonly scratchDir: string | undefined;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];
+	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: none, as before. */
+	readonly staticDir: string | undefined;
 }
 
 /** The fully-assembled facet config: the integrator's static fields plus the two live sources of truth. */

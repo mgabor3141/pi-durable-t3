@@ -22,7 +22,7 @@ function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
 		scratchDir: undefined,
 		tokenTtlSeconds: 60,
 		settings: ServerSettingsStore.open("/tmp/pi-durable-t3-project-id-unused"),
-		corsOrigins: [],
+		corsOrigins: [], staticDir: undefined,
 		registry: testRegistry(projects.map((project) => ({ id: project.id, cwd: project.path }))),
 	};
 	// `projects()` never touches the host, so an unloaded one is enough to construct a Bridge.

@@ -159,7 +159,7 @@ it("a thread.create racing the forced delete leaves no row under the removed pro
 		await host.load([createServerFacet(f.threads, f.model.models)]);
 		await host.ready();
 		const bridge = new Bridge(
-			{ host: "127.0.0.1", port: 0, label: "t", stateDir: f.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], registry: f.registry },
+			{ host: "127.0.0.1", port: 0, label: "t", stateDir: f.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], staticDir: undefined, registry: f.registry },
 			{ info: () => {}, warn: () => {} },
 			host,
 		);

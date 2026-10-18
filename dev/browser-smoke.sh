@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# Run the browser smokes end-to-end in a throwaway environment: a fresh root, the host (offline reply model) on the
-# facet port, the pinned T3 web app on a static port, then the Playwright flows. Cleans up only the processes it starts.
+# Run the browser smokes end-to-end in a throwaway environment: a fresh root and the host (offline reply model) on the
+# facet port — which also serves the built web app (the host serves the repo's web-dist). No separate web server: the
+# web app's "This machine" (primary environment) IS the facet. Cleans up only the processes it starts.
 #
 #   dev/browser-smoke.sh
-# Env overrides: FACET_PORT (default 4911), WEB_PORT (default 4920), WEB_DIST (default the repo's web-dist, built by
-# `pnpm setup:t3`), CHROMIUM (default /usr/bin/chromium). Ports avoid the default listen port so both can run side by side.
+# Env overrides: FACET_PORT (default 4911), WEB_PORT (default 4920, unused: the web app is served from the facet),
+# WEB_DIST (default the repo's web-dist, fetched by `pnpm setup:t3`), CHROMIUM (default /usr/bin/chromium). Ports avoid
+# the default listen port so both can run side by side.
 #
-# Two smokes share one root and one web app:
+# Four smokes share one root and one web app (the host serves it at the facet origin):
 #   1. pair → prompt → reply → undo (test/e2e/browser-smoke.ts)
 #   2. send → kill the host mid-turn → restart → the client shows the held message exactly once
 #      (test/e2e/crash-restart-browser.ts; this shell owns the host process, so it does the kill and the restart, and
 #       hands off to the browser through files).
+#   3. add a project from the picker, create a thread in it, remove it; the files on disk are untouched
+#      (test/e2e/project-flow.ts).
+#   4. the pi host is "This machine"; mint a pairing link in Settings → Connections and see the device list
+#      (test/e2e/connections-flow.ts).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 FACET_PORT="${FACET_PORT:-4911}"
-WEB_PORT="${WEB_PORT:-4920}"
+WEB_PORT="${WEB_PORT:-4920}"          # unused: the web app is served from the facet origin, not a separate port.
 WEB_DIST="${WEB_DIST:-$here/web-dist}"
 CHROMIUM="${CHROMIUM:-/usr/bin/chromium}"
 root="$(mktemp -d "${TMPDIR:-/tmp}/pi-durable-t3-smoke-XXXXXX")"
@@ -34,12 +40,11 @@ trap cleanup EXIT
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/t3"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
-web = "http://127.0.0.1:$WEB_PORT"
 TOML
-# `web` names the web app's origin: the nightly fetches /.well-known/t3/environment over HTTP (cross-origin), so the
-# bridge must reflect that origin in CORS. The desktop app (t3code://app) is allowed by default; the served SPA needs it.
-# The project registry lives in the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server
-# settings) is absent: the host answers the contract's defaults, with the pi provider instance enabled.
+# The host serves the web app from its own origin (the repo's web-dist), so there is no web origin to trust in CORS:
+# the desktop app (t3code://app) is allowed by default; the served SPA is same-origin. The project registry lives in
+# the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server settings) is absent: the host
+# answers the contract's defaults, with the pi provider instance enabled.
 cat > "$root/t3/projects.json" <<JSON
 {
   "projects": [
@@ -55,7 +60,7 @@ mint_code() {
     | sed -n 's/^Pairing code (single use): //p' | head -1
 }
 
-echo "root=$root  facet=127.0.0.1:$FACET_PORT  web=127.0.0.1:$WEB_PORT  web-dist=$WEB_DIST"
+echo "root=$root  facet=127.0.0.1:$FACET_PORT (serves the web app from the facet origin)  web-dist=$WEB_DIST"
 
 start_host() {
   PI_DURABLE_T3_FAKE=1 \
@@ -72,16 +77,14 @@ start_host() {
 # Start the host (offline reply model) and wait until it is listening.
 start_host || { echo "facet did not start:"; cat "$root/host.log"; exit 1; }
 
+# The web app is served from the facet origin; the smoke opens it there (WEB == the facet).
+FACET="http://127.0.0.1:$FACET_PORT"
 # Codes are single-use: mint one per browser flow, against the running host's bridge dir.
 PAIR_TOKEN="$(mint_code)"
 [ -n "$PAIR_TOKEN" ] || { echo "could not mint a pairing code"; cat "$root/host.log"; exit 1; }
 
-# Serve the pinned web app as an SPA.
-node "$here/dev/serve-static.mjs" "$WEB_DIST" "$WEB_PORT" > "$root/web.log" 2>&1 &
-pids+=("$!")
-
 set +e
-T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$PAIR_TOKEN" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
+T3_WEB="$FACET" BRIDGE="$FACET" PAIR="$PAIR_TOKEN" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
   node --experimental-strip-types "$here/test/e2e/browser-smoke.ts"
 status=$?
 set -e
@@ -93,7 +96,7 @@ if [ "$status" -eq 0 ]; then
   CRASH_TEXT="smoke crash $(date +%s)-$RANDOM"
   SENT_FILE="$root/crash-sent"; RESTARTED_FILE="$root/crash-restarted"; CRASH_FILE="$root/crash-thread"
   set +e
-  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
+  T3_WEB="$FACET" BRIDGE="$FACET" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
     CRASH_TEXT="$CRASH_TEXT" CRASH_FILE="$CRASH_FILE" SENT_FILE="$SENT_FILE" RESTARTED_FILE="$RESTARTED_FILE" \
     node --experimental-strip-types "$here/test/e2e/crash-restart-browser.ts" &
   crash_pid="$!"
@@ -129,7 +132,7 @@ if [ "$status" -eq 0 ]; then
   mkdir -p "$root/projects/newproj"
   printf 'do not delete me\n' > "$root/projects/newproj/keep.txt"
   set +e
-  T3_WEB="http://127.0.0.1:$WEB_PORT" BRIDGE="http://127.0.0.1:$FACET_PORT" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
+  T3_WEB="$FACET" BRIDGE="$FACET" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
     PICK_TARGET="$root/projects/newproj" PICK_MARKER="$root/projects/newproj/keep.txt" \
     node --experimental-strip-types "$here/test/e2e/project-flow.ts"
   flow_status=$?
@@ -141,8 +144,18 @@ if [ "$status" -eq 0 ]; then
   [ "$flow_status" -ne 0 ] && status="$flow_status"
 fi
 
+# Smoke 4: Settings → Connections over the same-origin web app — the pi host is the primary environment, the browser
+# mints a pairing link in the UI, and the device list shows its own session.
+if [ "$status" -eq 0 ]; then
+  set +e
+  T3_WEB="$FACET" BRIDGE="$FACET" PAIR="$(mint_code)" PAIR2="$(mint_code)" CHROMIUM="$CHROMIUM" \
+    node --experimental-strip-types "$here/test/e2e/connections-flow.ts"
+  conn_status=$?
+  set -e
+  [ "$conn_status" -ne 0 ] && status="$conn_status"
+fi
+
 if [ "$status" -ne 0 ]; then
   echo "--- host.log ---"; cat "$root/host.log"
-  echo "--- web.log ---"; cat "$root/web.log"
 fi
 exit "$status"

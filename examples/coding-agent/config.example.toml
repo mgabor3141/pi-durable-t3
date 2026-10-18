@@ -8,10 +8,9 @@
 # t3/ pairs with durable.db: back up and move them together.
 # Projects and the default model are not set here; the T3 UI edits them.
 
-# listen = "127.0.0.1:3774"                     # where T3 connects; a tailnet IP to reach it over Tailscale
-# web = "http://127.0.0.1:5733"                 # your T3 web app: `pair` prints a ready link, and its origin may call
+# listen = "127.0.0.1:3774"                     # where T3 connects, and where the web app is served (open / on it); a tailnet IP over Tailscale
 # label = "pi"                                  # the computer's name in T3
 # instructions = "AGENTS.md"                    # added to every thread's system prompt, re-read each turn (relative to the data dir)
 # scratch_dir = "scratch"                       # "No project" root (relative to the data dir)
 # token_ttl_days = 90                           # how long a paired device stays signed in
-# cors_origins = ["t3code://app", "<web origin>"]  # browser origins allowed to call; [] allows any
+# cors_origins = ["t3code://app"]               # extra browser origins allowed to call; [] allows any. The web app is served same-origin, so it needs no entry; add one for a web app served from a foreign origin.

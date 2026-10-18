@@ -12,17 +12,19 @@ From the repo root:
 
 ```sh
 pnpm install
-pnpm setup:t3     # fetch T3 at the pinned commit, vendor its contracts, build the web app
-pnpm start        # the agent, on 127.0.0.1:3774
+pnpm setup:t3     # fetch T3 at the pinned commit, vendor its contracts, download its web app
+pnpm start        # the agent; it serves T3's web app on 127.0.0.1:3774
 pnpm start pair   # a single-use pairing code and links
 ```
 
-**Desktop app:** add a computer and paste the `http://127.0.0.1:3774/pair#token=…` link.
-**Web app:** run `pnpm web` (port 5733), set `web = "http://127.0.0.1:5733"` in the config, and open the
-first link `pair` prints.
+The host serves T3's web app from its own origin, so `pair` prints one link
+(`http://127.0.0.1:3774/pair#token=…`). **Open it in a browser:** the page pairs the browser and lands you in
+the app, where this machine (the agent) is the primary environment. You can add a project (Settings →
+Connections → Add a project), start a thread, or start one without a project.
 
-Then add a project on the **pi** computer, or start a thread without one. T3's first-run wizard lists only
-Codex and Claude as agents; that's expected.
+You can also paste the same link into T3's **desktop app** to add this machine as a second computer there. The
+app's first-run wizard lists only Codex and Claude as agents to add; that's expected (pi is already the
+primary, served here).
 
 - Models and credentials come from `~/.pi/agent` (or `PI_CODING_AGENT_DIR`). None configured:
   `PI_DURABLE_T3_FAKE=1 pnpm start` uses an offline reply model.
@@ -33,10 +35,12 @@ Codex and Claude as agents; that's expected.
 Optional: `~/.config/pi-durable-t3/config.toml` (`$XDG_CONFIG_HOME`). [`config.example.toml`](config.example.toml)
 lists every key with its default. Most map straight onto `attachT3` options:
 
+The web app is served from the host's own origin (the built app lives in the repo's `web-dist/`, overridable
+with `PI_DURABLE_T3_WEB_DIST`); there is no separate web server.
+
 | Key | `attachT3` option |
 |---|---|
 | `listen` | `listen` |
-| `web` | `webAppUrl` (and `pair` prints a link for it) |
 | `label` | `label` |
 | `scratch_dir` | `scratchDir` |
 | `token_ttl_days` | `tokenTtlSeconds` |
@@ -55,10 +59,14 @@ In `~/.local/share/pi-durable-t3/` (`$XDG_DATA_HOME`), or `<dir>` with `--root`:
 | `t3/` | `t3-settings.json`, `projects.json`, `auth.json` | the bridge (`stateDir`) |
 | `scratch/` | one folder per "No project" thread | agent work output |
 
+The web app is served from the repo's `web-dist/` (T3's own build, fetched by `setup:t3`, overridable with
+`PI_DURABLE_T3_WEB_DIST`), not the data dir — a build artifact, not runtime state.
+
 `t3/` pairs with `durable.db`: back up and move them together. A file that doesn't parse stops the host with
 a message naming it.
 
 ## Over Tailscale
 
-Set `listen` to the machine's tailnet IP (no TLS; the tailnet is the boundary). If you serve the web app
-over the tailnet too, point `web` at that URL.
+Set `listen` to the machine's tailnet IP (no TLS; the tailnet is the boundary). The host serves the web app on
+that same origin, so a browser pointed at the pairing link (`http://<tailnet-ip>:3774/pair#token=…`) pairs and
+opens the app there; the browser-session cookie is bound to that host.

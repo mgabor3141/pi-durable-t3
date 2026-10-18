@@ -42,7 +42,9 @@ export interface StoredToken {
 	hash: string;
 	subject: string;
 	scopes: string[];
-	method: "bearer-access-token";
+	/** How the client presents this session: a bearer access token (the `/oauth/token` path), or the browser session
+	 * cookie the same-origin web app sends (`./http.ts`). T3's `ServerAuthSessionMethod`. */
+	method: "bearer-access-token" | "browser-session-cookie";
 	label?: string;
 	ipAddress?: string;
 	userAgent?: string;
@@ -355,8 +357,57 @@ export class AuthStore {
 	verifyBearer(header: string | undefined): StoredToken | undefined {
 		const match = /^(?:Bearer|DPoP)\s+(.+)$/i.exec(header ?? "");
 		if (!match) return undefined;
-		const tokenHash = hash(match[1]!.trim());
+		return this.#findByToken(match[1]!.trim());
+	}
+
+	/** The session a browser session cookie carries, given the raw cookie value (its token, hashed against the store).
+	 * The same-origin web app authenticates every call with this cookie, not a bearer. */
+	verifySessionToken(token: string): StoredToken | undefined {
+		return this.#findByToken(token);
+	}
+
+	#findByToken(token: string): StoredToken | undefined {
+		const tokenHash = hash(token);
 		return this.#read().tokens.find((t) => t.expiresAt > Date.now() && sameHash(t.hash, tokenHash));
+	}
+
+	/** Exchange a pairing credential for a BROWSER session: the same one-time exchange as `exchange`, but the session
+	 * is a `browser-session-cookie` (the value the same-origin web app's cookie carries). Mirrors T3's
+	 * `createBrowserSession`: the grant is consumed, and a previous browser session (the caller's own cookie) is
+	 * replaced so a re-pair in one browser leaves one live session, not a pile. */
+	createBrowserSession(code: string, presented: ClientMetadata, previousSessionId?: string): { session: IssuedSession } | { refused: "invalid-credential" } {
+		const now = Date.now();
+		const codeHash = hash(code);
+		const data = this.#read();
+		const index = data.pairings.findIndex((pairing) => pairing.expiresAt > now && sameHash(pairing.hash, codeHash));
+		if (index < 0) return { refused: "invalid-credential" };
+		const grant = data.pairings[index]!;
+		const token = newSecret(32);
+		const session: StoredToken = {
+			id: randomUUID(),
+			hash: hash(token),
+			subject: grant.subject,
+			scopes: [...grant.scopes],
+			method: "browser-session-cookie",
+			...(grant.label !== undefined ? { label: grant.label } : presented.label === undefined ? {} : { label: presented.label }),
+			...(presented.ipAddress === undefined ? {} : { ipAddress: presented.ipAddress }),
+			...(presented.userAgent === undefined ? {} : { userAgent: presented.userAgent }),
+			deviceType: presented.deviceType ?? "unknown",
+			...(presented.os === undefined ? {} : { os: presented.os }),
+			...(presented.browser === undefined ? {} : { browser: presented.browser }),
+			createdAt: now,
+			expiresAt: now + this.#ttlMs,
+		};
+		const kept = previousSessionId === undefined ? data.tokens : data.tokens.filter((t) => t.id !== previousSessionId);
+		this.#write({
+			...data,
+			pairings: data.pairings.filter((_, at) => at !== index),
+			tokens: [...kept.filter((stored) => stored.expiresAt > now), session],
+		});
+		this.#emit({ type: "pairingLinkRemoved", id: grant.id });
+		if (previousSessionId !== undefined) this.#emit({ type: "clientRemoved", sessionId: previousSessionId });
+		this.#emit({ type: "clientUpserted", session });
+		return { session: { token, expiresIn: Math.floor(this.#ttlMs / 1000), scopes: session.scopes, session } };
 	}
 
 	/** A one-shot WebSocket ticket for the bearer token with this hash. */

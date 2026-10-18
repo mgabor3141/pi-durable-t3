@@ -11,11 +11,10 @@ const root = "/srv/host-root";
 describe("config.toml", () => {
 	it("every key parses", () => {
 		const config = parseConfigToml(
-			`listen = "0.0.0.0:9000"\nweb = "http://localhost:5733"\ninstructions = "AGENTS.md"\nlabel = "studio"\nscratch_dir = "ws-scratch"\ntoken_ttl_days = 7\ncors_origins = ["http://a", "http://b"]\n`,
+			`listen = "0.0.0.0:9000"\ninstructions = "AGENTS.md"\nlabel = "studio"\nscratch_dir = "ws-scratch"\ntoken_ttl_days = 7\ncors_origins = ["http://a", "http://b"]\n`,
 			root,
 		);
 		expect(config.listen).toEqual({ host: "0.0.0.0", port: 9000 });
-		expect(config.webAppUrl).toBe("http://localhost:5733");
 		expect(config.instructionsPath).toBe(join(root, "AGENTS.md"));
 		expect(config.label).toBe("studio");
 		expect(config.scratchDir).toBe(join(root, "ws-scratch"));
@@ -26,7 +25,6 @@ describe("config.toml", () => {
 	it("a minimal file carries the defaults", () => {
 		const config = parseConfigToml(``, root);
 		expect(config.listen).toEqual({ host: "127.0.0.1", port: 3774 });
-		expect(config.webAppUrl).toBeUndefined();
 		expect(config.instructionsPath).toBeUndefined();
 		expect(config.label).toBe("pi");
 		expect(config.tokenTtlSeconds).toBe(90 * 86_400);
@@ -37,8 +35,8 @@ describe("config.toml", () => {
 	});
 
 	it("CORS is the bridge default when unset, and an override wins", () => {
-		expect(parseConfigToml(``, root).corsOrigins, "unset: the bridge's default (desktop app + web)").toBeUndefined();
-		expect(parseConfigToml(`web = "http://127.0.0.1:5733"\ncors_origins = ["http://a"]\n`, root).corsOrigins).toEqual(["http://a"]);
+		expect(parseConfigToml(``, root).corsOrigins, "unset: the bridge's default").toBeUndefined();
+		expect(parseConfigToml(`cors_origins = ["http://a"]\n`, root).corsOrigins).toEqual(["http://a"]);
 	});
 
 	it("listen must be host:port with a valid, explicit port (S5)", () => {

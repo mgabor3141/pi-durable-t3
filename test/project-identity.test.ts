@@ -30,7 +30,7 @@ describe("a project id is minted by whoever registers it", () => {
 			const root = join(dir, "proj");
 			await mkdir(root, { recursive: true });
 			const registry = await FileProjectRegistry.open(dir);
-			const config: BridgeConfig = { host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(join(dir, "settings-store")), corsOrigins: [], registry };
+			const config: BridgeConfig = { host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(join(dir, "settings-store")), corsOrigins: [], staticDir: undefined, registry };
 			const bridge = new Bridge(config, log, createHost({ name: "server" }));
 
 			const clientProjectId = randomUUID(); // exactly what `newProjectId()` mints in the web app.

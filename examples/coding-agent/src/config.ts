@@ -38,7 +38,6 @@ export type HostConfig = {
 	readonly configFile: string; // the `config.toml` this config was read from (for logging and error messages).
 	readonly dataDir: string; // where the harness files (durable storage, models store) live, and what relative paths resolve under.
 	readonly listen: { readonly host: string; readonly port: number };
-	readonly webAppUrl: string | undefined; // web app base URL; prints a ready-to-open pairing link at start.
 	readonly modelsStorePath: string; // pi-ai models store, under the data dir so `~/.pi/agent` is never written.
 	/** Absolute path to an explicit instructions file, if configured; its text joins every thread's system prompt, re-read each turn. */
 	readonly instructionsPath: string | undefined;
@@ -56,7 +55,6 @@ export type HostConfig = {
 const HostTomlSchema = Type.Object(
 	{
 		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }),
-		web: Type.Optional(Type.String({ minLength: 1 })),
 		instructions: Type.Optional(Type.String({ minLength: 1 })),
 		label: Type.String({ default: "pi", minLength: 1 }),
 		scratch_dir: Type.Optional(Type.String({ minLength: 1 })),
@@ -85,7 +83,6 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		configFile: file,
 		dataDir,
 		listen: { host, port },
-		webAppUrl: doc.web,
 		modelsStorePath: join(dataDir, "models-store.json"),
 		instructionsPath: doc.instructions === undefined ? undefined : resolve(dataDir, expandHome(doc.instructions, process.env)),
 		label: doc.label,

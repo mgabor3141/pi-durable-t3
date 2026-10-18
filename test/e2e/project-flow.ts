@@ -90,10 +90,10 @@ try {
 	const palette = page.getByTestId("command-palette");
 
 	// 1. Pair and land on the app.
-	const url = `${webAppUrl}/pair?host=${encodeURIComponent(bridgeUrl)}&label=pi-flow#${new URLSearchParams({ token: pairToken })}`;
-	await page.goto(url, { waitUntil: "domcontentloaded" });
-	await page.waitForURL((target) => !target.pathname.startsWith("/pair"), { timeout: 20000 });
-	await sleep(4000);
+	// The web app is served from the facet origin, so `/pair` is the bridge's screen: it exchanges the token for a
+	// browser session (a cookie), after which the app opens as "This machine".
+	await page.goto(`${webAppUrl}/pair#${new URLSearchParams({ token: pairToken })}`, { waitUntil: "domcontentloaded" });
+	await page.getByText("This browser is paired", { exact: false }).waitFor({ state: "visible", timeout: 20000 });
 	await page.goto(`${webAppUrl}/`, { waitUntil: "domcontentloaded" });
 	await page.waitForSelector("[contenteditable]", { timeout: 30000 });
 

@@ -4,7 +4,9 @@
 // bridge itself is `attachT3` in `src/bridge.ts`.
 // Run: `pnpm start [-- --root <dir>]` (no `--root`: XDG config/data dirs). `PI_DURABLE_T3_FAKE=1` swaps in an
 // offline reply model.
+import { existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
+import { fileURLToPath } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
 import { attachT3, type Logger, mintPairingCode } from "../../../src/bridge.ts";
@@ -19,9 +21,9 @@ const log: Logger = {
 	warn: (message, fields) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", message, ...fields })),
 };
 
-/** Ready-to-open pairing links for a minted code: the web app (when configured) plus the facet's own `/pair` screen.
- * A wildcard bind is spelled out per LAN address, so every printed link opens. */
-function pairingLinks(code: string, listen: { host: string; port: number }, webAppUrl: string | undefined): string[] {
+/** Ready-to-open pairing links for a minted code: the facet's own `/pair` screen — open it in a browser and it pairs
+ * and lands in the web app the host serves. A wildcard bind is spelled out per LAN address, so every printed link opens. */
+function pairingLinks(code: string, listen: { host: string; port: number }): string[] {
 	const hosts =
 		listen.host === "0.0.0.0" || listen.host === "::"
 			? Object.values(networkInterfaces())
@@ -29,13 +31,12 @@ function pairingLinks(code: string, listen: { host: string; port: number }, webA
 					.filter((n) => n !== undefined && n.family === "IPv4" && !n.internal)
 					.map((n) => n!.address)
 			: [listen.host];
-	const links = hosts.map((h) => `http://${h}:${listen.port}/pair#token=${code}`);
-	if (webAppUrl !== undefined) {
-		// The web app reads `host` (the facet) and the token from the fragment.
-		links.unshift(`${webAppUrl.replace(/\/$/, "")}/pair?host=${encodeURIComponent(`http://${listen.host}:${listen.port}`)}#token=${code}`);
-	}
-	return links;
+	return hosts.map((h) => `http://${h}:${listen.port}/pair#token=${code}`);
 }
+
+/** The repo's built web app (the directory `pnpm setup:t3` produces), served by the facet at `/`. Absent → the host
+ * logs one line and serves none. */
+const WEB_APP_DIR = fileURLToPath(new URL("../../../web-dist", import.meta.url));
 
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
@@ -50,7 +51,7 @@ async function main(): Promise<void> {
 	if (argv[0] === "pair") {
 		const { code } = mintPairingCode(config.stateDir);
 		console.log(`Pairing code (single use): ${code}`);
-		for (const link of pairingLinks(code, config.listen, config.webAppUrl)) console.log(`  ${link}\n`);
+		for (const link of pairingLinks(code, config.listen)) console.log(`  ${link}\n`);
 		return;
 	}
 
@@ -66,6 +67,10 @@ async function main(): Promise<void> {
 		models = runtime;
 	}
 
+	// Serve the built web app from the facet, so its "This machine" (primary environment) is the pi host and its
+	// Connections settings work. The dir is the repo's `web-dist` (built by `pnpm setup:t3`); absent → serve none.
+	const webApp = existsSync(WEB_APP_DIR) ? WEB_APP_DIR : undefined;
+	if (webApp === undefined) log.warn("no built web app; run `pnpm setup:t3` to serve one", { webAppDir: WEB_APP_DIR });
 	const runtime = await openCodingHarness(config, models, {
 		onWarn: (message, error) => log.warn(message, { error: String(error) }),
 		// The prompt: a coding-agent base section, plus the optional instructions file as another section.
@@ -84,7 +89,7 @@ async function main(): Promise<void> {
 			scratchDir: config.scratchDir,
 			listen: config.listen,
 			label: config.label,
-			...(config.webAppUrl === undefined ? {} : { webAppUrl: config.webAppUrl }),
+			...(webApp === undefined ? {} : { webApp }),
 			...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),
 			tokenTtlSeconds: config.tokenTtlSeconds,
 			log,

@@ -1,5 +1,6 @@
 // T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup). The minimal viable surface is implemented; every other method
 // gets a stub: streams stay open and silent, and unary calls answer with a benign value or a clear failure.
+import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
 	AssetPreviewTypeValidationError,
@@ -367,6 +368,15 @@ export function makeRpcLayer(deps: RpcDeps) {
 					};
 				}),
 			),
+		// The server lifecycle stream (T3's `subscribeServerLifecycle`): the opening snapshot — `welcome` (the
+		// environment + cwd, what the web app's onboarding gate reads to confirm this workspace) then `ready` —
+		// followed by live events. This host self-updates never, so after the snapshot the stream stays open and
+		// silent. A refused (dying) stream breaks the web app's connection reducer, so the snapshot is required.
+		subscribeServerLifecycle: () => {
+			const environment = deps.descriptor();
+			const cwd = serverCwd(deps.bridge.config);
+			return Stream.concat(Stream.make({ version: 1, sequence: 0, type: "welcome", payload: { environment, cwd, projectName: basename(cwd) || cwd } } as Any, { version: 1, sequence: 1, type: "ready", payload: { at: new Date().toISOString(), environment } } as Any), Stream.never);
+		},
 		// The Connections access stream (T3's `subscribeAuthAccess`): the snapshot first (links + sessions, `current` for
 		// this socket's session), then the store's changes as incremental events at an increasing revision (the client
 		// reducer folds each into the snapshot; it never re-reads the store). `current` is the viewer's own client.

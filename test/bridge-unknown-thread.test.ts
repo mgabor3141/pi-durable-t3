@@ -27,7 +27,7 @@ async function openBridge(): Promise<{ bridge: Bridge; close: () => Promise<void
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], registry: fixture.registry },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		log,
 		host,
 	);

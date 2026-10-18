@@ -47,9 +47,9 @@ export type AttachT3Options = {
 	readonly listen?: { readonly host: string; readonly port: number };
 	/** Environment name T3 shows. Default `"pi"`. */
 	readonly label?: string;
-	/** Web app base URL: its origin joins the default CORS list. */
-	readonly webAppUrl?: string;
-	/** Browser origins allowed to call. Default: the desktop app plus `webAppUrl`. `[]` allows any origin. */
+	/** A built T3 web app's directory, served at `/` (static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth`, `/api` and `/pair` routes win). The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. Unset: no web app, the API/WS serve the desktop app as before. */
+	readonly webApp?: string;
+	/** Browser origins allowed to call. Default: T3's desktop app. `[]` allows any origin. A web app served from this host's own origin is same-origin and needs no entry; this list is for a web app served from a foreign origin. */
 	readonly corsOrigins?: readonly string[];
 	/** Bearer-token lifetime, seconds. Default 90 days. */
 	readonly tokenTtlSeconds?: number;
@@ -61,15 +61,6 @@ export type T3Attachment = {
 	readonly closed: Promise<void>;
 	close(): Promise<void>;
 };
-
-/** The scheme://host:port of a URL, for use as a CORS origin; a non-URL value is used raw, minus a trailing slash. */
-function originOf(url: string): string {
-	try {
-		return new URL(url).origin;
-	} catch {
-		return url.replace(/\/$/, "");
-	}
-}
 
 /** Mint a single-use pairing code for the bridge whose dir you name — no server needed; the running host reads the
  * store on every pairing attempt. Returns the code only: the listen address is the host's, not in `dir`, so a host
@@ -116,7 +107,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		stateDir: options.stateDir,
 		scratchDir: options.scratchDir,
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
-		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN, ...(options.webAppUrl === undefined ? [] : [originOf(options.webAppUrl)])],
+		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
+		staticDir: options.webApp,
 	};
 	const facet = startFacet({ host: server, catalog, log, config });
 	// Resolve only once LISTENING: a bind failure (a port in use) rejects here, after the listener's own error —

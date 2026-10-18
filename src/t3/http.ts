@@ -1,12 +1,17 @@
-// HTTP surface (discovery, pairing, tickets, snapshots, Connections) and the `/ws` RPC endpoint.
-import { type Server } from "node:http";
+// HTTP surface (discovery, pairing, tickets, snapshots, Connections), the `/ws` RPC endpoint, and — when a web app
+// is configured — the static client with T3's SPA fallback.
 import { randomUUID } from "node:crypto";
+import { createReadStream, readFileSync, statSync } from "node:fs";
+import { type Server } from "node:http";
 import { arch, platform } from "node:os";
+import { extname, normalize, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import {
 	AuthAccessReadScope,
 	AuthAccessWriteScope,
 	AuthAccessTokenType,
+	AuthBrowserSessionResult,
 	AuthClientSessionRevokeResult,
 	AuthClientSession,
 	authScopeResponse,
@@ -29,9 +34,11 @@ import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Mime from "effect/http/Mime";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 import { WsRpcGroup } from "@t3tools/contracts";
@@ -69,27 +76,40 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnviron
 
 
 /** `/api/auth/session` for a paired client: the contract's own projection of a grant — legacy `scopes` (the frozen
- * vocabulary) plus the full `permissions` list T3 gates actions on. */
-function authenticatedSession(expiresAt: number) {
+ * vocabulary) plus the full `permissions` list T3 gates actions on. The `sessionMethod` is how this client is
+ * authenticated: a bearer token, or the browser session cookie the same-origin web app rides. */
+function authenticatedSession(token: { scopes: string[]; expiresAt: number; method: "bearer-access-token" | "browser-session-cookie" }) {
 	return {
 		authenticated: true,
 		auth: authDescriptor,
-		...authScopeResponse([...AuthStandardClientScopes]),
-		permissions: [...AuthStandardClientScopes],
-		sessionMethod: "bearer-access-token",
-		expiresAt: new Date(expiresAt).toISOString(),
+		...authScopeResponse(token.scopes as Any),
+		permissions: token.scopes as Any,
+		sessionMethod: token.method,
+		expiresAt: new Date(token.expiresAt).toISOString(),
 	};
 }
+
+/** The browser session cookie's name (T3's `SessionStore.cookieName`): the same-origin web app authenticates every
+ * call — HTTP and the WS ticket — with it, since a page served from this origin sends cookies, not a bearer. */
+export const SESSION_COOKIE_NAME = "pi_durable_t3_session";
 
 export const authDescriptor = {
 	policy: "remote-reachable",
 	bootstrapMethods: ["one-time-token"],
-	sessionMethods: ["bearer-access-token"],
-	sessionCookieName: "pi_durable_t3_session",
+	sessionMethods: ["bearer-access-token", "browser-session-cookie"] as const,
+	sessionCookieName: SESSION_COOKIE_NAME,
 };
+
+/** A browser session cookie: `HttpOnly`, `Path=/`, `SameSite=Lax`, and the session's expiry — exactly the cookie
+ * T3 sets (`Cookies.set` with those options), so a re-pair replaces it in place. No `Secure`: the host is loopback http. */
+function sessionCookieHeader(token: string, expiresAtMs: number): string {
+	return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${new Date(expiresAtMs).toUTCString()}`;
+}
 
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 const text = (body: string) => HttpServerResponse.text(body);
+// The pairing screen is a page, not text: it must run its exchange script, so the browser parses it as HTML.
+const html = (body: string) => HttpServerResponse.text(body, { contentType: "text/html; charset=utf-8" });
 const encode = <S extends Schema.Top>(schema: S, value: unknown) => Schema.encodeUnknownSync(schema as Any)(value);
 
 /** The commandId of a body that failed to decode, for the `commandId` the contract's error carries (an empty string when
@@ -100,6 +120,94 @@ const commandIdOf = (raw: unknown): string => (typeof raw === "object" && raw !=
 function decodeMessage(error: unknown): string {
 	const detail = error instanceof Error ? error.message : String(error);
 	return `Not a valid project mutation: ${detail.replace(/\s+/g, " ").slice(0, 400)}`;
+}
+
+// ── Static web app (T3's `layerStaticAndDevRoute`, faithful for a built client with no dev server): a built T3 web
+// app served at `/`, with the SPA fallback to `index.html` for app routes. The API, `/ws`, `/.well-known`, `/oauth`,
+// `/api` and `/pair` routes are registered more specifically, so the router's specificity makes them win — exactly
+// how T3 layers its `GET *` static route behind the API. Caching, the `W/` ETag and `If-None-Match`/`If-Modified-Since` revalidation are replicated from `apps/server/src/http.ts`.
+
+/** T3's `openStaticFile`: a real file → its stats; a directory or a miss → `undefined` (the caller falls back). */
+function openStaticFile(filePath: string) {
+	try {
+		const info = statSync(filePath);
+		return info.isFile() ? info : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function makeStaticHandler(staticDir: string) {
+	const staticRoot = resolve(staticDir);
+	const isWithinStaticRoot = (candidate: string) =>
+		candidate === staticRoot ||
+		candidate.startsWith(staticRoot.endsWith(sep) ? staticRoot : `${staticRoot}${sep}`);
+	return (request: HttpServerRequest.HttpServerRequest): HttpServerResponse.HttpServerResponse => {
+		const pathname = decodeURIComponent(new URL(request.url, "http://bridge").pathname);
+		const staticRequestPath = pathname === "/" ? "/index.html" : pathname;
+		const rawStaticRelativePath = staticRequestPath.replace(/^[/\\]+/, "");
+		const hasRawLeadingParentSegment = rawStaticRelativePath.startsWith("..");
+		const staticRelativePath = normalize(rawStaticRelativePath).replace(/^[/\\]+/, "");
+		const hasPathTraversalSegment = staticRelativePath.startsWith("..");
+		if (staticRelativePath.length === 0 || hasRawLeadingParentSegment || hasPathTraversalSegment || staticRelativePath.includes("\0") ) {
+			return HttpServerResponse.text("Invalid static file path", { status: 400 });
+		}
+
+		let filePath = resolve(staticRoot, staticRelativePath);
+		if (!isWithinStaticRoot(filePath))
+			return HttpServerResponse.text("Invalid static file path", { status: 400 });
+
+		// An extension-less path names a directory route ("/settings") → serve that directory's index.html.
+		if (!extname(filePath)) {
+			filePath = resolve(filePath, "index.html");
+			if (!isWithinStaticRoot(filePath))
+				return HttpServerResponse.text("Invalid static file path", { status: 400 });
+		}
+
+		// A miss falls back to the app shell (the SPA renders the route client-side); a missing shell is a plain 404.
+		let info = openStaticFile(filePath);
+		if (info === undefined) {
+			filePath = resolve(staticRoot, "index.html");
+			info = openStaticFile(filePath);
+			if (info === undefined)
+				return HttpServerResponse.text("Not Found", { status: 404 });
+		}
+
+		const mimeType = Option.getOrElse(Mime.getType(filePath), () => "application/octet-stream");
+		const isHtml = mimeType === "text/html";
+
+		// T3's immutable-asset rule keys on the build's `.vite/manifest.json`, which T3's released client does not ship, so
+		// T3 serves it all `no-cache` with validators; so does this host.
+		const headers: Record<string, string> = { "cache-control": "no-cache" };
+		// Deployments can preserve HTML size and mtime while changing its bundle URLs, so HTML carries no validator.
+		const modifiedAt = isHtml ? undefined : info.mtime;
+		const etag = modifiedAt
+			? `W/"${info.size.toString(16)}-${modifiedAt.getTime().toString(16)}"`
+			: undefined;
+		if (etag !== undefined && modifiedAt !== undefined) {
+			headers.etag = etag;
+			headers["last-modified"] = modifiedAt.toUTCString();
+		}
+
+		// `If-None-Match` (weak comparison) takes precedence over dates; only non-HTML (which carries a validator) revalidates.
+		const ifNoneMatch = request.headers["if-none-match"];
+		const ifModifiedSince = request.headers["if-modified-since"];
+		const unchanged =
+			ifNoneMatch !== undefined
+				? ifNoneMatch.split(",").some((value) => {
+						const candidate = value.trim();
+						return (candidate === "*" || (etag !== undefined && candidate.replace(/^W\//i, "") === etag.slice(2)) );
+					})
+				: ifModifiedSince !== undefined &&
+					modifiedAt !== undefined &&
+					Date.parse(modifiedAt.toUTCString()) <= Date.parse(ifModifiedSince);
+		if (!isHtml && unchanged) {
+			return HttpServerResponse.empty({ status: 304, headers: { ...headers, vary: "Accept-Encoding" } });
+		}
+
+		const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
+		return HttpServerResponse.stream(Stream.fromReadableStream({ evaluate: () => Readable.toWeb(createReadStream(filePath)), onError: (error) => error }), { headers, contentType, contentLength: info.size });
+	};
 }
 
 export function makeServerLayer(deps: {
@@ -114,6 +222,8 @@ export function makeServerLayer(deps: {
 	const descriptor = makeDescriptor(bridge, auth);
 	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments });
 	const pairingLimit = new PairingRateLimit();
+	// The built web app, when configured.
+	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
 
 	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
 	// story is the README's); a non-loopback bind may legitimately serve real hostnames.
@@ -131,28 +241,59 @@ export function makeServerLayer(deps: {
 		{ global: true },
 	);
 
+	// A browser session cookie is a credential a page can ride, so — like T3 (`EnvironmentAuth.isBrowserOriginAllowed`) —
+	// it authenticates ONLY a same-origin request: an absent `Origin` (a same-origin GET, a non-browser client), a
+	// `Sec-Fetch-Site: same-origin`, or an `Origin` whose host is this request's host (directly or behind a proxy).
+	const cookieOriginAllowed = (request: HttpServerRequest.HttpServerRequest): boolean => {
+		const origin = request.headers.origin;
+		if (origin === undefined) return true;
+		if (request.headers["sec-fetch-site"] === "same-origin") return true;
+		let originHost: string;
+		try {
+			originHost = new URL(origin).host.toLowerCase();
+		} catch {
+			return false;
+		}
+		if (originHost === "") return false;
+		const firstHost = (value: string | undefined) =>
+			value === undefined
+				? undefined
+				: value.split(",")[0]!.trim().toLowerCase();
+		return (originHost === firstHost(request.headers.host) || originHost === firstHost(request.headers["x-forwarded-host"]) );
+	};
+
+	// A request's session: a bearer/DPoP access token, else the browser session cookie (same-origin only). The web app
+	// served from this origin sends the cookie on every call; a foreign client (the desktop app) sends the bearer.
+	const resolveSession = (request: HttpServerRequest.HttpServerRequest) => {
+		const bearer = auth.verifyBearer(request.headers.authorization);
+		if (bearer !== undefined) return bearer;
+		const cookie = request.cookies[SESSION_COOKIE_NAME];
+		if (cookie === undefined || !cookieOriginAllowed(request)) return undefined;
+		return auth.verifySessionToken(cookie);
+	};
+
 	const authorized = <A, E, R>(
 		handler: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<A, E, R>,
 	) =>
 		Effect.gen(function* () {
 			const request = yield* HttpServerRequest.HttpServerRequest;
-			if (auth.verifyBearer(request.headers.authorization) === undefined) {
+			if (resolveSession(request) === undefined) {
 				return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", message: "Pair this client first." }, 401);
 			}
 			return yield* handler(request);
 		});
 
-	// The Connections endpoints are gated on a scope, not just a bearer. T3's handler shape: a missing credential is
-	// `auth_invalid`; a token without the scope is `insufficient_scope`. Both carry a traceId (a UUID we mint: the
+	// The Connections endpoints are gated on a scope, not just a session. T3's handler shape: a missing credential is
+	// `auth_invalid`; a session without the scope is `insufficient_scope`. Both carry a traceId (a UUID we mint: the
 	// contract requires the field and the client surfaces it). Every standard grant holds access:read/write, so a
 	// paired browser passes; a scope-narrowed grant does not.
 	const traceId = () => randomUUID();
-	const scopeOf = (header: string | undefined) => auth.verifyBearer(header);
+	const scopeOf = (request: HttpServerRequest.HttpServerRequest) => resolveSession(request);
 	const authorizedScope =
-		(scope: string, handler: (request: HttpServerRequest.HttpServerRequest, token: NonNullable<ReturnType<AuthStore["verifyBearer"]>>) => Any) =>
+		(scope: string, handler: (request: HttpServerRequest.HttpServerRequest, token: NonNullable<ReturnType<typeof resolveSession>>) => Any) =>
 			Effect.gen(function* () {
 				const request = yield* HttpServerRequest.HttpServerRequest;
-				const token = scopeOf(request.headers.authorization);
+				const token = scopeOf(request);
 				if (token === undefined) {
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", reason: "missing_credential", traceId: traceId(), message: "Pair this client first." }, 401);
 				}
@@ -177,19 +318,20 @@ export function makeServerLayer(deps: {
 	const routes = Layer.mergeAll(
 		HttpRouter.add("GET", "/.well-known/t3/environment", Effect.sync(() => json(descriptor()))),
 		// Printed pairing URLs point here: the pairing endpoint takes a POST, so a browser opening one needs a pairing
-		// screen, not a 404. The token rides in the hash, never the query string.
-		HttpRouter.add("GET", "/pair", Effect.sync(() => text(
+		// screen, not a 404. The token rides in the hash, never the query string. It exchanges for a BROWSER session (a
+		// cookie), so a web app served from this origin is "This machine" the moment you open it after pairing.
+		HttpRouter.add("GET", "/pair", Effect.sync(() => html(
 			`<!doctype html><meta charset=utf-8><title>Pair with ${"pi"} coding-agent</title>
 <style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:0 1rem}code{background:#eee;padding:2px 4px;border-radius:4px}</style>
 <h3>Pair this browser with the bridge</h3>
 <p id=s>Checking the pairing code…</p>
 <script>
-const token = new URL(location.href).hash.replace(/^#/, "");
-fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-  body: new URLSearchParams({ subject_token: token, client_label: "browser pairing screen" }) })
+const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token") || location.hash.replace(/^#/, "");
+fetch("/api/auth/browser-session", { method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ credential: token }), credentials: "same-origin" })
   .then((r) => r.json())
-  .then((j) => { document.getElementById("s").textContent = j.access_token
-    ? "Pairing code accepted. Open the T3 app and sign in with this environment — it is now paired."
+  .then((j) => { document.getElementById("s").textContent = j.authenticated
+    ? "Pairing code accepted. This browser is paired — open the app; it is signed in as this machine."
     : "Pairing failed: the code was already used or has expired. Mint a new pairing code with the host's pair command."; });
 </script>`,
 		))),
@@ -252,9 +394,43 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 			"/api/auth/session",
 			Effect.gen(function* () {
 				const request = yield* HttpServerRequest.HttpServerRequest;
-				const token = auth.verifyBearer(request.headers.authorization);
+				const token = resolveSession(request);
 				if (token === undefined) return json({ authenticated: false, auth: authDescriptor });
-				return json(authenticatedSession(token.expiresAt));
+				return json(authenticatedSession(token));
+			}),
+		),
+		// (its same-origin client sends cookies, not a bearer). Replicated from T3's `apps/server/src/auth/http.ts`.
+		HttpRouter.add("POST", "/api/auth/browser-session", Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
+				const address = Option.getOrElse(request.remoteAddress, () => "unknown");
+				if (pairingLimit.blocked(address)) {
+					log.warn("pairing rate limited", { address });
+					return json({ _tag: "EnvironmentAuthInvalidError", code: "rate_limited", message: "Too many pairing attempts; wait a minute." }, 429);
+				}
+				const raw = (yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))) as Any;
+				const credential =
+					typeof raw?.credential === "string" ? raw.credential.trim() : "";
+				if (credential === "")
+					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", reason: "invalid_credential", message: "No pairing credential." }, 401);
+				// A re-pair in one browser replaces the browser session it is calling with (its own cookie), not a new row.
+				const previous =
+					request.cookies[SESSION_COOKIE_NAME] === undefined
+						? undefined
+						: auth.verifySessionToken(request.cookies[SESSION_COOKIE_NAME]!);
+				const userAgentHeader = request.headers["user-agent"];
+				const presented = { ipAddress: address, label: "browser", ...(typeof userAgentHeader === "string" && userAgentHeader !== "" ? { userAgent: userAgentHeader } : {}), deviceType: "desktop" as const };
+				const exchanged =
+					credential.length > 0
+						? auth.createBrowserSession(credential, presented, previous?.id)
+						: { refused: "invalid-credential" as const };
+				if ("session" in exchanged === false) {
+					pairingLimit.fail(address);
+					log.warn("pairing rejected", { address, refused: exchanged.refused });
+					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", reason: "invalid_credential", message: "Invalid or expired pairing code." }, 401);
+				}
+				const issued = exchanged.session;
+				log.info("browser session paired", { label: issued.session.label ?? issued.session.deviceType });
+				return HttpServerResponse.jsonUnsafe(encode(AuthBrowserSessionResult, { authenticated: true, ...authScopeResponse(issued.scopes as Any), sessionMethod: "browser-session-cookie", expiresAt: DateTime.makeUnsafe(issued.session.expiresAt) }), { headers: { "set-cookie": sessionCookieHeader(issued.token, issued.session.expiresAt), "cache-control": "no-store", pragma: "no-cache" } });
 			}),
 		),
 		HttpRouter.add(
@@ -262,7 +438,7 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 			"/api/auth/websocket-ticket",
 			authorized((request) =>
 				Effect.sync(() => {
-					const token = auth.verifyBearer(request.headers.authorization)!;
+					const token = resolveSession(request)!;
 					const { ticket, expiresAt } = auth.issueTicket(token.hash);
 					return json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
 				}),
@@ -437,7 +613,10 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 						426,
 					);
 				}
-				const tokenHash = auth.consumeTicket(url.searchParams.get("wsTicket"));
+				// A session for the upgrade: a one-shot ticket (a bearer client that cannot set WS headers), else the
+				// session credential (the same-origin web app upgrades directly, sending its cookie) — T3's
+				// `authenticateWebSocketUpgrade`, which accepts a cookie as well as a bearer/ticket.
+				const tokenHash = auth.consumeTicket(url.searchParams.get("wsTicket")) ?? resolveSession(request)?.hash;
 				if (tokenHash === undefined) {
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", message: "Invalid WebSocket ticket." }, 401);
 				}
@@ -477,6 +656,9 @@ fetch("/oauth/token", { method: "POST", headers: { "content-type": "application/
 				return connection;
 			}),
 		),
+		// The built web app, added last: the router's specificity makes every route above win, so this `GET *` is reached
+		// only for app routes and asset files. Present only when a web app is configured.
+		...(staticHandler === undefined ? [] : [ HttpRouter.add("GET", "*", Effect.map(HttpServerRequest.HttpServerRequest, (request) => staticHandler(request))), ]),
 	);
 
 	const cors = HttpRouter.cors({

@@ -152,7 +152,7 @@ it("no scratch dir: ensureScratch is refused, and the config carries no scratchW
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: fixture.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(fixture.root), corsOrigins: [], registry: fixture.registry },
+		{ host: "127.0.0.1", port: 0, label: "t", stateDir: fixture.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(fixture.root), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		{ info: () => {}, warn: () => {} },
 		host,
 	);

@@ -9,7 +9,7 @@ import { testRegistry } from "./test-registry.ts";
 const ROOT = "/tmp/pi-durable-t3-t3-config";
 
 function bridgeConfig(projects: readonly { id: string; cwd: string }[]): BridgeConfig {
-	return { host: "127.0.0.1", port: 4903, label: "pi", stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], settings: ServerSettingsStore.open(ROOT), registry: testRegistry(projects) };
+	return { host: "127.0.0.1", port: 4903, label: "pi", stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], staticDir: undefined, settings: ServerSettingsStore.open(ROOT), registry: testRegistry(projects) };
 }
 
 describe("serverCwd (empty-environment fallback, B4)", () => {

@@ -24,7 +24,7 @@ async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: 
 		scratchDir: undefined,
 		tokenTtlSeconds: 60,
 		settings: ServerSettingsStore.open(dataDir),
-		corsOrigins: [],
+		corsOrigins: [], staticDir: undefined,
 		registry,
 	};
 	// create/update/delete never touch the host, so an unloaded one is enough to construct a Bridge.
