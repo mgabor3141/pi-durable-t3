@@ -4,18 +4,13 @@
 // bridge itself is `attachT3` in `src/bridge.ts`.
 // Run: `pnpm start [-- --root <dir>]` (no `--root`: XDG config/data dirs). `PI_DURABLE_T3_FAKE=1` swaps in an
 // offline reply model.
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
-import {
-	attachT3,
-	buildTailscaleHttpsBaseUrl,
-	type Logger,
-	mintPairingCode,
-	readTailscaleMagicDnsName,
-} from "../../../src/bridge.ts";
+import { attachT3, type Logger, mintPairingCode } from "../../../src/bridge.ts";
 import { ConfigError, loadConfig, resolvePaths } from "./config.ts";
 import { CodingExtension } from "./base-prompt.ts";
 import { openCodingHarness } from "./host-runtime.ts";
@@ -27,8 +22,8 @@ const log: Logger = {
 	warn: (message, fields) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", message, ...fields })),
 };
 
-/** Ready-to-open pairing links for a minted code: the facet's own `/pair` screen — open it in a browser and it pairs
- * and lands in the web app the host serves. A wildcard bind is spelled out per LAN address, so every printed link opens. */
+/** Pairing links for a minted code (the `/pair#token=` form T3's web page and desktop app both parse). A wildcard
+ * bind is spelled out per LAN address, so every printed link opens. */
 function pairingLinks(code: string, listen: { host: string; port: number }): string[] {
 	const hosts =
 		listen.host === "0.0.0.0" || listen.host === "::"
@@ -40,17 +35,20 @@ function pairingLinks(code: string, listen: { host: string; port: number }): str
 	return hosts.map((h) => `http://${h}:${listen.port}/pair#token=${code}`);
 }
 
-/** The tailnet HTTPS pairing link, when Serve is configured: the MagicDNS name comes from `tailscale status --json`
- * (T3's `t3 pair --tailscale` reads it the same way). A machine with no Tailscale gets a note, not a failed command:
- * minting the code already worked, and the loopback links are printed next to it. */
-async function tailscalePairingLink(code: string, servePort: number): Promise<string[]> {
+/** The tailnet HTTPS pairing link, when Serve is configured: this machine's MagicDNS name from
+ * `tailscale status --json` (T3's `t3 pair --tailscale` reads it the same way). The bridge exposes no tailscale
+ * helpers — printing its own links is the example's job, and this is the whole of it. A machine with no
+ * Tailscale gets a note, not a failed command: the code is minted, and the loopback links print next to it. */
+function tailscalePairingLink(code: string, servePort: number): { readonly links: string[]; readonly notes: string[] } {
 	try {
-		const magicDnsName = await readTailscaleMagicDnsName();
-		if (magicDnsName === null)
-			return ["note: tailscale_serve is on, but this machine has no MagicDNS name. Run `tailscale up` with MagicDNS enabled."];
-		return [`${buildTailscaleHttpsBaseUrl({ magicDnsName, servePort })}pair#token=${code}`];
+		const status = JSON.parse(execFileSync("tailscale", ["status", "--json"], { encoding: "utf8", timeout: 3_000 }) as string) as { Self?: { DNSName?: unknown } };
+		const magicDnsName = String(status?.Self?.DNSName ?? "").trim().replace(/\.$/, "");
+		if (magicDnsName === "")
+			return { links: [], notes: ["note: tailscale_serve is on, but this machine has no MagicDNS name. Run `tailscale up` with MagicDNS enabled."] };
+		const portPart = servePort === 443 ? "" : `:${String(servePort)}`; // 443 is HTTPS's default: it does not appear in the URL.
+		return { links: [`https://${magicDnsName}${portPart}/pair#token=${code}`], notes: [] };
 	} catch (error) {
-		return [`note: tailscale_serve is on, but \`tailscale status\` did not answer: ${(error as Error).message}`];
+		return { links: [], notes: [`note: tailscale_serve is on, but \`tailscale status\` did not answer: ${(error as Error).message}`] };
 	}
 }
 
@@ -71,10 +69,22 @@ async function main(): Promise<void> {
 	if (argv[0] === "pair") {
 		const { code } = mintPairingCode(config.stateDir);
 		console.log(`Pairing code (single use): ${code}`);
-		for (const link of pairingLinks(code, config.listen)) console.log(`  ${link}\n`);
+		const links = pairingLinks(code, config.listen);
+		const notes: string[] = [];
 		// With Serve configured, the link a tailnet device opens is the HTTPS one, not the loopback one.
-		if (config.tailscaleServe)
-			for (const line of await tailscalePairingLink(code, config.tailscaleServePort)) console.log(`  ${line}\n`);
+		if (config.tailscaleServe) {
+			const tailnet = tailscalePairingLink(code, config.tailscaleServePort);
+			links.push(...tailnet.links);
+			notes.push(...tailnet.notes);
+		}
+		// The links double as the `/pair` page a browser opens — but only while the host serves the web app; the
+		// desktop app parses the token from the link itself, so its links always print.
+		const webServed = existsSync(WEB_APP_DIR);
+		console.log(webServed
+			? "\n  Open in a browser (pairs and opens the web app), or paste into the T3 desktop app's Add computer:"
+			: "\n  Paste into the T3 desktop app's Add computer. (The browser `/pair` page needs the web app: run `pnpm setup:t3`.)");
+		for (const link of links) console.log(`  ${link}\n`);
+		for (const note of notes) console.log(`  ${note}\n`);
 		return;
 	}
 

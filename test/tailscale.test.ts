@@ -1,8 +1,8 @@
 // Tailscale Serve with the CLI faked — T3's own tests fake its spawner the same way
 // (`packages/tailscale/src/tailscale.test.ts`). What is pinned here is the contract with the binary: the exact argv,
-// the failures that stay warnings, the messages that never carry the CLI's stderr (they get logged, and stderr can
-// hold `tskey-…` auth keys and node names), and the runner's own spawn/exit/timeout paths against a fake `tailscale`
-// on PATH. Nothing here runs the real Tailscale.
+// the serve-status check that refuses to arm a taken port (the deviation from T3), the messages that never carry the
+// CLI's stderr (they get logged, and stderr can hold `tskey-…` auth keys and node names), and the runner's own
+// spawn/exit/timeout/signal paths against a fake `tailscale` on PATH. Nothing here runs the real Tailscale.
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,8 +11,11 @@ import {
 	buildTailscaleHttpsBaseUrl,
 	DEFAULT_TAILSCALE_SERVE_PORT,
 	makeTailscaleCli,
+	parseServeStatusTargets,
 	parseTailscaleMagicDnsName,
+	resolveServedEndpoint,
 	TailscaleCommandError,
+	type TailscaleCli,
 	type TailscaleRun,
 } from "../src/t3/tailscale.ts";
 
@@ -108,6 +111,70 @@ it("parses the name on its own, the way T3 normalizes it", () => {
 	expect(parseTailscaleMagicDnsName(`{}`)).toBeNull();
 });
 
+it("reads what maps to the Serve port before arming", () => {
+	// The live `tailscale serve status --json` shape: TCP lists the mapped ports, Web gives each port's proxy target.
+	const status = `{"TCP":{"443":{"HTTPS":true},"8444":{"HTTPS":true}},"Web":{"box.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}},"box.tail.ts.net:8444":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3774"}}}}}`;
+	expect(parseServeStatusTargets(status, 443)).toEqual(["http://127.0.0.1:8765"]);
+	expect(parseServeStatusTargets(status, 8444)).toEqual(["http://127.0.0.1:3774"]);
+	// A free port is `null` (arm); a mapped port with no readable target is `[]` (treat as taken).
+	expect(parseServeStatusTargets(status, 8445)).toBeNull();
+	expect(parseServeStatusTargets(`{"TCP":{"8445":{"HTTPS":true}}}`, 8445)).toEqual([]);
+	expect(parseServeStatusTargets(`{"TCP":{}}`, 443)).toBeNull();
+	// A path-mounted mapping names its path, so it is visibly not a plain proxy of ours.
+	expect(parseServeStatusTargets(`{"TCP":{"8443":{}},"Web":{"a.t.ts.net:8443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:9"}}}}}`, 8443)).toEqual(["http://127.0.0.1:9/api"]);
+	expect(() => parseServeStatusTargets(`not json`, 443)).toThrow("Failed to decode tailscale status JSON.");
+});
+
+it("arms through the status check and releases through the same CLI", async () => {
+	// A free port arms; the fake records `serve status --json` before `serve --bg`.
+	const free = fakeRun({ stdout: `{"TCP":{}}` });
+	const freeCli = makeTailscaleCli({ run: free.run });
+	expect(await freeCli.readServeTargets({ servePort: 8443 })).toBeNull();
+	await freeCli.ensureServe({ localPort: 4961, servePort: 8443 });
+	expect(free.calls().map((call) => call.args)).toEqual([
+		["serve", "status", "--json"],
+		["serve", "--bg", "--https=8443", "http://127.0.0.1:4961"],
+	]);
+	// A taken port is reported as such — the refusal and the decision not to release live in the bridge.
+	const taken = makeTailscaleCli({ run: fakeRun({ stdout: `{"TCP":{"8443":{}},"Web":{"a.t.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3773"}}}}}` }).run });
+	expect(await taken.readServeTargets({ servePort: 8443 })).toEqual(["http://127.0.0.1:3773"]);
+});
+
+it("advertises the served tailnet URL only once it answers as this server", async () => {
+	const probes: string[] = [];
+	const cli = (name: string | null, answers: boolean): TailscaleCli => ({
+		readMagicDnsName: async () => name,
+		readServeTargets: async () => null,
+		ensureServe: async () => {},
+		disableServe: async () => {},
+		probe: async (baseUrl) => {
+			probes.push(baseUrl);
+			return answers;
+		},
+	});
+	// The name is listed on the Serve port, after it answers the descriptor probe.
+	await expect(resolveServedEndpoint({ servePort: 8443, tailscale: cli("machine.example-tail.ts.net", true) })).resolves.toEqual({
+		kind: "tailnet",
+		httpBaseUrl: "https://machine.example-tail.ts.net:8443/",
+	});
+	expect(probes).toEqual(["https://machine.example-tail.ts.net:8443/"]);
+	// Not answering, and no MagicDNS name: no endpoint, and nothing to probe.
+	probes.length = 0;
+	await expect(resolveServedEndpoint({ servePort: 8443, tailscale: cli("machine.example-tail.ts.net", false) })).resolves.toBeNull();
+	const noName = cli(null, true);
+	await expect(resolveServedEndpoint({ servePort: 443, tailscale: noName })).resolves.toBeNull();
+	expect(probes).toEqual(["https://machine.example-tail.ts.net:8443/"]);
+	// A CLI that fails is not a config-read failure: `null`, promptly.
+	const failing: TailscaleCli = { ...cli("a.t.ts.net", true), readMagicDnsName: async () => { throw new Error("no cli"); } };
+	await expect(resolveServedEndpoint({ servePort: 443, tailscale: failing })).resolves.toBeNull();
+	// A CLI slower than the 3-second budget drops the name, not the config read.
+	const slow: TailscaleCli = { ...cli("a.t.ts.net", true), readMagicDnsName: () => new Promise<string>(() => undefined) };
+	const started = Date.now();
+	await expect(resolveServedEndpoint({ servePort: 443, tailscale: slow })).resolves.toBeNull();
+	expect(Date.now() - started).toBeGreaterThanOrEqual(2_500);
+	expect(Date.now() - started).toBeLessThan(6_000);
+}, 10_000);
+
 it("builds the tailnet URL: 443 is the port that is never printed", () => {
 	expect(buildTailscaleHttpsBaseUrl({ magicDnsName: "a.tail.ts.net" })).toBe("https://a.tail.ts.net/");
 	expect(buildTailscaleHttpsBaseUrl({ magicDnsName: "a.tail.ts.net", servePort: 443 })).toBe("https://a.tail.ts.net/");
@@ -190,7 +257,15 @@ it("runs the binary: a clean exit, a non-zero exit, a CLI that never answers, an
 	expect(Date.now() - started).toBeLessThan(3_000);
 	expect(await hung.calls()).toContain("status --json");
 
-	// (4) No binary on PATH is a named spawn failure, not an uncaught ENOENT.
+	// (4) A child killed by a signal (a null exit code) is a failure, not a clean exit.
+	const killed = await fakeBin('if [ "$1" = "status" ]; then kill -9 $$; fi; exit 0');
+	const killError = (await withPath(killed.dir, () =>
+		makeTailscaleCli().readMagicDnsName().catch((error) => error),
+	)) as TailscaleCommandError;
+	expect(killError).toBeInstanceOf(TailscaleCommandError);
+	expect([killError.kind, killError.exitCode, killError.message]).toEqual(["exit", -1, "tailscale status exited with code -1."]);
+
+	// (5) No binary on PATH is a named spawn failure, not an uncaught ENOENT.
 	const savedPath = process.env["PATH"];
 	process.env["PATH"] = "/nonexistent-dir-for-the-tailscale-test";
 	const spawnFailure = (await makeTailscaleCli()

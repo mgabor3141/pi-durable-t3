@@ -24,7 +24,7 @@ describe("config.toml", () => {
 		expect(config.tailscaleServePort).toBe(8443);
 	});
 
-	it("Tailscale Serve is off by default, and 443 is the port that needs no name", () => {
+	it("Tailscale Serve is off by default, and its HTTPS port defaults to 443", () => {
 		const config = parseConfigToml(``, root);
 		expect([config.tailscaleServe, config.tailscaleServePort], "unset").toEqual([false, 443]);
 		// Enabling without a port is the whole feature: Serve's HTTPS port defaults to 443, T3's own default.

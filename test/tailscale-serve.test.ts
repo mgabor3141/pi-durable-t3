@@ -1,7 +1,8 @@
-// Tailscale Serve over the real host, with a fake `tailscale` on PATH: the mapping the host arms at startup and
-// releases on shutdown, the host-header rule Serve needs (Serve forwards to loopback carrying the MagicDNS `Host`,
-// verified against a live Serve: `Host`/`X-Forwarded-Host` are `name.ts.net[:port]`), and the `pair` link. Nothing
-// here touches a real tailnet: the binary is a shell script that records its argv.
+// Tailscale Serve over the real host, with a fake `tailscale` on PATH: the status check before arming (a port that
+// already maps elsewhere is refused and never released), the mapping armed at startup and released on shutdown, the
+// host-header rule Serve needs (Serve forwards to loopback carrying the MagicDNS `Host`, verified against a live
+// Serve: `Host`/`X-Forwarded-Host` are `name.ts.net[:port]`), and the `pair` link. Nothing here touches a real
+// tailnet: the binary is a shell script that records its argv.
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
@@ -28,12 +29,13 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-/** A `tailscale` on PATH that records every call and answers `status --json` with the MagicDNS name. */
-async function fakeTailscale(logPath: string): Promise<string> {
+/** A `tailscale` on PATH that records every call and answers `status --json` with the MagicDNS name. `serveStatusJson`
+ * is the answer to `serve status --json`: the default says every port is free. */
+async function fakeTailscale(logPath: string, serveStatusJson = `{"TCP":{}}`): Promise<string> {
 	const bin = await mkdtemp(join(scratch, "bin-"));
 	await writeFile(
 		join(bin, "tailscale"),
-		`#!/bin/sh\necho "$@" >> ${logPath}\nif [ "$1" = "status" ]; then echo '{"Self":{"DNSName":"${TS_HOST}."}}'; fi\nexit 0\n`,
+		`#!/bin/sh\necho "$@" >> ${logPath}\nif [ "$1" = "status" ]; then echo '{"Self":{"DNSName":"${TS_HOST}."}}'; fi\nif [ "$1" = "serve" ] && [ "$2" = "status" ]; then echo '${serveStatusJson}'; fi\nexit 0\n`,
 		{ mode: 0o755 },
 	);
 	return bin;
@@ -138,18 +140,24 @@ it("arms Serve once the listener is up, widens the host rule to the tailnet name
 	await until("the log's Serve line", () => Promise.resolve(host.out()), (seen) => seen.includes("Tailscale Serve configured"));
 	await until("the serve call", () => callsOf("serve-on"), (seen) => seen.includes(`serve --bg --https=8443 http://127.0.0.1:${String(PORT)}`));
 
-	// A loopback Host is served, as always.
+	// A loopback Host is served, as always — the whole of 127.0.0.0/8, not just the address the host bound.
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.1:${PORT}`)).status).toBe(200);
-	// The tailnet `Host` Serve forwards is served too — only because Serve is configured.
+	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.2:${PORT}`)).status).toBe(200);
+	// The tailnet `Host` Serve forwards is served too — exactly this machine's name, with or without the Serve port,
+	// the trailing dot normalized — and only because Serve is configured.
 	const served = await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}:8443`, {
 		"x-forwarded-host": `${TS_HOST}:8443`,
 		"x-forwarded-proto": "https",
 	});
 	expect(served.status).toBe(200);
 	expect(JSON.parse(served.body).label).toBe("pi");
-	// Anything else stays refused on a loopback listener: the guard opens for the tailnet name, no wider.
+	expect((await getWithHost(PORT, "/.well-known/t3/environment", TS_HOST)).status).toBe(200);
+	expect((await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}.`)).status).toBe(200);
+	// Anything else stays refused on a loopback listener — including a *different* `.ts.net` name: the guard opens
+	// for this machine's name, no wider, and for nothing at all while Serve is off.
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", "evil.example.com")).status).toBe(421);
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", "evil-tailnet.example.com")).status).toBe(421);
+	expect((await getWithHost(PORT, "/.well-known/t3/environment", "other.example-tail.ts.net")).status).toBe(421);
 
 	// The pairing exchange a browser makes through Serve: same-origin by the forwarded Host, so the session cookie
 	// authenticates it. This is the flow `pair` prints an HTTPS link for.
@@ -199,6 +207,40 @@ it("runs no tailscale command, advertises no tailnet name and accepts no tailnet
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.1:${PORT}`)).status).toBe(200);
 	// The default host is off: the guard does not open for a `.ts.net` Host it never armed.
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}:8443`)).status).toBe(421);
+});
+
+it("refuses to arm a Serve port that already maps elsewhere, and never releases it", async () => {
+	const PORT = 4964;
+	// The status says 8443 already proxies 3773 — a mapping this host did not create (e.g. a real T3 beside it).
+	const takenStatus = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"${TS_HOST}:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3773"}}}}}`;
+	const root = join(scratch, "serve-busy");
+	await mkdir(join(root, "projects/alpha"), { recursive: true });
+	await mkdir(t3Dir(root), { recursive: true });
+	const calls = join(scratch, "calls-busy.log");
+	const bin = await fakeTailscale(calls, takenStatus);
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:4964"\ntailscale_serve = true\ntailscale_serve_port = 8443\n`, "utf8");
+	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
+	const host = launch(root, 4964, { PATH: `${bin}:${process.env["PATH"]}`, TAILSCALE_CALLS: calls }, agentDir);
+	launched.push(host);
+	expect(await waitListening(4964), host.out()).toBe(true);
+
+	// The host warns and starts without Serve: it checked, found the port taken, and armed nothing.
+	await until("the refusal", () => Promise.resolve(host.out()), (seen) => seen.includes("not arming"));
+	expect(host.out()).toContain("already maps to http://127.0.0.1:3773");
+	const armed = await callsOf("busy");
+	expect(armed).toContain("serve status --json");
+	expect(armed).not.toContain("--bg");
+
+	// A graceful stop releases nothing: the mapping was never this host's.
+	host.child.kill("SIGTERM");
+	const exited = await Promise.race([
+		host.exited,
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`host did not exit: ${host.out()}`)), 15_000)),
+	]);
+	expect(exited.code).toBe(0);
+	const callsAfter = await callsOf("busy");
+	expect(callsAfter).not.toContain("off");
+	expect(callsAfter).not.toContain("--bg");
 });
 
 it("pair prints the HTTPS link, built from the MagicDNS name", async () => {

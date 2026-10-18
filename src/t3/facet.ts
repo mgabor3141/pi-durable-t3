@@ -16,11 +16,10 @@ import type { ModelCatalog } from "./models.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
-	/** Resolves once the HTTP server is listening; rejects with the bind error (e.g. `EADDRINUSE`) if it cannot start. */
-	readonly ready: Promise<void>;
-	/** The port the listener actually got (T3 reads its server's address, not the configured port: with port 0 the two
-	 * differ, and Tailscale Serve must be pointed at the socket that is really open). Resolves with `ready`. */
-	readonly boundPort: Promise<number>;
+	/** Resolves with the port the listener ACTUALLY got, once it is listening; rejects with the bind error (e.g.
+	 * `EADDRINUSE`). The bound port, not the configured one: with port 0 the two differ, and Tailscale Serve must be
+	 * pointed at the socket that is really open. */
+	readonly ready: Promise<number>;
 	/** Resolves when the server fiber ENDS on its own after `ready`; what to do about it is the integrator's policy —
 	 * the library never kills the process. */
 	readonly closed: Promise<void>;
@@ -45,15 +44,14 @@ export function startFacet(deps: {
 	// Bind eagerly: await "listening" before the host prints "ready", and surface a bind error to the caller. Keep the
 	// launch fiber — `close()` interrupts it to release the port.
 	const httpServer = createServer();
-	const ready = new Promise<void>((resolve, reject) => {
-		httpServer.once("listening", () => resolve());
-		httpServer.once("error", (error) => reject(error));
-	});
-	const boundPort = new Promise<number>((resolve) => {
+	const ready = new Promise<number>((resolve, reject) => {
 		httpServer.once("listening", () => {
 			const address = httpServer.address();
-			resolve(typeof address === "object" && address !== null ? address.port : 0);
+			// A listener that is up has an address; anything else is a broken contract, not a port to hand to Serve.
+			if (typeof address === "object" && address !== null) resolve(address.port);
+			else reject(new Error("HTTP server is listening with no bound address."));
 		});
+		httpServer.once("error", (error) => reject(error));
 	});
 	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, tailscale: deps.tailscale })) as Effect.Effect<never>);
 	let closing = false;
@@ -71,7 +69,6 @@ export function startFacet(deps: {
 
 	return {
 		ready,
-		boundPort,
 		closed,
 		close: async () => {
 			closing = true;

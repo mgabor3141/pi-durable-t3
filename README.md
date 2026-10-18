@@ -64,16 +64,20 @@ call needs a credential from pairing: a bearer token, or, for the web app the ho
 session cookie, which counts only on same-origin requests. Browsers on other origins may call only if listed
 in `corsOrigins` (default: T3's desktop app). What the agent may do is the Harness's business, not the bridge's.
 
-With `tailscaleServe` set, the host arms `tailscale serve` for its own port and releases it on shutdown, and the
-`Host` rule admits the machine's `*.ts.net` name — Serve forwards to loopback carrying that `Host`, and a
-`.ts.net` name resolves only inside your tailnet. No Tailscale, no change: nothing runs, nothing is admitted.
+With `tailscaleServe` set, the host first reads `tailscale serve status` and arms its HTTPS port only when it is
+free (or already points at this host's own port): a port that maps elsewhere is refused with a warning, so the host
+never replaces — and never removes — a mapping it did not create (deliberately stricter than T3, which arms
+unconditionally). An armed port is released on shutdown, and the `Host` rule admits exactly this machine's MagicDNS
+name — the `Host` Serve carries when it forwards to loopback. No Tailscale, no change: nothing runs, nothing is
+admitted.
 
 ## What works
 
 Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page,
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
-(`tailscaleServe`: HTTPS on the tailnet, and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
+(`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
+and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
 refused on purpose: the agent works in real folders with `bash`. Every call and its status:
 [`docs/capabilities.md`](docs/capabilities.md).
 
@@ -91,7 +95,8 @@ Known limitations:
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
-  tailnet — it fails closed, and a legitimate user on a busy tailnet can be told to wait a minute.
+  tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
+  can lock out local pairing for that minute.
 - `tailscale serve` config lives in Tailscale, not in this host. A host that is SIGKILLed leaves its mapping behind;
   a graceful stop removes it. Clear a stale one with `tailscale serve --https=<port> off`.
 

@@ -32,12 +32,11 @@ import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
-import { resolveDirectEndpoints, type DirectEndpoint } from "./direct-endpoints.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
-import type { TailscaleCli } from "./tailscale.ts";
+import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 
@@ -121,7 +120,7 @@ function serverSettings(deps: RpcDeps) {
 	return deps.bridge.config.settings.current();
 }
 
-function serverConfig(deps: RpcDeps, directEndpoints: readonly DirectEndpoint[]): ServerConfig {
+function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[]): ServerConfig {
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,
@@ -141,8 +140,8 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly DirectEndpoint[])
 			otlpLogsEnabled: false,
 		},
 		settings: serverSettings(deps),
-		// The routes a client may learn from this host (T3's `directEndpoints`, read fresh on every config read: the
-		// addresses and the served tailnet name are the machine's, not this process's, facts).
+		// T3's `directEndpoints`, smaller: this host advertises only the tailnet Serve URL (no LAN addresses), read
+		// fresh on every config read — the served name is the machine's, not this process's, fact.
 		directEndpoints,
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
@@ -153,16 +152,16 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly DirectEndpoint[])
 	} as Any;
 }
 
-/** A config read: the static fields plus what the client can learn about this host's addresses (the tailscale read
- * is bounded, so a machine with no `tailscale` CLI answers in milliseconds, not in timeouts). */
+/** A config read: the static fields plus the served tailnet URL (bounded: a machine with no `tailscale` CLI answers
+ * in milliseconds, not in timeouts). */
 async function readServerConfig(deps: RpcDeps): Promise<ServerConfig> {
-	const directEndpoints = await resolveDirectEndpoints({
-		host: deps.bridge.config.host,
-		port: deps.bridge.config.port,
-		tailscaleServe: deps.bridge.config.tailscaleServe,
-		tailscale: deps.tailscale,
-	});
-	return serverConfig(deps, directEndpoints);
+	const served = deps.bridge.config.tailscaleServe === undefined
+		? null
+		: await resolveServedEndpoint({
+				servePort: deps.bridge.config.tailscaleServe.port,
+				tailscale: deps.tailscale,
+			});
+	return serverConfig(deps, served === null ? [] : [served]);
 }
 
 /** The image attachments of a command (the persisted records the client sent), shaped for `Bridge.sendMessage`. Files
