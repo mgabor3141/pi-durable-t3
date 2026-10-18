@@ -14,10 +14,15 @@ import type { BridgeConfig } from "./t3/config.ts";
 import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
+import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli } from "./t3/tailscale.ts";
 
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 export { ConfigError } from "./config.ts";
 export type { Logger } from "./t3/logging.ts";
+
+/** Tailscale helpers for a host that prints its own links (the example's `pair`): this machine's MagicDNS name, T3's
+ * default Serve port, and T3's tailnet URL builder. */
+export { readTailscaleMagicDnsName, buildTailscaleHttpsBaseUrl, DEFAULT_TAILSCALE_SERVE_PORT } from "./t3/tailscale.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 export const DESKTOP_APP_ORIGIN = "t3code://app";
@@ -53,6 +58,17 @@ export type AttachT3Options = {
 	readonly corsOrigins?: readonly string[];
 	/** Bearer-token lifetime, seconds. Default 90 days. */
 	readonly tokenTtlSeconds?: number;
+	/**
+	 * Publish this host over Tailscale Serve: `tailscale serve --bg --https=<port> http://127.0.0.1:<bound port>`,
+	 * armed once the listener is up and released on close, so the app is reachable at
+	 * `https://<machine>.<tailnet>.ts.net[:port]` (443 needs no port in the URL). Absent (the default): off — the host
+	 * runs no `tailscale` command, advertises no tailnet endpoint, and accepts no tailnet `Host`.
+	 *
+	 * Like T3, a Serve failure only logs: startup does not depend on Tailscale being installed, logged in, or willing.
+	 * Serve forwards to loopback carrying the MagicDNS `Host`, so enabling this is what allows a tailnet `Host` on a
+	 * loopback listener (T3 checks no `Host` at all; this guard opens no further, and only while Serve is on).
+	 */
+	readonly tailscaleServe?: { readonly port?: number };
 	readonly log?: Logger;
 };
 
@@ -109,8 +125,13 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: options.webApp,
+		tailscaleServe:
+			options.tailscaleServe === undefined
+				? undefined
+				: { port: options.tailscaleServe.port ?? DEFAULT_TAILSCALE_SERVE_PORT },
 	};
-	const facet = startFacet({ host: server, catalog, log, config });
+	const tailscale = makeTailscaleCli();
+	const facet = startFacet({ host: server, catalog, log, config, tailscale });
 	// Resolve only once LISTENING: a bind failure (a port in use) rejects here, after the listener's own error —
 	// release the objects host, then hand the error to the caller.
 	try {
@@ -119,9 +140,41 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		await server.close();
 		throw error;
 	}
+	// Tailscale Serve, armed only once the listener is up (T3's `layerTailscaleServe` waits for the server address for
+	// the same reason). A failure is a warning, never a dead host: T3's own comment on this path is that Serve setup
+	// can fail without stopping startup.
+	const servePort = config.tailscaleServe?.port;
+	let serveArmed: number | undefined;
+	if (servePort !== undefined) {
+		const localPort = await facet.boundPort;
+		try {
+			await tailscale.ensureServe({ localPort, servePort, localHost: "127.0.0.1" });
+			serveArmed = servePort;
+			log.info("Tailscale Serve configured", { localPort, servePort });
+		} catch (error) {
+			log.warn("Failed to configure Tailscale Serve", {
+				localPort,
+				servePort,
+				error: (error as Error).message || String(error),
+			});
+		}
+	}
 	return {
 		closed: facet.closed,
 		close: async () => {
+			// Release our own mapping first, so tailnet traffic stops before the listener does (T3's acquireRelease), and
+			// only when we armed it: a mapping this host did not create is not this host's to remove.
+			if (serveArmed !== undefined) {
+				try {
+					await tailscale.disableServe({ servePort: serveArmed });
+					log.info("Tailscale Serve disabled", { servePort: serveArmed });
+				} catch (error) {
+					log.warn("Failed to disable Tailscale Serve", {
+						servePort: serveArmed,
+						error: (error as Error).message || String(error),
+					});
+				}
+			}
 			await facet.close();
 			await server.close();
 		},

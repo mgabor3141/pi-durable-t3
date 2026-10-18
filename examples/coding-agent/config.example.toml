@@ -14,3 +14,5 @@
 # scratch_dir = "scratch"                       # "No project" root (relative to the data dir)
 # token_ttl_days = 90                           # how long a paired device stays signed in
 # cors_origins = ["t3code://app"]               # browser origins allowed to call cross-origin; [] allows any
+# tailscale_serve = false                       # publish this host over Tailscale Serve: HTTPS on the tailnet
+# tailscale_serve_port = 443                    # the HTTPS port Serve publishes it on (443 needs no port in the URL)

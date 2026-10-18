@@ -48,6 +48,9 @@ export type HostConfig = {
 	readonly scratchDir: string;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[] | undefined;
+	/** Tailscale Serve: publish the host on the tailnet HTTPS name (`tailscale serve`), and the HTTPS port to publish on. */
+	readonly tailscaleServe: boolean;
+	readonly tailscaleServePort: number;
 };
 
 // One flat schema for `config.toml`: the example host's own options, mostly passed straight to `attachT3`. Projects and
@@ -60,6 +63,8 @@ const HostTomlSchema = Type.Object(
 		scratch_dir: Type.Optional(Type.String({ minLength: 1 })),
 		token_ttl_days: Type.Integer({ default: 90, minimum: 1 }),
 		cors_origins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+		tailscale_serve: Type.Boolean({ default: false }),
+		tailscale_serve_port: Type.Integer({ default: 443, minimum: 1, maximum: 65_535 }),
 	},
 	{ additionalProperties: false },
 );
@@ -90,6 +95,8 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		scratchDir: resolve(dataDir, doc.scratch_dir ?? "scratch"),
 		tokenTtlSeconds: doc.token_ttl_days * 86_400,
 		corsOrigins: doc.cors_origins,
+		tailscaleServe: doc.tailscale_serve,
+		tailscaleServePort: doc.tailscale_serve_port,
 	};
 }
 

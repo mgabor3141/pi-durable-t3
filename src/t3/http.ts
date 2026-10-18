@@ -52,6 +52,8 @@ import type { Logger } from "./logging.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
 import { CurrentAuthSession } from "./session-context.ts";
+import { isTailnetHost } from "./host-classification.ts";
+import type { TailscaleCli } from "./tailscale.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/setup-t3.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -217,18 +219,25 @@ export function makeServerLayer(deps: {
 	log: Logger;
 	httpServer: Server;
 	attachments: AttachmentStore;
+	tailscale: TailscaleCli;
 }) {
 	const { bridge, auth, log, httpServer, attachments } = deps;
 	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments });
+	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, tailscale: deps.tailscale });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
 
 	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
 	// story is the README's); a non-loopback bind may legitimately serve real hostnames.
+	// T3 checks no `Host` header at all, so the widest this guard opens is what T3 accepts; it opens no further, and only
+	// while Serve is on. Serve forwards to loopback carrying the MagicDNS `Host` (verified: `Host:`/`X-Forwarded-Host:`
+	// are the `name.ts.net[:port]`, `X-Forwarded-Proto: https`, and the socket is 127.0.0.1), so a tailnet name is the
+	// address this host is legitimately addressed by — and a `.ts.net` name resolves only inside a tailnet, so it buys
+	// an attacker no rebinding reach over the loopback names.
 	const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 	const boundLoopback = LOOPBACK_HOSTS.has(bridge.config.host);
+	const serveEnabled = bridge.config.tailscaleServe !== undefined;
 	const hostGuard = HttpRouter.middleware(
 		(effect: Any) =>
 			Effect.gen(function* () {
@@ -236,6 +245,7 @@ export function makeServerLayer(deps: {
 				const request = yield* HttpServerRequest.HttpServerRequest;
 				const hostname = String(request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
 				if (LOOPBACK_HOSTS.has(hostname)) return yield* effect;
+				if (serveEnabled && isTailnetHost(hostname)) return yield* effect;
 				return json({ code: "invalid_host", message: `Host "${hostname}" is not allowed on a loopback listener.` }, 421);
 			}),
 		{ global: true },

@@ -41,6 +41,7 @@ lists every key with its default. Most map straight onto `attachT3` options:
 | `scratch_dir` | `scratchDir` |
 | `token_ttl_days` | `tokenTtlSeconds` |
 | `cors_origins` | `corsOrigins` |
+| `tailscale_serve`, `tailscale_serve_port` | `tailscaleServe` (`{ port }`, 443 by default) |
 | `instructions` | none: the agent's system prompt, added to every thread |
 
 `--root <dir>` puts config and data in one directory instead of the XDG locations.
@@ -60,5 +61,16 @@ a message naming it.
 
 ## Over Tailscale
 
-Set `listen` to the machine's tailnet IP (no TLS; the tailnet is the boundary), then open the pairing link on
-any device in the tailnet: `http://<tailnet-ip>:3774/pair#token=…`.
+Set `tailscale_serve = true` and restart. While the host runs it arms
+`tailscale serve --https=<tailscale_serve_port> --bg http://127.0.0.1:<listen port>`, and releases that mapping when
+you stop it gracefully — so the app is HTTPS on your tailnet, on the machine's MagicDNS name. `pnpm start pair`
+prints the link for it:
+
+```
+https://<machine>.<tailnet>.ts.net/pair#token=…      # port 8443 shows as `:8443`
+```
+
+Open it on any device in the tailnet: it pairs the browser and opens the app. Serve forwards to loopback carrying
+the `*.ts.net` `Host`, which the host accepts only while `tailscale_serve` is on; nothing about Serve is required to
+run the host without it. (The plain-HTTP alternative: set `listen` to the machine's tailnet IP and open
+`http://<tailnet-ip>:3774/pair#token=…` — the tailnet is then the only boundary, with no TLS.)

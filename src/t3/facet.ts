@@ -13,10 +13,14 @@ import type { BridgeConfig } from "./config.ts";
 import { makeServerLayer } from "./http.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
+import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
 	/** Resolves once the HTTP server is listening; rejects with the bind error (e.g. `EADDRINUSE`) if it cannot start. */
 	readonly ready: Promise<void>;
+	/** The port the listener actually got (T3 reads its server's address, not the configured port: with port 0 the two
+	 * differ, and Tailscale Serve must be pointed at the socket that is really open). Resolves with `ready`. */
+	readonly boundPort: Promise<number>;
 	/** Resolves when the server fiber ENDS on its own after `ready`; what to do about it is the integrator's policy —
 	 * the library never kills the process. */
 	readonly closed: Promise<void>;
@@ -28,6 +32,7 @@ export function startFacet(deps: {
 	catalog: ModelCatalog;
 	log: Logger;
 	config: BridgeConfig;
+	tailscale: TailscaleCli;
 }): FacetHandle {
 	const { host, catalog, log, config } = deps;
 	const auth = new AuthStore(config.stateDir, { tokenTtlSeconds: config.tokenTtlSeconds });
@@ -44,7 +49,13 @@ export function startFacet(deps: {
 		httpServer.once("listening", () => resolve());
 		httpServer.once("error", (error) => reject(error));
 	});
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments })) as Effect.Effect<never>);
+	const boundPort = new Promise<number>((resolve) => {
+		httpServer.once("listening", () => {
+			const address = httpServer.address();
+			resolve(typeof address === "object" && address !== null ? address.port : 0);
+		});
+	});
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, tailscale: deps.tailscale })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
@@ -60,6 +71,7 @@ export function startFacet(deps: {
 
 	return {
 		ready,
+		boundPort,
 		closed,
 		close: async () => {
 			closing = true;

@@ -46,6 +46,13 @@ output, not bridge state. The bridge interprets nothing in `t3-settings.json`. I
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.
 
+## Not the bridge's: Tailscale Serve
+
+With `tailscaleServe`, the mapping (`--https=<port>` → `http://127.0.0.1:<bound port>`) is Tailscale's config, not
+this host's: it survives a crash, and the bridge owns no file for it. The host arms it after the listener is up and
+releases it on a graceful stop, so a SIGKILLed host leaves a mapping pointing at a dead port
+(`tailscale serve --https=<port> off` clears it).
+
 ## In memory
 
 All of it is safe to lose:

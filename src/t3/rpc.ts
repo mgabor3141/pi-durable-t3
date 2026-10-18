@@ -32,10 +32,12 @@ import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
+import { resolveDirectEndpoints, type DirectEndpoint } from "./direct-endpoints.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
+import type { TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 
@@ -109,6 +111,7 @@ interface RpcDeps {
 	readonly authDescriptor: Any;
 	readonly auth: AuthStore;
 	readonly attachments: AttachmentStore;
+	readonly tailscale: TailscaleCli;
 	readonly log: Logger;
 }
 
@@ -118,7 +121,7 @@ function serverSettings(deps: RpcDeps) {
 	return deps.bridge.config.settings.current();
 }
 
-function serverConfig(deps: RpcDeps): ServerConfig {
+function serverConfig(deps: RpcDeps, directEndpoints: readonly DirectEndpoint[]): ServerConfig {
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,
@@ -138,6 +141,9 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 			otlpLogsEnabled: false,
 		},
 		settings: serverSettings(deps),
+		// The routes a client may learn from this host (T3's `directEndpoints`, read fresh on every config read: the
+		// addresses and the served tailnet name are the machine's, not this process's, facts).
+		directEndpoints,
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
 		// T3's client offers "New thread without a project" on an environment only when its config carries this folder
@@ -145,6 +151,18 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 		// with no scratch dir advertises nothing, and the client offers no such thread.
 		...(deps.bridge.scratchRoot === undefined ? {} : { scratchWorkspaceRoot: deps.bridge.scratchRoot }),
 	} as Any;
+}
+
+/** A config read: the static fields plus what the client can learn about this host's addresses (the tailscale read
+ * is bounded, so a machine with no `tailscale` CLI answers in milliseconds, not in timeouts). */
+async function readServerConfig(deps: RpcDeps): Promise<ServerConfig> {
+	const directEndpoints = await resolveDirectEndpoints({
+		host: deps.bridge.config.host,
+		port: deps.bridge.config.port,
+		tailscaleServe: deps.bridge.config.tailscaleServe,
+		tailscale: deps.tailscale,
+	});
+	return serverConfig(deps, directEndpoints);
 }
 
 /** The image attachments of a command (the persisted records the client sent), shaped for `Bridge.sendMessage`. Files
@@ -241,7 +259,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 
 	const handlers: Record<string, (payload: Any) => Any> = {
 		"server.probe": () => Effect.succeed({}),
-		"server.getConfig": () => Effect.sync(() => serverConfig(deps)),
+		"server.getConfig": () =>
+			toPromiseEffect(() => readServerConfig(deps), (message) => new Error(message) as Any),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
 		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
@@ -354,7 +373,9 @@ export function makeRpcLayer(deps: RpcDeps) {
 		// replaces `config.settings` (capabilities.md).
 		subscribeServerConfig: () =>
 			Stream.concat(
-				Stream.make({ version: 1, type: "snapshot", config: serverConfig(deps) }),
+				Stream.fromEffect(toPromiseEffect(() => readServerConfig(deps), (message) => new Error(message) as Any)).pipe(
+					Stream.map((config) => ({ version: 1 as const, type: "snapshot" as const, config })),
+				),
 				fromListener<Any>((emit) => {
 					const stopCatalog = deps.catalog.onChange(() =>
 						emit({ version: 1, type: "providerStatuses", payload: { providers: deps.catalog.providers() } }),

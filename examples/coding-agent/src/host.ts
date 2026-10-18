@@ -9,7 +9,13 @@ import { networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
-import { attachT3, type Logger, mintPairingCode } from "../../../src/bridge.ts";
+import {
+	attachT3,
+	buildTailscaleHttpsBaseUrl,
+	type Logger,
+	mintPairingCode,
+	readTailscaleMagicDnsName,
+} from "../../../src/bridge.ts";
 import { ConfigError, loadConfig, resolvePaths } from "./config.ts";
 import { CodingExtension } from "./base-prompt.ts";
 import { openCodingHarness } from "./host-runtime.ts";
@@ -34,6 +40,20 @@ function pairingLinks(code: string, listen: { host: string; port: number }): str
 	return hosts.map((h) => `http://${h}:${listen.port}/pair#token=${code}`);
 }
 
+/** The tailnet HTTPS pairing link, when Serve is configured: the MagicDNS name comes from `tailscale status --json`
+ * (T3's `t3 pair --tailscale` reads it the same way). A machine with no Tailscale gets a note, not a failed command:
+ * minting the code already worked, and the loopback links are printed next to it. */
+async function tailscalePairingLink(code: string, servePort: number): Promise<string[]> {
+	try {
+		const magicDnsName = await readTailscaleMagicDnsName();
+		if (magicDnsName === null)
+			return ["note: tailscale_serve is on, but this machine has no MagicDNS name. Run `tailscale up` with MagicDNS enabled."];
+		return [`${buildTailscaleHttpsBaseUrl({ magicDnsName, servePort })}pair#token=${code}`];
+	} catch (error) {
+		return [`note: tailscale_serve is on, but \`tailscale status\` did not answer: ${(error as Error).message}`];
+	}
+}
+
 /** The repo's built web app (the directory `pnpm setup:t3` produces), served by the facet at `/`. Absent → the host
  * logs one line and serves none. */
 const WEB_APP_DIR = fileURLToPath(new URL("../../../web-dist", import.meta.url));
@@ -52,6 +72,9 @@ async function main(): Promise<void> {
 		const { code } = mintPairingCode(config.stateDir);
 		console.log(`Pairing code (single use): ${code}`);
 		for (const link of pairingLinks(code, config.listen)) console.log(`  ${link}\n`);
+		// With Serve configured, the link a tailnet device opens is the HTTPS one, not the loopback one.
+		if (config.tailscaleServe)
+			for (const line of await tailscalePairingLink(code, config.tailscaleServePort)) console.log(`  ${line}\n`);
 		return;
 	}
 
@@ -92,6 +115,7 @@ async function main(): Promise<void> {
 			...(webApp === undefined ? {} : { webApp }),
 			...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),
 			tokenTtlSeconds: config.tokenTtlSeconds,
+			...(config.tailscaleServe ? { tailscaleServe: { port: config.tailscaleServePort } } : {}),
 			log,
 		});
 	} catch (error) {
