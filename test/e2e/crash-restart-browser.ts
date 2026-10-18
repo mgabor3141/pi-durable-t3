@@ -126,9 +126,13 @@ try {
 	console.log(`sent: thread=${threadId.slice(0, 8)} messageId=${clientMessageId}`);
 	await writeMarker(crashFile, `${threadId}\t${clientMessageId}`);
 
-	// 3. Wait until the message has durably landed as a single user turn. The offline reply model settles the run almost
-	//    instantly, so the durable placement (not a live run) is the mid-turn boundary we kill at — the entry is committed,
-	//    the turn is running/done, and the client is still holding its optimistic row. Then signal the shell to kill.
+	// 3. Wait until the message has durably landed as a single user turn AND is on screen exactly once. The offline reply
+	//    model settles the run almost instantly, so the durable placement (not a live run) is the mid-turn boundary we kill
+	//    at — the entry is committed, the turn is running/done, and the client is holding its row. Then kill.
+	//
+	//    The screen gate makes the kill land on a settled page: right after a launch the app is still fetching the chat
+	//    route's lazy chunks, and a kill in that window trips T3's one-shot chunk-reload guard
+	//    (apps/web/src/lib/chunkReloadGuard.ts) — the page reloads into a dead port and the browser's own error page.
 	const liveDeadline = Date.now() + launchTimeout;
 	for (;;) {
 		const p = await projection(threadId);
@@ -137,8 +141,15 @@ try {
 		if (Date.now() > liveDeadline) throw new Error(`the crash message never landed as a single user turn: ${JSON.stringify(p?.runs ?? null)}`);
 		await sleep(250);
 	}
+	const screenDeadline = Date.now() + launchTimeout;
+	for (;;) {
+		const onScreen = (await page.getByText(crashText, { exact: false }).all()).length;
+		if (onScreen === 1) break;
+		if (Date.now() > screenDeadline) throw new Error(`the crash message was not on screen exactly once before the kill: dom=${onScreen}`);
+		await sleep(250);
+	}
 	await writeMarker(sentFile, "sent");
-	console.log("message is durably placed (one user turn); the shell will now kill the host");
+	console.log("message is durably placed (one user turn) and on screen once; the shell will now kill the host");
 
 	// 4. Hand off: the shell kills the host, then restarts it. The page stays open — T3 reconnects on its own.
 	const restartDeadline = Date.now() + 120_000;

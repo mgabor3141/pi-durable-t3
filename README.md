@@ -82,6 +82,10 @@ Known limitations:
 - In T3's desktop app the agent is a second computer: its first-run wizard lists only Codex and Claude, and
   Settings → Connections shows the desktop's own machine. Use the web app the host serves for those, or `pair`.
 - T3 shows "Server update available" when the app is newer than the pinned T3 version. Dismissing it is safe.
+- A page left open across a host restart can land on the browser's "site can't be reached" screen: T3's app reloads
+  itself once when a lazily loaded chunk fails to fetch, and during the restart there is nothing to reload into. Reload
+  the page — the thread and its messages come back exactly as they were, including one holding a message the host was
+  sent just before it died.
 - Attachments are images only. Deleting a thread leaves its images in `stateDir/attachments/`.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
