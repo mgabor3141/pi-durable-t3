@@ -71,7 +71,7 @@ With `tailscaleServe` set, the host arms `tailscale serve` for its own port and 
 ## What works
 
 Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings, adding and removing projects, image attachments, thread search, the Usage page,
+crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page,
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
 refused on purpose: the agent works in real folders with `bash`. Every call and its status:

@@ -31,6 +31,53 @@ const ATOMIC_KEYS = new Set(["backgroundActivity", "automaticGitFetchInterval", 
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** The model-preference ops T3 applies per key (`packages/shared/src/serverSettings.ts`'s `applyServerSettingsPatch`),
+ * which the generic `deepMerge` cannot: they read the CURRENT document, not the file. T3 stores the favorites and
+ * per-provider preferences server-side as `favorites` (null = no client has migrated yet) and `providerModelPreferences`
+ * (same), so a star toggled on one device is authoritative for every device. Replicated faithfully and no more:
+ *
+ * - `setModelFavorites` / `setModelsHidden` / `setProviderModelOrder` fold into the current lists, entry by entry, so two
+ *   clients editing at once do not cancel each other. Favorites are keyed by (provider, model): re-adding is a no-op,
+ *   removing a model on one instance leaves it on another.
+ * - `favorites` / `providerModelPreferences` replace the whole value (a clear is authoritative — an empty value beats a
+ *   late migration from another device).
+ * - `migrateModelPreferences` is the client's one-time upload of a saved list, applied ONLY while the key is still unset
+ *   (`current.<key>` is null): a key that owns a value — an empty array included — keeps it. The bridge applies every
+ *   patch synchronously against the committed document, which is its serialization of these writes (the rule T3 runs
+ *   under a write lock); no `await` sits between the read and the commit.
+ *
+ * The other per-key special cases (background activity, project overrides, source control, usage maps, model-selection
+ * options) stay unreplicated (capabilities.md, Settings row): the model picker sends none of them.
+ */
+function applyModelPreferences(current: Record<string, unknown>, patch: ServerSettingsPatch): { favorites: unknown; providerModelPreferences: unknown } {
+	const { setModelFavorites, setModelsHidden, setProviderModelOrder, favorites: favoritesPatch, providerModelPreferences: preferencesPatch, migrateModelPreferences } = patch;
+
+	const initialFavorites = favoritesPatch ?? (current.favorites as unknown[] | null) ?? migrateModelPreferences?.favorites ?? null;
+	const favorites =
+		setModelFavorites?.reduce<unknown[]>((list, change) => {
+			const exists = list.some((favorite) => (favorite as { provider: string }).provider === change.provider && (favorite as { model: string }).model === change.model);
+			return change.favorite
+				? exists
+					? list
+					: [...list, { provider: change.provider, model: change.model }]
+				: list.filter((favorite) => (favorite as { provider: string }).provider !== change.provider || (favorite as { model: string }).model !== change.model);
+		}, (initialFavorites as unknown[] | null) ?? []) ?? initialFavorites;
+
+	const initialPreferences = (preferencesPatch ?? (current.providerModelPreferences as Record<string, { hiddenModels: string[]; modelOrder: string[] }> | null) ?? migrateModelPreferences?.providerModelPreferences ?? null) as Record<string, { hiddenModels: string[]; modelOrder: string[] }> | null;
+	let nextPreferences = initialPreferences;
+	for (const change of setModelsHidden ?? []) {
+		const preferences = nextPreferences?.[change.provider] ?? { hiddenModels: [], modelOrder: [] };
+		const hiddenModels = preferences.hiddenModels.filter((model) => model !== change.model);
+		if (change.hidden) hiddenModels.push(change.model);
+		nextPreferences = { ...nextPreferences, [change.provider]: { ...preferences, hiddenModels } };
+	}
+	if (setProviderModelOrder) {
+		const preferences = nextPreferences?.[setProviderModelOrder.provider] ?? { hiddenModels: [], modelOrder: [] };
+		nextPreferences = { ...nextPreferences, [setProviderModelOrder.provider]: { ...preferences, modelOrder: [...setProviderModelOrder.modelOrder] } };
+	}
+	return { favorites, providerModelPreferences: nextPreferences };
+}
+
 /** T3's patch rule (`packages/shared/src/Struct.ts`): recursive plain-object merge; `undefined` keys are skipped,
  * arrays and non-objects (including `null`) replace. */
 function deepMerge(current: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
@@ -142,9 +189,15 @@ export class ServerSettingsStore {
 		return this.#settings;
 	}
 
-	/** `server.updateSettings`: patch the materialized settings (T3 merges into the decoded document, not the file). */
+	/** `server.updateSettings`: patch the materialized settings (T3 merges into the decoded document, not the file),
+	 * then fold in the model-preference ops T3 applies per key (the model picker's star, hide and reorder). */
 	update(patch: ServerSettingsPatch): ServerSettings {
-		return this.#commit(deepMerge(this.#full, patch as Record<string, unknown>), false);
+		// The model-preference keys are consumed per key below, never deep-merged into the document (they read the
+		// current lists, not the file); the rest merges as T3's patch rule.
+		const { setModelFavorites: _f, setModelsHidden: _h, setProviderModelOrder: _o, providerModelPreferences: _p, migrateModelPreferences: _m, ...patchForMerge } = patch;
+		const merged = deepMerge(this.#full, patchForMerge as Record<string, unknown>);
+		const { favorites, providerModelPreferences } = applyModelPreferences(this.#full, patch);
+		return this.#commit({ ...merged, favorites, providerModelPreferences }, false);
 	}
 
 	/** `providerInstanceMutation` + patch against one snapshot (T3's `updateProviderInstance`): a `create` for an id
