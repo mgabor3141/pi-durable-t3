@@ -216,6 +216,9 @@ it("on loopback, rejects a non-loopback Host header — DNS-rebinding guard (S4)
 		// Loopback Host names are served; a rebinding (evil hostname resolving to 127.0.0.1) is refused with 421.
 		expect(await requestWithHost(port, `127.0.0.1:${port}`)).toBe(200);
 		expect(await requestWithHost(port, `localhost:${port}`)).toBe(200);
+		// An IPv6 literal arrives bracketed, as a browser on `http://[::1]:<port>` sends it.
+		expect(await requestWithHost(port, `[::1]:${port}`)).toBe(200);
+		expect(await requestWithHost(port, "[::2]")).toBe(421);
 		expect(await requestWithHost(port, "evil.example")).toBe(421);
 		expect(await requestWithHost(port, "evil.example:80")).toBe(421);
 	} finally {

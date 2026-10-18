@@ -243,7 +243,8 @@ export function makeServerLayer(deps: {
 			Effect.gen(function* () {
 				if (!boundLoopback) return yield* effect;
 				const request = yield* HttpServerRequest.HttpServerRequest;
-				const hostname = String(request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
+				// Drop the port, then an IPv6 literal's brackets: a browser sends `[::1]:3774`.
+				const hostname = String(request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1");
 				if (LOOPBACK_HOSTS.has(hostname)) return yield* effect;
 				if (serveEnabled && isTailnetHost(hostname)) return yield* effect;
 				return json({ code: "invalid_host", message: `Host "${hostname}" is not allowed on a loopback listener.` }, 421);
