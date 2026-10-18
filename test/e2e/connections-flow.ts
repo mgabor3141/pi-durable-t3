@@ -27,10 +27,6 @@ try {
 		`${webAppUrl}/pair#${new URLSearchParams({ token: pairToken })}`,
 		{ waitUntil: "domcontentloaded" },
 	);
-	await page
-		.getByText("This browser is paired", { exact: false })
-		.waitFor({ state: "visible", timeout: 20000 });
-	await page.goto(`${webAppUrl}/`, { waitUntil: "domcontentloaded" });
 	await page.waitForSelector("[contenteditable]", { timeout: 30000 });
 
 	// Open Settings → Connections directly (the SPA route, served by the facet's static fallback).

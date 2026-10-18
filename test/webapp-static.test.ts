@@ -1,5 +1,5 @@
 // The built T3 web app served by the facet at `/`: static bytes, T3's caching/validator headers, the SPA fallback
-// to index.html, and the API/`/ws`/`/.well-known`/`/api`/`/pair` routes winning over the catch-all. The host hardcodes
+// to index.html, and the API/`/ws`/`/.well-known`/`/api` routes winning over the catch-all. The host hardcodes
 // the web app to the repo's `web-dist`, so a launched host serves the real built app. One flow per host.
 
 import { readFileSync } from "node:fs";
@@ -82,7 +82,7 @@ it("serves a build asset no-cache, with a W/ ETag and 304 revalidation (as T3 se
 	await again.body?.cancel();
 }, 30000);
 
-it("the API, /ws, /.well-known and /pair routes win over the SPA catch-all", async () => {
+it("the API, /ws and /.well-known routes win over the SPA catch-all; /pair is the SPA's", async () => {
 	await start();
 	// The discovery descriptor is JSON, not the index shell — the specific route wins over `GET *`.
 	const wellKnown = await fetch(`${base}/.well-known/t3/environment`);
@@ -95,10 +95,10 @@ it("the API, /ws, /.well-known and /pair routes win over the SPA catch-all", asy
 	expect(session.status).toBe(200);
 	expect( ((await session.json()) as { authenticated: boolean }).authenticated, ).toBe(false);
 
-	// `/pair` is the bridge's pairing screen, not the SPA route.
+	// `/pair` is T3's own SPA route: the shell, which pairs from the link and opens the app.
 	const pair = await fetch(`${base}/pair#token=x`);
 	expect(pair.status).toBe(200);
-	expect(await pair.text()).toContain("Pair this browser with the bridge");
+	expect(await pair.text()).toContain("<div id=\"root\">");
 
 	// `/ws` without a ticket is a typed auth refusal (401 JSON), not the shell.
 	const ws = await fetch(`${base}/ws?orchestrationProtocol=2`);

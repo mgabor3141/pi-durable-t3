@@ -126,7 +126,7 @@ function decodeMessage(error: unknown): string {
 
 // ── Static web app (T3's `layerStaticAndDevRoute`, faithful for a built client with no dev server): a built T3 web
 // app served at `/`, with the SPA fallback to `index.html` for app routes. The API, `/ws`, `/.well-known`, `/oauth`,
-// `/api` and `/pair` routes are registered more specifically, so the router's specificity makes them win — exactly
+// `/api` routes are registered more specifically, so the router's specificity makes them win — exactly
 // how T3 layers its `GET *` static route behind the API. Caching, the `W/` ETag and `If-None-Match`/`If-Modified-Since` revalidation are replicated from `apps/server/src/http.ts`.
 
 /** T3's `openStaticFile`: a real file → its stats; a directory or a miss → `undefined` (the caller falls back). */
@@ -327,24 +327,6 @@ export function makeServerLayer(deps: {
 
 	const routes = Layer.mergeAll(
 		HttpRouter.add("GET", "/.well-known/t3/environment", Effect.sync(() => json(descriptor()))),
-		// Printed pairing URLs point here: the pairing endpoint takes a POST, so a browser opening one needs a pairing
-		// screen, not a 404. The token rides in the hash, never the query string. It exchanges for a BROWSER session (a
-		// cookie), so a web app served from this origin is "This machine" the moment you open it after pairing.
-		HttpRouter.add("GET", "/pair", Effect.sync(() => html(
-			`<!doctype html><meta charset=utf-8><title>Pair with ${"pi"} coding-agent</title>
-<style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:0 1rem}code{background:#eee;padding:2px 4px;border-radius:4px}</style>
-<h3>Pair this browser with the bridge</h3>
-<p id=s>Checking the pairing code…</p>
-<script>
-const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token") || location.hash.replace(/^#/, "");
-fetch("/api/auth/browser-session", { method: "POST", headers: { "content-type": "application/json" },
-  body: JSON.stringify({ credential: token }), credentials: "same-origin" })
-  .then((r) => r.json())
-  .then((j) => { document.getElementById("s").textContent = j.authenticated
-    ? "Pairing code accepted. This browser is paired — open the app; it is signed in as this machine."
-    : "Pairing failed: the code was already used or has expired. Mint a new pairing code with the host's pair command."; });
-</script>`,
-		))),
 		HttpRouter.add(
 			"POST",
 			"/oauth/token",

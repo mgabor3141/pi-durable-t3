@@ -52,7 +52,7 @@ export type AttachT3Options = {
 	readonly listen?: { readonly host: string; readonly port: number };
 	/** Environment name T3 shows. Default `"pi"`. */
 	readonly label?: string;
-	/** A built T3 web app's directory, served at `/` (static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth`, `/api` and `/pair` routes win). The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. Unset: no web app, the API/WS serve the desktop app as before. */
+	/** A built T3 web app's directory, served at `/` (static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth` and `/api` routes win; `/pair` is T3's own pairing page). The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. Unset: no web app, the API/WS serve the desktop app as before. */
 	readonly webApp?: string;
 	/** Browser origins allowed to call. Default: T3's desktop app. `[]` allows any origin. A web app served from this host's own origin is same-origin and needs no entry; this list is for a web app served from a foreign origin. */
 	readonly corsOrigins?: readonly string[];

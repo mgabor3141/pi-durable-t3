@@ -95,11 +95,9 @@ try {
 	page.on("websocket", (ws) => ws.on("framesent", (frame) => wsFrames.push(String(frame.payload))));
 
 	// 1. Pair.
-	// The web app is served from the facet origin, so `/pair` is the bridge's screen: it exchanges the token for a
-	// browser session (a cookie), after which the app opens as "This machine".
+	// The web app is served from the facet origin, so `/pair` is T3's own pairing route: it exchanges the token for a
+	// browser session (a cookie) and opens the app as "This machine", with no further click.
 	await page.goto(`${webAppUrl}/pair#${new URLSearchParams({ token: pairToken })}`, { waitUntil: "domcontentloaded" });
-	await page.getByText("This browser is paired", { exact: false }).waitFor({ state: "visible", timeout: 20000 });
-	await page.goto(`${webAppUrl}/`, { waitUntil: "domcontentloaded" });
 	await page.waitForSelector("[contenteditable]", { timeout: 30000 });
 
 	const editor = page.locator('[contenteditable="true"]').first();
