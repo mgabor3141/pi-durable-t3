@@ -13,16 +13,16 @@ Turns are durable: kill the host mid-turn, start it again, and the turn finishes
 
 ```sh
 pnpm install
-pnpm setup:t3     # fetch T3 at the pinned commit, vendor its contracts, download its web app
-pnpm start        # an example coding agent; it serves T3's web app on 127.0.0.1:3774
-pnpm start pair   # a pairing link — open it in a browser to pair this machine
+pnpm setup:t3     # fetch T3 at the pinned version: its contracts and its web app
+pnpm start        # an example coding agent on 127.0.0.1:3774, serving T3's web app
+pnpm start pair   # a single-use pairing link
 ```
 
-Open the pairing link the last command prints (`http://127.0.0.1:3774/pair#token=…`) in a browser: the page
-pairs the browser and lands you in the app, where this machine (the agent) is the primary environment. You
-can also paste the same link into T3's desktop app to add this machine as a second computer there. The agent
-is [`examples/coding-agent/`](examples/coding-agent/): pi-durable's coding-agent recipe with the bridge
-attached. Its README covers the web app, config, files and Tailscale. **It runs `bash` as your user, with no
+Open the link in a browser: it signs the browser in and opens T3 with the agent as "This machine". To use T3's
+desktop app instead, add a computer there and paste the same link.
+
+The agent is [`examples/coding-agent/`](examples/coding-agent/): pi-durable's coding-agent recipe with the
+bridge attached. Its README covers config, files and Tailscale. **It runs `bash` as your user, with no
 approvals.**
 
 ## Attach it to your own agent
@@ -36,7 +36,7 @@ import { attachT3, mintPairingCode } from "./src/bridge.ts";
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
 	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
-	webApp,        // optional: a built T3 web app to serve at `/`; omit to serve none (desktop + API only)
+	webApp,        // optional: a built T3 web app folder to serve at `/`
 	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	// optional: label, corsOrigins, tokenTtlSeconds, log
@@ -58,25 +58,23 @@ await t3.close();
 
 ## Security
 
-The bridge listens on loopback by default and then rejects requests whose `Host` header isn't loopback.
-Every API/WS call needs a bearer token from pairing. When `webApp` is set, the host also serves the web app,
-and a browser on the host's own origin authenticates entirely by a same-origin session cookie (set by the
-`/pair` page, exchanged from a pairing code; the cookie is bound to the pairing scope, and a same-origin
-guard blocks cross-site request forgery). Browsers may call the API cross-origin only from T3's desktop app
-and any origins in `corsOrigins`. What the agent may do is the Harness's business, not the bridge's.
+The bridge listens on loopback by default and then rejects requests whose `Host` header isn't loopback. Every
+call needs a credential from pairing: a bearer token, or, for the web app the host serves, T3's browser
+session cookie, which counts only on same-origin requests. Browsers on other origins may call only if listed
+in `corsOrigins` (default: T3's desktop app). What the agent may do is the Harness's business, not the bridge's.
 
 ## What works
 
 Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings, adding and removing projects, image attachments, thread search, the Usage page, and
-T3's Connections settings (pairing links, paired devices, revoking). The host can serve T3's web app from its
-own origin, so the agent is the app's **primary environment** ("This machine") and Connections works in the
-browser. Git, terminals, file panels and previews are refused on purpose: the agent works in real folders with
-`bash`. Every call and its status: [`docs/capabilities.md`](docs/capabilities.md).
+crash resume, T3's settings, adding and removing projects, image attachments, thread search, the Usage page,
+and Connections (pairing links, paired devices, revoking). Git, terminals, file panels and previews are
+refused on purpose: the agent works in real folders with `bash`. Every call and its status:
+[`docs/capabilities.md`](docs/capabilities.md).
 
 Known limitations:
 - T3 shows only threads created through T3, not conversations started by other code on the same Harness.
-- T3's first-run wizard lists only Codex and Claude as agents; pi appears once the computer is added.
+- In T3's desktop app the agent is a second computer: its first-run wizard lists only Codex and Claude, and
+  Settings → Connections shows the desktop's own machine. Use the web app the host serves for those, or `pair`.
 - T3 shows "Server update available" when the app is newer than the pinned T3 version. Dismissing it is safe.
 - Attachments are images only. Deleting a thread leaves its images in `stateDir/attachments/`.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
@@ -88,11 +86,11 @@ Known limitations:
 ```sh
 pnpm test        # no credentials, no network, never touches ~/.pi
 pnpm typecheck
-pnpm smoke       # the real web app, served by the host, in Chromium: pairing, prompts, undo, crash resume, projects, Connections
+pnpm smoke       # T3's web app in Chromium: pairing, prompts, undo, crash resume, projects, Connections
 ```
 
 `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm test` also runs one real-model turn.
 
 ## License
 
-MIT. The vendored T3 contracts are MIT (T3 Tools); see `LICENSE`.
+MIT, see `LICENSE`. `pnpm setup:t3` fetches T3 Code's contracts and web app, which are MIT (T3 Tools Inc.).

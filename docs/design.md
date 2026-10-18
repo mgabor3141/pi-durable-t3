@@ -37,16 +37,12 @@ touches any of those, and a test enforces the boundary.
   keep is listed in [`state.md`](state.md).
 - **Conflicts become forks, never errors.** A write names the conversation the client is looking at. If
   that is no longer the head, it becomes a new thread. No locks, no "stale" errors, no lost input.
-- **Stock wire.** T3's web app runs unmodified, and the host serves it from its own origin (when given
-  `webApp`), so a browser on the host treats the agent as its **primary environment** ("This machine") —
-  authenticating by the cookie-session twin of pairing (a same-origin `t3_bs` cookie exchanged from a pairing
-  code, bound to the pairing scope), not a bearer. The same-origin static serving and browser-session cookie
-  are faithful ports of T3's `handleStaticAndDevRequest` and `EnvironmentAuth.authenticateBrowserSession`.
-  The protocol code lives in `src/t3/`, and Effect never leaves it.
+- **Stock wire.** T3's web app and desktop app run unmodified. Given `webApp`, the host also serves the web
+  app from its own origin, which makes the agent the app's primary environment ("This machine"), signed in
+  with T3's browser session cookie. The protocol code lives in `src/t3/`, and Effect never leaves it.
 - **Refuse, don't fake.** Files, git and terminals belong to the agent. T3 is told they are unsupported and
-  hides them. A panel that pretends to work is worse than none. The line is what the UI depends on: the server
-  lifecycle stream is answered truthfully (the host welcomes, is ready, and self-updates never) because the
-  web app's connection reducer cannot reach the app without it — that is replication, not a fake.
+  hides them. A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,
+  the answer is the truth: an empty session scan, a lifecycle stream that says "ready" and nothing more.
 - **Strict files.** A file the host cannot read stops it at boot, naming the file. The host never writes a
   file it could not read back.
 - **One host per state dir.** No cross-process locking. The state dir pairs with the Harness's storage —

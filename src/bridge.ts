@@ -63,7 +63,7 @@ export type T3Attachment = {
 };
 
 /** Mint a single-use pairing code for the bridge whose dir you name — no server needed; the running host reads the
- * store on every pairing attempt. Returns the code only: the listen address is the host's, not in `dir`, so a host
+ * store on every pairing attempt. Returns the code only: the listen address is the host's, not in `stateDir`, so a host
  * prints the ready-to-open links itself (`pair?token=…` against its own address). */
 export function mintPairingCode(stateDir: string): { readonly code: string } {
 	return { code: new AuthStore(stateDir, { tokenTtlSeconds: 90 * 86_400 }).createPairingCode() };

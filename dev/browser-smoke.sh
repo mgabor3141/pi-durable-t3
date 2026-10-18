@@ -54,7 +54,7 @@ cat > "$root/t3/projects.json" <<JSON
 }
 JSON
 
-# A single-use pairing code, minted the way a user adds a device (the host's `pair` command against the bridge dir).
+# A single-use pairing code, minted the way a user adds a device (the host's `pair` command against the state dir).
 mint_code() {
   node --experimental-strip-types "$here/examples/coding-agent/src/host.ts" pair --root "$root" 2>/dev/null \
     | sed -n 's/^Pairing code (single use): //p' | head -1
@@ -79,7 +79,7 @@ start_host || { echo "facet did not start:"; cat "$root/host.log"; exit 1; }
 
 # The web app is served from the facet origin; the smoke opens it there (WEB == the facet).
 FACET="http://127.0.0.1:$FACET_PORT"
-# Codes are single-use: mint one per browser flow, against the running host's bridge dir.
+# Codes are single-use: mint one per browser flow, against the running host's state dir.
 PAIR_TOKEN="$(mint_code)"
 [ -n "$PAIR_TOKEN" ] || { echo "could not mint a pairing code"; cat "$root/host.log"; exit 1; }
 

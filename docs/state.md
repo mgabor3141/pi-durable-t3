@@ -37,17 +37,14 @@ the two together; a mismatched pair shows an empty sidebar, and nothing repairs 
 |---|---|---|
 | `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
 | `projects.json` (the state dir) | The project registry: id, path, title | Project names; threads keep their `cwd` |
-| `auth.json` (the state dir) | Environment id, hashed pairing links and hashed session credentials (bearer-token clients and browser-session-cookie clients), each with its id, grant, scopes and client metadata; and the HMAC key that signs attachment-upload/asset-access URLs. The browser-session cookie is the cookie twin of bearer pairing — same grant/scopes, revoked with its client, so the Connections device list shows one entry per device regardless of how it authenticated | Every client re-pairs; minted links are lost; previously minted asset URLs stop verifying (re-minted on demand) |
-| `attachments/` (the state dir) | Persisted image-attachment bytes, keyed by the deterministic attachment id (the display copy the `/api/assets/*` route serves) | A past thread's images no longer render (the message's attachment record — and the copy the model received — survive in pi-durable); new attachments are unaffected |
-| The scratch dir (the integrator's `scratchDir`, if set) | T3's "No project" folder: one subfolder per thread launched without a project | Nothing — the folder is re-made by the next `projects.ensureScratch`, and every thread keeps the `cwd` its conversation recorded |
+| `auth.json` (the state dir) | Environment id; hashed pairing links and device sessions (bearer or browser cookie), each with its scopes and client metadata; the key that signs attachment URLs | Every device re-pairs |
+| `attachments/` (the state dir) | Image attachments, one file per attachment id | Past images stop rendering; the model's copy in pi-durable survives |
+| The scratch dir (`scratchDir`, if set) | "No project" threads: one folder per thread | Nothing the bridge needs; threads keep their recorded `cwd` |
 
-The JSON files are written atomically, mode 0600; the scratch dir is a plain directory, created on demand
-— it is agent work output, not bridge state. The `attachments/` dir holds bytes the client uploaded (images),
-mode 0600, written by `assets.persistChatAttachments`; the bridge keeps no index of them — an attachment id
-decodes to its own filename, and the message's attachment record (in pi-durable) names the id. The bridge
-interprets nothing in `t3-settings.json`. Its one deviation
-from T3's defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers
-are off, because this host serves only pi.
+The JSON files are written atomically, mode 0600, and so are attachments. The scratch dir is agent work
+output, not bridge state. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
+defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
+because this host serves only pi.
 
 ## In memory
 
