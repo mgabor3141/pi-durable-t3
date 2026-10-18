@@ -9,7 +9,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
 
-const PORT = 4893;
+const PORT = 4967;
 let root: string;
 let agentDir: string;
 let host: Launched | undefined;

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening, type WsRpc } from "./ws-rpc.ts";
 import { launch, pairCode, t3Dir, type Launched } from "./host-process-harness.ts";
 
-const PORT = 4951;
+const PORT = 4964;
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC";
 const PNG_BYTES = Buffer.from(PNG_B64, "base64");
 

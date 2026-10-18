@@ -23,7 +23,7 @@ const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-bs-"));
 const agentDir = join(scratch, "agent");
 await mkdir(agentDir, { recursive: true });
 const launched: Launched[] = [];
-const PORT = 4951;
+const PORT = 4965;
 const base = `http://127.0.0.1:${PORT}`;
 const ORIGIN = { origin: base }; // same-origin (host === Origin host) satisfies T3's cookie origin guard.
 

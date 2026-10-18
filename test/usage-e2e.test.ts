@@ -26,7 +26,7 @@ const dayMs = 86_400_000;
 const utcDay = (offsetDays: number): UsageDay => new Date(Date.now() - offsetDays * dayMs).toISOString().slice(0, 10) as UsageDay;
 
 it("server.getUsageSummary answers a pi bucket for a real turn; refreshUsageRates answers honest pricing; a bad window is a typed error", async () => {
-	const port = 4940;
+	const port = 4968;
 	const root = join(scratch, "host");
 	const projectDir = join(root, "projects", "alpha");
 	await mkdir(projectDir, { recursive: true });

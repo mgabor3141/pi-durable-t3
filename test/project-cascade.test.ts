@@ -124,7 +124,7 @@ await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [
 }, 120_000);
 
 it("a project with no threads deletes without force (the guard is about threads, not about the entry)", async () => {
-	const port = 4942;
+	const port = 4969;
 	const root = join(scratch, "empty");
 	const projectDir = join(root, "projects", "quiet");
 	await mkdir(projectDir, { recursive: true });
