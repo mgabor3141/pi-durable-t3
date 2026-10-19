@@ -204,7 +204,7 @@ it("runs no tailscale command and advertises no tailnet name when Serve is off",
 });
 
 it("refuses to arm a Serve port that already maps elsewhere, and never releases it", async () => {
-	const PORT = 4964;
+	const PORT = 4966;
 	// The status says 8443 already proxies 3773 — a mapping this host did not create (e.g. a real T3 beside it).
 	const takenStatus = `{"TCP":{"8443":{"HTTPS":true}},"Web":{"${TS_HOST}:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3773"}}}}}`;
 	const root = join(scratch, "serve-busy");
@@ -212,11 +212,11 @@ it("refuses to arm a Serve port that already maps elsewhere, and never releases 
 	await mkdir(t3Dir(root), { recursive: true });
 	const calls = join(scratch, "calls-busy.log");
 	const bin = await fakeTailscale(calls, takenStatus);
-	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:4964"\ntailscale_serve = true\ntailscale_serve_port = 8443\n`, "utf8");
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:4966"\ntailscale_serve = true\ntailscale_serve_port = 8443\n`, "utf8");
 	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
-	const host = launch(root, 4964, { PATH: `${bin}:${process.env["PATH"]}`, TAILSCALE_CALLS: calls }, agentDir);
+	const host = launch(root, 4966, { PATH: `${bin}:${process.env["PATH"]}`, TAILSCALE_CALLS: calls }, agentDir);
 	launched.push(host);
-	expect(await waitListening(4964), host.out()).toBe(true);
+	expect(await waitListening(4966), host.out()).toBe(true);
 
 	// The host warns and starts without Serve: it checked, found the port taken, and armed nothing.
 	await until("the refusal", () => Promise.resolve(host.out()), (seen) => seen.includes("not arming"));
