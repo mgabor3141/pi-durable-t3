@@ -71,7 +71,7 @@ unconditionally). An armed port is released on shutdown.
 ## What works
 
 Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page,
+crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
 and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
@@ -91,6 +91,8 @@ Known limitations:
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
+- Scheduled tasks: webhook triggers are refused (the form still offers them). A task's thread is titled "New thread",
+  and its workspace choice is not applied: every run is at the project root.
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
   tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
   can lock out local pairing for that minute.
