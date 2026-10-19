@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, WEBHOOKS_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -223,6 +223,12 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		}
 		expect(error).toBeInstanceOf(ScheduledTaskError);
 		expect((error as ScheduledTaskError).message).toBe(WEBHOOKS_UNSUPPORTED);
+		expect(tasks.list().tasks).toHaveLength(0);
+	});
+
+	it("a worktree workspace is refused: every run is at the project root", async () => {
+		const { tasks } = await fixture();
+		expect(() => tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).toThrow(WORKTREES_UNSUPPORTED);
 		expect(tasks.list().tasks).toHaveLength(0);
 	});
 

@@ -91,8 +91,8 @@ Known limitations:
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
-- Scheduled tasks: webhook triggers are refused (the form still offers them). A task's thread is titled "New thread",
-  and its workspace choice is not applied: every run is at the project root.
+- Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
+  (T3's form defaults to one; pick "Use the project checkout"). A task's thread is titled "New thread".
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
   tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
   can lock out local pairing for that minute.

@@ -2,7 +2,7 @@
 // for the interval and fixed-time triggers. Webhook triggers are refused (capabilities.md). The tasks live in one JSON
 // document in the state dir (`scheduled-tasks.json`); a run is a dispatch — a new thread with the prompt as its first
 // message, or the prompt queued on the task's thread — never the turn's completion.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { ScheduledTask, ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
@@ -15,6 +15,7 @@ import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./sche
 type Task = typeof ScheduledTask.Type;
 
 export const WEBHOOKS_UNSUPPORTED = "Webhook triggers are not supported by pi-durable-t3 yet.";
+export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-t3: choose "Use the project checkout" as the workspace.';
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 /** T3's Scheduler cadence. */
 export const POLL_INTERVAL_MS = 5_000;
@@ -223,6 +224,8 @@ export class ScheduledTasks {
 
 	upsert(input: ScheduledTaskUpsertInput): { task: Task } {
 		if (input.schedule.type === "webhook") throw taskError(WEBHOOKS_UNSUPPORTED, input.id);
+		// Every run is at the project root: a task asking for a worktree would silently run somewhere else.
+		if (input.workspaceStrategy.type !== "root") throw taskError(WORKTREES_UNSUPPORTED, input.id);
 		const now = this.#now();
 		const id = input.id ?? `scheduled-task:${input.commandId ?? randomUUID()}`;
 		const existing = this.#tasks.get(id);
@@ -318,12 +321,6 @@ export class ScheduledTasks {
 	}
 }
 
-/** A launch's thread id, derived from its commandId: a replayed fire lands on the thread the first attempt made. */
-export function launchThreadId(commandId: string): string {
-	const hex = createHash("sha256").update(commandId).digest("hex");
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
-
 /** The two dispatch paths over the bridge: T3's `threadLaunch.launch` is our launch (root workspace — the only one this
  * host has), `sendToThread(mode: "queue")` is `message.dispatch` with `queue_after_active`. */
 export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
@@ -331,7 +328,6 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 		launch: async (input) => {
 			await bridge.launchThread({
 				commandId: input.commandId,
-				threadId: launchThreadId(input.commandId),
 				projectId: input.projectId,
 				title: input.title,
 				modelSelection: input.modelSelection,

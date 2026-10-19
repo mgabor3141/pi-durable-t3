@@ -10,7 +10,6 @@ import { Schema } from "effect";
 import { ScheduledTaskError, ScheduledTaskListResult } from "@t3tools/contracts";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
-import { launchThreadId } from "../src/t3/scheduled-tasks.ts";
 
 const PORT = 4986;
 let root: string;
@@ -61,8 +60,14 @@ it("subscribe, runNow (launch, then queue on the thread), and the webhook refusa
 
 		const ran = exitValue(await ws.call("scheduledTasks.runNow", { id: created.task.id }, 30_000), "runNow") as { task: Task };
 		expect(ran.task).toMatchObject({ lastRunStatus: "succeeded", runCount: 1 });
-		const fireKey = `${created.task.id}:${Date.parse(ran.task.lastRunAt!)}:manual`;
-		const threadId = launchThreadId(`scheduled-task:${fireKey}`);
+		// The launched thread: the only one in the shell snapshot.
+		const shell = await ws.open("orchestration.subscribeShell", { requestCompletionMarker: true });
+		let threadId = "";
+		await until("the launched thread in the shell", () => {
+			const snapshot = ws.chunks(shell).flatMap((frame) => (frame as { values?: { kind?: string; snapshot?: { threads?: { id: string }[] } }[] }).values ?? []).find((v) => v.kind === "snapshot");
+			threadId = snapshot?.snapshot?.threads?.[0]?.id ?? "";
+			return threadId !== "";
+		});
 		const projection = exitValue(await ws.call("orchestration.getThreadProjection", { threadId }), "getThreadProjection") as { messages: { role: string; text: string; scheduledTaskId?: string }[] };
 		const first = projection.messages.find((message) => message.role === "user");
 		expect(first).toMatchObject({ text: "scheduled hello", scheduledTaskId: created.task.id });
