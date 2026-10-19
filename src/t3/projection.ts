@@ -509,7 +509,8 @@ export function projectThread(
 			lastError: null,
 		},
 	];
-	const providerThreads: OrchestrationV2ProviderThread[] = [
+	// Like T3, a thread gets its provider thread with its first run: until then it has none, and no active one.
+	const providerThreads: OrchestrationV2ProviderThread[] = drafts.length === 0 ? [] : [
 		{
 			id: id(providerThreadId),
 			driver: id(PROVIDER_DRIVER),
@@ -545,7 +546,7 @@ export function projectThread(
 		interactionMode: "default",
 		branch: null,
 		worktreePath,
-		activeProviderThreadId: id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		lineage: {
 			parentThreadId: meta.parentThreadId === undefined ? null : id(meta.parentThreadId),
 			relationshipToParent: meta.parentThreadId === undefined ? null : "fork",
@@ -603,7 +604,7 @@ export function projectThread(
 		worktreePath,
 		lineage: thread.lineage,
 		forkedFrom: null,
-		activeProviderThreadId: id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		latestRunId: latestRun?.id ?? null,
 		latestRunRequestedAt: latestRun?.requestedAt ?? null,
 		latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -611,7 +612,8 @@ export function projectThread(
 		activeRunId: activeRun?.id ?? null,
 		activityRunStartedAt: activeRun?.startedAt ?? null,
 		activityRunStatus: activeRun === undefined ? null : "running",
-		status: busy ? "running" : "idle",
+		// T3's shell status is the latest run's status, and "idle" only for a thread that never ran (ProjectionStore.ts).
+		status: busy ? "running" : (latestRun?.status ?? "idle"),
 		pendingRuntimeRequest: null,
 		latestVisibleMessage:
 			lastVisibleMessage === undefined
