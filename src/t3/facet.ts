@@ -13,6 +13,7 @@ import type { BridgeConfig } from "./config.ts";
 import { makeServerLayer } from "./http.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
+import { ScheduledTasks, scheduledTaskDispatch } from "./scheduled-tasks.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
@@ -39,7 +40,10 @@ export function startFacet(deps: {
 	const attachments = new AttachmentStore(join(config.stateDir, "attachments"), auth);
 
 	const bridge = new Bridge(config, log, host, attachments);
+	// Opened at boot (a scheduled-tasks.json the host cannot read stops it here), polled while the facet runs.
+	const scheduledTasks = new ScheduledTasks({ stateDir: config.stateDir, dispatch: scheduledTaskDispatch(bridge), log });
 	bridge.start();
+	scheduledTasks.start();
 
 	// Bind eagerly: await "listening" before the host prints "ready", and surface a bind error to the caller. Keep the
 	// launch fiber — `close()` interrupts it to release the port.
@@ -53,7 +57,7 @@ export function startFacet(deps: {
 		});
 		httpServer.once("error", (error) => reject(error));
 	});
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, tailscale: deps.tailscale })) as Effect.Effect<never>);
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, scheduledTasks, tailscale: deps.tailscale })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
@@ -72,6 +76,7 @@ export function startFacet(deps: {
 		closed,
 		close: async () => {
 			closing = true;
+			await scheduledTasks.stop();
 			await bridge.close();
 			// Interrupting the launch fiber runs the server layer's finalizers, which close the listener and release the port.
 			await Effect.runPromise(Fiber.interrupt(serverFiber) as Effect.Effect<never>);

@@ -15,6 +15,7 @@ import {
 	ProjectMutationError,
 	RpcScopeAuthorization,
 	type ServerConfig,
+	ScheduledTaskError,
 	ServerSettingsError,
 	UsageReadError,
 	WsRpcGroup,
@@ -39,6 +40,7 @@ import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
+import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -110,6 +112,7 @@ interface RpcDeps {
 	readonly authDescriptor: Any;
 	readonly auth: AuthStore;
 	readonly attachments: AttachmentStore;
+	readonly scheduledTasks: ScheduledTasks;
 	readonly tailscale: TailscaleCli;
 	readonly log: Logger;
 }
@@ -176,6 +179,13 @@ function imageRecords(attachments: unknown): { type: "image"; id: string; name: 
 
 const toPromiseEffect = <A>(run: () => Promise<A>, onError: (message: string) => Any) =>
 	Effect.tryPromise({ try: run, catch: (error) => onError((error as Error).message || String(error)) });
+
+/** A scheduled-task call: its refusals are already the contract's `ScheduledTaskError`; anything else becomes one. */
+const scheduled = <A>(run: () => Promise<A>) =>
+	Effect.tryPromise({
+		try: run,
+		catch: (error) => (error instanceof ScheduledTaskError ? error : new ScheduledTaskError({ message: (error as Error).message || String(error) })),
+	});
 
 export function makeRpcLayer(deps: RpcDeps) {
 	const { bridge, log } = deps;
@@ -448,29 +458,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 		[`orchestration.launchThread`]: (input: Any) =>
 			toPromiseEffect(
 				async () => {
-					// A Scratch launch names the folder it claims: T3 names it from the first message, else the title.
-					const threadId = await bridge.createThread({
+					const message = input.initialMessage;
+					const threadId = await bridge.launchThread({
+						commandId: input.commandId,
 						threadId: input.threadId,
 						projectId: input.projectId,
-						...(input.workspaceStrategy?.type === undefined || input.workspaceStrategy.type === "root"
-							? { launchText: input.initialMessage?.text ?? input.title }
-							: {}),
+						title: input.title,
+						modelSelection: input.modelSelection,
+						workspaceStrategy: input.workspaceStrategy,
+						initialMessage: message === undefined ? undefined : { messageId: message.messageId, text: message.text, attachments: imageRecords(message.attachments) },
 					});
-					await bridge.applySelection(threadId, input.modelSelection);
-					if (input.initialMessage !== undefined && input.initialMessage.text.trim().length > 0) {
-						const launchAttachments = imageRecords(input.initialMessage.attachments);
-						await bridge.idempotent(input.commandId, async () => {
-							await bridge.sendMessage({
-								threadId,
-								commandId: input.commandId,
-								messageId: input.initialMessage.messageId ?? `launch-${input.commandId}`,
-								text: input.initialMessage.text,
-								mode: "start",
-								...(launchAttachments === undefined ? {} : { attachments: launchAttachments }),
-							});
-							return bridge.nextSequence();
-						});
-					}
 					const { projection } = await bridge.projection(threadId);
 					return { threadId, projection, resumed: false };
 				},
@@ -478,6 +475,23 @@ export function makeRpcLayer(deps: RpcDeps) {
 				// asked about — the whole point of the field (design.md, Invariants).
 				(message) => new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, projectId: input.projectId, message }),
 			),
+		// T3's scheduled tasks, interval and fixed-time triggers (`scheduled-tasks.ts`); webhook triggers are refused with the
+		// contract's typed error, which the edit dialog shows as a toast.
+		"scheduledTasks.list": () => scheduled(async () => deps.scheduledTasks.list()),
+		// T3's `subscribeList`: subscribed before the snapshot, so no change falls between; then a fresh list per change.
+		"scheduledTasks.subscribe": () =>
+			fromListener<Any>((emit) => {
+				const stop = deps.scheduledTasks.onChange(() => emit(deps.scheduledTasks.list()));
+				emit(deps.scheduledTasks.list());
+				return stop;
+			}),
+		"scheduledTasks.upsert": (input: Any) => scheduled(async () => deps.scheduledTasks.upsert(input)),
+		"scheduledTasks.setEnabled": (input: Any) => scheduled(async () => deps.scheduledTasks.setEnabled(input)),
+		"scheduledTasks.delete": (input: Any) => scheduled(async () => deps.scheduledTasks.delete(input)),
+		"scheduledTasks.runNow": (input: Any) => scheduled(() => deps.scheduledTasks.runNow(input)),
+		"scheduledTasks.rotateWebhookToken": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.listWebhookDeliveries": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.getWebhookDelivery": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
 		[`orchestration.dispatchCommand`]: dispatch,
 		// T3's command-palette / sidebar thread search, answered from the host's conversations (design.md, replication
 		// rule). The client validates the query (2..200) and limit; `limit` defaults to T3's 50.

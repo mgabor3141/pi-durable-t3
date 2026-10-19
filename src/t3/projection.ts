@@ -20,6 +20,7 @@ import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
+import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
@@ -309,12 +310,16 @@ export function projectThread(
 			const text = textOf(message.role === "user" ? message.content : undefined);
 			// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
 			const attachments = attachmentsOf(entry);
+			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
+			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
+			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
 				createdBy: "user",
 				creationSource: "web",
 				type: "user_message",
 				messageId: id(messageId),
+				...scheduled,
 				inputIntent: intent,
 				text,
 				attachments,
@@ -322,6 +327,7 @@ export function projectThread(
 			messages.push({
 				createdBy: "user",
 				creationSource: "web",
+				...scheduled,
 				id: id(messageId),
 				threadId: id(threadId),
 				runId: id(runId),

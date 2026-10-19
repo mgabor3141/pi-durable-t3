@@ -319,6 +319,11 @@ export class Bridge {
 		return this.#summary(threadId) !== undefined;
 	}
 
+	/** The project a known thread belongs to. */
+	threadProjectId(threadId: string): string | undefined {
+		return this.#summary(threadId)?.projectId;
+	}
+
 	#meta(threadId: string, thread: Thread | undefined, state: ThreadState | undefined): ThreadMeta {
 		// The FK is the only lookup: an unregistered `projectId` is reported as it is, with NO invented project, and no row
 		// exists without a registered project (design.md, IDs), so this resolves.
@@ -640,6 +645,44 @@ export class Bridge {
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
 		this.#syncDirectory();
 		return id;
+	}
+
+	/**
+	 * T3's `orchestration.launchThread` (and a scheduled task's launch): create the thread, apply the client's model, then
+	 * start the first message under the launch's commandId, so a retried launch sends it once.
+	 */
+	async launchThread(input: {
+		commandId: string;
+		threadId?: string | undefined;
+		projectId: string;
+		title?: string | undefined;
+		modelSelection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined;
+		workspaceStrategy?: { type?: string } | undefined;
+		initialMessage?: { messageId?: string; text: string; attachments?: readonly AttachmentRecord[] | undefined } | undefined;
+	}): Promise<string> {
+		// A Scratch launch names the folder it claims: T3 names it from the first message, else the title.
+		const launchText = input.initialMessage?.text ?? input.title;
+		const threadId = await this.createThread({
+			threadId: input.threadId,
+			projectId: input.projectId,
+			...(launchText !== undefined && (input.workspaceStrategy?.type === undefined || input.workspaceStrategy.type === "root") ? { launchText } : {}),
+		});
+		await this.applySelection(threadId, input.modelSelection);
+		const message = input.initialMessage;
+		if (message !== undefined && message.text.trim().length > 0) {
+			await this.idempotent(input.commandId, async () => {
+				await this.sendMessage({
+					threadId,
+					commandId: input.commandId,
+					messageId: message.messageId ?? `launch-${input.commandId}`,
+					text: message.text,
+					mode: "start",
+					...(message.attachments === undefined ? {} : { attachments: message.attachments }),
+				});
+				return this.nextSequence();
+			});
+		}
+		return threadId;
 	}
 
 	/**

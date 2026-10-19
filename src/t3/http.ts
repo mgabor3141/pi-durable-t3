@@ -51,6 +51,7 @@ import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
+import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
@@ -217,11 +218,12 @@ export function makeServerLayer(deps: {
 	log: Logger;
 	httpServer: Server;
 	attachments: AttachmentStore;
+	scheduledTasks: ScheduledTasks;
 	tailscale: TailscaleCli;
 }) {
 	const { bridge, auth, log, httpServer, attachments } = deps;
 	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, tailscale: deps.tailscale });
+	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
