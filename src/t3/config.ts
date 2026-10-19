@@ -17,7 +17,7 @@ export interface FacetConfig {
 	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: none, as before. */
 	readonly staticDir: string | undefined;
 	/** Tailscale Serve: publish this host on the tailnet HTTPS name. Absent (the default) is off: the host runs no
-	 * `tailscale` command, advertises no tailnet endpoint and widens no host check. Optional, like `attachT3`'s option. */
+	 * `tailscale` command and advertises no tailnet endpoint. Optional, like `attachT3`'s option. */
 	readonly tailscaleServe?: { readonly port: number };
 }
 

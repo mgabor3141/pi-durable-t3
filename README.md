@@ -59,17 +59,14 @@ await t3.close();
 
 ## Security
 
-The bridge listens on loopback by default and then rejects requests whose `Host` header isn't loopback. Every
-call needs a credential from pairing: a bearer token, or, for the web app the host serves, T3's browser
-session cookie, which counts only on same-origin requests. Browsers on other origins may call only if listed
-in `corsOrigins` (default: T3's desktop app). What the agent may do is the Harness's business, not the bridge's.
+The bridge listens on loopback by default. Like T3, it checks no `Host` header: every call except the public
+descriptor and pairing needs a credential from pairing — a bearer token, or the web app's same-origin session
+cookie. Browsers on other origins may call only if listed in `corsOrigins` (default: T3's desktop app). What the agent may do is the Harness's business, not the bridge's.
 
 With `tailscaleServe` set, the host first reads `tailscale serve status` and arms its HTTPS port only when it is
 free (or already points at this host's own port): a port that maps elsewhere is refused with a warning, so the host
 never replaces — and never removes — a mapping it did not create (deliberately stricter than T3, which arms
-unconditionally). An armed port is released on shutdown, and the `Host` rule admits exactly this machine's MagicDNS
-name — the `Host` Serve carries when it forwards to loopback. No Tailscale, no change: nothing runs, nothing is
-admitted.
+unconditionally). An armed port is released on shutdown.
 
 ## What works
 
@@ -97,6 +94,8 @@ Known limitations:
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
   tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
   can lock out local pairing for that minute.
+- A page that rebinds a hostname to the port gets no credentials, but can read the public descriptor and spend the
+  pairing rate limit.
 - `tailscale serve` config lives in Tailscale, not in this host. A host that is SIGKILLed leaves its mapping behind;
   a graceful stop removes it. Clear a stale one with `tailscale serve --https=<port> off`.
 

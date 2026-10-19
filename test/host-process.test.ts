@@ -1,13 +1,12 @@
 // The reference host driven as a user does, over a real child process (the wiring `main.ts` runs): Ctrl-C must stop it
 // (B1); a second instance on a taken port must fail loudly — naming the address and EADDRINUSE — without printing
 // "ready" or a pairing link (B2); it must fail at start when there are no models; and the HTTP surface must answer as
-// T3 reads it (the Host guard, the thread-detail routes' auth and unknown-thread contracts).
+// T3 reads it (the thread-detail routes' auth and unknown-thread contracts).
 //
 // Each test spawns `node --experimental-strip-types examples/coding-agent/src/host.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
-// never read. Ports here are their own (4901-4905, 4908) and distinct, so the tests can run in parallel.
+// never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { request } from "node:http";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,22 +49,6 @@ async function writeRoot(name: string, port: number): Promise<string> {
 	await mkdir(join(root, "t3"), { recursive: true });
 	await writeFile(join(root, "t3", "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
 	return root;
-}
-
-/** GET `/.well-known/t3/environment` connecting to loopback `port` but sending an explicit `Host` header. */
-function requestWithHost(port: number, hostHeader: string): Promise<number> {
-	return new Promise((resolve) => {
-		const req = request({ host: "127.0.0.1", port, path: "/.well-known/t3/environment", headers: { host: hostHeader }, timeout: 2000 }, (res) => {
-			res.resume();
-			res.on("end", () => resolve(res.statusCode ?? 0));
-		});
-		req.on("error", () => resolve(0));
-		req.on("timeout", () => {
-			req.destroy();
-			resolve(0);
-		});
-		req.end();
-	});
 }
 
 const get = async (port: number, path: string): Promise<number> => {
@@ -205,24 +188,4 @@ it("fails at start, before ready, when no models are available (S1)", async () =
 	expect(code).toBe(1);
 	expect(out).toMatch(/no models are available/);
 	expect(out).not.toContain("pi-durable-t3 ready");
-}, 30_000);
-
-it("on loopback, rejects a non-loopback Host header — DNS-rebinding guard (S4)", async () => {
-	const port = 4905;
-	const root = await writeRoot("s4", port);
-	const host = launch(root, port);
-	try {
-		expect(await waitListening(port)).toBe(true);
-		// Loopback Host names are served; a rebinding (evil hostname resolving to 127.0.0.1) is refused with 421.
-		expect(await requestWithHost(port, `127.0.0.1:${port}`)).toBe(200);
-		expect(await requestWithHost(port, `localhost:${port}`)).toBe(200);
-		// An IPv6 literal arrives bracketed, as a browser on `http://[::1]:<port>` sends it.
-		expect(await requestWithHost(port, `[::1]:${port}`)).toBe(200);
-		expect(await requestWithHost(port, "[::2]")).toBe(421);
-		expect(await requestWithHost(port, "evil.example")).toBe(421);
-		expect(await requestWithHost(port, "evil.example:80")).toBe(421);
-	} finally {
-		host.child.kill("SIGKILL");
-		await host.exited;
-	}
 }, 30_000);

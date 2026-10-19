@@ -58,13 +58,6 @@ import type { TailscaleCli } from "./tailscale.ts";
  * truthfully how far the pin is behind the app. */
 export const SERVER_VERSION = "0.1.1-nightly.20261017.3238";
 
-/** The loopback hosts: 127.0.0.0/8, `localhost`, `::1` (an IPv6 literal's brackets and a trailing dot normalize
- * away). The one definition for both the bind check and the `Host` check. */
-export function isLoopbackHost(host: string): boolean {
-	const normalized = host.toLowerCase().replace(/^\[(.*)\]$/u, "$1").replace(/\.+$/u, "");
-	return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
-}
-
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
 
@@ -233,30 +226,9 @@ export function makeServerLayer(deps: {
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
 
-	// DNS-rebinding guard on a loopback bind: serve only requests addressed to a loopback `Host` (the bind/`Host`/CORS
-	// story is the README's); a non-loopback bind may legitimately serve real hostnames. One loopback definition for
-	// both the bind check and the `Host` check: 127.0.0.0/8, `localhost`, `::1` (brackets and trailing dot normalized).
-	// With Serve armed, the guard also admits EXACTLY this machine's MagicDNS name: Serve forwards to loopback
-	// carrying it (verified: `Host:`/`X-Forwarded-Host:` are `name.ts.net[:port]`, `X-Forwarded-Proto: https`, the
-	// socket is 127.0.0.1). The name is read once; a name that cannot be read admits nothing (fail closed).
-	const boundLoopback = isLoopbackHost(bridge.config.host);
-	const serveEnabled = bridge.config.tailscaleServe !== undefined;
-	const tailnetName: Promise<string | null> = serveEnabled
-		? deps.tailscale.readMagicDnsName().catch(() => null)
-		: Promise.resolve(null);
-	const hostGuard = HttpRouter.middleware(
-		(effect: Any) =>
-			Effect.gen(function* () {
-				if (!boundLoopback) return yield* effect;
-				const request = yield* HttpServerRequest.HttpServerRequest;
-				// Drop the port, then an IPv6 literal's brackets: a browser sends `[::1]:3774`.
-				const hostname = String(request.headers.host ?? "").toLowerCase().replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1").replace(/\.+$/u, "");
-				if (isLoopbackHost(hostname)) return yield* effect;
-				if (serveEnabled && hostname === (yield* Effect.tryPromise(() => tailnetName))) return yield* effect;
-				return json({ code: "invalid_host", message: `Host "${hostname}" is not allowed on a loopback listener.` }, 421);
-			}),
-		{ global: true },
-	);
+	// No `Host` check, like T3 (its server reads `request.headers.host` nowhere in a guard: the only `Host` use is the
+	// cookie's same-origin rule below). Auth is the boundary: every route that is not public needs a credential, so a
+	// page that rebinds a hostname onto this listener reaches only the public surface and the pairing rate limit.
 
 	// A browser session cookie is a credential a page can ride, so — like T3 (`EnvironmentAuth.isBrowserOriginAllowed`) —
 	// it authenticates ONLY a same-origin request: an absent `Origin` (a same-origin GET, a non-browser client), a
@@ -667,7 +639,7 @@ export function makeServerLayer(deps: {
 		maxAge: 600,
 	});
 
-	return HttpRouter.serve(Layer.mergeAll(routes, cors, hostGuard) as Any, { disableLogger: true }).pipe(
+	return HttpRouter.serve(Layer.mergeAll(routes, cors) as Any, { disableLogger: true }).pipe(
 		Layer.provide(NodeHttpServer.layer(() => httpServer, { host: bridge.config.host, port: bridge.config.port })),
 	);
 }

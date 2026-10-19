@@ -72,8 +72,6 @@ parses the same link pasted into Add computer):
 https://<machine>.<tailnet>.ts.net/pair#token=…      # port 8443 shows as `:8443`
 ```
 
-Open it on any device in the tailnet: it pairs the browser and opens the app. Serve forwards to loopback carrying
-the machine's MagicDNS `Host`, which the host accepts — exactly that name, no other `.ts.net` — only while
-`tailscale_serve` is on; nothing about Serve is required to run the host without it. (The plain-HTTP alternative: set
-`listen` to the machine's tailnet IP and open `http://<tailnet-ip>:3774/pair#token=…` — the tailnet is then the only
-boundary, with no TLS.)
+Open it on any device in the tailnet: it pairs the browser and opens the app. (The
+plain-HTTP alternative: set `listen` to the machine's tailnet IP and open `http://<tailnet-ip>:3774/pair#token=…` —
+the tailnet is then the only boundary, with no TLS.)

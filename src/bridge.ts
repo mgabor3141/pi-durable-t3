@@ -61,8 +61,9 @@ export type AttachT3Options = {
 	 *
 	 * A Serve failure only warns: startup never depends on Tailscale. Before arming, the host reads
 	 * `tailscale serve status` and refuses to arm an HTTPS port that already maps elsewhere — unlike T3, which arms
-	 * unconditionally and would take over (and later remove) a mapping another process created. Enabling this is what
-	 * admits the machine's own MagicDNS `Host` on a loopback listener; Serve forwards to loopback carrying it.
+	 * unconditionally and would take over (and later remove) a mapping another process created. Serve forwards to
+	 * loopback carrying the machine's MagicDNS `Host`; the host checks no `Host` header (like T3), so a forwarded
+	 * request reaches the same routes and the same credential check as any other.
 	 */
 	readonly tailscaleServe?: { readonly port?: number };
 	readonly log?: Logger;

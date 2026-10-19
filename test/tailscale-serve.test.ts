@@ -1,8 +1,9 @@
 // Tailscale Serve over the real host, with a fake `tailscale` on PATH: the status check before arming (a port that
 // already maps elsewhere is refused and never released), the mapping armed at startup and released on shutdown, the
-// host-header rule Serve needs (Serve forwards to loopback carrying the MagicDNS `Host`, verified against a live
-// Serve: `Host`/`X-Forwarded-Host` are `name.ts.net[:port]`), and the `pair` link. Nothing here touches a real
-// tailnet: the binary is a shell script that records its argv.
+// flow of a browser pairing through Serve (it forwards to loopback carrying the MagicDNS `Host`, verified against a
+// live Serve: `Host`/`X-Forwarded-Host` are `name.ts.net[:port]`), and the `pair` link. Nothing here touches a real
+// tailnet: the binary is a shell script that records its argv. There is no `Host` guard to open (like T3), so what
+// these tests pin is the mapping's lifecycle and that a Serve-forwarded request works.
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
@@ -131,7 +132,7 @@ function postWithHost(port: number, path: string, body: unknown, headers: Record
 	});
 }
 
-it("arms Serve once the listener is up, widens the host rule to the tailnet name, and releases it on shutdown", async () => {
+it("arms Serve once the listener is up, releases it on shutdown, and serves a browser pairing forwarded through it", async () => {
 	const PORT = 4961;
 	const host = await start("serve-on", PORT, { port: 8443 });
 
@@ -140,27 +141,22 @@ it("arms Serve once the listener is up, widens the host rule to the tailnet name
 	await until("the log's Serve line", () => Promise.resolve(host.out()), (seen) => seen.includes("Tailscale Serve configured"));
 	await until("the serve call", () => callsOf("serve-on"), (seen) => seen.includes(`serve --bg --https=8443 http://127.0.0.1:${String(PORT)}`));
 
-	// A loopback Host is served, as always — the whole of 127.0.0.0/8, not just the address the host bound.
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.1:${PORT}`)).status).toBe(200);
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.2:${PORT}`)).status).toBe(200);
-	// The tailnet `Host` Serve forwards is served too — exactly this machine's name, with or without the Serve port,
-	// the trailing dot normalized — and only because Serve is configured.
+	// A request with the `Host` Serve forwards — this machine's MagicDNS name and the `X-Forwarded-*` pair — is
+	// served, and answered with the descriptor. No Host check admits it; nothing rejects it either.
 	const served = await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}:8443`, {
 		"x-forwarded-host": `${TS_HOST}:8443`,
 		"x-forwarded-proto": "https",
 	});
 	expect(served.status).toBe(200);
 	expect(JSON.parse(served.body).label).toBe("pi");
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", TS_HOST)).status).toBe(200);
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}.`)).status).toBe(200);
-	// Anything else stays refused on a loopback listener — including a *different* `.ts.net` name: the guard opens
-	// for this machine's name, no wider, and for nothing at all while Serve is off.
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", "evil.example.com")).status).toBe(421);
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", "evil-tailnet.example.com")).status).toBe(421);
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", "other.example-tail.ts.net")).status).toBe(421);
+	// An unauthenticated request with any other `Host` reaches the same routes and the same answers: the boundary is
+	// the credential, so the descriptor is public and a guarded route is a 401 (`auth-boundary.test.ts` enumerates
+	// every route's no-credential answer).
+	expect((await getWithHost(PORT, "/.well-known/t3/environment", "other.example-tail.ts.net")).status).toBe(200);
+	expect((await getWithHost(PORT, "/api/projects", "evil.example.com")).status).toBe(401);
 
-	// The pairing exchange a browser makes through Serve: same-origin by the forwarded Host, so the session cookie
-	// authenticates it. This is the flow `pair` prints an HTTPS link for.
+	// The pairing exchange a browser makes through Serve: the forwarded `Host` makes it same-origin, so the session
+	// cookie authenticates it. This is the flow `pair` prints an HTTPS link for.
 	const code = pairCode(join(scratch, "serve-on"));
 	const exchanged = await postWithHost(PORT, "/api/auth/browser-session", { credential: code }, {
 		host: `${TS_HOST}:8443`,
@@ -195,7 +191,7 @@ it("arms Serve once the listener is up, widens the host rule to the tailnet name
 	expect(calls).not.toContain("--https=443");
 });
 
-it("runs no tailscale command, advertises no tailnet name and accepts no tailnet Host when Serve is off", async () => {
+it("runs no tailscale command and advertises no tailnet name when Serve is off", async () => {
 	const PORT = 4962;
 	const host = await start("serve-off", PORT, undefined);
 
@@ -205,8 +201,6 @@ it("runs no tailscale command, advertises no tailnet name and accepts no tailnet
 	expect(host.out()).not.toContain("Tailscale Serve");
 	expect(await callsOf("serve-off")).toBe("");
 	expect((await getWithHost(PORT, "/.well-known/t3/environment", `127.0.0.1:${PORT}`)).status).toBe(200);
-	// The default host is off: the guard does not open for a `.ts.net` Host it never armed.
-	expect((await getWithHost(PORT, "/.well-known/t3/environment", `${TS_HOST}:8443`)).status).toBe(421);
 });
 
 it("refuses to arm a Serve port that already maps elsewhere, and never releases it", async () => {

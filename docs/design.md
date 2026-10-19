@@ -97,3 +97,9 @@ the threads layer through chord objects that any pi client could also call:
 | `pi.models` | `select`, `selectThinking` |
 
 Rate limiting keys on the socket address, never on a client-supplied header.
+
+**Auth is the boundary; there is no `Host` check, like T3.** Every route that is not public requires a credential, and
+the browser-session cookie — the one credential a page can ride — authenticates only a same-origin request (T3's
+`EnvironmentAuth.isBrowserOriginAllowed`). A page that rebinds a hostname onto the listener therefore arrives with no
+credentials: it reads the public descriptor and spends the pairing rate limit, and nothing else
+(`test/auth-boundary.test.ts`).
