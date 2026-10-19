@@ -1,13 +1,13 @@
 // Scheduled tasks (T3's ScheduledTaskService + Schedule.ts, replicated for interval and fixed time): the schedule math,
 // upsert idempotence, a due task dispatching exactly once, runNow while running, restart recovery, the webhook refusal
 // and the change signal. A fake clock drives every test; the poll loop is never started, `tick()` is called directly.
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -230,6 +230,25 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		const { tasks } = await fixture();
 		expect(() => tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).toThrow(WORKTREES_UNSUPPORTED);
 		expect(tasks.list().tasks).toHaveLength(0);
+	});
+
+	it("a mode pi does not have is refused, like the thread commands", async () => {
+		const { tasks } = await fixture();
+		expect(() => tasks.upsert(input({ runtimeMode: "approval-required" }))).toThrow(FULL_ACCESS_ONLY);
+		expect(() => tasks.upsert(input({ interactionMode: "plan" }))).toThrow(NO_PLAN_MODE);
+		expect(tasks.list().tasks).toHaveLength(0);
+	});
+
+	it("a delete whose save fails keeps the task, in memory as on disk", async () => {
+		const { dir, tasks } = await fixture();
+		const task = tasks.upsert(input()).task;
+		await chmod(dir, 0o555);
+		try {
+			expect(() => tasks.delete({ id: task.id })).toThrow("Could not delete schedule task.");
+		} finally {
+			await chmod(dir, 0o755);
+		}
+		expect(tasks.list().tasks.map((t) => t.id)).toEqual([task.id]);
 	});
 
 	it("every change signals subscribers: upsert, toggle, run, delete", async () => {

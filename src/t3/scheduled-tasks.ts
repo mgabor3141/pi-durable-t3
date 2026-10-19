@@ -15,6 +15,8 @@ import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./sche
 type Task = typeof ScheduledTask.Type;
 
 export const WEBHOOKS_UNSUPPORTED = "Webhook triggers are not supported by pi-durable-t3 yet.";
+export const FULL_ACCESS_ONLY = "pi runs tools without approvals; full-access is the only mode.";
+export const NO_PLAN_MODE = "Plan mode is not supported by pi-durable-t3.";
 export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-t3: choose "Use the project checkout" as the workspace.';
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 /** T3's Scheduler cadence. */
@@ -226,6 +228,9 @@ export class ScheduledTasks {
 		if (input.schedule.type === "webhook") throw taskError(WEBHOOKS_UNSUPPORTED, input.id);
 		// Every run is at the project root: a task asking for a worktree would silently run somewhere else.
 		if (input.workspaceStrategy.type !== "root") throw taskError(WORKTREES_UNSUPPORTED, input.id);
+		// pi's only modes, as the thread commands answer them (rpc.ts): a task must not run in a mode it did not ask for.
+		if (input.runtimeMode !== "full-access") throw taskError(FULL_ACCESS_ONLY, input.id);
+		if (input.interactionMode !== "default") throw taskError(NO_PLAN_MODE, input.id);
 		const now = this.#now();
 		const id = input.id ?? `scheduled-task:${input.commandId ?? randomUUID()}`;
 		const existing = this.#tasks.get(id);
@@ -270,10 +275,17 @@ export class ScheduledTasks {
 	}
 
 	delete(input: { id: string }): { id: string } {
-		if (this.#tasks.delete(input.id)) {
+		const previous = this.#tasks.get(input.id);
+		if (previous === undefined) return { id: input.id };
+		this.#tasks.delete(input.id);
+		try {
 			this.#save();
-			this.#notify();
+		} catch (error) {
+			// Memory follows the file: a task still on disk would come back, and fire, after a restart.
+			this.#tasks.set(input.id, previous);
+			throw taskError("Could not delete schedule task.", input.id, error);
 		}
+		this.#notify();
 		return { id: input.id };
 	}
 
