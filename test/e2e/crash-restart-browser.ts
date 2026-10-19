@@ -148,6 +148,7 @@ try {
 		if (Date.now() > screenDeadline) throw new Error(`the crash message was not on screen exactly once before the kill: dom=${onScreen}`);
 		await sleep(250);
 	}
+	const threadUrl = `${webAppUrl}${new URL(page.url()).pathname}`; // the thread's route, for reopening it below
 	await writeMarker(sentFile, "sent");
 	console.log("message is durably placed (one user turn) and on screen once; the shell will now kill the host");
 
@@ -161,6 +162,7 @@ try {
 
 	// 5. The proof, from the SAME client: the server projection shows the message exactly once, under the client's own
 	//    id (the id rode in the entry — not the `m<entryId>` fallback a lost store would force), and the DOM shows one copy.
+	let reloads = 0;
 	const checkDeadline = Date.now() + launchTimeout;
 	for (;;) {
 		const p = await projection(threadId);
@@ -170,6 +172,14 @@ try {
 			if (domCopies === 1) {
 				console.log(`single copy after restart (projection userMessageId=${copies.messageId}, dom=${domCopies})`);
 				break;
+			}
+			// T3's one-shot chunk-reload guard can still reload the page into the dead port, leaving the browser's error
+			// page. Do what a user does: go back to the thread, in the same browser (same cookie, same caches).
+			if (page.url().startsWith("chrome-error:") && reloads < 3) {
+				reloads++;
+				console.log(`the page is the browser's error page; reopening ${threadUrl}`);
+				await page.goto(threadUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+				await page.waitForSelector('[contenteditable="true"]', { timeout: 30_000 }).catch(() => {});
 			}
 		}
 		if (Date.now() > checkDeadline) {
