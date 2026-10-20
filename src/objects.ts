@@ -86,10 +86,12 @@ export const PiThreads = local("pi.threads", {
 	input: Type.Object({}),
 	members: {
 		threads: ThreadsCell,
-		// A thread starts untitled: the create command carries no title (capabilities.md; the 🔜 rename owns the field).
-		// `cwd` is a folder of its own under the project (a Scratch thread's); absent, the project's root.
-		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()) }), ThreadSchema),
+		// `title` is a launch's title (absent: untitled, "New thread"). `cwd` is a folder of its own under the project (a
+		// Scratch thread's); absent, the project's root.
+		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()), title: Type.Optional(Type.String()) }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
+		// Set a thread's title (a rename, a seed, a generated title); durable in the threads document.
+		rename: method(Type.Object({ threadId: Type.String(), title: Type.String() }), Type.Null()),
 		// T3's thread search over the threads the host has: a query and a limit, answered with T3's match shape (ms timestamps;
 		// the facet converts to ISO for the wire).
 		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
@@ -181,6 +183,15 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				remove: async (args, ctx) => {
 					try {
 						await threads.remove(args.threadId);
+						await publish(ctx);
+						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				rename: async (args, ctx) => {
+					try {
+						await threads.rename(args.threadId, args.title);
 						await publish(ctx);
 						return null;
 					} catch (error) {

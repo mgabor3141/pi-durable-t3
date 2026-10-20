@@ -84,7 +84,6 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.unarchive": "Archiving is not supported by pi-durable-t3 yet.",
 	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
-	"thread.metadata.update": "Renaming threads is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
 	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
@@ -221,6 +220,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						messageId: command.messageId,
 						text: command.text,
 						mode,
+						...(typeof command.titleSeed === "string" ? { titleSeed: command.titleSeed } : {}),
 						...(imageRecords(command.attachments) === undefined ? {} : { attachments: imageRecords(command.attachments) }),
 					});
 					break;
@@ -242,6 +242,9 @@ export function makeRpcLayer(deps: RpcDeps) {
 					break;
 				case "thread.delete":
 					await bridge.deleteThread(command.threadId);
+					break;
+				case "thread.metadata.update":
+					await bridge.updateThreadMetadata(command);
 					break;
 				case "thread.create":
 					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId });
@@ -464,6 +467,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						threadId: input.threadId,
 						projectId: input.projectId,
 						title: input.title,
+						generateTitle: input.generateTitle === true,
 						modelSelection: input.modelSelection,
 						workspaceStrategy: input.workspaceStrategy,
 						initialMessage: message === undefined ? undefined : { messageId: message.messageId, text: message.text, attachments: imageRecords(message.attachments) },

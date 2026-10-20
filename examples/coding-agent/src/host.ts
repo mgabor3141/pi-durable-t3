@@ -16,6 +16,7 @@ import { CodingExtension } from "./base-prompt.ts";
 import { openCodingHarness } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
 import { createReplyModel } from "./reply-model.ts";
+import { titleThread } from "./title.ts";
 
 const log: Logger = {
 	info: (message, fields) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "info", message, ...fields })),
@@ -126,6 +127,8 @@ async function main(): Promise<void> {
 			...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),
 			tokenTtlSeconds: config.tokenTtlSeconds,
 			...(config.tailscaleServe ? { tailscaleServe: { port: config.tailscaleServePort } } : {}),
+			// Thread titles: one tool-less completion on the thread's model (./title.ts).
+			titleThread: titleThread(runtime.harness, models),
 			log,
 		});
 	} catch (error) {

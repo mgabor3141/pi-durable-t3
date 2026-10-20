@@ -11,7 +11,7 @@ import { FileProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
-import type { BridgeConfig } from "./t3/config.ts";
+import type { BridgeConfig, TitleThread } from "./t3/config.ts";
 import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
@@ -20,6 +20,7 @@ import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandEr
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 export { ConfigError } from "./config.ts";
 export type { Logger } from "./t3/logging.ts";
+export type { TitleThread, TitleThreadRequest } from "./t3/config.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 export const DESKTOP_APP_ORIGIN = "t3code://app";
@@ -67,6 +68,14 @@ export type AttachT3Options = {
 	 * request reaches the same routes and the same credential check as any other.
 	 */
 	readonly tailscaleServe?: { readonly port?: number };
+	/**
+	 * Title generation, delegated to you (T3's `ThreadTitleRegenerationService`). Called once a thread's first user
+	 * entry is committed (not after the reply) and on "Regenerate title"; resolve with a title, or `undefined` / "New
+	 * thread" (/ the same title on regenerate) for no change. `signal` aborts when a rename or a newer request supersedes
+	 * the call; a late result is ignored either way. A rejection is logged as a warning and changes nothing. Absent: the
+	 * first message's seed and renames still work, and "Regenerate title" is refused.
+	 */
+	readonly titleThread?: TitleThread;
 	readonly log?: Logger;
 };
 
@@ -74,6 +83,8 @@ export type T3Attachment = {
 	/** Resolves when the facet stops serving on its own. Exiting over that is the integrator's policy. */
 	readonly closed: Promise<void>;
 	close(): Promise<void>;
+	/** Rename a thread, as a user rename in T3 does: durable, and it cancels a pending title generation. */
+	setTitle(threadId: string, title: string): Promise<void>;
 };
 
 /** Mint a single-use pairing code for the bridge whose dir you name — no server needed; the running host reads the
@@ -125,6 +136,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: options.webApp,
+		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		tailscaleServe:
 			options.tailscaleServe === undefined
 				? undefined
@@ -173,6 +185,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	}
 	return {
 		closed: facet.closed,
+		setTitle: (threadId, title) => facet.setTitle(threadId, title),
 		close: async () => {
 			// Release our own mapping first, so tailnet traffic stops before the listener does (T3's acquireRelease
 			// order). Only an armed port is released: the status check above guarantees an armed mapping is ours.

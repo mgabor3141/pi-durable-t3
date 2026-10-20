@@ -77,7 +77,7 @@ type ThreadsDeps = {
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
-type CreateInput = { readonly threadId: string; readonly projectId: string; readonly cwd?: string };
+type CreateInput = { readonly threadId: string; readonly projectId: string; readonly cwd?: string; readonly title?: string };
 type MessageInput = {
 	readonly threadId: string;
 	readonly conversationId: number;
@@ -233,11 +233,22 @@ export class Threads {
 				threadId: input.threadId,
 				projectId: input.projectId,
 				head: conversation.id,
-				title: "",
+				// A launch names its title (T3's `ThreadLaunchService` creates the thread with `input.title`); a plain create none.
+				title: input.title ?? "",
 				createdAt: Date.now(),
 			};
 			doc.threads.push(thread);
 			return { ...thread };
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** Set a thread's title: one commit on the threads document, so a rename survives a restart. */
+	async rename(threadId: string, title: string): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
+			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+			thread.title = title;
 		}, BACKGROUND_CONTEXT);
 	}
 

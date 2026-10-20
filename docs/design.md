@@ -91,7 +91,7 @@ the threads layer through chord objects that any pi client could also call:
 
 | Object | Methods |
 |---|---|
-| `pi.threads` | `create`, `remove`, `search` |
+| `pi.threads` | `create`, `remove`, `rename`, `search` |
 | `pi.transcript` | (state: the head's conversation view) |
 | `pi.controller` | `prompt`, `steer`, `followUp`, `abort`, `rewind` |
 | `pi.models` | `select`, `selectThinking` |

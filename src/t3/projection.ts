@@ -51,6 +51,8 @@ export interface ThreadMeta {
 	readonly parentThreadId?: string;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
+	/** T3's in-progress title generation (in memory only: none survives a restart). */
+	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
 
 /** Bridge-side memory needed for a faithful projection. */
@@ -546,6 +548,7 @@ export function projectThread(
 		id: id(threadId),
 		projectId: id(meta.projectId),
 		title: meta.title,
+		titleRegeneration: meta.titleRegeneration == null ? null : { requestId: id(meta.titleRegeneration.requestId), startedAt: time(meta.titleRegeneration.startedAt) },
 		providerInstanceId: id(PROVIDER_INSTANCE_ID),
 		modelSelection,
 		runtimeMode: "full-access",
@@ -602,6 +605,7 @@ export function projectThread(
 		id: id(threadId),
 		projectId: id(meta.projectId),
 		title: meta.title,
+		titleRegeneration: meta.titleRegeneration == null ? null : { requestId: id(meta.titleRegeneration.requestId), startedAt: time(meta.titleRegeneration.startedAt) },
 		providerInstanceId: id(PROVIDER_INSTANCE_ID),
 		modelSelection,
 		runtimeMode: "full-access",

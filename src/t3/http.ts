@@ -72,7 +72,13 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnviron
 			platform: { os, arch: cpu, machine: "server" },
 			serverVersion: SERVER_VERSION,
 			orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
-			capabilities: { repositoryIdentity: false, connectionProbe: true, serverResolvedCommandContext: true },
+			capabilities: {
+				repositoryIdentity: false,
+				connectionProbe: true,
+				serverResolvedCommandContext: true,
+				// The web app offers "Regenerate title" only when this is true: only with the integrator's generator.
+				threadTitleRegeneration: bridge.config.titleThread !== undefined,
+			},
 		}) as Any;
 }
 

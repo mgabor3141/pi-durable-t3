@@ -17,10 +17,12 @@ import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWor
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import type { Thread } from "../threads.ts";
 import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
-import type { BridgeConfig } from "./config.ts";
+import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
+import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { Logger } from "./logging.ts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
+import { USER_ENTRY_KINDS } from "./runs.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
 export class CommandError extends Error {}
@@ -119,6 +121,8 @@ export class Bridge {
 	/** The project ids last shown to clients, so a registry change emits the removed shells. */
 	#projectIds = new Set<string>();
 	readonly #commandResults = new Map<string, Promise<number>>();
+	/** T3's `thread.titleRegeneration`, per thread: the one current title request. In memory only (state.md). */
+	readonly #titleRequests = new Map<string, { requestId: string; startedAt: number; controller: AbortController }>();
 	#directory: Thread[] = [];
 	/** Settles at the directory's first load (`pi.threads` publishes revision 1+): `ready()` waits for the objects, not
 	 * their loads, so a thread lookup right after `start()` can still see an empty list. */
@@ -374,6 +378,9 @@ export class Bridge {
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(thread?.parent?.threadId === undefined ? {} : { parentThreadId: thread.parent.threadId }),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
+			titleRegeneration: this.#titleRequests.has(threadId)
+				? { requestId: this.#titleRequests.get(threadId)!.requestId, startedAt: this.#titleRequests.get(threadId)!.startedAt }
+				: null,
 		};
 	}
 
@@ -658,7 +665,7 @@ export class Bridge {
 	 * Scratch project a folder of its own, claimed at launch — a thread whose row already exists is a replayed create and
 	 * claims nothing, exactly T3's "only the first attempt claims one" (ManagedProjectFolders, ThreadLaunchService).
 	 */
-	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string }): Promise<string> {
+	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string; title?: string }): Promise<string> {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
@@ -669,7 +676,7 @@ export class Bridge {
 				? undefined
 				: await claimScratchThreadFolder(scratchRoot, id, options.launchText);
 		// A call's reference is released when the call settles (`c.get`); `host.get` would hold one per call, forever.
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
 		this.#syncDirectory();
 		return id;
@@ -684,6 +691,8 @@ export class Bridge {
 		threadId?: string | undefined;
 		projectId: string;
 		title?: string | undefined;
+		/** T3's `generateTitle`: the launch's title is the first message's `titleSeed`. */
+		generateTitle?: boolean | undefined;
 		modelSelection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined;
 		workspaceStrategy?: { type?: string } | undefined;
 		initialMessage?: { messageId?: string; text: string; attachments?: readonly AttachmentRecord[] | undefined } | undefined;
@@ -693,6 +702,8 @@ export class Bridge {
 		const threadId = await this.createThread({
 			threadId: input.threadId,
 			projectId: input.projectId,
+			// T3's launch creates the thread with the launch's title.
+			...(input.title === undefined || input.title.trim() === "" ? {} : { title: input.title.trim() }),
 			// T3's launch: Scratch has no Git, so a new-worktree request there is the root, with a folder of its own.
 			...(launchText !== undefined && [undefined, "root", "worktree"].includes(input.workspaceStrategy?.type) ? { launchText } : {}),
 		});
@@ -706,6 +717,7 @@ export class Bridge {
 					messageId: message.messageId ?? `launch-${input.commandId}`,
 					text: message.text,
 					mode: "start",
+					...(input.generateTitle === true && input.title !== undefined && input.title.trim() !== "" ? { titleSeed: input.title.trim() } : {}),
 					...(message.attachments === undefined ? {} : { attachments: message.attachments }),
 				});
 				return this.nextSequence();
@@ -753,12 +765,22 @@ export class Bridge {
 		text: string;
 		mode: "start" | "queue" | "steer" | "restart";
 		attachments?: readonly AttachmentRecord[] | undefined;
+		/** T3's `titleSeed`: honoured only on a thread with no messages yet (Orchestrator's message count 0). */
+		titleSeed?: string | undefined;
 	}): Promise<void> {
 		const release = this.acquire(input.threadId);
 		try {
 			const state = this.#state(input.threadId);
 			const head = await this.#awaitHead(state);
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
+			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
+			const seed = input.titleSeed?.trim();
+			const seeded = seed !== undefined && seed !== "" && !this.#hasMessages(state);
+			if (seeded) {
+				this.#cancelTitle(input.threadId);
+				await this.#setStoredTitle(input.threadId, seed);
+				this.#beginTitle(input.threadId, input.commandId);
+			}
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
 			// commandId for durable dedup (design.md, Invariants). Images ride along as content blocks (model) and entry
 			// data (display), only when the model accepts them.
@@ -778,9 +800,143 @@ export class Bridge {
 				if (input.mode === "steer") await controller.steer(request, c);
 				else if (busy && input.mode !== "restart") await controller.followUp(request, c);
 				else await controller.prompt(request, c);
+			}).catch((error: unknown) => {
+				if (seeded) void this.#completeTitle(input.threadId, input.commandId, undefined);
+				throw error;
 			});
+			if (seeded) this.#generateTitle(input.threadId, input.commandId, { reason: "first-message", messageId: input.messageId });
 		} finally {
 			release();
+		}
+	}
+
+	// ---- titles (T3's Orchestrator `titleRegeneration` + ThreadTitleRegenerationService) ------------------------
+
+	/** Does the thread's head carry a message yet (T3's `getMessageCount(threadId) > 0`)? */
+	#hasMessages(state: ThreadState): boolean {
+		return (state.result?.projection.messages.length ?? 0) > 0 || (state.view?.entries ?? []).some((entry) => USER_ENTRY_KINDS.has(entry.kind));
+	}
+
+	async #setStoredTitle(threadId: string, title: string): Promise<void> {
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).rename({ threadId, title }, c));
+		this.#syncDirectory();
+		this.#titleChanged(threadId);
+	}
+
+	/** Re-publish a thread after a title or `titleRegeneration` change. */
+	#titleChanged(threadId: string): void {
+		const state = this.#threads.get(threadId);
+		if (state !== undefined) this.#recompute(state);
+		this.#publishShell(threadId);
+	}
+
+	/** Start a request (`titleRegeneration: { requestId, startedAt }`), superseding any pending one. */
+	#beginTitle(threadId: string, requestId: string): void {
+		if (this.config.titleThread === undefined) return;
+		this.#cancelTitle(threadId);
+		this.#titleRequests.set(threadId, { requestId, startedAt: Date.now(), controller: new AbortController() });
+		this.#titleChanged(threadId);
+	}
+
+	/** Drop the pending request, aborting its signal (a rename, a newer request, a delete). */
+	#cancelTitle(threadId: string): void {
+		const pending = this.#titleRequests.get(threadId);
+		if (pending === undefined) return;
+		this.#titleRequests.delete(threadId);
+		pending.controller.abort();
+		this.#titleChanged(threadId);
+	}
+
+	/**
+	 * T3's `thread.title.regeneration.complete`: applied only while `requestId` is still current. A "New thread" (or, on
+	 * regenerate, the unchanged title) changes nothing (ThreadTitleRegenerationService).
+	 */
+	async #completeTitle(threadId: string, requestId: string, title: string | undefined, previousTitle?: string): Promise<void> {
+		const pending = this.#titleRequests.get(threadId);
+		if (pending?.requestId !== requestId) return;
+		this.#titleRequests.delete(threadId);
+		const next = title?.trim();
+		if (next !== undefined && next !== "" && next !== "New thread" && next !== previousTitle?.trim() && this.hasThread(threadId)) {
+			await this.#setStoredTitle(threadId, next).catch((error: unknown) => this.#log.warn("storing a generated title failed", { threadId, error: String(error) }));
+		}
+		this.#titleChanged(threadId);
+	}
+
+	/** Run the integrator's hook for the current request, detached: the caller (a send, a regenerate) does not wait. */
+	#generateTitle(threadId: string, requestId: string, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }): void {
+		const hook = this.config.titleThread;
+		const pending = this.#titleRequests.get(threadId);
+		if (hook === undefined || pending?.requestId !== requestId) return;
+		const signal = pending.controller.signal;
+		void (async () => {
+			const release = this.acquire(threadId);
+			let previousTitle: string | undefined;
+			try {
+				const state = this.#state(threadId);
+				const conversationId = (await this.#awaitHead(state)) as ConversationId;
+				const at = await this.#titleEntry(state, kind, signal);
+				if (at === undefined || signal.aborted) return void (await this.#completeTitle(threadId, requestId, undefined));
+				const request: TitleThreadRequest =
+					kind.reason === "regenerate"
+						? { threadId, conversationId, at, reason: "regenerate", previousTitle: (previousTitle = this.#summary(threadId)?.title || "New thread"), signal }
+						: { threadId, conversationId, at, reason: "first-message", signal };
+				const title = await hook(request);
+				await this.#completeTitle(threadId, requestId, title, previousTitle);
+			} catch (error) {
+				// T3: a failure logs a warning and completes without a title.
+				if (!signal.aborted) this.#log.warn("Thread title generation failed", { threadId, requestId, error: (error as Error).message || String(error) });
+				await this.#completeTitle(threadId, requestId, undefined);
+			} finally {
+				release();
+			}
+		})();
+	}
+
+	/** The entry a request names: the first message's committed entry (waited for, not its reply), or the head's latest. */
+	async #titleEntry(state: ThreadState, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, signal: AbortSignal): Promise<EntryId | undefined> {
+		if (kind.reason === "regenerate") return state.view?.entries.at(-1)?.id as EntryId | undefined;
+		const deadline = Date.now() + 60_000;
+		while (!signal.aborted && state.gone === undefined && Date.now() < deadline) {
+			const entry = state.view?.entries.find(
+				(candidate) => USER_ENTRY_KINDS.has(candidate.kind) && (candidate.data as { messageId?: unknown } | undefined)?.messageId === kind.messageId,
+			);
+			if (entry !== undefined) return entry.id as EntryId;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		return undefined;
+	}
+
+	/** A user rename (T3's `thread.metadata.update` with `title`, or `T3Attachment.setTitle`): durable, and it cancels a
+	 * pending generation (`titleRegeneration: null`). */
+	async renameThread(threadId: string, title: string): Promise<void> {
+		const trimmed = title.trim();
+		if (trimmed === "") throw new CommandError("Thread title cannot be empty.");
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		this.#cancelTitle(threadId);
+		await this.#setStoredTitle(threadId, trimmed);
+	}
+
+	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
+	 * no `titleThread` hook), `false` clears it. Fields this host has no backend for are refused. */
+	async updateThreadMetadata(command: { commandId: string; threadId: string; title?: string; regenerateTitle?: boolean } & Record<string, unknown>): Promise<void> {
+		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty", "limitRecovery"].filter((field) => command[field] !== undefined);
+		if (refused.length > 0) {
+			throw new CommandError(
+				refused.includes("linkedPullRequest")
+					? "Linking pull requests is not supported by pi-durable-t3."
+					: `Updating ${refused.join(", ")} is not supported by pi-durable-t3 (no git or limit recovery here).`,
+			);
+		}
+		if (command.regenerateTitle === true && this.config.titleThread === undefined) {
+			throw new CommandError("Regenerating titles is not supported by this host (it has no title generator).");
+		}
+		if (!this.hasThread(command.threadId)) throw new CommandError(`Unknown thread: ${command.threadId}`);
+		if (command.title !== undefined) await this.renameThread(command.threadId, command.title);
+		if (command.regenerateTitle === true) {
+			this.#beginTitle(command.threadId, command.commandId);
+			this.#generateTitle(command.threadId, command.commandId, { reason: "regenerate" });
+		} else if (command.regenerateTitle === false) {
+			this.#cancelTitle(command.threadId);
 		}
 	}
 
@@ -838,6 +994,7 @@ export class Bridge {
 	}
 
 	async deleteThread(threadId: string): Promise<void> {
+		this.#cancelTitle(threadId);
 		await this.#host.root(async (c) => (await c.get(PiThreads, {})).remove({ threadId }, c));
 		this.#syncDirectory();
 		const state = this.#threads.get(threadId);
