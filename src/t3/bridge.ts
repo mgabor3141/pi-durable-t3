@@ -120,6 +120,9 @@ export class Bridge {
 	#projectIds = new Set<string>();
 	readonly #commandResults = new Map<string, Promise<number>>();
 	#directory: Thread[] = [];
+	/** Settles at the directory's first load (`pi.threads` publishes revision 1+): `ready()` waits for the objects, not
+	 * their loads, so a thread lookup right after `start()` can still see an empty list. */
+	readonly #loaded = Promise.withResolvers<void>();
 	/** The `pi.threads` handle, so a create/remove can refresh the directory synchronously: the thread-existence check
 	 * must never race the subscription that mirrors the document. */
 	#threadsHandle: Ref<typeof PiThreads> | undefined;
@@ -139,7 +142,9 @@ export class Bridge {
 		const handle = this.#host.hold(PiThreads, {});
 		this.#threadsHandle = handle;
 		const publish = (): void => {
-			this.#directory = (peek(handle.threads)?.threads ?? []).map((thread) => ({ ...thread }));
+			const value = peek(handle.threads);
+			this.#directory = (value?.threads ?? []).map((thread) => ({ ...thread }));
+			if ((value?.revision ?? 0) > 0) this.#loaded.resolve();
 			this.#refreshShells();
 		};
 		this.#directoryStop = handle.threads.subscribe(publish);
@@ -338,6 +343,11 @@ export class Bridge {
 	}
 
 	/** The project a known thread belongs to. */
+	/** Resolves once the thread list has loaded. */
+	loaded(): Promise<void> {
+		return this.#loaded.promise;
+	}
+
 	threadProjectId(threadId: string): string | undefined {
 		return this.#summary(threadId)?.projectId;
 	}
