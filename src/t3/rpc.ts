@@ -247,7 +247,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					await bridge.updateThreadMetadata(command);
 					break;
 				case "thread.create":
-					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId });
+					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId, title: command.title });
 					await bridge.applySelection(command.threadId, command.modelSelection);
 					break;
 				case "thread.runtime-mode.set":

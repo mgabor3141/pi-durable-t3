@@ -233,7 +233,7 @@ export class Threads {
 				threadId: input.threadId,
 				projectId: input.projectId,
 				head: conversation.id,
-				// A launch names its title (T3's `ThreadLaunchService` creates the thread with `input.title`); a plain create none.
+				// The client names the title on create and launch (T3 creates the thread with it).
 				title: input.title ?? "",
 				createdAt: Date.now(),
 			};

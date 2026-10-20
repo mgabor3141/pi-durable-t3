@@ -236,3 +236,30 @@ it("a launch stores its title; generateTitle seeds a generation; a scheduled tas
 	await sleep(100);
 	expect(calls).toHaveLength(1);
 }, 30_000);
+
+it("close aborts a pending generation", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	fixture.model.respond(fauxAssistantMessage("pong"));
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+	const threadId = await newThread(bridge);
+	await send(bridge, threadId, 1, "Seed");
+	await until("the hook call", () => calls.length === 1);
+	await bridge.close();
+	expect(calls[0]!.request.signal.aborted).toBe(true);
+}, 30_000);
+
+it("a first message that fails leaves no seed title (T3 stores both in one command)", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+	const threadId = await newThread(bridge);
+	fixture.threads.submit = async () => {
+		throw new Error("refused");
+	};
+	await expect(send(bridge, threadId, 1, "Seed")).rejects.toThrow();
+	await until("the title restored", () => shell(bridge, threadId).title === "New thread");
+	expect(shell(bridge, threadId).titleRegeneration).toBeNull();
+	expect((await fixture.threads.thread(threadId))!.title).toBe("");
+	expect(calls).toHaveLength(0);
+}, 30_000);

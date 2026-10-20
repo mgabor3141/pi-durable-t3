@@ -57,16 +57,19 @@ await t3.close();
   point at its project ids), so back up and move the two together.
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
   better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
-  thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you; a
-  late answer is ignored. Return `undefined` (or "New thread") to keep the title. The example's hook is
+  thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you (or the host closes); a
+  late answer is ignored. Return `undefined` (or "New thread") to keep the title. The hook owns its timeout: until it
+  settles, the thread shows "Regenerating…". The example's hook is
   [`examples/coding-agent/src/title.ts`](examples/coding-agent/src/title.ts): one tool-less completion on the
-  thread's model.
+  thread's model, over the conversation's text trimmed to T3's budget.
 
   ```ts
   titleThread: async ({ conversationId, at, reason, previousTitle, signal }) => {
   	const conversation = await harness.conversation(conversationId, ctx);
   	const { messages } = await conversation!.context(ctx, { at });   // not a fork: no tools, nothing runs
-  	const reply = await models.completeSimple(model, { systemPrompt: "Title only, at most 6 words.", messages: [...messages, ask(reason, previousTitle)] }, { signal });
+  	// Text only (tool calls and results would need tools declared), within a budget, as one user message.
+  	const prompt = `${titleContext(messages)}\n\n${ask(reason, previousTitle)}`;
+  	const reply = await models.completeSimple(model, { systemPrompt: "Title only, at most 6 words.", messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { signal });
   	return textOf(reply);
   },
   ```

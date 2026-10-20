@@ -776,6 +776,7 @@ export class Bridge {
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();
 			const seeded = seed !== undefined && seed !== "" && !this.#hasMessages(state);
+			const previousTitle = this.#summary(input.threadId)?.title ?? "";
 			if (seeded) {
 				this.#cancelTitle(input.threadId);
 				await this.#setStoredTitle(input.threadId, seed);
@@ -801,7 +802,11 @@ export class Bridge {
 				else if (busy && input.mode !== "restart") await controller.followUp(request, c);
 				else await controller.prompt(request, c);
 			}).catch((error: unknown) => {
-				if (seeded) void this.#completeTitle(input.threadId, input.commandId, undefined);
+				if (seeded) {
+					void this.#completeTitle(input.threadId, input.commandId, undefined);
+					// T3 stores the seed and the message in one command: a message that did not land leaves no seed title.
+					if (this.#summary(input.threadId)?.title === seed) void this.#setStoredTitle(input.threadId, previousTitle).catch(() => {});
+				}
 				throw error;
 			});
 			if (seeded) this.#generateTitle(input.threadId, input.commandId, { reason: "first-message", messageId: input.messageId });
@@ -1028,6 +1033,9 @@ export class Bridge {
 	}
 
 	async close(): Promise<void> {
+		// Shutdown cancels the title work it started: the hook's model call stops, and nothing lands on a closed host.
+		for (const pending of this.#titleRequests.values()) pending.controller.abort();
+		this.#titleRequests.clear();
 		for (const state of this.#threads.values()) this.#release(state);
 		this.#directoryStop?.();
 		this.#threadsHandle?.release();
