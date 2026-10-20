@@ -108,7 +108,9 @@ try {
 		await page.keyboard.type(text);
 		await page.keyboard.press("Enter");
 	};
-	const replyCount = async (): Promise<number> => (await page.getByText(replyMarker, { exact: false }).all()).length;
+	// Counted in the transcript only: the thread's generated title is the offline model's reply too (sidebar, header).
+	const replyCount = async (): Promise<number> =>
+		(await page.locator('[data-message-role="assistant"]').getByText(replyMarker, { exact: false }).all()).length;
 	let threadId: string | undefined;
 	const runStatuses = async (): Promise<string[]> => {
 		const p = await projection(threadId as string).catch(() => undefined);

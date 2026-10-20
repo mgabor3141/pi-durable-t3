@@ -17,7 +17,7 @@ Projections are rebuilt from it on every change.
 
 | What | If lost |
 |---|---|
-| The threads document: one pointer per thread to its head conversation | Empty sidebar. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
+| The threads document: one pointer per thread to its head conversation, and its title | Empty sidebar. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
 | Removed threads, in the same document | A deleted thread could come back |
 | Applied undos, so a retried undo doesn't fork twice | A retried undo forks again |
 
@@ -60,6 +60,8 @@ All of it is safe to lose:
 - Per-thread view caches and the undo overlay.
 - The thread list.
 - A bounded map of recent prompt command ids.
+- The pending title request per thread (T3's `titleRegeneration`): after a restart no thread shows one, and a reply
+  from the integrator's `titleThread` hook that was in flight is never asked for again.
 - Which scheduled tasks are running right now (a crash leaves them `running` on disk; the next boot records them failed).
 - Pairing tickets, rate-limit buckets, and the live-socket count per client session (which drives a device's `connected` badge).
 

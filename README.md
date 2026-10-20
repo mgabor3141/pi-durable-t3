@@ -40,8 +40,10 @@ const t3 = await attachT3(harness, {
 	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
+	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
 	// optional: label, corsOrigins, tokenTtlSeconds, log
 });
+await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
 harness.resume();                            // yours to call, after attaching
 const { code } = mintPairingCode(stateDir);  // from anywhere, e.g. a CLI; the running host accepts it
 await t3.closed;                             // the server stopped on its own
@@ -53,6 +55,21 @@ await t3.close();
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
 - `stateDir` belongs to the bridge, one host per directory. It pairs with the Harness's storage (threads
   point at its project ids), so back up and move the two together.
+- Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
+  better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
+  thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you; a
+  late answer is ignored. Return `undefined` (or "New thread") to keep the title. The example's hook is
+  [`examples/coding-agent/src/title.ts`](examples/coding-agent/src/title.ts): one tool-less completion on the
+  thread's model.
+
+  ```ts
+  titleThread: async ({ conversationId, at, reason, previousTitle, signal }) => {
+  	const conversation = await harness.conversation(conversationId, ctx);
+  	const { messages } = await conversation!.context(ctx, { at });   // not a fork: no tools, nothing runs
+  	const reply = await models.completeSimple(model, { systemPrompt: "Title only, at most 6 words.", messages: [...messages, ask(reason, previousTitle)] }, { signal });
+  	return textOf(reply);
+  },
+  ```
 - The bridge decides nothing about the agent: T3 picks the model and thinking level, the Harness says which
   models exist. Why, and the rest of the design: [`docs/design.md`](docs/design.md). Who owns which state:
   [`docs/state.md`](docs/state.md).
@@ -70,7 +87,7 @@ unconditionally). An armed port is released on shutdown.
 
 ## What works
 
-Threads, "No project" threads, prompts, steering, interrupts, per-thread model and thinking level, undo,
+Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
@@ -92,7 +109,7 @@ Known limitations:
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
 - Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
-  (T3's form defaults to one; pick "Use the project checkout"). A task's thread is titled "New thread".
+  (T3's form defaults to one; pick "Use the project checkout").
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
   tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
   can lock out local pairing for that minute.
