@@ -3,7 +3,6 @@
 import { Type } from "typebox";
 import {
 	type Ctx,
-	cell,
 	ChordError,
 	defineFacet,
 	type Facet,
@@ -126,6 +125,9 @@ export const PiModels = local("pi.models", {
 	},
 });
 
+/** The principal of the host's own code (`createHost({ self })`): chord 1.2's built-in `hostPrincipal`. */
+export const HOST_PRINCIPAL = { host: true } as const;
+
 // ── Error mapping ────────────────────────────────────────────────────────────
 
 function toChordError(error: unknown): ChordError {
@@ -157,14 +159,14 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 	api.serve(
 		PiThreads,
 		(_input, _principal, self) => {
-			const state = self.state({
-				threads: cell(ThreadsCell, { revision: 0, projects: [...threads.projects], threads: [] }),
-			});
+			const state = {
+				threads: self.state("threads", ThreadsCell, { revision: 0, projects: [...threads.projects], threads: [] }),
+			};
 			const publish = async (ctx: Ctx): Promise<void> => {
 				const list = await threads.list();
 				state.threads.replace(ctx, { revision: state.threads.value.revision + 1, projects: [...threads.projects], threads: list }, { diff: true });
 			};
-			self.tasks({ load: (ctx) => publish(ctx) });
+			self.task((ctx) => publish(ctx));
 			return {
 				threads: state.threads,
 				create: async (args, ctx) => {
@@ -194,46 +196,44 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				},
 			};
 		},
-		{ eager: true },
+		{ lifetime: "host" },
 	);
 
 	api.serve(PiTranscript, ({ threadId }, _principal, self) => {
-		const state = self.state({ transcript: cell(TranscriptState, { conversationId: 0, view: EMPTY_VIEW }) });
-		self.tasks({
-			// Follow the thread's head: watch the thread list for the head, and the head conversation's view for its value.
-			pump: async (ctx) => {
-				let conversationWatch: ConversationWatch | undefined;
-				let currentHead = -1;
-				const setView = (conversationId: number, view: ConversationView): void => {
-					state.transcript.replace(ctx, { conversationId, view }, { diff: true });
-				};
-				const rebind = async (head: number): Promise<void> => {
-					if (head === currentHead) return;
-					currentHead = head;
-					await conversationWatch?.stop().catch(() => {});
-					const conversation = await harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
-					if (conversation === undefined) {
-						setView(head, EMPTY_VIEW);
-						return;
-					}
-					conversationWatch = await conversation.watch(BACKGROUND_CONTEXT);
-					conversationWatch.start(async (view) => setView(head, view));
-					setView(head, conversationWatch.value);
-				};
-				const threadsWatch = await harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
-				threadsWatch?.start(async (value) => {
-					const head = headOf(value, threadId);
-					if (head !== undefined) await rebind(head);
-				});
-				try {
-					const head = headOf((await harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT)) ?? null, threadId);
-					if (head !== undefined) await rebind(head);
-					await untilAborted(ctx.signal);
-				} finally {
-					await conversationWatch?.stop().catch(() => {});
-					await threadsWatch?.stop().catch(() => {});
+		const state = { transcript: self.state("transcript", TranscriptState, { conversationId: 0, view: EMPTY_VIEW }) };
+		// Follow the thread's head: watch the thread list for the head, and the head conversation's view for its value.
+		self.task(async (ctx) => {
+			let conversationWatch: ConversationWatch | undefined;
+			let currentHead = -1;
+			const setView = (conversationId: number, view: ConversationView): void => {
+				state.transcript.replace(ctx, { conversationId, view }, { diff: true });
+			};
+			const rebind = async (head: number): Promise<void> => {
+				if (head === currentHead) return;
+				currentHead = head;
+				await conversationWatch?.stop().catch(() => {});
+				const conversation = await harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+				if (conversation === undefined) {
+					setView(head, EMPTY_VIEW);
+					return;
 				}
-			},
+				conversationWatch = await conversation.watch(BACKGROUND_CONTEXT);
+				conversationWatch.start(async (view) => setView(head, view));
+				setView(head, conversationWatch.value);
+			};
+			const threadsWatch = await harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
+			threadsWatch?.start(async (value) => {
+				const head = headOf(value, threadId);
+				if (head !== undefined) await rebind(head);
+			});
+			try {
+				const head = headOf((await harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT)) ?? null, threadId);
+				if (head !== undefined) await rebind(head);
+				await untilAborted(ctx.signal);
+			} finally {
+				await conversationWatch?.stop().catch(() => {});
+				await threadsWatch?.stop().catch(() => {});
+			}
 		});
 		return { transcript: state.transcript };
 	});
@@ -285,10 +285,10 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 	api.serve(PiModels, ({ threadId }, _principal, self) => {
 		const catalog = models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input] }));
-		const state = self.state({
-			catalog: cell(Catalog, catalog),
-			configuration: cell(ConfigurationSchema, { model: null, thinkingLevel: "off" }),
-		});
+		const state = {
+			catalog: self.state("catalog", Catalog, catalog),
+			configuration: self.state("configuration", ConfigurationSchema, { model: null, thinkingLevel: "off" }),
+		};
 		const headConversation = async () => {
 			const doc = await harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 			const head = headOf(doc ?? null, threadId);
@@ -312,19 +312,17 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			state.configuration.replace(ctx, configuration, { diff: true });
 			return configuration;
 		};
-		self.tasks({
-			// Seed and refresh the head's configuration; the head only changes via a switch, so re-read on a thread change.
-			pump: async (ctx) => {
-				const threadsWatch = await harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
-				const refresh = async (): Promise<void> => state.configuration.replace(ctx, await readConfiguration(), { diff: true });
-				threadsWatch?.start(async () => refresh());
-				try {
-					await refresh();
-					await untilAborted(ctx.signal);
-				} finally {
-					await threadsWatch?.stop().catch(() => {});
-				}
-			},
+		// Seed and refresh the head's configuration; the head only changes via a switch, so re-read on a thread change.
+		self.task(async (ctx) => {
+			const threadsWatch = await harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
+			const refresh = async (): Promise<void> => state.configuration.replace(ctx, await readConfiguration(), { diff: true });
+			threadsWatch?.start(async () => refresh());
+			try {
+				await refresh();
+				await untilAborted(ctx.signal);
+			} finally {
+				await threadsWatch?.stop().catch(() => {});
+			}
 		});
 		return {
 			catalog: state.catalog,

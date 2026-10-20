@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
-import type { Ctx, Handle, Host } from "@earendil-works/chord";
+import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
 	OrchestrationProjectShell,
 	OrchestrationSearchThreadsResult,
@@ -97,6 +97,17 @@ export type ProjectMutation = {
 export const DEDUP_ENTRY_LIMIT = 2_000;
 
 
+/** A reference's state member, or `undefined` before its first hydration (chord 1.3 throws `not_ready` there; 1.2 read
+ * `undefined`). A listener added meanwhile gets the snapshot once it is readable. */
+function peek<T>(member: Readable<T>): T | undefined {
+	try {
+		return member.value;
+	} catch (error) {
+		if (isChordError(error, "not_ready")) return undefined;
+		throw error;
+	}
+}
+
 export class Bridge {
 	readonly config: BridgeConfig;
 	readonly #host: Host;
@@ -111,7 +122,7 @@ export class Bridge {
 	#directory: Thread[] = [];
 	/** The `pi.threads` handle, so a create/remove can refresh the directory synchronously: the thread-existence check
 	 * must never race the subscription that mirrors the document. */
-	#threadsHandle: Handle<typeof PiThreads> | undefined;
+	#threadsHandle: Ref<typeof PiThreads> | undefined;
 	#directoryStop: (() => void) | undefined;
 	#registryStop: (() => void) | undefined;
 	#sequence = 0;
@@ -125,10 +136,10 @@ export class Bridge {
 	}
 
 	start(): void {
-		const handle = this.#host.get(PiThreads, {});
+		const handle = this.#host.hold(PiThreads, {});
 		this.#threadsHandle = handle;
 		const publish = (): void => {
-			this.#directory = (handle.threads.value?.threads ?? []).map((thread) => ({ ...thread }));
+			this.#directory = (peek(handle.threads)?.threads ?? []).map((thread) => ({ ...thread }));
 			this.#refreshShells();
 		};
 		this.#directoryStop = handle.threads.subscribe(publish);
@@ -242,7 +253,7 @@ export class Bridge {
 				// terminates (design.md, Invariants).
 				for (;;) {
 					if (this.#threadsHandle === undefined) break;
-					const late = (this.#threadsHandle.threads.value?.threads ?? []).filter((thread) => thread.projectId === mutation.projectId);
+					const late = (peek(this.#threadsHandle.threads)?.threads ?? []).filter((thread) => thread.projectId === mutation.projectId);
 					if (late.length === 0) break;
 					for (const entry of late) await this.deleteThread(entry.threadId);
 				}
@@ -443,13 +454,13 @@ export class Bridge {
 		}
 		if (state.stops.length > 0) return;
 		const key = { threadId: state.threadId };
-		const transcript = this.#host.get(PiTranscript, key);
-		const models = this.#host.get(PiModels, key);
+		const transcript = this.#host.hold(PiTranscript, key);
+		const models = this.#host.hold(PiModels, key);
 		const fire = (): void => {
-			state.view = transcript.transcript.value?.view as ConversationView | undefined;
-			state.conversationId = transcript.transcript.value?.conversationId;
-			state.catalog = (models.catalog.value ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [] }));
-			const configuration = models.configuration.value;
+			state.view = peek(transcript.transcript)?.view as ConversationView | undefined;
+			state.conversationId = peek(transcript.transcript)?.conversationId;
+			state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [] }));
+			const configuration = peek(models.configuration);
 			if (configuration !== undefined) state.configuration = { model: configuration.model ?? null, thinkingLevel: configuration.thinkingLevel };
 			this.#recompute(state);
 		};
@@ -619,10 +630,8 @@ export class Bridge {
 	}
 
 	/** Run a `pi.controller` / `pi.models` call for a thread under the host root. */
-	#call<T>(threadId: string, fn: (controller: Handle<typeof PiController>, models: Handle<typeof PiModels>, c: Ctx) => Promise<T>): Promise<T> {
-		const controller = this.#host.get(PiController, { threadId });
-		const models = this.#host.get(PiModels, { threadId });
-		return this.#host.root((c) => fn(controller, models, c));
+	#call<T>(threadId: string, fn: (controller: Ref<typeof PiController>, models: Ref<typeof PiModels>, c: Ctx) => Promise<T>): Promise<T> {
+		return this.#host.root(async (c) => fn(await c.get(PiController, { threadId }), await c.get(PiModels, { threadId }), c));
 	}
 
 	/**
@@ -640,7 +649,7 @@ export class Bridge {
 			options.launchText === undefined || scratchRoot === undefined || !isScratchRoot(project.cwd, scratchRoot)
 				? undefined
 				: await claimScratchThreadFolder(scratchRoot, id, options.launchText);
-		const handle = this.#host.get(PiThreads, {});
+		const handle = await this.#host.get(PiThreads, {});
 		await this.#host.root((c) => handle.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
 		this.#syncDirectory();
@@ -809,7 +818,7 @@ export class Bridge {
 	}
 
 	async deleteThread(threadId: string): Promise<void> {
-		const handle = this.#host.get(PiThreads, {});
+		const handle = await this.#host.get(PiThreads, {});
 		await this.#host.root((c) => handle.remove({ threadId }, c));
 		this.#syncDirectory();
 		const state = this.#threads.get(threadId);
@@ -822,7 +831,7 @@ export class Bridge {
 	 * makes; the matching, ranking and ordering are T3's (`t3/thread-search.ts`).
 	 */
 	async searchThreads(query: string, limit: number): Promise<OrchestrationSearchThreadsResult> {
-		const handle = this.#host.get(PiThreads, {});
+		const handle = await this.#host.get(PiThreads, {});
 		const matches = await this.#host.root((c) => handle.search({ query, limit }, c));
 		return {
 			matches: matches.map((match) => ({
@@ -840,7 +849,7 @@ export class Bridge {
 	#syncDirectory(): void {
 		const handle = this.#threadsHandle;
 		if (handle === undefined) return;
-		this.#directory = (handle.threads.value?.threads ?? []).map((thread) => ({ ...thread }));
+		this.#directory = (peek(handle.threads)?.threads ?? []).map((thread) => ({ ...thread }));
 	}
 
 	async close(): Promise<void> {

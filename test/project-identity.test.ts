@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHost } from "@earendil-works/chord";
-import { createServerFacet } from "../src/objects.ts";
+import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
@@ -31,7 +31,7 @@ describe("a project id is minted by whoever registers it", () => {
 			await mkdir(root, { recursive: true });
 			const registry = await FileProjectRegistry.open(dir);
 			const config: BridgeConfig = { host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(join(dir, "settings-store")), corsOrigins: [], staticDir: undefined, registry };
-			const bridge = new Bridge(config, log, createHost({ name: "server" }));
+			const bridge = new Bridge(config, log, createHost({ name: "server", self: HOST_PRINCIPAL }));
 
 			const clientProjectId = randomUUID(); // exactly what `newProjectId()` mints in the web app.
 			const created = await bridge.mutateProject({ type: "project.create", projectId: clientProjectId, commandId: "cmd-create-picked", title: "picked", workspaceRoot: root, createWorkspaceRootIfMissing: true });

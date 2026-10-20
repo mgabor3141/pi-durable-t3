@@ -11,7 +11,7 @@ import { createHost } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId } from "@earendil-works/pi-durable";
-import { createServerFacet } from "../src/objects.ts";
+import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
 import type { Logger } from "../src/t3/logging.ts";
@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 it("sends the first message on a cold thread with no prior warming (S2)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-bridge-"));
-	const host = createHost({ name: "server" });
+	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	fixture.model.respond(fauxAssistantMessage("pong"));

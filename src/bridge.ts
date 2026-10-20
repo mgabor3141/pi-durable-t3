@@ -3,6 +3,7 @@
 // needs comes from this file.
 import { mkdirSync } from "node:fs";
 import { createHost } from "@earendil-works/chord";
+import { HOST_PRINCIPAL } from "./objects.ts";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
 import { createServerFacet } from "./objects.ts";
@@ -97,7 +98,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		onWarn: (message) => log.warn(message),
 	});
 
-	const server = createHost({ name: "server" });
+	// chord 1.3 makes the app supply the principal of the host's own code; this host has no other principals, so it is
+	// the `{ host: true }` chord 1.2 built in (`hostPrincipal`).
+	const server = createHost({ name: "server", self: HOST_PRINCIPAL });
 	await server.load([createServerFacet(threads, options.models)]);
 	await server.ready();
 

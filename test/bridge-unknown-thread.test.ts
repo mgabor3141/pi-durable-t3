@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { createHost } from "@earendil-works/chord";
-import { createServerFacet } from "../src/objects.ts";
+import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge, CommandError } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { makeThreads } from "./threads-harness.ts";
@@ -23,7 +23,7 @@ const log: Logger = { info: () => {}, warn: () => {} };
 async function openBridge(): Promise<{ bridge: Bridge; close: () => Promise<void> }> {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-unknown-"));
-	const host = createHost({ name: "server" });
+	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(

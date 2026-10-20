@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { createHost } from "@earendil-works/chord";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { createServerFacet } from "../src/objects.ts";
+import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { makeThreads } from "./threads-harness.ts";
@@ -148,7 +148,7 @@ async function waitForShellProject(ws: Awaited<ReturnType<typeof connectWs>>, pr
 // refused with a message the UI shows. The example host always configures one; the bridge owns the switch.
 it("no scratch dir: ensureScratch is refused, and the config carries no scratchWorkspaceRoot (the feature is off)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
-	const host = createHost({ name: "server" });
+	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
 	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
 	await host.ready();
 	const bridge = new Bridge(

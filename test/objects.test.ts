@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createHost, isChordError } from "@earendil-works/chord";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { PiController, PiModels, PiThreads, PiTranscript } from "../src/objects.ts";
-import { createServerFacet } from "../src/objects.ts";
+import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { makeThreads } from "./threads-harness.ts";
 
 type Cell<T> = { readonly value: T | undefined; subscribe(listener: (value: T | undefined) => void): () => void };
@@ -30,14 +30,14 @@ function waitFor<T>(cell: Cell<T>, predicate: (value: T | undefined) => boolean,
 describe("objects (in-process)", () => {
 	it("create, prompt, transcript, models, remove", async () => {
 		const fixture = await makeThreads();
-		const server = createHost({ name: "server" });
+		const server = createHost({ name: "server", self: HOST_PRINCIPAL });
 		await server.load([createServerFacet(fixture.threads, fixture.model.models)]);
 		await server.ready();
 
-		const directory = server.get(PiThreads, {});
+		const directory = await server.get(PiThreads, {});
 		await directory.ready;
 
-		// Create a thread and see it arrive through the eager directory cell.
+		// Create a thread and see it arrive through the host-lifetime directory cell.
 		await server.root((ctx) => directory.create({ threadId: "t", projectId: "p" }, ctx));
 		await waitFor(directory.threads, (value) => (value?.threads.length ?? 0) >= 1);
 		const created = directory.threads.value?.threads.find((thread) => thread.threadId === "t");
@@ -47,16 +47,16 @@ describe("objects (in-process)", () => {
 
 		// Prompt through the controller; the run should reach the transcript view for the same conversation.
 		fixture.model.respond(fauxAssistantMessage("hi back"));
-		const controller = server.get(PiController, { threadId: "t" });
+		const controller = await server.get(PiController, { threadId: "t" });
 		await controller.ready;
 		await server.root((ctx) => controller.prompt({ conversationId: head!, requestId: "m1", message: "hi" }, ctx));
 
-		const transcript = server.get(PiTranscript, { threadId: "t" });
+		const transcript = await server.get(PiTranscript, { threadId: "t" });
 		await transcript.ready;
 		await waitFor(transcript.transcript, (value) => value?.conversationId === head && JSON.stringify(value?.view ?? "").includes("hi"));
 
 		// The model catalog is the injected collection; selecting validates against it.
-		const models = server.get(PiModels, { threadId: "t" });
+		const models = await server.get(PiModels, { threadId: "t" });
 		await models.ready;
 		expect(models.catalog.value?.length).toBeGreaterThan(0);
 		const faux = models.catalog.value!.find((entry) => entry.provider === "faux")!;

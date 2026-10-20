@@ -3,6 +3,7 @@
 // shell). There is no cwd→project lookup left to invent one: a thread's project is its row's `projectId` read
 // through the registry (the FK, checked at commit), and an unregistered one is reported with that id and no
 // invented project. Ids for paths are the registry's business — see `settings.test.ts` and `projects.mutate`.
+import { HOST_PRINCIPAL } from "../src/objects.ts";
 import { expect, it } from "vitest";
 import { createHost } from "@earendil-works/chord";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -26,7 +27,7 @@ function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
 		registry: testRegistry(projects.map((project) => ({ id: project.id, cwd: project.path }))),
 	};
 	// `projects()` never touches the host, so an unloaded one is enough to construct a Bridge.
-	return new Bridge(config, log, createHost({ name: "server" }));
+	return new Bridge(config, log, createHost({ name: "server", self: HOST_PRINCIPAL }));
 }
 
 it("the shell lists registered projects and nothing else — no invented id, no `(other)` project (H2)", () => {
