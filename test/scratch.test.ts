@@ -107,6 +107,36 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 		expect(await exists(worktree!), `the claimed folder exists on disk: ${worktree}`).toBe(true);
 		expect(worktree!.slice(scratchRoot.length + 1), "named from the date, the message's words, and the thread id").toMatch(/^\d{4}-\d{2}-\d{2}-scratch-smoke-\d+-/);
 
+		// 5b. T3 normalizes a new-worktree request on Scratch to the root (Scratch has no Git): a folder of its own too.
+		const asWorktree = exitValue(await ws.call("orchestration.launchThread", {
+			commandId: "cmd-launch-scratch-wt",
+			threadId: "thread-scratch-2",
+			projectId: ensured.projectId,
+			title: "scratch worktree",
+			modelSelection: { instanceId: provider!.instanceId, model: provider!.models[0]!.slug },
+			runtimeMode: "full-access",
+			interactionMode: "default",
+			workspaceStrategy: { type: "worktree", baseRef: "main" },
+			initialMessage: { messageId: "msg-scratch-2", text: "scratch worktree", attachments: [] },
+		}), "launchThread in the Scratch project asking for a worktree") as { projection: { thread: { worktreePath: string | null } } };
+		expect(asWorktree.projection.thread.worktreePath?.startsWith(`${scratchRoot}/`), "a worktree request on Scratch claims a folder").toBe(true);
+
+		// 5c. The same normalization for a scheduled task saved on the Scratch project: stored as the root, not refused.
+		const task = exitValue(await ws.call("scheduledTasks.upsert", {
+			enabled: false,
+			title: "scratch task",
+			prompt: "hello",
+			projectId: ensured.projectId,
+			threadId: null,
+			workspaceStrategy: { type: "worktree", baseRef: "main" },
+			modelSelection: { instanceId: provider!.instanceId, model: provider!.models[0]!.slug },
+			runtimeMode: "full-access",
+			interactionMode: "default",
+			creationSource: "web",
+			schedule: { type: "interval", everyMs: 3_600_000 },
+		}), "scheduledTasks.upsert on Scratch with a worktree") as { task: { workspaceStrategy: { type: string } } };
+		expect(task.task.workspaceStrategy).toEqual({ type: "root" });
+
 		// 6. A thread in an ordinary project is unchanged: no folder, `worktreePath: null`.
 		const inAlpha = exitValue(await ws.call("orchestration.launchThread", {
 			commandId: "cmd-launch-alpha",

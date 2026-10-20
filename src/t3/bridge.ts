@@ -693,7 +693,8 @@ export class Bridge {
 		const threadId = await this.createThread({
 			threadId: input.threadId,
 			projectId: input.projectId,
-			...(launchText !== undefined && (input.workspaceStrategy?.type === undefined || input.workspaceStrategy.type === "root") ? { launchText } : {}),
+			// T3's launch: Scratch has no Git, so a new-worktree request there is the root, with a folder of its own.
+			...(launchText !== undefined && [undefined, "root", "worktree"].includes(input.workspaceStrategy?.type) ? { launchText } : {}),
 		});
 		await this.applySelection(threadId, input.modelSelection);
 		const message = input.initialMessage;
