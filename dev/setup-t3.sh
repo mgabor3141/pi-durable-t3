@@ -9,9 +9,9 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 # The single source of truth for the pinned T3 Code commit (protocol 2). MIT, "Copyright (c) 2026 T3 Tools Inc.".
-PIN=70d60e03a7a35c6fa131825bbfa05ec893e69912
+PIN=fb990765a49414a5bfbdc73365455fc8b5fbe691
 # The release tag at PIN: the version the bridge reports as `serverVersion` (src/t3/http.ts; a test keeps them equal).
-T3_TAG=v0.1.1-nightly.20261017.3238
+T3_TAG=v0.1.1-nightly.20261020.3386
 T3_URL="https://github.com/pingdotgg/t3code"
 CACHE="$here/.t3-cache/t3code"
 
