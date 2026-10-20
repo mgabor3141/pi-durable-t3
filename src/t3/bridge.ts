@@ -189,6 +189,13 @@ export class Bridge {
 		return ensureScratchProject(this.config.registry, root);
 	}
 
+	/** T3's `ManagedProjectFolders.isScratchProject`: the project is rooted at the scratch dir. */
+	isScratchProject(projectId: string): boolean {
+		const root = this.config.scratchDir;
+		const project = this.config.registry.list().find((p) => p.id === projectId);
+		return root !== undefined && project !== undefined && isScratchRoot(project.cwd, root);
+	}
+
 	/** The registered projects (from the live registry), shaped for the shell. */
 	#configured(): { id: string; title: string; path: string }[] {
 		return this.config.registry.list().map((project) => ({ id: project.id, title: project.name, path: project.cwd }));

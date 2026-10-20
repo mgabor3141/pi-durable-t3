@@ -25,7 +25,10 @@ export const POLL_INTERVAL_MS = 5_000;
 /** The two dispatch paths a run takes (T3's `threadLaunch.launch` and `threadManagement.sendToThread(mode: "queue")`). */
 export interface ScheduledTaskDispatch {
 	launch(input: { commandId: string; messageId: string; projectId: string; title: string; text: string; modelSelection: Task["modelSelection"] }): Promise<void>;
-	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string; modelSelection: Task["modelSelection"] }): Promise<void>;
+	/** T3 passes no model to a bound run: it follows the thread's current selection (ScheduledTaskService). */
+	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string }): Promise<void>;
+	/** T3's `ManagedProjectFolders.isScratchProject`. */
+	isScratchProject(projectId: string): boolean;
 }
 
 /** The message id T3 mints for a fire; the projection reads the task id back out of it. */
@@ -174,7 +177,7 @@ export class ScheduledTasks {
 				if (active.threadId === null) {
 					await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection });
 				} else {
-					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt, modelSelection: active.modelSelection });
+					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt });
 				}
 			} catch (error) {
 				lastRunError = errorMessage(error);
@@ -226,8 +229,11 @@ export class ScheduledTasks {
 
 	upsert(input: ScheduledTaskUpsertInput): { task: Task } {
 		if (input.schedule.type === "webhook") throw taskError(WEBHOOKS_UNSUPPORTED, input.id);
-		// Every run is at the project root: a task asking for a worktree would silently run somewhere else.
-		if (input.workspaceStrategy.type !== "root") throw taskError(WORKTREES_UNSUPPORTED, input.id);
+		// T3 stores a Scratch project's worktree request as the root (ScheduledTaskService.upsert). Any other worktree
+		// request is refused: every run here is at the project root, so it would silently run somewhere else.
+		const workspaceStrategy: Task["workspaceStrategy"] =
+			input.workspaceStrategy.type === "worktree" && this.#dispatch.isScratchProject(input.projectId) ? { type: "root" } : input.workspaceStrategy;
+		if (workspaceStrategy.type !== "root") throw taskError(WORKTREES_UNSUPPORTED, input.id);
 		// pi's only modes, as the thread commands answer them (rpc.ts): a task must not run in a mode it did not ask for.
 		if (input.runtimeMode !== "full-access") throw taskError(FULL_ACCESS_ONLY, input.id);
 		if (input.interactionMode !== "default") throw taskError(NO_PLAN_MODE, input.id);
@@ -246,7 +252,7 @@ export class ScheduledTasks {
 			schedule,
 			projectId: input.projectId,
 			threadId: input.threadId ?? null,
-			workspaceStrategy: input.workspaceStrategy,
+			workspaceStrategy,
 			modelSelection: input.modelSelection,
 			runtimeMode: input.runtimeMode,
 			interactionMode: input.interactionMode,
@@ -351,10 +357,10 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			// T3's sendToThread refuses a thread that is gone or belongs to another project.
 			if (bridge.threadProjectId(input.threadId) !== input.projectId) throw new Error(`Thread ${input.threadId} was not found in project ${input.projectId}.`);
 			await bridge.idempotent(input.commandId, async () => {
-				await bridge.applySelection(input.threadId, input.modelSelection);
 				await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue" });
 				return bridge.nextSequence();
 			});
 		},
+		isScratchProject: (projectId) => bridge.isScratchProject(projectId),
 	};
 }

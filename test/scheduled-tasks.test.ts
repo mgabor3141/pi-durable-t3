@@ -70,6 +70,7 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 	const dispatch: ScheduledTaskDispatch = {
 		launch: options.dispatch?.launch ?? (async (input) => void calls.push({ kind: "launch", ...input })),
 		queue: options.dispatch?.queue ?? (async (input) => void calls.push({ kind: "queue", ...input })),
+		isScratchProject: options.dispatch?.isScratchProject ?? ((projectId) => projectId === "scratch"),
 	};
 	const tasks = new ScheduledTasks({ stateDir: dir, dispatch, now: () => new Date(clock.now) });
 	const advance = (ms: number) => {
@@ -156,6 +157,7 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		advance(60_000);
 		await tasks.tick();
 		expect(queued.map((call) => [call.kind, call.threadId])).toEqual([["queue", "t1"]]);
+		expect(queued[0], "a bound run follows the thread's model (T3 passes none)").not.toHaveProperty("modelSelection");
 		fail = true;
 		advance(60_000);
 		await tasks.tick();
@@ -230,6 +232,12 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		const { tasks } = await fixture();
 		expect(() => tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).toThrow(WORKTREES_UNSUPPORTED);
 		expect(tasks.list().tasks).toHaveLength(0);
+	});
+
+	it("a worktree asked of the Scratch project is stored as the root, as T3 does", async () => {
+		const { tasks } = await fixture();
+		const { task } = tasks.upsert(input({ projectId: "scratch" as never, workspaceStrategy: { type: "worktree", baseRef: "main" } as never }));
+		expect(task.workspaceStrategy).toEqual({ type: "root" });
 	});
 
 	it("a mode pi does not have is refused, like the thread commands", async () => {
