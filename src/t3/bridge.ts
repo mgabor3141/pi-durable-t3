@@ -482,10 +482,12 @@ export class Bridge {
 			this.#recompute(state);
 		};
 		state.stops.push(transcript.transcript.subscribe(fire), models.catalog.subscribe(fire), models.configuration.subscribe(fire));
+		// Released at the idle release: the next open holds them again (their state is durable and re-read on activation).
+		state.stops.push(() => transcript.release(), () => models.release());
 		fire();
 	}
 
-	/** Detach a thread's handles (idle release); its result is dropped and recomputed on the next open. */
+	/** Detach and release a thread's references (idle release); its result is dropped and recomputed on the next open. */
 	#release(state: ThreadState): void {
 		for (const stop of state.stops.splice(0)) stop();
 		state.result = undefined;
@@ -666,8 +668,8 @@ export class Bridge {
 			options.launchText === undefined || scratchRoot === undefined || !isScratchRoot(project.cwd, scratchRoot)
 				? undefined
 				: await claimScratchThreadFolder(scratchRoot, id, options.launchText);
-		const handle = await this.#host.get(PiThreads, {});
-		await this.#host.root((c) => handle.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
+		// A call's reference is released when the call settles (`c.get`); `host.get` would hold one per call, forever.
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
 		this.#syncDirectory();
 		return id;
@@ -835,8 +837,7 @@ export class Bridge {
 	}
 
 	async deleteThread(threadId: string): Promise<void> {
-		const handle = await this.#host.get(PiThreads, {});
-		await this.#host.root((c) => handle.remove({ threadId }, c));
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).remove({ threadId }, c));
 		this.#syncDirectory();
 		const state = this.#threads.get(threadId);
 		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
@@ -848,8 +849,7 @@ export class Bridge {
 	 * makes; the matching, ranking and ordering are T3's (`t3/thread-search.ts`).
 	 */
 	async searchThreads(query: string, limit: number): Promise<OrchestrationSearchThreadsResult> {
-		const handle = await this.#host.get(PiThreads, {});
-		const matches = await this.#host.root((c) => handle.search({ query, limit }, c));
+		const matches = await this.#host.root(async (c) => (await c.get(PiThreads, {})).search({ query, limit }, c));
 		return {
 			matches: matches.map((match) => ({
 				threadId: match.threadId,
@@ -872,6 +872,7 @@ export class Bridge {
 	async close(): Promise<void> {
 		for (const state of this.#threads.values()) this.#release(state);
 		this.#directoryStop?.();
+		this.#threadsHandle?.release();
 		this.#registryStop?.();
 	}
 }
