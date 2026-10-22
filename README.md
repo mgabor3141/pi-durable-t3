@@ -9,7 +9,18 @@ https://github.com/user-attachments/assets/250218eb-9a15-4f99-aa00-cf3c1e75d38e
 
 Turns are durable: kill the host mid-turn, start it again, and the turn finishes.
 
-## Try it
+## Install
+
+```sh
+pnpm add @mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/pi-ai @earendil-works/pi-durable
+```
+
+The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.1**) comes along as
+`@mgabor3141/pi-durable-t3-web`, and the bridge serves it. Node `>=22.19.0`. The public API is listed in
+[the package's README](packages/bridge/README.md); how to use it is [below](#attach-it-to-your-own-agent). For a
+whole agent to start from, copy the [example agent](examples/coding-agent/#use-it-as-a-template).
+
+## Try it (contributors: from a checkout)
 
 ```sh
 pnpm install
@@ -31,12 +42,12 @@ The bridge is a library. You build the pi-durable Harness (storage, tools, exten
 serves T3's wire over it.
 
 ```ts
-import { attachT3, mintPairingCode } from "./src/bridge.ts";
+import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
 
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
 	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
-	webApp,        // optional: a built T3 web app folder to serve at `/`
+	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the web package's)
 	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
@@ -54,8 +65,9 @@ await t3.close();
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
 - `stateDir` belongs to the bridge, one host per directory. It pairs with the Harness's storage (threads
-  point at its project ids), so back up and move the two together. Back up before upgrading pi to 1.4 too: it migrates `durable.db` to schema v2
-  on first open, and 1.3 then refuses it (`Durable SQLite schema version 2 is newer than supported version 1`).
+  point at its project ids), so back up and move the two together.
+- Upgrading from pi 1.3: back up first. pi 1.4 migrates `durable.db` to schema v2 on first open, and 1.3 then
+  refuses it (`Durable SQLite schema version 2 is newer than supported version 1`).
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
   better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
   thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you (or the host closes); a
@@ -135,10 +147,15 @@ Known limitations:
 pnpm test        # no credentials, no network, never touches ~/.pi
 pnpm typecheck
 pnpm smoke       # T3's web app in Chromium: pairing, prompts, undo, crash resume, projects, Connections
+pnpm build && FACET_PORT=5070 dev/pack-proof.sh   # the packed packages, installed outside the repo, in a browser
 ```
 
 `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm test` also runs one real-model turn.
 
+Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents/skills/bump-pins`](.agents/skills/bump-pins/SKILL.md).
+
 ## License
 
-MIT, see `LICENSE`. `pnpm setup:t3` fetches T3 Code's contracts and web app, which are MIT (T3 Tools Inc.).
+MIT, see `LICENSE`. T3 Code is MIT (T3 Tools Inc.): the bridge package bundles T3's contracts and replicates parts of
+its server (`THIRD_PARTY_LICENSES`), and the web package is T3's built app, unmodified. In a checkout,
+`pnpm setup:t3` fetches both.
