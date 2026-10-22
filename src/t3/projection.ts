@@ -12,17 +12,21 @@ import type {
 	OrchestrationV2ProviderTurn,
 	OrchestrationV2Run,
 	OrchestrationV2RunAttempt,
+	OrchestrationV2Subagent,
 	OrchestrationV2ThreadProjection,
 	OrchestrationV2ThreadShell,
 	OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
-import { type ContentBlock, type ConversationView, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
+import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
+
+type LiveToolSlot = NonNullable<LiveDoc["tools"]>[number];
 
 export const PROVIDER_INSTANCE_ID = "pi";
 export const PROVIDER_DRIVER = "pi";
@@ -51,6 +55,12 @@ export interface ThreadMeta {
 	readonly parentThreadId?: string;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
+	/** The subagents this thread's tool calls own, by the owning call's task (`subagents.ts`): a call whose details name
+	 * one of these children is shown as a subagent. */
+	readonly subagents?: ReadonlyMap<number, SubagentRef>;
+	/** Set on a subagent's own thread: pi owns it as Claude owns its Task children (provider-native, so it cannot take
+	 * user messages). `parentThreadId` is the thread whose call created it; `nodeId` that call's node. */
+	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -111,6 +121,7 @@ export function projectThread(
 	const providerTurns: OrchestrationV2ProviderTurn[] = [];
 	const messages: OrchestrationV2ConversationMessage[] = [];
 	const turnItems: OrchestrationV2TurnItem[] = [];
+	const subagents: OrchestrationV2Subagent[] = [];
 	const checkpointScopes: OrchestrationV2CheckpointScope[] = [];
 	const checkpoints: OrchestrationV2Checkpoint[] = [];
 	const projectedRuns: ProjectedRun[] = [];
@@ -315,10 +326,14 @@ export function projectThread(
 			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
 			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
+			// A subagent's first message is its parent's call: T3 records it as the agent's, with the sending thread.
+			const fromParent = meta.subagentOf !== undefined && intent === "turn_start";
+			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : ({ createdBy: "user", creationSource: "web" } as const);
+			const sender = fromParent ? { senderThreadId: id(meta.subagentOf!.parentThreadId) } : {};
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
-				createdBy: "user",
-				creationSource: "web",
+				...author,
+				...sender,
 				type: "user_message",
 				messageId: id(messageId),
 				...scheduled,
@@ -327,8 +342,8 @@ export function projectThread(
 				attachments,
 			} as Any);
 			messages.push({
-				createdBy: "user",
-				creationSource: "web",
+				...author,
+				...sender,
 				...scheduled,
 				id: id(messageId),
 				threadId: id(threadId),
@@ -348,7 +363,7 @@ export function projectThread(
 			at: number,
 			streaming: boolean,
 			toolResults: ReadonlyMap<string, EntryRecord>,
-			liveTools: ReadonlyMap<string, { output?: string }>,
+			liveTools: ReadonlyMap<string, LiveToolSlot>,
 		) => {
 			const thinking = thinkingOf(message.content);
 			if (thinking.length > 0) {
@@ -404,6 +419,75 @@ export function projectThread(
 							: "interrupted";
 				const resultAt = resultMessage?.timestamp ?? at;
 				const common = base(`ti-t${block.id}`, resultAt, itemStatus, result !== undefined);
+				// A subagent: the call's details name a child conversation that the call's own task owns (`subagents.ts`).
+				const callTaskId = result?.byTaskId ?? liveSlot?.taskId;
+				const childId = detailsConversationId(resultMessage?.role === "toolResult" ? resultMessage.details : liveSlot?.details);
+				const ref = callTaskId === undefined || childId === undefined ? undefined : meta.subagents?.get(callTaskId);
+				if (ref !== undefined && ref.conversationId === childId) {
+					const subagentStatus: OrchestrationV2Subagent["status"] =
+						itemStatus === "interrupted" ? (aborted ? "cancelled" : "interrupted") : (itemStatus as OrchestrationV2Subagent["status"]);
+					const nodeAt = time(resultAt);
+					const nativeTaskRef = { driver: id(PROVIDER_DRIVER), nativeId: String(ref.taskId), strength: "strong" } as const;
+					const subagentNode = subagentNodeId(ref.taskId);
+					const prompt = typeof block.arguments["prompt"] === "string" ? block.arguments["prompt"] : "";
+					const label = typeof block.arguments["description"] === "string" && block.arguments["description"].trim() !== "" ? block.arguments["description"] : null;
+					const settledSubagent = result !== undefined;
+					const subagentResult = settledSubagent ? output ?? "" : null;
+					nodes.push({
+						id: id(subagentNode),
+						threadId: id(threadId),
+						runId: id(runId),
+						parentNodeId: id(nodeId),
+						rootNodeId: id(nodeId),
+						kind: "subagent",
+						status: subagentStatus as OrchestrationV2ExecutionNode["status"],
+						countsForRun: false,
+						providerThreadId: id(providerThreadId),
+						providerTurnId: id(turnId),
+						nativeItemRef: nativeTaskRef,
+						runtimeRequestId: null,
+						checkpointScopeId: null,
+						startedAt: time(at),
+						completedAt: settledSubagent ? nodeAt : null,
+					} as Any);
+					subagents.push({
+						id: id(subagentNode),
+						threadId: id(threadId),
+						runId: id(runId),
+						parentNodeId: id(nodeId),
+						origin: "provider_native",
+						createdBy: "agent",
+						driver: id(PROVIDER_DRIVER),
+						providerInstanceId: id(PROVIDER_INSTANCE_ID),
+						providerThreadId: id(providerThreadId),
+						childThreadId: id(ref.threadId),
+						nativeTaskRef,
+						prompt,
+						title: label,
+						model: null,
+						status: subagentStatus,
+						result: subagentResult,
+						startedAt: time(at),
+						completedAt: settledSubagent ? nodeAt : null,
+						updatedAt: nodeAt,
+					} as Any);
+					turnItems.push({
+						...common,
+						nodeId: id(subagentNode),
+						nativeItemRef: nativeTaskRef,
+						status: subagentStatus,
+						title: label,
+						type: "subagent",
+						subagentId: id(subagentNode),
+						origin: "provider_native",
+						driver: id(PROVIDER_DRIVER),
+						providerInstanceId: id(PROVIDER_INSTANCE_ID),
+						childThreadId: id(ref.threadId),
+						prompt,
+						result: subagentResult,
+					} as Any);
+					continue;
+				}
 				if (block.name === "bash" && typeof block.arguments.command === "string") {
 					turnItems.push({
 						...common,
@@ -444,11 +528,11 @@ export function projectThread(
 			const m = firstMessage(step);
 			if (m?.role === "toolResult") toolResults.set(m.toolCallId, step);
 		}
-		const liveTools = new Map<string, { output?: string }>();
+		const liveTools = new Map<string, LiveToolSlot>();
 		if (running) {
 			for (const slot of live?.tools ?? []) {
-				const key = (slot.toolCallId ?? slot.id) as string | undefined;
-				if (key !== undefined) liveTools.set(key, slot as { output?: string });
+				const key = (slot["callId"] ?? slot.toolCallId ?? slot.id) as string | undefined;
+				if (key !== undefined) liveTools.set(key, slot);
 			}
 		}
 		draft.steps.forEach((step, stepIndex) => {
@@ -542,9 +626,18 @@ export function projectThread(
 		},
 	];
 
+	// A subagent's thread: provider-native, like Claude's Task children — `isProviderNativeSubagentThread` makes it read-only
+	// in the web app and hides it from the sidebar (`makeSubagentChildThread`, packages/provider-core).
+	const sub = meta.subagentOf;
+	const lineage = () => ({
+		parentThreadId: sub !== undefined ? id(sub.parentThreadId) : meta.parentThreadId === undefined ? null : id(meta.parentThreadId),
+		relationshipToParent: sub !== undefined ? "subagent" : meta.parentThreadId === undefined ? null : "fork",
+		rootThreadId: sub !== undefined ? id(sub.parentThreadId) : id(threadId),
+	});
+	const forkedFrom = () => (sub === undefined ? null : { type: "node", nodeId: id(sub.nodeId) });
+	const author = sub === undefined ? ({ createdBy: "user", creationSource: "web" } as const) : ({ createdBy: "agent", creationSource: "provider" } as const);
 	const thread: Any = {
-		createdBy: "user",
-		creationSource: "web",
+		...author,
 		id: id(threadId),
 		projectId: id(meta.projectId),
 		title: meta.title,
@@ -556,12 +649,8 @@ export function projectThread(
 		branch: null,
 		worktreePath,
 		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
-		lineage: {
-			parentThreadId: meta.parentThreadId === undefined ? null : id(meta.parentThreadId),
-			relationshipToParent: meta.parentThreadId === undefined ? null : "fork",
-			rootThreadId: id(threadId),
-		},
-		forkedFrom: null,
+		lineage: lineage(),
+		forkedFrom: forkedFrom(),
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		archivedAt: null,
@@ -578,7 +667,7 @@ export function projectThread(
 		runs,
 		attempts,
 		nodes,
-		subagents: [],
+		subagents,
 		providerSessions,
 		providerThreads,
 		providerTurns,
@@ -600,8 +689,7 @@ export function projectThread(
 	const lastVisibleMessage = messages.at(-1);
 	const lastUser = messages.findLast((message) => message.role === "user");
 	const shell: OrchestrationV2ThreadShell = {
-		createdBy: "user",
-		creationSource: "web",
+		...author,
 		id: id(threadId),
 		projectId: id(meta.projectId),
 		title: meta.title,
@@ -613,7 +701,7 @@ export function projectThread(
 		branch: null,
 		worktreePath,
 		lineage: thread.lineage,
-		forkedFrom: null,
+		forkedFrom: thread.forkedFrom,
 		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		latestRunId: latestRun?.id ?? null,
 		latestRunRequestedAt: latestRun?.requestedAt ?? null,

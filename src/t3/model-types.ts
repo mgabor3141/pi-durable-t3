@@ -72,6 +72,8 @@ export type DurableMessage =
 			toolName: string;
 			content: ContentBlock[];
 			isError?: boolean;
+			/** What the tool reported (`ToolExecutionResult.details`); a subagent call names its child here. */
+			details?: unknown;
 			timestamp?: number;
 			/** Usage from the tool execution itself, when the tool reports it (not part of the model context accounting). */
 			usage?: PiUsage;
@@ -82,12 +84,17 @@ export interface EntryRecord {
 	kind: string;
 	model?: readonly DurableMessage[];
 	data?: unknown;
+	/** The task that appended the entry: a tool result's is the call's task. */
+	byTaskId?: number;
 }
 
 interface ToolSlot {
 	toolCallId?: string;
 	id?: string;
+	taskId?: number;
 	output?: string;
+	/** The last `details()` the running call published. */
+	details?: unknown;
 	[key: string]: unknown;
 }
 

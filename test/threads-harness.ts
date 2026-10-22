@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { onTestFinished } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { createRegistry, type ConversationId, type Conversation, type EnvTarget, Harness, UserEntry } from "@earendil-works/pi-durable";
+import { createRegistry, type ConversationId, type Conversation, type EnvTarget, type Extension, Harness, UserEntry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -24,6 +24,8 @@ export type ThreadsFixture = {
 	readonly root: string;
 	readonly projects: readonly Project[];
 	readonly registry: ReturnType<typeof testRegistry>;
+	/** The extensions installed on the Harness's tool registry (a restart installs them again). */
+	readonly extensions: readonly Extension[];
 };
 
 export async function makeThreads(
@@ -32,6 +34,8 @@ export async function makeThreads(
 		readonly responses?: FauxResponseStep[];
 		readonly tokensPerSecond?: number;
 		readonly coding?: boolean;
+		/** Extensions installed on the Harness's registry (an agent's own tools, such as the example's `subagent`). */
+		readonly extensions?: readonly Extension[];
 	} = { projects: [{ id: "p" }] },
 ): Promise<ThreadsFixture> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-durable-t3-threads-"));
@@ -46,6 +50,7 @@ export async function makeThreads(
 	const model = createScriptedModel(options.responses ?? [], options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
 	const registry = createRegistry();
 	if (options.coding === true) registry.install(CodingTools);
+	for (const extension of options.extensions ?? []) registry.install(extension);
 	const storage = await openNodeSqliteStorage(join(dir, "durable.db"));
 	const harness = await Harness.open(storage, {
 		models: model.models,
@@ -60,7 +65,7 @@ export async function makeThreads(
 	// (`"p"`, `"one"`) so a test names its project directly.
 	const projectRegistry = testRegistry(projects);
 	const threads = new Threads({ harness, registry: projectRegistry });
-	return { threads, harness, model, root: dir, projects, registry: projectRegistry };
+	return { threads, harness, model, root: dir, projects, registry: projectRegistry, extensions: options.extensions ?? [] };
 }
 
 /**
@@ -85,7 +90,9 @@ export async function restart(f: ThreadsFixture): Promise<{ threads: Threads; ha
 	await f.harness.close(ctx);
 	const storage = await openNodeSqliteStorage(join(f.root, "durable.db"));
 	// The harness registry is pi-durable's TOOL registry (a fresh one — the scripted model needs no tools).
-	const harness = await Harness.open(storage, { models: f.model.models, registry: createRegistry() }, ctx);
+	const registry = createRegistry();
+	for (const extension of f.extensions) registry.install(extension);
+	const harness = await Harness.open(storage, { models: f.model.models, registry }, ctx);
 	return { threads: new Threads({ harness, registry: f.registry }), harness };
 }
 

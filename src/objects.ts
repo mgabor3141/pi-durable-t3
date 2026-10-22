@@ -18,6 +18,7 @@ import type { AgentChange, ConversationId, ConversationView, ConversationWatch }
 import { HostError } from "./host-errors.ts";
 import { ThreadsDoc, type Thread, type Threads } from "./threads.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
+import { parseSubagentThreadId } from "./t3/subagents.ts";
 
 /** A persisted image record the client sent, placed in the entry's data (the projection reads it back). Mirrors
  * `AttachmentStore`'s record shape; declared here so the objects layer stays free of a facet→objects import. */
@@ -52,6 +53,17 @@ const ThreadSearchMatchSchema = Type.Object({
 
 // The head's durable view, carried through as-is (an opaque JSON value; the facet reads the fields it needs).
 const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown() });
+
+// A subagent, as `pi.threads.subagents` discovers it (`t3/subagents.ts`).
+const SubagentSchema = Type.Object({
+	threadId: Type.String(),
+	parentThreadId: Type.String(),
+	conversationId: Type.Number(),
+	taskId: Type.Number(),
+	prompt: Type.String(),
+	title: Type.Union([Type.String(), Type.Null()]),
+	startedAt: Type.Number(),
+});
 
 const ThreadKey = Type.Object({ threadId: Type.String() });
 /** A persisted image, shaped for the entry's data (the projection reads it back as the message's attachments). */
@@ -95,6 +107,8 @@ export const PiThreads = local("pi.threads", {
 		// T3's thread search over the threads the host has: a query and a limit, answered with T3's match shape (ms timestamps;
 		// the facet converts to ISO for the wire).
 		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
+		// The subagents of every thread: conversations owned by a tool call of a thread's conversation (a read).
+		subagents: method(Type.Object({}), Type.Array(SubagentSchema)),
 	},
 });
 
@@ -205,6 +219,13 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 						throw toChordError(error);
 					}
 				},
+				subagents: async () => {
+					try {
+						return await threads.subagents();
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
 			};
 		},
 		{ lifetime: "host" },
@@ -232,6 +253,18 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				conversationWatch.start(async (view) => setView(head, view));
 				setView(head, conversationWatch.value);
 			};
+			// A subagent's thread is its child conversation, fixed by the id: the bridge opens it only for a child it
+			// discovered (`Bridge.hasThread`), and it is no thread's head, so it never enters the threads document.
+			const subagent = parseSubagentThreadId(threadId);
+			if (subagent !== undefined) {
+				try {
+					await rebind(subagent.conversationId);
+					await untilAborted(ctx.signal);
+				} finally {
+					await conversationWatch?.stop().catch(() => {});
+				}
+				return;
+			}
 			const threadsWatch = await harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
 			threadsWatch?.start(async (value) => {
 				const head = headOf(value, threadId);

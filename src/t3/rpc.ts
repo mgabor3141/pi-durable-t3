@@ -86,6 +86,7 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
+	"subagent.stop": "Stopping one subagent is not supported by pi-durable-t3: interrupt the parent's turn, which stops the subagent with it.",
 	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
 	// relaunch command and never sends these; if one arrives (a hand-built client, a future default), refuse it
 	// honestly: the bridge is not a T3 install and updates by updating itself on the host, not over the wire.
@@ -251,9 +252,11 @@ export function makeRpcLayer(deps: RpcDeps) {
 					await bridge.applySelection(command.threadId, command.modelSelection);
 					break;
 				case "thread.runtime-mode.set":
+					if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
 					if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
 					break;
 				case "thread.interaction-mode.set":
+					if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
 					if (command.interactionMode !== "default") throw new CommandError("Plan mode is not supported by pi-durable-t3.");
 					break;
 				default:

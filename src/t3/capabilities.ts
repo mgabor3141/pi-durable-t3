@@ -63,9 +63,9 @@ export const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
 		planDeltasHaveItemIds: no,
 	},
 	subagents: {
-		supportsSubagents: no,
-		exposesSubagentThreadIds: no,
-		emitsSubagentLifecycle: no,
+		supportsSubagents: true,
+		exposesSubagentThreadIds: true,
+		emitsSubagentLifecycle: true,
 		canWaitForSubagents: no,
 		canCloseSubagents: no,
 		canForkSubagentThread: no,

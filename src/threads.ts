@@ -21,11 +21,12 @@ import {
 	UserEntry,
 	type UserInput,
 } from "@earendil-works/pi-durable";
-import type { Harness } from "@earendil-works/pi-durable";
+import { type Harness, ToolTask } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
+import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import type { ProjectRegistry } from "./registry.ts";
@@ -184,6 +185,51 @@ export class Threads {
 			threadUpdatedAt.set(thread.threadId, updatedAt);
 		}
 		return searchThreads(candidates, threadUpdatedAt, query, limit);
+	}
+
+	/**
+	 * The subagents of every thread, read from ownership alone (no entry is loaded but the owning call's): a conversation
+	 * OWNED BY A MODEL-ISSUED TOOL CALL of the thread's head conversation, or of an ancestor it was forked from (an undo
+	 * keeps the child its reverted call made). The bridge matches a call's `details` against these, so a call is a
+	 * subagent only when its own task owns the child it names (`t3/subagents.ts`). One read-only commit.
+	 */
+	async subagents(): Promise<SubagentRef[]> {
+		const threads = await this.list();
+		return this.#harness.commit(async (tx) => {
+			const refs: SubagentRef[] = [];
+			for (const thread of threads) {
+				const lineage: ConversationId[] = [];
+				for (let id: ConversationId | undefined = thread.head as ConversationId; id !== undefined && !lineage.includes(id); id = (await tx.conversation(id))?.parent?.conversationId) lineage.push(id);
+				const owned: ConversationRecord[] = [];
+				for (const owner of lineage) {
+					for (let cursor: Cursor | undefined; ; ) {
+						const page = await tx.scanConversations({ ownerConversationId: owner }, 256, cursor);
+						owned.push(...page.items);
+						if (page.next === undefined || page.items.length === 0) break;
+						cursor = page.next;
+					}
+				}
+				for (const child of owned.sort((a, b) => a.id - b.id)) {
+					if (child.owner === undefined) continue;
+					const task = await tx.task(child.owner.taskId);
+					const input = task?.input as { kind?: string; assistant?: number; callId?: string } | undefined;
+					if (task === undefined || task.kind !== ToolTask.definition.name || input?.kind !== "model") continue;
+					const assistant = await tx.entry(input.assistant as EntryId);
+					const call = (assistant?.model?.[0] as { content?: ContentBlock[] } | undefined)?.content?.find((block) => block.type === "toolCall" && block.id === input.callId);
+					const args = call?.type === "toolCall" ? call.arguments : {};
+					refs.push({
+						threadId: subagentThreadId(thread.threadId, child.id),
+						parentThreadId: thread.threadId,
+						conversationId: child.id,
+						taskId: child.owner.taskId,
+						prompt: typeof args["prompt"] === "string" ? args["prompt"] : "",
+						title: typeof args["description"] === "string" ? args["description"] : null,
+						startedAt: task.startedAt ?? 0,
+					});
+				}
+			}
+			return refs;
+		}, BACKGROUND_CONTEXT);
 	}
 
 	async thread(threadId: string): Promise<Thread | undefined> {
