@@ -9,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { Threads } from "../../../src/threads.ts";
 import { openCodingHarness } from "../src/host-runtime.ts";
+import { Subagent } from "../src/subagent.ts";
 import { testRegistry } from "../../../test/test-registry.ts";
 import { conversation, idle } from "../../../test/threads-harness.ts";
 import { tempRoot } from "../../../test/temp-root.ts";
@@ -44,4 +45,25 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 			await host.close();
 		}
 	}, 120_000);
+
+	it("delegates to the subagent tool: the call owns a child that answered", async () => {
+		const target = ref!;
+		const root = await tempRoot();
+		const registry = testRegistry([{ id: "live", cwd: join(root, "p") }]);
+		await mkdir(join(root, "p"), { recursive: true });
+		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
+		const host = await openCodingHarness({ dataDir: root }, runtime, { extensions: [Subagent] });
+		const threads = new Threads({ harness: host.harness, registry });
+		try {
+			const thread = await threads.create({ threadId: "t", projectId: "live" });
+			await (await host.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: target }, BACKGROUND_CONTEXT);
+			await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "Use the subagent tool, with the prompt \"Reply with exactly: ok\", then tell me what it answered." }, undefined);
+			await idle(host.harness, thread.head);
+			const owned = await threads.subagents();
+			expect(owned.length).toBeGreaterThanOrEqual(1);
+			expect(owned[0]!.parentThreadId).toBe("t");
+		} finally {
+			await host.close();
+		}
+	}, 180_000);
 });

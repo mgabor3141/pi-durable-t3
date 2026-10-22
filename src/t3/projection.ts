@@ -560,6 +560,31 @@ export function projectThread(
 		}
 	});
 
+	// A subagent's thread carries the root node T3's provider-native children have (`runId: null`): the web app reads the
+	// child's status bar ("Running 3s", "Done") from it (`deriveProviderSubagentStatus`).
+	if (meta.subagentOf !== undefined) {
+		const last = runs.at(-1);
+		const rootStatus = (busy ? "running" : (last?.status ?? "pending")) as OrchestrationV2ExecutionNode["status"];
+		const settledAt = busy || last === undefined ? null : last.completedAt;
+		nodes.push({
+			id: id(`n-sub-root`),
+			threadId: id(threadId),
+			runId: null,
+			parentNodeId: null,
+			rootNodeId: id(`n-sub-root`),
+			kind: "root_turn",
+			status: rootStatus,
+			countsForRun: false,
+			providerThreadId: null,
+			providerTurnId: null,
+			nativeItemRef: null,
+			runtimeRequestId: null,
+			checkpointScopeId: null,
+			startedAt: runs[0]?.startedAt ?? time(meta.createdAt),
+			completedAt: settledAt,
+		} as Any);
+	}
+
 	// Runs removed by rewinds stay as rolled back; their items stay hidden (design.md, Invariants).
 	const known = new Set(runs.map((run) => run.id as string));
 	for (const rolled of memory.rolledBack) {

@@ -91,7 +91,8 @@ unconditionally). An armed port is released on shutdown.
 ## What works
 
 Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time),
+crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), subagents (a pi tool whose call owns a child
+conversation shows as T3's subagent card with a read-only child thread; the example agent has one),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
 and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
@@ -111,6 +112,8 @@ Known limitations:
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
+- Subagents: a child thread is read-only and cannot be stopped on its own (interrupt the parent, which stops it). Undoing past
+  the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page.
 - Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
   (T3's form defaults to one; pick "Use the project checkout").
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the

@@ -29,6 +29,14 @@ desktop's machine. Both are expected.
 - The web app comes from the repo's `web-dist/` (T3's own build, fetched by `setup:t3`). Without it, the host
   serves the API only.
 
+## Subagents
+
+The agent has a `subagent` tool (`src/subagent.ts`, installed in `src/host.ts`): pi-durable's foreground subagent
+pattern. A call creates a child conversation owned by the call's task, runs `prompt` there on a copy of the parent's
+agent without the tool (no recursion), and returns the child's answer. Stopping the parent stops the child. T3 shows the
+call as a subagent card with a read-only child thread. The bridge keys on pi's convention (the call's `details` carry the
+`conversationId` of a conversation its task owns), not on this tool's name.
+
 ## Config
 
 Optional: `~/.config/pi-durable-t3/config.toml` (`$XDG_CONFIG_HOME`). [`config.example.toml`](config.example.toml)

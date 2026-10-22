@@ -58,6 +58,8 @@ releases it on a graceful stop, so a SIGKILLed host leaves a mapping pointing at
 
 All of it is safe to lose:
 - Per-thread view caches and the undo overlay.
+- The subagent list: rediscovered from conversation ownership (a child thread's id is derived from its parent thread and
+  child conversation), so nothing about subagents is stored.
 - The thread list.
 - A bounded map of recent prompt command ids.
 - The pending title request per thread (T3's `titleRegeneration`): after a restart no thread shows one, and a reply

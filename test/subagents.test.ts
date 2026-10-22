@@ -97,6 +97,8 @@ it("a subagent call is a provider-native card with a read-only child thread link
 	expect(child.thread).toMatchObject({ creationSource: "provider", lineage: { parentThreadId: "t", relationshipToParent: "subagent" } });
 	expect(child.messages.map((m: Any) => [m.role, m.text])).toEqual([["user", "Name a prime."], ["assistant", "7"]]);
 	expect(child.messages[0]).toMatchObject({ createdBy: "agent", senderThreadId: "t" });
+	// The web app reads the child's status bar from a root node with no run (as Claude's children have).
+	expect(child.nodes.find((n: Any) => n.kind === "root_turn" && n.runId === null)).toMatchObject({ status: "completed" });
 
 	// Never a thread of the threads document.
 	expect((await fixture.threads.list()).map((t) => t.threadId)).toEqual(["t"]);
