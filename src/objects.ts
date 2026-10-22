@@ -63,6 +63,7 @@ const SubagentSchema = Type.Object({
 	prompt: Type.String(),
 	title: Type.Union([Type.String(), Type.Null()]),
 	startedAt: Type.Number(),
+	endedAt: Type.Optional(Type.Number()),
 });
 
 const ThreadKey = Type.Object({ threadId: Type.String() });
@@ -108,7 +109,7 @@ export const PiThreads = local("pi.threads", {
 		// the facet converts to ISO for the wire).
 		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
 		// The subagents of every thread: conversations owned by a tool call of a thread's conversation (a read).
-		subagents: method(Type.Object({}), Type.Array(SubagentSchema)),
+		subagents: method(Type.Object({ threadId: Type.Optional(Type.String()) }), Type.Array(SubagentSchema)),
 	},
 });
 
@@ -219,9 +220,9 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 						throw toChordError(error);
 					}
 				},
-				subagents: async () => {
+				subagents: async (args) => {
 					try {
-						return await threads.subagents();
+						return await threads.subagents(args.threadId);
 					} catch (error) {
 						throw toChordError(error);
 					}

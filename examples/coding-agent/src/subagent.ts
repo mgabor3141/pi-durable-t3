@@ -48,7 +48,7 @@ export const Subagent: Extension = defineExtension({
 				const answer = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
 				const message = answer?.model?.[0];
 				const text = message?.role === "assistant" ? message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("") : "";
-				return { output: [{ type: "text", text }], details: { conversationId: child } };
+				return { output: [{ type: "text", text: text || "(the subagent returned no text)" }], details: { conversationId: child } };
 			},
 		}),
 	],

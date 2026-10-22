@@ -190,11 +190,11 @@ export class Threads {
 	/**
 	 * The subagents of every thread, read from ownership alone (no entry is loaded but the owning call's): a conversation
 	 * OWNED BY A MODEL-ISSUED TOOL CALL of the thread's head conversation, or of an ancestor it was forked from (an undo
-	 * keeps the child its reverted call made). The bridge matches a call's `details` against these, so a call is a
+	 * keeps the child its reverted call made). `only` limits the scan to one thread. The bridge matches a call's `details` against these, so a call is a
 	 * subagent only when its own task owns the child it names (`t3/subagents.ts`). One read-only commit.
 	 */
-	async subagents(): Promise<SubagentRef[]> {
-		const threads = await this.list();
+	async subagents(only?: string): Promise<SubagentRef[]> {
+		const threads = (await this.list()).filter((thread) => only === undefined || thread.threadId === only);
 		return this.#harness.commit(async (tx) => {
 			const refs: SubagentRef[] = [];
 			for (const thread of threads) {
@@ -225,6 +225,7 @@ export class Threads {
 						prompt: typeof args["prompt"] === "string" ? args["prompt"] : "",
 						title: typeof args["description"] === "string" ? args["description"] : null,
 						startedAt: task.startedAt ?? 0,
+						...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
 					});
 				}
 			}

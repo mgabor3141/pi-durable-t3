@@ -122,7 +122,7 @@ it("every command that writes to a subagent's thread is refused, and changes not
 	await expect(bridge.deleteThread(childThreadId)).rejects.toThrow(refused);
 	await expect(bridge.applySelection(childThreadId, { model: "faux/faux-1" })).rejects.toThrow(refused);
 	await expect(bridge.updateThreadMetadata({ commandId: "c4", threadId: childThreadId, title: "x" })).rejects.toThrow(refused);
-	await expect(bridge.createThread({ threadId: childThreadId, projectId: "p" })).rejects.toThrow(refused);
+	await expect(bridge.createThread({ threadId: childThreadId, projectId: "p" })).rejects.toThrow(/reserved for subagents/);
 	await sleep(100);
 	expect((await bridge.projection(childThreadId)).projection.messages.length).toBe(before);
 	expect((await fixture.threads.list()).map((t) => t.threadId)).toEqual(["t"]);
@@ -187,4 +187,112 @@ it("undo past the call hides the card; the child thread stays, read-only", async
 	await until("the child is still known", async () => bridge.hasThread(childThreadId));
 	expect(bridge.isSubagentThread(childThreadId)).toBe(true);
 	await expect(bridge.sendMessage({ threadId: childThreadId, commandId: "c3", messageId: "m3", text: "hi", mode: "start" })).rejects.toThrow(/subagent's thread/);
+}, 30_000);
+
+it("the card, the turn item and the child's root node time the call by its task, not by the parent's message", async () => {
+	const { bridge, fixture } = await delegated([delegate(), async () => fauxAssistantMessage("word ".repeat(80)), async () => fauxAssistantMessage("done")], { slow: true });
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
+	await until("the end is read", async () => (await bridge.projection("t")).projection.subagents[0]!.completedAt !== null);
+	const { projection } = await bridge.projection("t");
+	const card = subagentItem(projection);
+	const subagent = projection.subagents[0] as Any;
+	const node = projection.nodes.find((n: Any) => n.id === subagent.id) as Any;
+	const ms = (t: Any) => t.epochMilliseconds as number;
+	const span = ms(subagent.completedAt) - ms(subagent.startedAt);
+	// The child streamed for seconds: the span is the task's, not the 0 ms between a message's stamps.
+	expect(span).toBeGreaterThan(1000);
+	for (const timed of [node, card]) {
+		expect([ms(timed.startedAt), ms(timed.completedAt)]).toEqual([ms(subagent.startedAt), ms(subagent.completedAt)]);
+	}
+	// The child's thread is created when the task started, and its root node spans the same pair.
+	// The task's end can land a moment after its result is visible: the bridge reads it again.
+	await until("the end is read", async () => ms(((await bridge.projection(card.childThreadId)).projection.nodes.find((n: Any) => n.kind === "root_turn" && n.runId === null) as Any).completedAt) - ms(subagent.startedAt) > 1000);
+	const child = (await bridge.projection(card.childThreadId)).projection;
+	expect(ms(child.thread.createdAt)).toBe(ms(subagent.startedAt));
+	const root = child.nodes.find((n: Any) => n.kind === "root_turn" && n.runId === null) as Any;
+	expect([ms(root.startedAt), ms(root.completedAt)]).toEqual([ms(subagent.startedAt), ms(subagent.completedAt)]);
+}, 60_000);
+
+it("a stopped subagent's card has no result, a failed one's has the error without pi's harness wrapper", async () => {
+	const stopped = await delegated([delegate(), slowAnswer()], { slow: true });
+	await stopped.bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the running card", async () => subagentItem((await stopped.bridge.projection("t")).projection)?.status === "running");
+	await until("the child runs", async () => (await stopped.bridge.projection(subagentItem((await stopped.bridge.projection("t")).projection).childThreadId)).projection.runs.at(-1)?.status === "running");
+	await stopped.bridge.interrupt("t");
+	await until("the card stops", async () => ["cancelled", "interrupted"].includes(subagentItem((await stopped.bridge.projection("t")).projection)?.status));
+	const card = subagentItem((await stopped.bridge.projection("t")).projection);
+	expect(card.result).toBeNull();
+	expect((await stopped.bridge.projection("t")).projection.subagents[0]!.result).toBeNull();
+
+	const failed = await delegated([delegate(), async () => fauxAssistantMessage("x", { stopReason: "error", errorMessage: "boom" }), async () => fauxAssistantMessage("done")]);
+	await failed.bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card fails", async () => subagentItem((await failed.bridge.projection("t")).projection)?.status === "failed");
+	const result = subagentItem((await failed.bridge.projection("t")).projection).result as string;
+	expect(result).toContain("The subagent did not finish");
+	expect(result).not.toContain("<harness>");
+}, 60_000);
+
+it("a subagent's thread has no provider session or thread, so 'Disconnect agent session' is not offered", async () => {
+	const { bridge } = await delegated([delegate(), async () => fauxAssistantMessage("7"), async () => fauxAssistantMessage("done")]);
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
+	const childThreadId = subagentItem((await bridge.projection("t")).projection).childThreadId as string;
+	const child = (await bridge.projection(childThreadId)).projection;
+	expect(child.providerSessions).toEqual([]);
+	expect(child.providerThreads).toEqual([]);
+	expect(child.thread.activeProviderThreadId).toBeNull();
+	const shell = (bridge.shellSnapshot().threads as Any[]).find((s) => s.id === childThreadId);
+	expect(shell.activeProviderThreadId).toBeNull();
+	expect(child.messages.length).toBeGreaterThan(0);
+});
+
+it("a client cannot create a thread whose id is a derived subagent id, even one no child has", async () => {
+	const { fixture, bridge } = await delegated([]);
+	await expect(bridge.createThread({ threadId: "x.sub.3", projectId: "p" })).rejects.toThrow(/reserved for subagents/);
+	await expect(bridge.launchThread({ threadId: "x.sub.3", projectId: "p", text: "hi" } as Any)).rejects.toThrow(/reserved for subagents/);
+	expect((await fixture.threads.list()).map((t) => t.threadId)).toEqual(["t"]);
+});
+
+it("discovery scans everything once at boot, then only a thread whose view names an unseen child; a deleted parent takes its children", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }], extensions: [Subagent], responses: [delegate(), async () => fauxAssistantMessage("7"), async () => fauxAssistantMessage("done")] });
+	await createNamed(fixture.threads, fixture.harness, fixture.model)({ threadId: "t", projectId: "p", title: "Parent" });
+	const scans: (string | undefined)[] = [];
+	const original = fixture.threads.subagents.bind(fixture.threads);
+	fixture.threads.subagents = async (only?: string) => {
+		scans.push(only);
+		return original(only);
+	};
+	const bridge = await boot(fixture);
+	expect(scans).toEqual([undefined]);
+	await bridge.createThread({ threadId: "u1", projectId: "p" });
+	await bridge.createThread({ threadId: "u2", projectId: "p" });
+	await bridge.renameThread("u1", "renamed");
+	await sleep(200);
+	// Directory changes (create, rename) cost no scan.
+	expect(scans).toEqual([undefined]);
+
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
+	const childThreadId = subagentItem((await bridge.projection("t")).projection).childThreadId as string;
+	await sleep(200);
+	// Only the parent was scanned, for the new child (and once more for its end).
+	expect(scans.slice(1).every((only) => only === "t")).toBe(true);
+	expect(scans.length).toBeLessThanOrEqual(4);
+	const settledScans = scans.length;
+	await bridge.projection("t");
+	await sleep(200);
+	expect(scans.length).toBe(settledScans);
+
+	await bridge.deleteThread("t");
+	// At once: no waiting for a publish.
+	expect(bridge.hasThread(childThreadId)).toBe(false);
+	expect((bridge.shellSnapshot().threads as Any[]).some((s) => s.id === childThreadId)).toBe(false);
+}, 30_000);
+
+it("an empty child answer gives the tool a non-empty output", async () => {
+	const { bridge } = await delegated([delegate(), async () => fauxAssistantMessage(""), async () => fauxAssistantMessage("done")]);
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
+	expect(subagentItem((await bridge.projection("t")).projection).result).toBe("(the subagent returned no text)");
 }, 30_000);

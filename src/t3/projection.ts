@@ -60,7 +60,7 @@ export interface ThreadMeta {
 	readonly subagents?: ReadonlyMap<number, SubagentRef>;
 	/** Set on a subagent's own thread: pi owns it as Claude owns its Task children (provider-native, so it cannot take
 	 * user messages). `parentThreadId` is the thread whose call created it; `nodeId` that call's node. */
-	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string };
+	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string; readonly endedAt?: number };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -426,13 +426,21 @@ export function projectThread(
 				if (ref !== undefined && ref.conversationId === childId) {
 					const subagentStatus: OrchestrationV2Subagent["status"] =
 						itemStatus === "interrupted" ? (aborted ? "cancelled" : "interrupted") : (itemStatus as OrchestrationV2Subagent["status"]);
-					const nodeAt = time(resultAt);
+					// Times are the tool task's own, as Claude's are `task.startedAt/completedAt` (the parent message's stamp is when its
+					// stream began, long before the call ran).
+					const nodeAt = time(ref.endedAt ?? resultAt);
+					const startAt = time(ref.startedAt);
 					const nativeTaskRef = { driver: id(PROVIDER_DRIVER), nativeId: String(ref.taskId), strength: "strong" } as const;
 					const subagentNode = subagentNodeId(ref.taskId);
 					const prompt = typeof block.arguments["prompt"] === "string" ? block.arguments["prompt"] : "";
 					const label = typeof block.arguments["description"] === "string" && block.arguments["description"].trim() !== "" ? block.arguments["description"] : null;
 					const settledSubagent = result !== undefined;
-					const subagentResult = settledSubagent ? output ?? "" : null;
+					// Claude's cancelled/interrupted subagent carries no result; a failed one carries the tool's error text, which in
+					// pi is wrapped in a `<harness>` block.
+					const subagentResult =
+						!settledSubagent || subagentStatus === "cancelled" || subagentStatus === "interrupted"
+							? null
+							: (output ?? "").replace(/^\s*<harness>\s*([\s\S]*?)\s*<\/harness>\s*$/, "$1");
 					nodes.push({
 						id: id(subagentNode),
 						threadId: id(threadId),
@@ -447,7 +455,7 @@ export function projectThread(
 						nativeItemRef: nativeTaskRef,
 						runtimeRequestId: null,
 						checkpointScopeId: null,
-						startedAt: time(at),
+						startedAt: startAt,
 						completedAt: settledSubagent ? nodeAt : null,
 					} as Any);
 					subagents.push({
@@ -467,12 +475,14 @@ export function projectThread(
 						model: null,
 						status: subagentStatus,
 						result: subagentResult,
-						startedAt: time(at),
+						startedAt: startAt,
 						completedAt: settledSubagent ? nodeAt : null,
 						updatedAt: nodeAt,
 					} as Any);
 					turnItems.push({
 						...common,
+						startedAt: startAt,
+						completedAt: settledSubagent ? nodeAt : null,
 						nodeId: id(subagentNode),
 						nativeItemRef: nativeTaskRef,
 						status: subagentStatus,
@@ -565,7 +575,9 @@ export function projectThread(
 	if (meta.subagentOf !== undefined) {
 		const last = runs.at(-1);
 		const rootStatus = (busy ? "running" : (last?.status ?? "pending")) as OrchestrationV2ExecutionNode["status"];
-		const settledAt = busy || last === undefined ? null : last.completedAt;
+		// The child's span is its owning task's (the run clock stamps a message when its stream starts, so a one-answer child
+		// would read 0s).
+		const settledAt = busy || last === undefined ? null : meta.subagentOf.endedAt !== undefined ? time(meta.subagentOf.endedAt) : last.completedAt;
 		nodes.push({
 			id: id(`n-sub-root`),
 			threadId: id(threadId),
@@ -580,7 +592,7 @@ export function projectThread(
 			nativeItemRef: null,
 			runtimeRequestId: null,
 			checkpointScopeId: null,
-			startedAt: runs[0]?.startedAt ?? time(meta.createdAt),
+			startedAt: time(meta.createdAt),
 			completedAt: settledAt,
 		} as Any);
 	}
@@ -612,7 +624,7 @@ export function projectThread(
 	const updatedAt = time(lastActivity);
 	// One provider session with honest capabilities, so clients hide what pi cannot do instead of offering it and failing.
 	const providerSessionId = `ps-${threadId}`;
-	const providerSessions: OrchestrationV2ProviderSession[] = [
+	const providerSessions: OrchestrationV2ProviderSession[] = meta.subagentOf !== undefined ? [] : [
 		{
 			id: id(providerSessionId),
 			driver: id(PROVIDER_DRIVER),
@@ -626,8 +638,9 @@ export function projectThread(
 			lastError: null,
 		},
 	];
+	// A subagent's thread has no provider session or thread, like Claude's provider-native children (so "Disconnect agent session" is not offered).
 	// Like T3, a thread gets its provider thread with its first run: until then it has none, and no active one.
-	const providerThreads: OrchestrationV2ProviderThread[] = drafts.length === 0 ? [] : [
+	const providerThreads: OrchestrationV2ProviderThread[] = drafts.length === 0 || meta.subagentOf !== undefined ? [] : [
 		{
 			id: id(providerThreadId),
 			driver: id(PROVIDER_DRIVER),
@@ -673,7 +686,7 @@ export function projectThread(
 		interactionMode: "default",
 		branch: null,
 		worktreePath,
-		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 || sub !== undefined ? null : id(providerThreadId),
 		lineage: lineage(),
 		forkedFrom: forkedFrom(),
 		createdAt: time(meta.createdAt),
@@ -727,7 +740,7 @@ export function projectThread(
 		worktreePath,
 		lineage: thread.lineage,
 		forkedFrom: thread.forkedFrom,
-		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 || sub !== undefined ? null : id(providerThreadId),
 		latestRunId: latestRun?.id ?? null,
 		latestRunRequestedAt: latestRun?.requestedAt ?? null,
 		latestRunStartedAt: latestRun?.startedAt ?? null,
