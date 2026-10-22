@@ -193,7 +193,6 @@ it("the card, the turn item and the child's root node time the call by its task,
 	const { bridge, fixture } = await delegated([delegate(), async () => fauxAssistantMessage("word ".repeat(80)), async () => fauxAssistantMessage("done")], { slow: true });
 	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
 	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
-	await until("the end is read", async () => (await bridge.projection("t")).projection.subagents[0]!.completedAt !== null);
 	const { projection } = await bridge.projection("t");
 	const card = subagentItem(projection);
 	const subagent = projection.subagents[0] as Any;
@@ -206,12 +205,15 @@ it("the card, the turn item and the child's root node time the call by its task,
 		expect([ms(timed.startedAt), ms(timed.completedAt)]).toEqual([ms(subagent.startedAt), ms(subagent.completedAt)]);
 	}
 	// The child's thread is created when the task started, and its root node spans the same pair.
-	// The task's end can land a moment after its result is visible: the bridge reads it again.
-	await until("the end is read", async () => ms(((await bridge.projection(card.childThreadId)).projection.nodes.find((n: Any) => n.kind === "root_turn" && n.runId === null) as Any).completedAt) - ms(subagent.startedAt) > 1000);
 	const child = (await bridge.projection(card.childThreadId)).projection;
 	expect(ms(child.thread.createdAt)).toBe(ms(subagent.startedAt));
 	const root = child.nodes.find((n: Any) => n.kind === "root_turn" && n.runId === null) as Any;
-	expect([ms(root.startedAt), ms(root.completedAt)]).toEqual([ms(subagent.startedAt), ms(subagent.completedAt)]);
+	expect(ms(root.startedAt)).toBe(ms(subagent.startedAt));
+	expect(ms(root.completedAt) - ms(root.startedAt)).toBeGreaterThan(1000);
+	// An ordinary run's span includes its last message's `durationMs` (pi stamps a message when its stream starts), on the
+	// child's own run and on the parent's.
+	await until("the parent's run ends", async () => (await bridge.projection("t")).projection.runs.at(-1)?.completedAt != null);
+	for (const run of [child.runs.at(-1)!, (await bridge.projection("t")).projection.runs.at(-1)!]) expect(ms(run.completedAt!) - ms(run.startedAt)).toBeGreaterThan(1000);
 }, 60_000);
 
 it("a stopped subagent's card has no result, a failed one's has the error without pi's harness wrapper", async () => {

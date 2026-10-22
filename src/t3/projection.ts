@@ -198,7 +198,10 @@ export function projectThread(
 						: "interrupted";
 		}
 		const lastEntry = draft.steps.at(-1) ?? u;
-		const completedMs = running ? null : (firstMessage(lastEntry)?.timestamp ?? requestedAt);
+		// pi stamps an assistant message when its stream starts; its `durationMs` (pi-durable 1.1) is how long it took.
+		const lastMessage = firstMessage(lastEntry) as { role?: string; timestamp?: number; durationMs?: number } | undefined;
+		const startedStamp = lastMessage?.timestamp ?? requestedAt;
+		const completedMs = running ? null : startedStamp + (lastMessage?.role === "assistant" ? (lastMessage.durationMs ?? 0) : 0);
 		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
 		// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
 		const runModel: Any = (() => {
