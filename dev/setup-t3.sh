@@ -4,7 +4,8 @@
 #   2. copy packages/contracts (and T3's LICENSE) into the gitignored vendor/contracts, so the facet and the
 #      contracts share one Effect copy (two Effect instances break the schema brand encode);
 #   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into the gitignored web-dist/.
-# Then link the host against the vendored contracts. Idempotent: re-running skips a cache already at the tag.
+# Then link the host against the vendored contracts. Re-running skips the git fetch when the cache is at the tag (the
+# web app's checksum is still fetched, so it needs the network).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 

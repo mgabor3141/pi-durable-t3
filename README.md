@@ -113,8 +113,8 @@ Known limitations:
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - A task parked by pi's crash-loop guard (after 5 crashes without progress) keeps its thread "running"; Stop clears it.
-- General settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads` and
-  `snoozeLimitedThreads` are shown and stored but act on nothing here.
+- Settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads`,
+  `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
 - Search has no index: each query reads every thread.
 - Subagents: a child thread is read-only and cannot be stopped on its own (interrupt the parent, which stops it). Undoing past
   the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page. A fork that keeps the call lists the child under both threads, a subagent of a
