@@ -29,8 +29,10 @@ Two consequences:
 pi-durable's coding-agent recipe, a base prompt, credentials, an offline model, shutdown. The bridge never
 touches any of those, and a test enforces the boundary. The example is a template to copy, not a package.
 
-`packages/` holds what is published: `bridge` builds `src/` into `@mgabor3141/pi-durable-t3` (T3's contracts bundled,
-public types only), and `web` is T3's built web app for the pinned release, which the bridge serves by default.
+The repo root is the one published package, `@mgabor3141/pi-durable-t3`: `build/` turns `src/` into `dist/` (T3's
+contracts bundled, public types only), and `web/` is T3's built web app for the pinned release, which the bridge serves
+by default (`../web` from both `src/` and `dist/`). Neither is in git: `prepare` (`setup:t3`, then the build) makes
+them, on a contributor's `pnpm install`, in a consumer's install from git, and before `pnpm publish`.
 
 ## Principles
 
@@ -41,7 +43,7 @@ public types only), and `web` is T3's built web app for the pinned release, whic
 - **Conflicts become forks, never errors.** A write names the conversation the client is looking at. If
   that is no longer the head, it becomes a new thread. No locks, no "stale" errors, no lost input.
 - **Stock wire.** T3's web app and desktop app run unmodified. The host also serves the web
-  app (by default the one in the web package; `webApp` points elsewhere) from its own origin, which makes the agent the app's primary environment ("This machine"), signed in
+  app (by default the one in the package; `webApp` points elsewhere) from its own origin, which makes the agent the app's primary environment ("This machine"), signed in
   with T3's browser session cookie. The protocol code lives in `src/t3/`, and Effect never leaves it.
 - **Refuse, don't fake.** Files, git and terminals belong to the agent. T3 is told they are unsupported and
   hides them. A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,

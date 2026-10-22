@@ -17,9 +17,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm setup:t3        # T3's contracts and web app at the pin (needs the network)
-      - run: pnpm build
+      - run: pnpm install --frozen-lockfile   # runs `prepare`: T3's contracts and web app at the pin (network), then the build
       - run: pnpm typecheck
       - run: pnpm test
       # The browser smokes drive the real T3 web app; the runner's preinstalled Chrome stands in for /usr/bin/chromium.

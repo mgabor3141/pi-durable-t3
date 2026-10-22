@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the browser smokes end-to-end in a throwaway environment: a fresh root and the host (offline reply model) on the
-# facet port — which also serves the built web app (the bridge's default: the web package, filled by `pnpm setup:t3`). No separate web server: the
+# facet port — which also serves the built web app (the bridge's default: `web/`, filled by `pnpm setup:t3`). No separate web server: the
 # web app's "This machine" (primary environment) IS the facet. Cleans up only the processes it starts.
 #
 #   dev/browser-smoke.sh
@@ -32,13 +32,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ -f "$here/packages/web/app/index.html" ] || { echo "no web app in packages/web/app: run pnpm setup:t3"; exit 2; }
+[ -f "$here/web/index.html" ] || { echo "no web app in web/: run pnpm setup:t3"; exit 2; }
 
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/t3"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 TOML
-# The host serves the web app from its own origin (the web package's), so there is no web origin to trust in CORS:
+# The host serves the web app from its own origin (web/), so there is no web origin to trust in CORS:
 # the desktop app (t3code://app) is allowed by default; the served SPA is same-origin. The project registry lives in
 # the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server settings) is absent: the host
 # answers the contract's defaults, with the pi provider instance enabled.

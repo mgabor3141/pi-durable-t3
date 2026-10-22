@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetch T3's built web app for T3_TAG (dev/t3-pin.sh) into the directory given as $1 (replaced). Used by
-# `pnpm setup:t3` (into the web package, packages/web/app).
+# `pnpm setup:t3` (into web/).
 #   dev/fetch-web.sh <out-dir>
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"

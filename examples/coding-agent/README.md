@@ -26,20 +26,22 @@ desktop's machine. Both are expected.
 
 - Models and credentials come from `~/.pi/agent` (or `PI_CODING_AGENT_DIR`). None configured:
   `PI_DURABLE_T3_FAKE=1 pnpm start` uses an offline reply model.
-- The web app is the bridge's default: T3's own build in the web package (in a checkout, fetched by `setup:t3`).
+- The web app is the bridge's default: T3's own build, in the package's `web/` (fetched by `setup:t3`, part of `prepare`).
 
 ## Use it as a template
 
-The agent is meant to be copied: it is not published. Copy `src/` and `config.example.toml` into your project, then:
+The agent is meant to be copied: it is not published. Copy `src/` and `config.example.toml` into your project,
+allowlist the bridge's build (it builds on install from git) in `pnpm-workspace.yaml` with
+`onlyBuiltDependencies: ["@mgabor3141/pi-durable-t3"]` (npm: `--allow-git=root`; neither once it is on npm), then:
 
 ```sh
-pnpm add @mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/pi-ai @earendil-works/pi-durable \
+pnpm add github:mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/pi-ai @earendil-works/pi-durable \
   @earendil-works/pi-coding-agent smol-toml typebox
 ```
 
-and change the three imports of `../../../src/bridge.ts` (in `host.ts`, `config.ts`, `title.ts`) to
-`@mgabor3141/pi-durable-t3`. Run it with `node --experimental-strip-types src/host.ts` (add `pair` for a link). The
-web app needs no setup: it comes with the package.
+Change the three imports of `../../../src/bridge.ts` (in `host.ts`, `config.ts`, `title.ts`) to
+`@mgabor3141/pi-durable-t3`, and run it with `node --experimental-strip-types src/host.ts` (add `pair` for a link).
+The web app needs no setup: it comes with the package.
 
 ## Subagents
 

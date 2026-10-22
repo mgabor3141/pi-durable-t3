@@ -1,6 +1,6 @@
 // The built T3 web app served by the facet at `/`: static bytes, T3's caching/validator headers, the SPA fallback
 // to index.html, and the API/`/ws`/`/.well-known`/`/api` routes winning over the catch-all. The host hardcodes
-// the web app to the web package (`packages/web/app`, from `pnpm setup:t3`), so a launched host serves the real built app. One flow per host.
+// the web app to the package's `web/` (from `pnpm setup:t3`), so a launched host serves the real built app. One flow per host.
 
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
@@ -42,9 +42,9 @@ async function start() {
 
 /** A real build asset the app shell loads (its module script), as `/assets/<name>.js`. */
 function anAsset(): string {
-	const html = readFileSync(new URL("../packages/web/app/index.html", import.meta.url), "utf8");
+	const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
 	const match = /src="(\/assets\/[^"]+\.js)"/.exec(html);
-	if (match === null) throw new Error("no module script in packages/web/app/index.html");
+	if (match === null) throw new Error("no module script in web/index.html");
 	return match[1]!;
 }
 

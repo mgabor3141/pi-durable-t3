@@ -4,8 +4,8 @@ import { defineConfig } from "tsdown";
 // package) into the output; here that is a single `noExternal`. Declarations come from tsc (build.sh): TypeScript 7
 // has no JS API for tsdown's dts plugin.
 export default defineConfig({
-	entry: ["../../src/bridge.ts"],
-	outDir: "dist",
+	entry: ["../src/bridge.ts"],
+	outDir: "../dist",
 	format: "esm",
 	platform: "node",
 	target: "node22",
@@ -13,7 +13,7 @@ export default defineConfig({
 	clean: true,
 	fixedExtension: false,
 	sourcemap: false,
-	// Bundle T3's contracts (vendor/contracts, linked as @t3tools/contracts). Everything else in `dependencies` /
+	// Bundle T3's contracts (vendor/contracts, symlinked as node_modules/@t3tools/contracts by setup:t3). Everything else in `dependencies` /
 	// `peerDependencies` stays external: `effect` must be ONE copy shared by the bridge and the contracts.
 	deps: { alwaysBundle: [/^@t3tools\/contracts/], onlyBundle: false },
 });

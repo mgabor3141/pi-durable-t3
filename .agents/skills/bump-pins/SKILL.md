@@ -7,9 +7,10 @@ description: Move pi-durable-t3 to a newer T3 Code stable release and/or newer p
 
 Two independent bumps. Do each in its own commit stack; do them in parallel only in separate checkouts.
 
-**Isolation first.** A running host serves the checkout's `packages/web/app` and `vendor/contracts`, and `pnpm install` /
+**Isolation first.** A running host serves the checkout's `web/` and `vendor/contracts`, and `pnpm install` /
 `pnpm setup:t3` rewrite them. Work in a separate checkout (a jj workspace) with its OWN `node_modules`, `vendor`,
-`packages/web/app` and `.t3-cache` — never symlinks to the main checkout's. Run `pnpm install`, then `pnpm setup:t3`, there.
+`web` and `.t3-cache` — never symlinks to the main checkout's. Run `pnpm install` there (its `prepare` runs
+`setup:t3` and the build; after changing `T3_TAG` it refetches).
 Agents working in parallel need disjoint `FACET_PORT`s and probe ports.
 
 ## T3 pin
@@ -47,32 +48,34 @@ Agents working in parallel need disjoint `FACET_PORT`s and probe ports.
 
 - `pnpm typecheck`, `pnpm test`, `FACET_PORT=<port> pnpm smoke`.
 - pi bumps: `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm vitest run examples/coding-agent/test/live-model.test.ts`.
-- T3 bumps: a browser run against the new web app (`packages/web/app`) (playwright-core): pair, prompt, reply, stop, Settings pages
+- T3 bumps: a browser run against the new web app (`web/`) (playwright-core): pair, prompt, reply, stop, Settings pages
   (General, Connections, Scheduled Tasks); compare console errors with the old one. Known noise:
   `clerk.t3.codes` 400 and `POST /api/observability/v1/traces` 404.
 
 ## Release (npm)
 
-Two packages under `packages/`: `web` (T3's built web app; its `version` IS the T3 version it carries) and `bridge`
-(`@mgabor3141/pi-durable-t3`). The example agent is a template in the repo, not published. After a bump:
+One package, the repo root: `@mgabor3141/pi-durable-t3` (the bridge bundle, its types, and T3's web app in `web/`). The
+example agent is a template in the repo, not published. After a bump:
 
-1. **T3 bump:** set `packages/web/package.json` `version` to the new T3 version (no `v`) and `t3.tag` to the new tag.
-   `test/server-version.test.ts` fails until both equal `T3_TAG`. Bump the `bridge` version too (it ships new
-   bridge code: a patch/minor by semver of the API).
-   **pi bump:** move the exact `devDependencies` in `packages/bridge` together with the root `dependencies`; keep the bridge's `peerDependencies` at `^<major>.<minor>.0` of the lowest version you support.
-   Versions are independent otherwise; `workspace:*` becomes the exact version at publish.
-2. `pnpm setup:t3 && pnpm build && FACET_PORT=<port> dev/pack-proof.sh`: packs the two, installs the tarballs in a
-   temp dir, checks one Effect copy, runs an integrator script plus a browser probe. Read the
-   tarball listing it prints (nothing from tests, `.memory`, `.t3-cache`; no source maps are built).
-3. Commit, then tag `v<bridge version>` and push the tag. `.github/workflows/release.yml` repeats build, typecheck,
-   test, smoke and the pack proof, then `pnpm -r publish --provenance --access public` (web first; versions already
-   on the registry are skipped). The tag must equal the bridge's version (the workflow checks).
+1. **T3 bump:** set `T3_TAG` in `dev/t3-pin.sh`; `test/server-version.test.ts` fails until `SERVER_VERSION` equals it.
+   Bump the package `version` too (it ships new code: a patch/minor by semver of the API).
+   **pi bump:** move the exact `devDependencies` of the pi packages; keep the `peerDependencies` at
+   `^<major>.<minor>.0` of the lowest version you support.
+2. `FACET_PORT=<port> dev/pack-proof.sh`: packs the package and installs the tarball in a temp dir, then installs a
+   git dependency from a local repo of the working copy (pnpm with the `onlyBuiltDependencies` allowlist, and npm), each
+   checking one Effect copy and, under pnpm, running an integrator script plus a browser probe. Also
+   `pnpm publish --dry-run --no-git-checks` and read the file list (nothing from tests, `.memory`, `.t3-cache`; no
+   source maps).
+3. Commit, then tag `v<version>` and push the tag. `.github/workflows/release.yml` repeats typecheck, test, smoke and
+   the pack proof, then `pnpm publish --provenance --access public` (a version already on the registry is skipped).
+   The tag must equal the package's version (the workflow checks). The README's install line
+   (`github:mgabor3141/pi-durable-t3#v<version>`, also in the example's README) names the tag: update it.
 4. **Auth:** npm trusted publishing (OIDC) cannot publish a package's first version, so the first release needs an
-   `NPM_TOKEN` repository secret (granular, read and write on all packages of `@mgabor3141`, since they do not exist
-   yet; with "bypass 2FA" if the account enforces 2FA). Then configure a trusted publisher per
-   package on npmjs.com (repo `mgabor3141/pi-durable-t3`, workflow `release.yml`) and delete the secret: with no token
-   the workflow publishes by OIDC. `effect`, `@effect/platform-node` and `@effect/platform-node-shared` are pinned to the SAME exact version (bridge
-   deps and the root `pnpm.overrides`; each has a peer `effect ^<its own version>`). `dev/pack-proof.sh` asserts one copy under npm.
+   `NPM_TOKEN` repository secret (granular, read and write on `@mgabor3141`; with "bypass 2FA" if the account
+   enforces 2FA). Then configure a trusted publisher on npmjs.com (repo `mgabor3141/pi-durable-t3`, workflow
+   `release.yml`) and delete the secret: with no token the workflow publishes by OIDC. `effect`,
+   `@effect/platform-node` and `@effect/platform-node-shared` are pinned to the SAME exact version (the dependencies
+   and `pnpm.overrides`; each has a peer `effect ^<its own version>`). `dev/pack-proof.sh` asserts one copy under npm.
 
 ## Review
 

@@ -3,15 +3,26 @@
 #   1. shallow-fetch t3code at T3_TAG into the gitignored .t3-cache/;
 #   2. copy packages/contracts (and T3's LICENSE) into the gitignored vendor/contracts, so the facet and the
 #      contracts share one Effect copy (two Effect instances break the schema brand encode);
-#   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into the web package
-#      (packages/web/app, gitignored), with T3's LICENSE. The bridge serves it by default, in a checkout too.
-# Then link the host against the vendored contracts. Re-running skips the git fetch when the cache is at the tag (the
-# web app's checksum is still fetched, so it needs the network).
+#   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into web/ (gitignored). The bridge
+#      serves it by default, from a checkout and from the installed package.
+# This is the package's `prepare` step, so it runs on every `pnpm install` in a checkout: once done for a tag it is a
+# no-op (`.t3-cache/setup-done`), with no network. Delete `.t3-cache` to force it. It must not run `pnpm install`
+# (that would re-enter `prepare`). `@t3tools/contracts` is not a package.json dependency (npm has no `link:`, and
+# vendor/ does not exist at install time): this script symlinks node_modules/@t3tools/contracts to vendor/contracts.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 . "$here/dev/t3-pin.sh"
 CACHE="$here/.t3-cache/t3code"
+DONE="$here/.t3-cache/setup-done"
+# The symlink goes first, every run: a package manager's install may have pruned it.
+mkdir -p "$here/node_modules/@t3tools"
+ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/web/index.html" ]; then
+  echo "setup:t3: already at $T3_TAG"
+  exit 0
+fi
+rm -f "$DONE"
 
 # 1. Fetch t3code at the tag (shallow). `.t3-cache/t3code-tag` holds "<tag> <sha>", written only after a successful
 # checkout; the fetch is skipped only when the cache's HEAD is that sha, so a half-done or switched cache heals itself.
@@ -58,8 +69,6 @@ cat > "$here/vendor/contracts/tsconfig.json" <<'TS'
 TS
 echo "vendored @t3tools/contracts at $PIN (+ LICENSE) into vendor/contracts"
 
-# 3. T3's own web app build (the release's CLI archive, checksum-verified): dev/fetch-web.sh, into the web package.
-bash "$here/dev/fetch-web.sh" "$here/packages/web/app"
-cp "$CACHE/LICENSE" "$here/packages/web/LICENSE"
-
-pnpm install
+# 3. T3's own web app build (the release's CLI archive, checksum-verified): dev/fetch-web.sh, into web/.
+bash "$here/dev/fetch-web.sh" "$here/web"
+echo "$T3_TAG" > "$DONE"

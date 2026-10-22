@@ -11,13 +11,25 @@ Turns are durable: kill the host mid-turn, start it again, and the turn finishes
 
 ## Install
 
-```sh
-pnpm add @mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/pi-ai @earendil-works/pi-durable
+Installing from git builds the package on your machine (it fetches T3's web app, then bundles), so pnpm 10 needs
+it allowlisted first, in your `pnpm-workspace.yaml` (or `package.json`'s `pnpm` field):
+
+```yaml
+onlyBuiltDependencies:
+  - "@mgabor3141/pi-durable-t3"
 ```
 
-The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.1**) comes along as
-`@mgabor3141/pi-durable-t3-web`, and the bridge serves it. Node `>=22.19.0`. The public API is listed in
-[the package's README](packages/bridge/README.md); how to use it is [below](#attach-it-to-your-own-agent). For a
+```sh
+pnpm add github:mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/pi-ai @earendil-works/pi-durable
+```
+
+Append `#v<version>` to pin a release tag. npm builds git dependencies by default; npm 12 also needs
+`--allow-git=root` (supported since npm 11.10). Once published, `pnpm add
+@mgabor3141/pi-durable-t3` needs neither.
+
+The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.1**) ships in the package, and the bridge serves
+it. Node `>=22.19.0`. The public API is [listed below](#public-api); how to use it is
+[here](#attach-it-to-your-own-agent). For a
 whole agent to start from, copy the [example agent](examples/coding-agent/#use-it-as-a-template).
 
 ## Try it (contributors: from a checkout)
@@ -47,7 +59,7 @@ import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
 	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
-	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the web package's)
+	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
 	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
@@ -147,15 +159,28 @@ Known limitations:
 pnpm test        # no credentials, no network, never touches ~/.pi
 pnpm typecheck
 pnpm smoke       # T3's web app in Chromium: pairing, prompts, undo, crash resume, projects, Connections
-pnpm build && FACET_PORT=5070 dev/pack-proof.sh   # the packed packages, installed outside the repo, in a browser
+FACET_PORT=5070 dev/pack-proof.sh   # the packed tarball and a git install, each outside the repo, in a browser
 ```
 
 `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm test` also runs one real-model turn.
 
 Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents/skills/bump-pins`](.agents/skills/bump-pins/SKILL.md).
 
+## Public API
+
+`"."` is the only entry point.
+
+- `attachT3(harness, options): Promise<T3Attachment>` and the `AttachT3Options` type (options are documented in the
+  type's comments).
+- `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`.
+- `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
+- `ConfigError`, `Logger`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
+
+T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,
+exact dependencies, so the bridge and the bundled contracts share one Effect: do not override `effect`.
+
 ## License
 
-MIT, see `LICENSE`. T3 Code is MIT (T3 Tools Inc.): the bridge package bundles T3's contracts and replicates parts of
-its server (`THIRD_PARTY_LICENSES`), and the web package is T3's built app, unmodified. In a checkout,
-`pnpm setup:t3` fetches both.
+MIT, see `LICENSE`. T3 Code is MIT (T3 Tools Inc.): the package bundles T3's contracts, replicates parts of its
+server, and ships T3's built web app unmodified (`web/`); the notice is `THIRD_PARTY_LICENSES`. `pnpm setup:t3`
+fetches both (it is part of `prepare`, so `pnpm install` in a checkout does it).

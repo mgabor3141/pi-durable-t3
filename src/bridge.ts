@@ -1,7 +1,7 @@
 // The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. Ownership of models and
 // projects follows docs/design.md's north star: the bridge computes no defaults of its own. Everything an integrator
 // needs comes from this file.
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHost } from "@earendil-works/chord";
@@ -31,13 +31,10 @@ export const DESKTOP_APP_ORIGIN = "t3code://app";
 /** The default listen address: loopback, T3's own app's port plus one (T3 uses 3773). */
 const DEFAULT_LISTEN = { host: "127.0.0.1", port: 3774 } as const;
 
-/** The web package's `app/` directory, or `undefined` when the package cannot be resolved (a checkout without it). */
+/** The package's `web/` directory (T3's built web app, filled by `pnpm setup:t3`): `../web` from both `src/` and `dist/`. `undefined` when it is missing. */
 function bundledWebApp(): string | undefined {
-	try {
-		return join(dirname(fileURLToPath(import.meta.resolve("@mgabor3141/pi-durable-t3-web/package.json"))), "app");
-	} catch {
-		return undefined;
-	}
+	const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
+	return existsSync(join(dir, "index.html")) ? dir : undefined;
 }
 
 export type AttachT3Options = {
@@ -62,7 +59,7 @@ export type AttachT3Options = {
 	readonly listen?: { readonly host: string; readonly port: number };
 	/** Environment name T3 shows. Default `"pi"`. */
 	readonly label?: string;
-	/** A built T3 web app's directory, served at `/`. Default: the T3 web app of `@mgabor3141/pi-durable-t3-web`, the package this one depends on; served by default. Set `webApp` to serve a different build. Static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth` and `/api` routes win; `/pair` is T3's own pairing page. The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. */
+	/** A built T3 web app's directory, served at `/`. Default: the T3 web app shipped in this package (`web/`). Set `webApp` to serve a different build. Static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth` and `/api` routes win; `/pair` is T3's own pairing page. The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. */
 	readonly webApp?: string;
 	/** Browser origins allowed to call. Default: T3's desktop app. `[]` allows any origin. A web app served from this host's own origin is same-origin and needs no entry; this list is for a web app served from a foreign origin. */
 	readonly corsOrigins?: readonly string[];
@@ -138,7 +135,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 
 	const listen = options.listen ?? DEFAULT_LISTEN;
 	const webApp = options.webApp ?? bundledWebApp();
-	if (webApp === undefined) log.warn("no web app to serve (the web package is not installed; in a checkout, run `pnpm setup:t3`)");
+	if (webApp === undefined) log.warn("no web app to serve (`web/` is missing; in a checkout, run `pnpm setup:t3`)");
 	const config: BridgeConfig = {
 		registry,
 		settings: ServerSettingsStore.open(options.stateDir),
