@@ -18,7 +18,8 @@ Agents working in parallel need disjoint `FACET_PORT`s and probe ports.
    (`prerelease: false`; we pin releases, never nightlies or previews).
 2. Set `T3_TAG` in `dev/setup-t3.sh` (the one place; the commit is read from the fetched tag and recorded in
    `.t3-cache/t3code-tag`) and `SERVER_VERSION` in `src/t3/http.ts` (the tag without the `v`; a test keeps them
-   equal). Before running `pnpm setup:t3`, copy `.t3-cache/t3code` aside: it is the OLD pin to diff against.
+   equal). Note the resolved sha (`.t3-cache/t3code-tag`) in the commit message, so the reviewed commit is in
+   history: tags are mutable. Before running `pnpm setup:t3`, copy `.t3-cache/t3code` aside: it is the OLD pin to diff against.
 3. Diff the old pin against `.t3-cache/t3code`, for what the bridge serves:
    - `packages/contracts/src`: new or changed RPCs, new REQUIRED fields (optional ones decode from absence), settings
      keys, descriptor capabilities (`environment.ts`), projection/shell fields.

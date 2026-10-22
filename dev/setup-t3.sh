@@ -15,16 +15,22 @@ T3_TAG=v0.1.1
 T3_URL="https://github.com/pingdotgg/t3code"
 CACHE="$here/.t3-cache/t3code"
 
-# 1. Fetch t3code at the tag (shallow) unless the cache is already at it. Tags are mutable in principle, so the cache is
-# compared by the commit the tag resolved to when it was fetched (.t3-cache/t3code-tag holds "<tag> <sha>").
-if [ "$(cat "$here/.t3-cache/t3code-tag" 2>/dev/null | cut -d' ' -f1 || true)" != "$T3_TAG" ] || [ ! -d "$CACHE/.git" ]; then
+# 1. Fetch t3code at the tag (shallow). `.t3-cache/t3code-tag` holds "<tag> <sha>", written only after a successful
+# checkout; the fetch is skipped only when the cache's HEAD is that sha, so a half-done or switched cache heals itself.
+# The pin is the tag: tags (and these releases) are mutable, so the recorded sha is for diagnosis, and SHA256SUMS below
+# detects a corrupt download, not tampering.
+TAGFILE="$here/.t3-cache/t3code-tag"
+read -r have_tag have_sha < <(cat "$TAGFILE" 2>/dev/null || true) || true
+if [ "${have_tag:-}" != "$T3_TAG" ] || [ -z "${have_sha:-}" ] \
+   || [ "$(git -C "$CACHE" rev-parse -q --verify HEAD 2>/dev/null || true)" != "$have_sha" ]; then
+  rm -f "$TAGFILE"
   rm -rf "$CACHE"
   mkdir -p "$CACHE"
   git -C "$CACHE" init -q
   git -C "$CACHE" remote add origin "$T3_URL"
   git -C "$CACHE" fetch -q --depth 1 origin "refs/tags/$T3_TAG:refs/tags/$T3_TAG"
   git -C "$CACHE" checkout -q "$T3_TAG"
-  echo "$T3_TAG $(git -C "$CACHE" rev-parse HEAD)" > "$here/.t3-cache/t3code-tag"
+  echo "$T3_TAG $(git -C "$CACHE" rev-parse HEAD)" > "$TAGFILE"
 fi
 PIN="$(git -C "$CACHE" rev-parse HEAD)"
 

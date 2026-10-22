@@ -54,7 +54,8 @@ await t3.close();
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
 - `stateDir` belongs to the bridge, one host per directory. It pairs with the Harness's storage (threads
-  point at its project ids), so back up and move the two together.
+  point at its project ids), so back up and move the two together. Back up before upgrading pi to 1.4 too: it migrates `durable.db` to schema v2
+  on first open, and 1.3 then refuses it (`Durable SQLite schema version 2 is newer than supported version 1`).
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
   better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
   thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you (or the host closes); a
@@ -111,6 +112,9 @@ Known limitations:
 - Attachments are images only. Deleting a thread leaves its images in `stateDir/attachments/`.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
+- A task parked by pi's crash-loop guard (after 5 crashes without progress) keeps its thread "running"; Stop clears it.
+- General settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads` and
+  `snoozeLimitedThreads` are shown and stored but act on nothing here.
 - Search has no index: each query reads every thread.
 - Subagents: a child thread is read-only and cannot be stopped on its own (interrupt the parent, which stops it). Undoing past
   the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page. A fork that keeps the call lists the child under both threads, a subagent of a
