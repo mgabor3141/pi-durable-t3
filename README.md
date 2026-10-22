@@ -113,7 +113,8 @@ Known limitations:
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - Search has no index: each query reads every thread.
 - Subagents: a child thread is read-only and cannot be stopped on its own (interrupt the parent, which stops it). Undoing past
-  the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page.
+  the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page. A fork that keeps the call lists the child under both threads, a subagent of a
+  subagent is not discovered, and a failed subagent's reason is only the tool's error text.
 - Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
   (T3's form defaults to one; pick "Use the project checkout").
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
