@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm setup:t3        # T3's contracts and web app at the pin (needs the network)
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+      # The browser smokes drive the real T3 web app; the runner's preinstalled Chrome stands in for /usr/bin/chromium.
+      # (Not verified in Actions from the authoring machine: it has run only locally.)
+      - run: FACET_PORT=5070 CHROMIUM="$(command -v google-chrome)" pnpm smoke
+      - run: FACET_PORT=5072 CHROMIUM="$(command -v google-chrome)" bash dev/pack-proof.sh

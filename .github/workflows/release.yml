@@ -1,0 +1,46 @@
+name: Release
+# Push a tag `v<bridge version>` (see .agents/skills/bump-pins/SKILL.md). Publishes the two packages, web first.
+#
+# Auth: npm trusted publishing (OIDC) cannot publish a package's FIRST version (npm requires the package to exist
+# before a trusted publisher can be configured). So: the first release uses an `NPM_TOKEN` repository secret (a
+# granular token with publish rights on the @mgabor3141 scope). After that, configure each package's trusted publisher
+# on npmjs.com (repo mgabor3141/pi-durable-t3, workflow release.yml) and delete the secret: with no token set, the
+# publish below authenticates by OIDC (`id-token: write`, npm >= 11.5.1, which Node 24 bundles).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write   # provenance, and OIDC auth once trusted publishers are configured
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org   # writes the .npmrc at $NPM_CONFIG_USERCONFIG; see Publish
+      - name: Tag matches the bridge version
+        run: test "v$(node -p 'require("./packages/bridge/package.json").version')" = "$GITHUB_REF_NAME"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm setup:t3
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: FACET_PORT=5070 CHROMIUM="$(command -v google-chrome)" pnpm smoke
+      - run: FACET_PORT=5072 CHROMIUM="$(command -v google-chrome)" bash dev/pack-proof.sh
+      # Topological order: web, bridge. pnpm skips a version that is already on the registry.
+      # setup-node's `registry-url` wrote `_authToken=${NODE_AUTH_TOKEN}` into .npmrc, so the secret is used as is.
+      # Without the secret that line is deleted, since a token entry stops npm from doing its OIDC exchange. The OIDC
+      # path is UNTESTED: it is first exercised by the first release after the secret is deleted.
+      - name: Publish
+        run: |
+          [ -n "$NODE_AUTH_TOKEN" ] || sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+          pnpm -r --filter "./packages/*" publish --provenance --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
