@@ -225,7 +225,6 @@ export class Threads {
 						prompt: typeof args["prompt"] === "string" ? args["prompt"] : "",
 						title: typeof args["description"] === "string" ? args["description"] : null,
 						startedAt: task.startedAt ?? 0,
-						...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
 					});
 				}
 			}

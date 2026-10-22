@@ -395,7 +395,11 @@ export class Bridge {
 						this.#log.warn("subagent discovery failed", { error: String(error) });
 						return undefined;
 					});
-					if (found === undefined) failed = true;
+					if (found === undefined) {
+						failed = true;
+						// Forget the batch's probes so the next update scans again.
+						if (target !== undefined) for (const probe of [...this.#probedCalls]) if (probe.startsWith(`${target}:`)) this.#probedCalls.delete(probe);
+					}
 					else refs.push(...(found as SubagentRef[]));
 				}
 				if (failed) continue;
@@ -466,7 +470,7 @@ export class Bridge {
 			updatedAt: ref.startedAt,
 			model: agent?.model ?? null,
 			...(agent?.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
-			subagentOf: { parentThreadId: ref.parentThreadId, nodeId: subagentNodeId(ref.taskId), ...(ref.endedAt === undefined ? {} : { endedAt: ref.endedAt }) },
+			subagentOf: { parentThreadId: ref.parentThreadId, nodeId: subagentNodeId(ref.taskId) },
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 		};
 	}

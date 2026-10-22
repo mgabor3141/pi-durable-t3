@@ -298,3 +298,35 @@ it("an empty child answer gives the tool a non-empty output", async () => {
 	await until("the card settles", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
 	expect(subagentItem((await bridge.projection("t")).projection).result).toBe("(the subagent returned no text)");
 }, 30_000);
+
+it("a run's span is the same before and after a later turn (the end sits on the assistant message)", async () => {
+	const { bridge } = await delegated([async () => fauxAssistantMessage("word ".repeat(80)), async () => fauxAssistantMessage("word ".repeat(80))], { slow: true });
+	const ms = (t: Any) => t.epochMilliseconds as number;
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "one", mode: "start" });
+	await until("turn 1 ends", async () => (await bridge.projection("t")).projection.runs.at(-1)?.completedAt != null);
+	const first = (await bridge.projection("t")).projection;
+	const span = (p: Any) => ms(p.runs[0].completedAt) - ms(p.runs[0].startedAt);
+	const before = span(first);
+	expect(before).toBeGreaterThan(1000);
+	// The end is the message's own, not only the run's.
+	const answer = first.messages.find((m: Any) => m.role === "assistant") as Any;
+	expect(ms(answer.updatedAt)).toBe(ms(first.runs[0]!.completedAt!));
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "two", mode: "start" });
+	await until("turn 2 ends", async () => (await bridge.projection("t")).projection.runs.length === 2 && (await bridge.projection("t")).projection.runs[1]!.completedAt != null);
+	expect(span((await bridge.projection("t")).projection)).toBe(before);
+}, 60_000);
+
+it("a failed discovery scan forgets its probes, so the next update scans again", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }], extensions: [Subagent], responses: [delegate(), async () => fauxAssistantMessage("7"), async () => fauxAssistantMessage("done")] });
+	await createNamed(fixture.threads, fixture.harness, fixture.model)({ threadId: "t", projectId: "p", title: "Parent" });
+	const original = fixture.threads.subagents.bind(fixture.threads);
+	let failures = 1;
+	fixture.threads.subagents = async (only?: string) => {
+		if (only !== undefined && failures-- > 0) throw new Error("injected");
+		return original(only);
+	};
+	const bridge = await boot(fixture);
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "delegate", mode: "start" });
+	await until("the card appears despite the failed first scan", async () => subagentItem((await bridge.projection("t")).projection)?.status === "completed");
+	expect(failures).toBeLessThan(0);
+}, 30_000);

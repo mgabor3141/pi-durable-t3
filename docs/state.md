@@ -60,7 +60,7 @@ All of it is safe to lose:
 - Per-thread view caches and the undo overlay.
 - The subagent list: rediscovered from conversation ownership (a child thread's id is derived from its parent thread and
   child conversation), so nothing about subagents is stored. The full scan runs at boot; afterwards one thread is scanned when its view names
-  a child not yet discovered (or one whose end is not yet read), and a deleted thread's children are dropped at once.
+  a child not yet discovered (a failed scan is retried on the next update), and a deleted thread's children are dropped at once.
 - The thread list.
 - A bounded map of recent prompt command ids.
 - The pending title request per thread (T3's `titleRegeneration`): after a restart no thread shows one, and a reply

@@ -63,7 +63,6 @@ const SubagentSchema = Type.Object({
 	prompt: Type.String(),
 	title: Type.Union([Type.String(), Type.Null()]),
 	startedAt: Type.Number(),
-	endedAt: Type.Optional(Type.Number()),
 });
 
 const ThreadKey = Type.Object({ threadId: Type.String() });

@@ -16,8 +16,6 @@ export interface SubagentRef {
 	readonly title: string | null;
 	/** When the owning task started: the child thread's creation time. */
 	readonly startedAt: number;
-	/** When it ended: absent while the task runs. The card's and the child's end time (Claude: `task.completedAt`). */
-	readonly endedAt?: number;
 }
 
 const SEPARATOR = ".sub.";

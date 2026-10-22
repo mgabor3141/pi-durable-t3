@@ -35,6 +35,9 @@ const BASELINE_SCOPE_ID = "cs-baseline";
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
 const id = (value: string): Any => value;
+/** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
+const endOf = (message: { role?: string; timestamp?: number; durationMs?: number } | undefined, fallback: number): number =>
+	(message?.timestamp ?? fallback) + (message?.role === "assistant" ? (message.durationMs ?? 0) : 0);
 const time = (ms: number | undefined) => DateTime.makeUnsafe(ms ?? 0);
 
 export interface ThreadMeta {
@@ -60,7 +63,7 @@ export interface ThreadMeta {
 	readonly subagents?: ReadonlyMap<number, SubagentRef>;
 	/** Set on a subagent's own thread: pi owns it as Claude owns its Task children (provider-native, so it cannot take
 	 * user messages). `parentThreadId` is the thread whose call created it; `nodeId` that call's node. */
-	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string; readonly endedAt?: number };
+	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -198,10 +201,9 @@ export function projectThread(
 						: "interrupted";
 		}
 		const lastEntry = draft.steps.at(-1) ?? u;
-		// pi stamps an assistant message when its stream starts; its `durationMs` (pi-durable 1.1) is how long it took.
-		const lastMessage = firstMessage(lastEntry) as { role?: string; timestamp?: number; durationMs?: number } | undefined;
-		const startedStamp = lastMessage?.timestamp ?? requestedAt;
-		const completedMs = running ? null : startedStamp + (lastMessage?.role === "assistant" ? (lastMessage.durationMs ?? 0) : 0);
+		// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
+		const lastMessage = firstMessage(lastEntry);
+		const completedMs = running ? null : endOf(lastMessage, requestedAt);
 		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
 		// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
 		const runModel: Any = (() => {
@@ -303,7 +305,7 @@ export function projectThread(
 		projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
 
 		// ---- items ----
-		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean) => ({
+		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
 			id: id(itemId),
 			threadId: id(threadId),
 			runId: id(runId),
@@ -316,8 +318,8 @@ export function projectThread(
 			status: itemStatus,
 			title: null,
 			startedAt: time(at),
-			completedAt: done ? time(at) : null,
-			updatedAt: time(at),
+			completedAt: done ? time(end) : null,
+			updatedAt: time(end),
 		});
 		const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
 			const message = firstMessage(entry)!;
@@ -368,10 +370,11 @@ export function projectThread(
 			toolResults: ReadonlyMap<string, EntryRecord>,
 			liveTools: ReadonlyMap<string, LiveToolSlot>,
 		) => {
+			const end = endOf(message, at);
 			const thinking = thinkingOf(message.content);
 			if (thinking.length > 0) {
 				turnItems.push({
-					...base(`ti-r${key}`, at, streaming ? "running" : "completed", !streaming),
+					...base(`ti-r${key}`, at, streaming ? "running" : "completed", !streaming, end),
 					type: "reasoning",
 					text: thinking,
 					streaming,
@@ -381,7 +384,7 @@ export function projectThread(
 			if (text.length > 0 || (streaming && message.content.length === 0)) {
 				const messageId = `m${key}`;
 				turnItems.push({
-					...base(`ti-a${key}`, at, streaming ? "running" : "completed", !streaming),
+					...base(`ti-a${key}`, at, streaming ? "running" : "completed", !streaming, end),
 					type: "assistant_message",
 					messageId: id(messageId),
 					text,
@@ -399,7 +402,7 @@ export function projectThread(
 					attachments: [],
 					streaming,
 					createdAt: time(at),
-					updatedAt: time(at),
+					updatedAt: time(end),
 				});
 			}
 			for (const block of message.content) {
@@ -429,9 +432,9 @@ export function projectThread(
 				if (ref !== undefined && ref.conversationId === childId) {
 					const subagentStatus: OrchestrationV2Subagent["status"] =
 						itemStatus === "interrupted" ? (aborted ? "cancelled" : "interrupted") : (itemStatus as OrchestrationV2Subagent["status"]);
-					// Times are the tool task's own, as Claude's are `task.startedAt/completedAt` (the parent message's stamp is when its
-					// stream began, long before the call ran).
-					const nodeAt = time(ref.endedAt ?? resultAt);
+					// The card runs from its task's start to the call's result (the parent message's stamp is when its stream began,
+					// long before the call ran).
+					const nodeAt = time(resultAt);
 					const startAt = time(ref.startedAt);
 					const nativeTaskRef = { driver: id(PROVIDER_DRIVER), nativeId: String(ref.taskId), strength: "strong" } as const;
 					const subagentNode = subagentNodeId(ref.taskId);
@@ -578,9 +581,7 @@ export function projectThread(
 	if (meta.subagentOf !== undefined) {
 		const last = runs.at(-1);
 		const rootStatus = (busy ? "running" : (last?.status ?? "pending")) as OrchestrationV2ExecutionNode["status"];
-		// The child's span is its owning task's (the run clock stamps a message when its stream starts, so a one-answer child
-		// would read 0s).
-		const settledAt = busy || last === undefined ? null : meta.subagentOf.endedAt !== undefined ? time(meta.subagentOf.endedAt) : last.completedAt;
+		const settledAt = busy || last === undefined ? null : last.completedAt;
 		nodes.push({
 			id: id(`n-sub-root`),
 			threadId: id(threadId),
