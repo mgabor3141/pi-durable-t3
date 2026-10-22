@@ -280,6 +280,21 @@ export class ScheduledTasks {
 		return { task };
 	}
 
+	/** T3's `ScheduledTaskService.deleteForThread` (run by a thread deletion's `scheduled-tasks.cleanup` effect): the
+	 * tasks bound to the deleted thread go with it, rather than failing on every run. */
+	deleteForThread(threadId: string): void {
+		const removed = [...this.#tasks.values()].filter((task) => task.threadId === threadId);
+		if (removed.length === 0) return;
+		for (const task of removed) this.#tasks.delete(task.id);
+		try {
+			this.#save();
+		} catch (error) {
+			for (const task of removed) this.#tasks.set(task.id, task);
+			throw taskError("Could not delete thread's schedule tasks.", undefined, error);
+		}
+		this.#notify();
+	}
+
 	delete(input: { id: string }): { id: string } {
 		const previous = this.#tasks.get(input.id);
 		if (previous === undefined) return { id: input.id };

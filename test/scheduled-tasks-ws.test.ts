@@ -93,6 +93,11 @@ it("subscribe, runNow (launch, then queue on the thread), and the webhook refusa
 			expect(decode(exitError(await ws.call(tag, { id: created.task.id }), tag)).message).toBe("Webhook triggers are not supported by pi-durable-t3 yet.");
 		}
 
+		// Deleting a thread deletes the tasks bound to it (T3's `scheduled-tasks.cleanup` effect); an unbound task stays.
+		exitValue(await ws.call("orchestration.dispatchCommand", { type: "thread.delete", commandId: "del-bound-thread", threadId }), "thread.delete");
+		await until("the bound task goes with its thread", () => !snapshots().at(-1)!.tasks.some((t) => t.id === bound.task.id));
+		expect(snapshots().at(-1)!.tasks.some((t) => t.id === created.task.id)).toBe(true);
+
 		exitValue(await ws.call("scheduledTasks.delete", { id: created.task.id }), "delete");
 		await until("the delete reaches subscribers", () => !snapshots().at(-1)!.tasks.some((t) => t.id === created.task.id));
 	} finally {

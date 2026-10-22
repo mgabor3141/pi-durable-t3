@@ -118,6 +118,7 @@ export class Bridge {
 	readonly #attachments: AttachmentStore | undefined;
 	readonly #threads = new Map<string, ThreadState>();
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
+	readonly #deletedListeners = new Set<(threadId: string) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
 	/** The project ids last shown to clients, so a registry change emits the removed shells. */
 	#projectIds = new Set<string>();
@@ -1156,6 +1157,13 @@ export class Bridge {
 		this.#dropOrphanSubagents();
 		const state = this.#threads.get(threadId);
 		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
+		for (const listener of this.#deletedListeners) listener(threadId);
+	}
+
+	/** A thread was deleted (T3's `scheduled-tasks.cleanup` effect of a thread deletion hangs off this). */
+	onThreadDeleted(listener: (threadId: string) => void): () => void {
+		this.#deletedListeners.add(listener);
+		return () => this.#deletedListeners.delete(listener);
 	}
 
 	/**

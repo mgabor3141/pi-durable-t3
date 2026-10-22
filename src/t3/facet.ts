@@ -46,6 +46,14 @@ export function startFacet(deps: {
 	const scheduledTasks = new ScheduledTasks({ stateDir: config.stateDir, dispatch: scheduledTaskDispatch(bridge), log });
 	bridge.start();
 	scheduledTasks.start();
+	// T3 deletes the tasks bound to a deleted thread (the thread deletion's `scheduled-tasks.cleanup` effect).
+	bridge.onThreadDeleted((threadId) => {
+		try {
+			scheduledTasks.deleteForThread(threadId);
+		} catch (error) {
+			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) });
+		}
+	});
 
 	// Bind eagerly: await "listening" before the host prints "ready", and surface a bind error to the caller. Keep the
 	// launch fiber — `close()` interrupts it to release the port.
