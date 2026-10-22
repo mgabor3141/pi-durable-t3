@@ -16,6 +16,7 @@ import { CodingExtension } from "./base-prompt.ts";
 import { openCodingHarness } from "./host-runtime.ts";
 import { installShutdown } from "./shutdown.ts";
 import { createReplyModel } from "./reply-model.ts";
+import { Subagent } from "./subagent.ts";
 import { titleThread } from "./title.ts";
 
 const log: Logger = {
@@ -108,7 +109,7 @@ async function main(): Promise<void> {
 	const runtime = await openCodingHarness(config, models, {
 		onWarn: (message, error) => log.warn(message, { error: String(error) }),
 		// The prompt: a coding-agent base section, plus the optional instructions file as another section.
-		extensions: [CodingExtension(config.instructionsPath)],
+		extensions: [CodingExtension(config.instructionsPath), Subagent],
 	});
 
 	const address = `http://${config.listen.host}:${config.listen.port}`;
