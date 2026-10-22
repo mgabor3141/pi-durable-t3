@@ -1,6 +1,6 @@
 ---
 name: bump-pins
-description: Move pi-durable-t3 to a newer T3 Code nightly and/or newer pi packages (@earendil-works/*), then review the bump. Use when asked to upgrade, bump, or update T3 or pi.
+description: Move pi-durable-t3 to a newer T3 Code stable release and/or newer pi packages (@earendil-works/*), then review the bump. Use when asked to upgrade, bump, or update T3 or pi.
 ---
 
 # Bumping T3 and pi
@@ -14,11 +14,12 @@ Agents working in parallel need disjoint `FACET_PORT`s and probe ports.
 
 ## T3 pin
 
-1. Find the target: `gh api 'repos/pingdotgg/t3code/releases?per_page=10' --jq '.[].tag_name'` (nightlies are
-   `v<ver>-nightly.<date>.<n>`); its commit: `gh api repos/pingdotgg/t3code/commits/<tag> --jq .sha`.
-2. Set `PIN` and `T3_TAG` in `dev/setup-t3.sh` and `SERVER_VERSION` in `src/t3/http.ts` (a test keeps them equal). Run
-   `pnpm setup:t3`.
-3. Fetch the OLD pin into a temp dir and diff, for what the bridge serves:
+1. Find the target: the latest stable release, `gh api repos/pingdotgg/t3code/releases/latest --jq .tag_name`
+   (`prerelease: false`; we pin releases, never nightlies or previews).
+2. Set `T3_TAG` in `dev/setup-t3.sh` (the one place; the commit is read from the fetched tag and recorded in
+   `.t3-cache/t3code-tag`) and `SERVER_VERSION` in `src/t3/http.ts` (the tag without the `v`; a test keeps them
+   equal). Before running `pnpm setup:t3`, copy `.t3-cache/t3code` aside: it is the OLD pin to diff against.
+3. Diff the old pin against `.t3-cache/t3code`, for what the bridge serves:
    - `packages/contracts/src`: new or changed RPCs, new REQUIRED fields (optional ones decode from absence), settings
      keys, descriptor capabilities (`environment.ts`), projection/shell fields.
    - The client's RPC call sites (`apps/web/src`, `packages/client-runtime/src`): collect every `*_METHODS.x` reference

@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 # One-shot T3 setup:
-#   1. shallow-fetch t3code at PIN into the gitignored .t3-cache/;
+#   1. shallow-fetch t3code at T3_TAG into the gitignored .t3-cache/;
 #   2. copy packages/contracts (and T3's LICENSE) into the gitignored vendor/contracts, so the facet and the
 #      contracts share one Effect copy (two Effect instances break the schema brand encode);
 #   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into the gitignored web-dist/.
-# Then link the host against the vendored contracts. Idempotent: re-running skips a cache already at PIN.
+# Then link the host against the vendored contracts. Idempotent: re-running skips a cache already at the tag.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
-# The single source of truth for the pinned T3 Code commit (protocol 2). MIT, "Copyright (c) 2026 T3 Tools Inc.".
-PIN=fb990765a49414a5bfbdc73365455fc8b5fbe691
-# The release tag at PIN: the version the bridge reports as `serverVersion` (src/t3/http.ts; a test keeps them equal).
-T3_TAG=v0.1.1-nightly.20261020.3386
+# The single place to change: the pinned T3 Code stable release (`prerelease: false`; never a nightly). Protocol 2.
+# MIT, "Copyright (c) 2026 T3 Tools Inc.". It is also the version the bridge reports as `serverVersion`
+# (src/t3/http.ts SERVER_VERSION without the `v`; a test keeps them equal).
+T3_TAG=v0.1.1
 T3_URL="https://github.com/pingdotgg/t3code"
 CACHE="$here/.t3-cache/t3code"
 
-# 1. Fetch t3code at PIN (shallow, single commit) unless the cache is already there.
-if [ "$(git -C "$CACHE" rev-parse HEAD 2>/dev/null || true)" != "$PIN" ]; then
+# 1. Fetch t3code at the tag (shallow) unless the cache is already at it. Tags are mutable in principle, so the cache is
+# compared by the commit the tag resolved to when it was fetched (.t3-cache/t3code-tag holds "<tag> <sha>").
+if [ "$(cat "$here/.t3-cache/t3code-tag" 2>/dev/null | cut -d' ' -f1 || true)" != "$T3_TAG" ] || [ ! -d "$CACHE/.git" ]; then
   rm -rf "$CACHE"
   mkdir -p "$CACHE"
   git -C "$CACHE" init -q
   git -C "$CACHE" remote add origin "$T3_URL"
-  git -C "$CACHE" fetch -q --depth 1 origin "$PIN"
-  git -C "$CACHE" checkout -q FETCH_HEAD
+  git -C "$CACHE" fetch -q --depth 1 origin "refs/tags/$T3_TAG:refs/tags/$T3_TAG"
+  git -C "$CACHE" checkout -q "$T3_TAG"
+  echo "$T3_TAG $(git -C "$CACHE" rev-parse HEAD)" > "$here/.t3-cache/t3code-tag"
 fi
-[ "$(git -C "$CACHE" rev-parse HEAD)" = "$PIN" ] || { echo "setup:t3: cache not at $PIN"; exit 1; }
+PIN="$(git -C "$CACHE" rev-parse HEAD)"
 
 # 2. Vendor packages/contracts + the LICENSE that covers it.
 [ -d "$CACHE/packages/contracts/src" ] || { echo "setup:t3: packages/contracts missing in $CACHE"; exit 1; }
@@ -58,6 +60,7 @@ echo "vendored @t3tools/contracts at $PIN (+ LICENSE) into vendor/contracts"
 ARCHIVE="t3-${T3_TAG#v}-darwin-arm64.tar.gz"
 RELEASE="$T3_URL/releases/download/$T3_TAG"
 ARCHIVE_PATH="$here/.t3-cache/$ARCHIVE"
+find "$here/.t3-cache" -maxdepth 1 -name 't3-*.tar.gz' ! -name "$ARCHIVE" -delete
 SUM="$(curl -fsSL "$RELEASE/SHA256SUMS" | awk -v f="$ARCHIVE" '$2 == f { print $1 }')"
 [ -n "$SUM" ] || { echo "setup:t3: $ARCHIVE is not in the release's SHA256SUMS"; exit 1; }
 if ! echo "$SUM  $ARCHIVE_PATH" | sha256sum -c --status 2>/dev/null; then
