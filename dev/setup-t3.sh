@@ -3,17 +3,14 @@
 #   1. shallow-fetch t3code at T3_TAG into the gitignored .t3-cache/;
 #   2. copy packages/contracts (and T3's LICENSE) into the gitignored vendor/contracts, so the facet and the
 #      contracts share one Effect copy (two Effect instances break the schema brand encode);
-#   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into the gitignored web-dist/.
+#   3. fetch T3's own built web app (the `client/` of the release's CLI archive) into the web package
+#      (packages/web/app, gitignored), with T3's LICENSE. The bridge serves it by default, in a checkout too.
 # Then link the host against the vendored contracts. Re-running skips the git fetch when the cache is at the tag (the
 # web app's checksum is still fetched, so it needs the network).
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
-# The single place to change: the pinned T3 Code stable release (`prerelease: false`; never a nightly). Protocol 2.
-# MIT, "Copyright (c) 2026 T3 Tools Inc.". It is also the version the bridge reports as `serverVersion`
-# (src/t3/http.ts SERVER_VERSION without the `v`; a test keeps them equal).
-T3_TAG=v0.1.1
-T3_URL="https://github.com/pingdotgg/t3code"
+. "$here/dev/t3-pin.sh"
 CACHE="$here/.t3-cache/t3code"
 
 # 1. Fetch t3code at the tag (shallow). `.t3-cache/t3code-tag` holds "<tag> <sha>", written only after a successful
@@ -61,24 +58,8 @@ cat > "$here/vendor/contracts/tsconfig.json" <<'TS'
 TS
 echo "vendored @t3tools/contracts at $PIN (+ LICENSE) into vendor/contracts"
 
-# 3. T3's own web app build, from the release at T3_TAG: the CLI archive (what `npx t3` downloads) carries the built,
-# self-hosted client in `client/`. It is the same on every platform; the smallest archive is fetched. Verified
-# against the release's SHA256SUMS.
-ARCHIVE="t3-${T3_TAG#v}-darwin-arm64.tar.gz"
-RELEASE="$T3_URL/releases/download/$T3_TAG"
-ARCHIVE_PATH="$here/.t3-cache/$ARCHIVE"
-find "$here/.t3-cache" -maxdepth 1 -name 't3-*.tar.gz' ! -name "$ARCHIVE" -delete
-SUM="$(curl -fsSL "$RELEASE/SHA256SUMS" | awk -v f="$ARCHIVE" '$2 == f { print $1 }')"
-[ -n "$SUM" ] || { echo "setup:t3: $ARCHIVE is not in the release's SHA256SUMS"; exit 1; }
-if ! echo "$SUM  $ARCHIVE_PATH" | sha256sum -c --status 2>/dev/null; then
-  curl -fL --progress-bar -o "$ARCHIVE_PATH" "$RELEASE/$ARCHIVE"
-  echo "$SUM  $ARCHIVE_PATH" | sha256sum -c --status || { echo "setup:t3: checksum mismatch for $ARCHIVE"; exit 1; }
-fi
-staging="$(mktemp -d)"
-tar -xzf "$ARCHIVE_PATH" -C "$staging" --strip-components=1 --wildcards '*/client/*'
-rm -rf "$here/web-dist"
-mv "$staging/client" "$here/web-dist"
-rm -rf "$staging"
-echo "fetched T3's web app ($T3_TAG) into web-dist"
+# 3. T3's own web app build (the release's CLI archive, checksum-verified): dev/fetch-web.sh, into the web package.
+bash "$here/dev/fetch-web.sh" "$here/packages/web/app"
+cp "$CACHE/LICENSE" "$here/packages/web/LICENSE"
 
 pnpm install

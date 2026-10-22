@@ -5,9 +5,7 @@
 // Run: `pnpm start [-- --root <dir>]` (no `--root`: XDG config/data dirs). `PI_DURABLE_T3_FAKE=1` swaps in an
 // offline reply model.
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { fileURLToPath } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Models } from "@earendil-works/pi-ai";
 import { attachT3, type Logger, mintPairingCode } from "../../../src/bridge.ts";
@@ -54,10 +52,6 @@ function tailscalePairingLink(code: string, servePort: number): { readonly links
 	}
 }
 
-/** The repo's built web app (the directory `pnpm setup:t3` produces), served by the facet at `/`. Absent → the host
- * logs one line and serves none. */
-const WEB_APP_DIR = fileURLToPath(new URL("../../../web-dist", import.meta.url));
-
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	// `pnpm start -- pair …` forwards a leading `--` (pnpm does not strip it before a subcommand); drop any leading `--`
@@ -79,12 +73,8 @@ async function main(): Promise<void> {
 			links.push(...tailnet.links);
 			notes.push(...tailnet.notes);
 		}
-		// The links double as the `/pair` page a browser opens — but only while the host serves the web app; the
-		// desktop app parses the token from the link itself, so its links always print.
-		const webServed = existsSync(WEB_APP_DIR);
-		console.log(webServed
-			? "\n  Open in a browser (pairs and opens the web app), or paste into the T3 desktop app's Add computer:"
-			: "\n  Paste into the T3 desktop app's Add computer. (The browser `/pair` page needs the web app: run `pnpm setup:t3`.)");
+		// The links double as the `/pair` page a browser opens; the desktop app parses the token from the link itself.
+		console.log("\n  Open in a browser (pairs and opens the web app), or paste into the T3 desktop app's Add computer:");
 		for (const link of links) console.log(`  ${link}\n`);
 		for (const note of notes) console.log(`  ${note}\n`);
 		return;
@@ -102,10 +92,6 @@ async function main(): Promise<void> {
 		models = runtime;
 	}
 
-	// Serve the built web app from the facet, so its "This machine" (primary environment) is the pi host and its
-	// Connections settings work. The dir is the repo's `web-dist` (built by `pnpm setup:t3`); absent → serve none.
-	const webApp = existsSync(WEB_APP_DIR) ? WEB_APP_DIR : undefined;
-	if (webApp === undefined) log.warn("no built web app; run `pnpm setup:t3` to serve one", { webAppDir: WEB_APP_DIR });
 	const runtime = await openCodingHarness(config, models, {
 		onWarn: (message, error) => log.warn(message, { error: String(error) }),
 		// The prompt: a coding-agent base section, plus the optional instructions file as another section.
@@ -124,7 +110,6 @@ async function main(): Promise<void> {
 			scratchDir: config.scratchDir,
 			listen: config.listen,
 			label: config.label,
-			...(webApp === undefined ? {} : { webApp }),
 			...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),
 			tokenTtlSeconds: config.tokenTtlSeconds,
 			...(config.tailscaleServe ? { tailscaleServe: { port: config.tailscaleServePort } } : {}),

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Run the browser smokes end-to-end in a throwaway environment: a fresh root and the host (offline reply model) on the
-# facet port — which also serves the built web app (the host serves the repo's web-dist). No separate web server: the
+# facet port — which also serves the built web app (the bridge's default: the web package, filled by `pnpm setup:t3`). No separate web server: the
 # web app's "This machine" (primary environment) IS the facet. Cleans up only the processes it starts.
 #
 #   dev/browser-smoke.sh
-# Env overrides: FACET_PORT (default 4911), WEB_PORT (default 4920, unused: the web app is served from the facet),
-# WEB_DIST (default the repo's web-dist, fetched by `pnpm setup:t3`), CHROMIUM (default /usr/bin/chromium). Ports avoid
+# Env overrides: FACET_PORT (default 4911), CHROMIUM (default /usr/bin/chromium). Ports avoid
 # the default listen port so both can run side by side.
 #
 # Four smokes share one root and one web app (the host serves it at the facet origin):
@@ -21,8 +20,6 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 FACET_PORT="${FACET_PORT:-4911}"
-WEB_PORT="${WEB_PORT:-4920}"          # unused: the web app is served from the facet origin, not a separate port.
-WEB_DIST="${WEB_DIST:-$here/web-dist}"
 CHROMIUM="${CHROMIUM:-/usr/bin/chromium}"
 root="$(mktemp -d "${TMPDIR:-/tmp}/pi-durable-t3-smoke-XXXXXX")"
 pids=()
@@ -35,13 +32,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ -d "$WEB_DIST" ] || { echo "web-dist not found at $WEB_DIST (set WEB_DIST to the built T3 web app)"; exit 2; }
+[ -f "$here/packages/web/app/index.html" ] || { echo "no web app in packages/web/app: run pnpm setup:t3"; exit 2; }
 
 mkdir -p "$root/projects/alpha" "$root/projects/beta" "$root/t3"
 cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 TOML
-# The host serves the web app from its own origin (the repo's web-dist), so there is no web origin to trust in CORS:
+# The host serves the web app from its own origin (the web package's), so there is no web origin to trust in CORS:
 # the desktop app (t3code://app) is allowed by default; the served SPA is same-origin. The project registry lives in
 # the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server settings) is absent: the host
 # answers the contract's defaults, with the pi provider instance enabled.
@@ -60,7 +57,7 @@ mint_code() {
     | sed -n 's/^Pairing code (single use): //p' | head -1
 }
 
-echo "root=$root  facet=127.0.0.1:$FACET_PORT (serves the web app from the facet origin)  web-dist=$WEB_DIST"
+echo "root=$root  facet=127.0.0.1:$FACET_PORT (serves the web app from the facet origin)"
 
 start_host() {
   PI_DURABLE_T3_FAKE=1 \

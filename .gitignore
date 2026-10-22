@@ -4,10 +4,16 @@ node_modules
 dist/
 *.log
 vendor
-web-dist
 .t3-cache
 
 # Scratch notes; never published.
 .memory/
 
 .DS_Store
+
+# Package contents not in git (packages/*/dist is covered above): the web app and T3's LICENSE (`pnpm setup:t3`), and
+# the license files the bridge build copies next to its code.
+packages/web/app
+packages/web/LICENSE
+packages/bridge/LICENSE
+packages/bridge/THIRD_PARTY_LICENSES

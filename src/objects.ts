@@ -1,6 +1,9 @@
 // The chord objects: the surface design.md's "chord objects" table describes — thin adapters over `Threads` that mirror
 // the thread list and each head view as observable state and answer host codes as `ChordError` reasons.
 import { Type } from "typebox";
+// TS2883: the contracts below infer chord's `MethodSpec`, which chord's package exports do not expose. Importing it by path
+// lets declaration emit name it (type-only: erased at build, and objects.d.ts is not shipped).
+import type { MethodSpec } from "../node_modules/@earendil-works/chord/dist/contract.js";
 import {
 	type Ctx,
 	ChordError,
@@ -89,6 +92,7 @@ const Catalog = Type.Array(Type.Object({ provider: Type.String(), modelId: Type.
 const ConfigurationSchema = Type.Object({ model: Type.Union([ModelRefSchema, Type.Null()]), thinkingLevel: Type.String() });
 
 // Mirrors pi-ai's model thinking levels (the array is not exported from the package index).
+
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 // ── Contracts ───────────────────────────────────────────────────────────────

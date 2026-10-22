@@ -55,7 +55,7 @@ import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
-/** The T3 release at our pin (`T3_TAG` in dev/setup-t3.sh). Never the client's version: T3's update banner then says
+/** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
 export const SERVER_VERSION = "0.1.1";
 

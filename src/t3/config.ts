@@ -1,25 +1,10 @@
 // The T3 facet's configuration: the integrator-owned static fields from `attachT3`, the live project registry
 // (`../registry.ts`), and the live settings store over the state dir (`../settings.ts`). The facet reads them live.
-import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
+import type { TitleThread } from "./title-thread.ts";
 
-/** What the bridge asks of `attachT3`'s `titleThread` hook (T3's `ThreadTitleRegenerationService` input, on pi's terms). */
-export type TitleThreadRequest = {
-	readonly threadId: string;
-	/** The thread's head conversation. */
-	readonly conversationId: ConversationId;
-	/** "first-message": the first user entry; "regenerate": the head's latest entry. */
-	readonly at: EntryId;
-	readonly reason: "first-message" | "regenerate";
-	/** The title being replaced; "regenerate" only. */
-	readonly previousTitle?: string;
-	/** Aborted when a rename or a newer request supersedes this one. */
-	readonly signal: AbortSignal;
-};
-
-/** The integrator's title generator: a title, or `undefined` / "New thread" (/ the same title on regenerate) for no change. */
-export type TitleThread = (request: TitleThreadRequest) => Promise<string | undefined>;
+export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
 /** The facet's integrator-owned fields, assembled once from `attachT3`'s options. */
 export interface FacetConfig {

@@ -2,6 +2,8 @@
 // projects follows docs/design.md's north star: the bridge computes no defaults of its own. Everything an integrator
 // needs comes from this file.
 import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHost } from "@earendil-works/chord";
 import { HOST_PRINCIPAL } from "./objects.ts";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
@@ -11,7 +13,8 @@ import { FileProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
-import type { BridgeConfig, TitleThread } from "./t3/config.ts";
+import type { BridgeConfig } from "./t3/config.ts";
+import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
@@ -20,13 +23,22 @@ import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandEr
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 export { ConfigError } from "./config.ts";
 export type { Logger } from "./t3/logging.ts";
-export type { TitleThread, TitleThreadRequest } from "./t3/config.ts";
+export type { TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 export const DESKTOP_APP_ORIGIN = "t3code://app";
 
 /** The default listen address: loopback, T3's own app's port plus one (T3 uses 3773). */
 const DEFAULT_LISTEN = { host: "127.0.0.1", port: 3774 } as const;
+
+/** The web package's `app/` directory, or `undefined` when the package cannot be resolved (a checkout without it). */
+function bundledWebApp(): string | undefined {
+	try {
+		return join(dirname(fileURLToPath(import.meta.resolve("@mgabor3141/pi-durable-t3-web/package.json"))), "app");
+	} catch {
+		return undefined;
+	}
+}
 
 export type AttachT3Options = {
 	/** The model catalog: T3's picker list and the list `server.refreshProviders` answers (availability is the Harness's). */
@@ -50,7 +62,7 @@ export type AttachT3Options = {
 	readonly listen?: { readonly host: string; readonly port: number };
 	/** Environment name T3 shows. Default `"pi"`. */
 	readonly label?: string;
-	/** A built T3 web app's directory, served at `/` (static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth` and `/api` routes win; `/pair` is T3's own pairing page). The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. Unset: no web app, the API/WS serve the desktop app as before. */
+	/** A built T3 web app's directory, served at `/`. Default: the T3 web app of `@mgabor3141/pi-durable-t3-web`, the package this one depends on; served by default. Set `webApp` to serve a different build. Static files, with T3's SPA fallback to `index.html`; the API, `/ws`, `/.well-known`, `/oauth` and `/api` routes win; `/pair` is T3's own pairing page. The web app treats the page origin as its primary environment, so serving it here makes the pi host "This machine" and Settings → Connections works in the browser. */
 	readonly webApp?: string;
 	/** Browser origins allowed to call. Default: T3's desktop app. `[]` allows any origin. A web app served from this host's own origin is same-origin and needs no entry; this list is for a web app served from a foreign origin. */
 	readonly corsOrigins?: readonly string[];
@@ -125,6 +137,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	await catalog.refresh();
 
 	const listen = options.listen ?? DEFAULT_LISTEN;
+	const webApp = options.webApp ?? bundledWebApp();
+	if (webApp === undefined) log.warn("no web app to serve (the web package is not installed; in a checkout, run `pnpm setup:t3`)");
 	const config: BridgeConfig = {
 		registry,
 		settings: ServerSettingsStore.open(options.stateDir),
@@ -135,7 +149,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		scratchDir: options.scratchDir,
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
-		staticDir: options.webApp,
+		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		tailscaleServe:
 			options.tailscaleServe === undefined
