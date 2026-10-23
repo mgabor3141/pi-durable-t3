@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 [ -f vendor/contracts/LICENSE ] || { echo "build: run 'pnpm setup:t3' first"; exit 1; }
 
 command -v tsdown >/dev/null || { echo "build: tsdown is missing: the build needs this package's devDependencies (installing from git with --prod skips them: install once without --prod, then run 'pnpm install --prod')"; exit 1; }
-tsdown -c build/tsdown.config.ts
+tsdown -c build/tsdown.config.mjs
 # Declarations: tsc over src/, then keep only the files reachable from bridge.d.ts, with `.ts` specifiers rewritten
 # to `.js`. (tsc 7 does not rewrite them.) Any type error fails the build.
 tsc -p build/tsconfig.build.json
