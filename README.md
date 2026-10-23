@@ -124,7 +124,9 @@ crash resume, T3's settings (star, hide and reorder models in the picker), addin
 conversation shows as T3's subagent card with a read-only child thread; the example agent has one),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
-and the tailnet name in the link `pair` prints). Git, terminals, file panels and previews are
+and the tailnet name in the link `pair` prints). T3's file panel works inside a project's folder: browse,
+open, edit and save (atomically; the agent may edit the same file, last write wins), quick-open and content search.
+Git, terminals and previews (including image and PDF previews of files) are
 refused on purpose: the agent works in real folders with `bash`. Every call and its status:
 [`docs/capabilities.md`](docs/capabilities.md).
 

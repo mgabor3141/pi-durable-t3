@@ -45,8 +45,9 @@ them, on a contributor's `pnpm install`, in a consumer's install from git, and b
 - **Stock wire.** T3's web app and desktop app run unmodified. The host also serves the web
   app (by default the one in the package; `webApp` points elsewhere) from its own origin, which makes the agent the app's primary environment ("This machine"), signed in
   with T3's browser session cookie. The protocol code lives in `src/t3/`, and Effect never leaves it.
-- **Refuse, don't fake.** Files, git and terminals belong to the agent. T3 is told they are unsupported and
-  hides them. A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,
+- **Refuse, don't fake.** Git and terminals belong to the agent. T3 is told they are unsupported and
+  hides them. Files are shared: the file panel works on the folders the host knows (a project's root, a thread's
+  own folder) and nowhere else, and the agent may edit the same file at the same time (last write wins). A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,
   the answer is the truth: an empty session scan, a lifecycle stream that says "ready" and nothing more.
 - **Strict files.** A file the host cannot read stops it at boot, naming the file. The host never writes a
   file it could not read back.
