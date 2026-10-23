@@ -65,6 +65,7 @@ const t3 = await attachT3(harness, {
 	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
 	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
 	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
+	workspaceRoot, // optional: the only directory T3 may browse, register as a project or serve in the file panel
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
@@ -82,6 +83,9 @@ await t3.close();
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
 - `stateDir` belongs to the bridge, one host per directory. It pairs with the Harness's storage (threads
   point at its project ids), so back up and move the two together.
+- `workspaceRoot` confines T3 to one tree: project create/update, the "Add project" picker and the file panel refuse
+  a root outside it (symlinks are resolved). `scratchDir` must be inside it. Omit it and T3's own rule applies: a
+  paired client may add any folder, so pairing is the boundary. It is not a mount; the host reads the tree itself.
 - Upgrading from pi 1.3: back up first. pi 1.4 migrates `durable.db` to schema v2 on first open, and 1.3 then
   refuses it (`Durable SQLite schema version 2 is newer than supported version 1`).
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a

@@ -387,14 +387,18 @@ function runSearch<A>(cwd: string, operation: string, execute: () => Result<A>):
 export interface WorkspaceFilesOptions {
 	/** The folders a client-named `cwd` may act in: every registered project's root and every thread's working folder. */
 	readonly roots: () => readonly string[];
+	/** When set, only roots whose realpath is inside this directory are known: the panel never serves another tree. */
+	readonly root?: string;
 }
 
 export class WorkspaceFiles {
 	readonly #roots: () => readonly string[];
+	readonly #root: string | undefined;
 	readonly #indexes = new SearchIndexes();
 
 	constructor(options: WorkspaceFilesOptions) {
 		this.#roots = options.roots;
+		this.#root = options.root;
 	}
 
 	close(): Promise<void> {
@@ -409,8 +413,12 @@ export class WorkspaceFiles {
 		} catch {
 			return false;
 		}
+		const realRoot = this.#root === undefined ? undefined : await fsp.realpath(resolve(this.#root)).catch(() => undefined);
 		for (const root of this.#roots()) {
-			if ((await fsp.realpath(resolve(root)).catch(() => undefined)) === real) return true;
+			const candidate = await fsp.realpath(resolve(root)).catch(() => undefined);
+			if (candidate !== real) continue;
+			if (realRoot !== undefined && !isInsideRealRoot(realRoot, candidate)) continue;
+			return true;
 		}
 		return false;
 	}

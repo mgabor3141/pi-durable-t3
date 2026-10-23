@@ -15,6 +15,8 @@ export interface FacetConfig {
 	readonly stateDir: string;
 	/** The Scratch project's root, when the feature is on; `undefined` refuses `projects.ensureScratch`. */
 	readonly scratchDir: string | undefined;
+	/** The only directory project roots and file calls may use, realpath; `undefined` leaves T3 unrestricted. */
+	readonly workspaceRoot?: string;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];
 	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: none, as before. */
@@ -37,5 +39,5 @@ export interface BridgeConfig extends FacetConfig {
 /** The single server-level `cwd` T3's ServerConfig shows: the first project's path, else the state dir — a display
  * field, because this host has no working directory of its own (design.md, The model). */
 export function serverCwd(config: BridgeConfig): string {
-	return config.registry.list()[0]?.cwd ?? config.stateDir;
+	return config.workspaceRoot ?? config.registry.list()[0]?.cwd ?? config.stateDir;
 }

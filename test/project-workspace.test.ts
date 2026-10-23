@@ -15,7 +15,7 @@ import type { Logger } from "../src/t3/logging.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
-async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: FileProjectRegistry }> {
+async function makeBridge(dataDir: string, workspaceRoot?: string): Promise<{ bridge: Bridge; registry: FileProjectRegistry }> {
 	const registry = await FileProjectRegistry.open(dataDir);
 	const config: BridgeConfig = {
 		host: "127.0.0.1",
@@ -27,6 +27,7 @@ async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: 
 		settings: ServerSettingsStore.open(dataDir),
 		corsOrigins: [], staticDir: undefined,
 		registry,
+		...(workspaceRoot === undefined ? {} : { workspaceRoot }),
 	};
 	// create/update/delete never touch the host, so an unloaded one is enough to construct a Bridge.
 	return { bridge: new Bridge(config, log, createHost({ name: "server", self: HOST_PRINCIPAL })), registry };
@@ -54,4 +55,28 @@ describe("a registered path that is a file (H1)", () => {
 	}, 30_000);
 
 
+});
+
+describe("workspaceRoot", () => {
+	it("refuses a project outside the workspace root and accepts one inside it", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pi-durable-t3-ws-root-"));
+		try {
+			const workspace = join(dir, "workspace");
+			const outside = join(dir, "outside");
+			await mkdir(workspace);
+			await mkdir(outside);
+			const { bridge, registry } = await makeBridge(dir, workspace);
+
+			const refused = await bridge.mutateProject({ type: "project.create", projectId: "u2", commandId: "cmd-ws-outside", title: "outside", workspaceRoot: outside, createWorkspaceRootIfMissing: true }).then(() => undefined, (error: unknown) => error);
+			expect(refused).toBeInstanceOf(Error);
+			expect((refused as Error).message).toContain(workspace);
+			expect(registry.list()).toHaveLength(0);
+
+			const inside = join(workspace, "project");
+			await bridge.mutateProject({ type: "project.create", projectId: "u3", commandId: "cmd-ws-inside", title: "inside", workspaceRoot: inside, createWorkspaceRootIfMissing: true });
+			expect(registry.list().map((project) => project.cwd)).toEqual([inside]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });

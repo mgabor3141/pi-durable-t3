@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { browseFilesystem, BrowseCurrentProjectRequired, BrowseWindowsPathUnsupported } from "../src/t3/browse.ts";
+import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "../src/t3/browse.ts";
 
 let base = "";
 const names = (entries: readonly { name: string }[]): string[] => entries.map((entry) => entry.name);
@@ -37,6 +37,13 @@ describe("browseFilesystem (the picker's directory listing)", () => {
 	it("an explicit-relative path resolves against the current project's cwd; without one it is refused (current_project_required)", async () => {
 		expect(names((await browseFilesystem({ partialPath: "./ga", cwd: base, platform: "linux" })).entries)).toEqual(["gamma"]);
 		await expect(browseFilesystem({ partialPath: "./ga", platform: "linux" })).rejects.toBeInstanceOf(BrowseCurrentProjectRequired);
+	});
+
+	it("a configured root refuses a listing outside it", async () => {
+		const root = join(base, "alpha");
+		const outside = join(base, "beta");
+		expect((await browseFilesystem({ partialPath: `${root}/`, root, platform: "linux" })).parentPath).toBe(root);
+		await expect(browseFilesystem({ partialPath: `${outside}/`, root, platform: "linux" })).rejects.toBeInstanceOf(BrowseReadDirectoryFailed);
 	});
 
 	it("~ expands to the home directory; a Windows path on a non-Windows server is refused", async () => {

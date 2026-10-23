@@ -2,9 +2,10 @@
 // `apps/server/src/workspace/WorkspaceEntries.ts`, not forked (capabilities.md). It reads, writes nothing, and adds no
 // trust surface beyond the `/ws` bearer token and loopback bind every other call needs.
 import type { Dirent } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { isInsidePath } from "../config.ts";
 
 /** Mirror of `@t3tools/shared/path`'s `isWindowsAbsolutePath` (a Windows path is refused on a non-Windows server). */
 function isWindowsAbsolutePath(value: string): boolean {
@@ -53,12 +54,21 @@ function resolveBrowseTarget(partialPath: string, cwd: string | undefined, platf
 
 /** Browse one directory for the picker: reads the target's PARENT (a trailing separator means the target is the
  * directory), returning only subdirectories, prefix-filtered by the target's basename. */
-export async function browseFilesystem(input: { readonly partialPath: string; readonly cwd?: string; readonly platform?: NodeJS.Platform }): Promise<BrowseResult> {
+export async function browseFilesystem(input: { readonly partialPath: string; readonly cwd?: string; readonly root?: string; readonly platform?: NodeJS.Platform }): Promise<BrowseResult> {
 	const platform = input.platform ?? process.platform;
-	const resolved = resolveBrowseTarget(input.partialPath, input.cwd, platform);
-	const endsWithSeparator = /[\\/]$/.test(input.partialPath) || input.partialPath === "~";
+	// An empty path opens the configured root: that is where "Add project" should start when the host has a
+	// workspace root, rather than the harness's process cwd (which the root would refuse anyway).
+	const target = input.partialPath.trim() === "" && input.root !== undefined ? `${input.root}/` : input.partialPath;
+	const resolved = resolveBrowseTarget(target, input.cwd, platform);
+	const endsWithSeparator = /[\\/]$/.test(target) || target === "~";
 	const parentPath = endsWithSeparator ? resolved : dirname(resolved);
 	const prefix = endsWithSeparator ? "" : basename(resolved);
+
+	if (input.root !== undefined) {
+		const realRoot = await realpath(input.root).catch(() => undefined);
+		const realParent = await realpath(parentPath).catch(() => undefined);
+		if (realRoot === undefined || realParent === undefined || !isInsidePath(realRoot, realParent)) throw new BrowseReadDirectoryFailed(parentPath);
+	}
 
 	let dirents: Dirent[];
 	try {
