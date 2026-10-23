@@ -178,6 +178,15 @@ describe("writeFile", () => {
 		expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 	});
 
+	it("refuses a read-only file, as T3's in-place write does, and leaves it untouched", async () => {
+		const { root, files } = await fixture();
+		await writeFile(join(root, "locked.txt"), "keep\n");
+		await chmod(join(root, "locked.txt"), 0o444);
+		await expect(files.writeFile({ cwd: root, relativePath: "locked.txt", contents: "changed\n" })).rejects.toMatchObject({ failure: "operation_failed", context: { operation: "write-file" } });
+		expect(await readFile(join(root, "locked.txt"), "utf8")).toBe("keep\n");
+		expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+
 	it("is atomic: the target is replaced by a rename, never truncated in place", async () => {
 		const { root, files } = await fixture();
 		const before = await stat(join(root, "README.md"));

@@ -4,9 +4,11 @@
 //
 // Differences from T3, all deliberate (docs/capabilities.md, "File access"):
 //   - a `cwd` must be a workspace root this host knows (a registered project's root or a thread's working folder) for
-//     EVERY call, not only writes — there is no arbitrary-directory access;
+//     EVERY call, not only writes. This scopes the panel; it is not a sandbox: a paired client can register any folder
+//     as a project (and can ask the agent to read anything), so pairing is the security boundary;
 //   - an absolute (or `~/`) host path is refused on read, where T3 reads it in place;
 //   - a write is atomic (a temp file in the target's directory, then a rename) where T3 truncates and rewrites in place.
+//     A read-only file is refused as T3 refuses it; a read-only directory refuses the temp file, where T3 could write.
 //
 // Failures are plain classes here (`EntriesError`, `FileError`); `rpc.ts` turns them into the contract's typed errors.
 import { spawn } from "node:child_process";
@@ -640,6 +642,8 @@ export class WorkspaceFiles {
 		});
 		// The deepest existing ancestor resolves to its real path before the root check, so neither the file nor the
 		// directories created for it can follow a symlink out of the root. A dangling symlink is refused, not written through.
+		// The check and the writes below are separate steps: a symlink swapped in between them (by someone writing inside
+		// the root, i.e. the agent) is followed, as in T3.
 		const segments = relative(cwd, target.absolutePath).split(sep);
 		let realTargetPath: string;
 		try {
@@ -681,6 +685,8 @@ export class WorkspaceFiles {
 				if (error.code === "ENOENT") return undefined;
 				throw error;
 			});
+			// The rename would replace a file this user may not write; refuse it as T3's in-place write does (EACCES).
+			if (existing !== undefined) await fsp.access(realTargetPath, constants.W_OK);
 			const handle = await fsp.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o666);
 			try {
 				await handle.writeFile(input.contents);
