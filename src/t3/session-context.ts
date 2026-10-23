@@ -3,6 +3,6 @@
 // the socket's session). The HTTP endpoints read it from the bearer token directly and do not use this service.
 import * as Context from "effect/Context";
 
-export class CurrentAuthSession extends Context.Service<CurrentAuthSession, { readonly sessionId: string }>()(
+export class CurrentAuthSession extends Context.Service<CurrentAuthSession, { readonly sessionId: string; readonly scopes: readonly string[] }>()(
 	"pi-durable-t3/CurrentAuthSession",
 ) {}

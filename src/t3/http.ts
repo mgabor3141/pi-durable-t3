@@ -51,6 +51,7 @@ import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
+import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import type { TailscaleCli } from "./tailscale.ts";
@@ -226,10 +227,11 @@ export function makeServerLayer(deps: {
 	attachments: AttachmentStore;
 	scheduledTasks: ScheduledTasks;
 	tailscale: TailscaleCli;
+	files: WorkspaceFiles;
 }) {
 	const { bridge, auth, log, httpServer, attachments } = deps;
 	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale });
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
@@ -617,7 +619,7 @@ export function makeServerLayer(deps: {
 								yield* RpcServer.make(WsRpcGroup, { disableTracing: true, disableFatalDefects: true } as Any).pipe(
 									Effect.provideService(RpcServer.Protocol, protocol),
 									Effect.provide(rpcLayer),
-									Effect.provideService(CurrentAuthSession, { sessionId }),
+									Effect.provideService(CurrentAuthSession, { sessionId, scopes: session?.scopes ?? [] }),
 									Effect.forkScoped,
 								);
 								return httpEffect;

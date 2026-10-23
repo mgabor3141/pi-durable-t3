@@ -517,6 +517,19 @@ export class Bridge {
 		}).shell;
 	}
 
+	/**
+	 * The folders a client may name as the `cwd` of a file call (`files.ts`): every registered project's root, and every
+	 * thread's folder of its own (a Scratch thread's) — the two values T3's client sends, `thread.worktreePath ?? project.workspaceRoot`.
+	 */
+	workspaceRoots(): string[] {
+		const roots = new Set(this.#configured().map((project) => project.path));
+		for (const thread of this.#directory) {
+			const meta = this.#meta(thread.threadId, this.#summary(thread.threadId), this.#threads.get(thread.threadId));
+			if (meta.projectPath !== undefined && meta.cwd.startsWith(`${meta.projectPath}/`)) roots.add(meta.cwd);
+		}
+		return [...roots];
+	}
+
 	shellSnapshot(): OrchestrationV2ShellSnapshot {
 		// A subagent's shell travels with the rest: the web app finds a thread's lineage, and the child thread itself,
 		// among the shells it holds (and hides it from the sidebar by its lineage).

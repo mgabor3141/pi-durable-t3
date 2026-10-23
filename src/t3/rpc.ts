@@ -3,6 +3,15 @@
 import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
+	AuthFilesystemReadScope,
+	AuthFilesystemWriteScope,
+	authScopeRequiredResponse,
+	EnvironmentAuthorizationError,
+	ProjectListEntriesError,
+	ProjectReadFileError,
+	ProjectSearchContentsError,
+	ProjectSearchEntriesError,
+	ProjectWriteFileError,
 	AssetPreviewTypeValidationError,
 	FilesystemBrowseError,
 	PersistChatAttachmentsError,
@@ -33,6 +42,7 @@ import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
+import { EntriesError, FileError, type WorkspaceFiles } from "./files.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
@@ -107,6 +117,7 @@ function unsupportedMessage(type: string): string {
 
 interface RpcDeps {
 	readonly bridge: Bridge;
+	readonly files: WorkspaceFiles;
 	readonly catalog: ModelCatalog;
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
 	readonly authDescriptor: Any;
@@ -186,6 +197,31 @@ const scheduled = <A>(run: () => Promise<A>) =>
 		try: run,
 		catch: (error) => (error instanceof ScheduledTaskError ? error : new ScheduledTaskError({ message: (error as Error).message || String(error) })),
 	});
+
+/**
+ * T3's per-method scope gate, for the file calls (`auth/RpcAuthorization.ts`: read/list/search need
+ * `filesystem:read`, write needs `filesystem:write`). The scopes are the session's own, read from the socket's session
+ * (`CurrentAuthSession`); a grant without the scope is refused with the contract's `EnvironmentAuthorizationError`, the
+ * error T3's middleware raises — the client shows it as a missing permission.
+ */
+const withScope = <A, E>(scope: typeof AuthFilesystemReadScope | typeof AuthFilesystemWriteScope, run: () => Effect.Effect<A, E>) =>
+	Effect.gen(function* () {
+		const { scopes } = yield* CurrentAuthSession;
+		if (!scopes.includes(scope)) {
+			return yield* Effect.fail(new EnvironmentAuthorizationError({ message: `The authenticated token is missing required scope: ${scope}.`, ...authScopeRequiredResponse(scope) }));
+		}
+		return yield* run();
+	});
+
+/** A file-call refusal as the contract's typed error: T3's `projectEntriesFailureContext` / `projectFileFailureContext`. */
+const entriesFailure = (error: unknown) =>
+	error instanceof EntriesError
+		? { failure: error.failure, ...error.context, message: error.message, cause: error }
+		: { failure: "search_index_search_failed" as const, message: (error as Error).message || String(error), cause: error };
+const fileFailure = (error: unknown) =>
+	error instanceof FileError
+		? { failure: error.failure, ...error.context, message: error.message, cause: error }
+		: { failure: "operation_failed" as const, message: (error as Error).message || String(error), cause: error };
 
 export function makeRpcLayer(deps: RpcDeps) {
 	const { bridge, log } = deps;
@@ -345,6 +381,28 @@ export function makeRpcLayer(deps: RpcDeps) {
 						...(error instanceof BrowseReadDirectoryFailed ? { parentPath: error.parentPath } : {}),
 					}),
 			}),
+		// T3's file panel and quick-open (`files.ts`, replicated from `apps/server/src/workspace`). The `cwd` must be a root this
+		// host knows; every failure is the contract's own typed error.
+		"projects.listEntries": (input: Any) =>
+			withScope(AuthFilesystemReadScope, () =>
+				Effect.tryPromise({ try: () => deps.files.list(input), catch: (error) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(error) } as Any) }),
+			),
+		"projects.searchEntries": (input: Any) =>
+			withScope(AuthFilesystemReadScope, () =>
+				Effect.tryPromise({ try: () => deps.files.searchEntries(input), catch: (error) => new ProjectSearchEntriesError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) } as Any) }),
+			),
+		"projects.searchContents": (input: Any) =>
+			withScope(AuthFilesystemReadScope, () =>
+				Effect.tryPromise({ try: () => deps.files.searchContents(input), catch: (error) => new ProjectSearchContentsError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) } as Any) }),
+			),
+		"projects.readFile": (input: Any) =>
+			withScope(AuthFilesystemReadScope, () =>
+				Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) } as Any) }),
+			),
+		"projects.writeFile": (input: Any) =>
+			withScope(AuthFilesystemWriteScope, () =>
+				Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) } as Any) }),
+			),
 		"server.reportClientActivity": () => Effect.succeed({}),
 		// T3's usage view. `server.getUsageSummary` is answered from what pi-durable records per turn (tokens, cost,
 		// model) — replicated bucketing from T3, provider-reported cost, fields pi has no value for omitted (see
@@ -372,8 +430,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"assets.createUrl": (input: Any) => {
 			const resource = input.resource;
 			// Only the `attachment` resource is served: every other asset resource names a host file (workspace/media/
-			// favicon/tool-output/github), and this host refuses file reads (capabilities.md), so the client gets the
-			// contract's typed preview refusal rather than a fabricated URL.
+			// favicon/tool-output/github): the file panel reads text through `projects.readFile`, but serving a file by URL is not
+			// built (capabilities.md), so the client gets the contract's typed preview refusal rather than a fabricated URL.
 			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource } as Any));
 			const minted = deps.attachments.mintAssetUrl({
 				attachmentId: resource.attachmentId,
@@ -526,7 +584,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 	}
 
 	const handlersLayer = (WsRpcGroup as Any).toLayer(all) as Layer.Layer<never>;
-	// Every paired client holds every standard scope; per-method authorization is not needed.
+	// Per-method authorization is not a middleware here: a standard grant holds every scope, and the one split a
+	// narrowed grant can express — the file calls — is checked in their handlers (`withScope`).
 	const authorization = Layer.succeed(RpcScopeAuthorization)((effect: Any) => effect) as Layer.Layer<never>;
 	return Layer.merge(handlersLayer, authorization);
 }
