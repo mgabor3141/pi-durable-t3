@@ -24,7 +24,11 @@ pnpm add github:mgabor3141/pi-durable-t3 @earendil-works/chord @earendil-works/p
 ```
 
 Append `#v<version>` to pin a release tag. npm builds git dependencies by default; npm 12 also needs
-`--allow-git=root` (supported since npm 11.10). Once published, `pnpm add
+`--allow-git=root` (supported since npm 11.10).
+
+The build on install needs the package's own devDependencies, so `pnpm install --prod` fails on a fresh git install
+(`tsdown: command not found`). For a production image, install once without `--prod`, then run `pnpm install --prod`.
+That reuses the built package from the store and drops the dev tools. Once published, `pnpm add
 @mgabor3141/pi-durable-t3` needs neither.
 
 The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.1**) ships in the package, and the bridge serves
