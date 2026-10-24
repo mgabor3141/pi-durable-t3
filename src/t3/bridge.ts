@@ -849,10 +849,12 @@ export class Bridge {
 		this.#writable(id);
 		if (this.#summary(id) !== undefined) return id;
 		const scratchRoot = this.config.scratchDir;
-		const cwd =
-			options.launchText === undefined || scratchRoot === undefined || !isScratchRoot(project.cwd, scratchRoot)
-				? undefined
-				: await claimScratchThreadFolder(scratchRoot, id, options.launchText);
+		let cwd: string | undefined;
+		if (options.launchText !== undefined && scratchRoot !== undefined && isScratchRoot(project.cwd, scratchRoot)) {
+			const env = this.config.env;
+			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
+			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);
+		}
 		// A call's reference is released when the call settles (`c.get`); `host.get` would hold one per call, forever.
 		await this.#host.root(async (c) => (await c.get(PiThreads, {})).create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) }, c));
 		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
