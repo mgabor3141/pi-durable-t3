@@ -367,7 +367,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
 		"filesystem.browse": (input: Any) =>
 			Effect.tryPromise({
-				try: () => browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }), ...(deps.bridge.config.workspaceRoot === undefined ? {} : { root: deps.bridge.config.workspaceRoot }) }),
+				try: () => browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) }),
 				catch: (error) =>
 					new FilesystemBrowseError({
 						partialPath: input.partialPath,

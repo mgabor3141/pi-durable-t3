@@ -47,8 +47,7 @@ them, on a contributor's `pnpm install`, in a consumer's install from git, and b
   with T3's browser session cookie. The protocol code lives in `src/t3/`, and Effect never leaves it.
 - **Refuse, don't fake.** Git and terminals belong to the agent. T3 is told they are unsupported and
   hides them. Files are shared: the file panel works on the folders the host knows (a project's root, a thread's
-  own folder). `workspaceRoot` can confine the picker, project registry and panel to one tree; without it a paired
-  client can add any folder, so pairing is the boundary. The agent may edit the same file at the same time (last write wins). A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,
+  own folder), which scopes the panel but is no sandbox (a paired client can add any folder; pairing is the boundary), and the agent may edit the same file at the same time (last write wins). A panel that pretends to work is worse than none. Where the UI cannot proceed without an answer,
   the answer is the truth: an empty session scan, a lifecycle stream that says "ready" and nothing more.
 - **Strict files.** A file the host cannot read stops it at boot, naming the file. The host never writes a
   file it could not read back.

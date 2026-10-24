@@ -1,15 +1,14 @@
 // The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. Ownership of models and
 // projects follows docs/design.md's north star: the bridge computes no defaults of its own. Everything an integrator
 // needs comes from this file.
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHost } from "@earendil-works/chord";
 import { HOST_PRINCIPAL } from "./objects.ts";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
 import { createServerFacet } from "./objects.ts";
-import { ConfigError, isInsidePath } from "./config.ts";
 import { FileProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
@@ -56,12 +55,6 @@ export type AttachT3Options = {
 	 * the config advertises no `scratchWorkspaceRoot` and `projects.ensureScratch` is refused.
 	 */
 	readonly scratchDir?: string;
-	/**
-	 * The only directory T3 may treat as a workspace: project roots, the "Add project" picker and the file panel are
-	 * confined to it. Default: unrestricted (pairing is then the boundary). The path must exist and be a directory;
-	 * `scratchDir`, when set, must be inside it. Relative paths are resolved against the working directory.
-	 */
-	readonly workspaceRoot?: string;
 	/** Listen address. Default `127.0.0.1:3774`. */
 	readonly listen?: { readonly host: string; readonly port: number };
 	/** Environment name T3 shows. Default `"pi"`. */
@@ -140,28 +133,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	})));
 	await catalog.refresh();
 
-	let workspaceRoot: string | undefined;
-	if (options.workspaceRoot !== undefined) {
-		let real: string;
-		try {
-			real = realpathSync(options.workspaceRoot);
-		} catch (error) {
-			throw new ConfigError(`workspaceRoot is not a usable directory: ${options.workspaceRoot} (${(error as Error).message})`);
-		}
-		if (!statSync(real).isDirectory()) throw new ConfigError(`workspaceRoot is not a directory: ${options.workspaceRoot}`);
-		workspaceRoot = real;
-	}
-	if (workspaceRoot !== undefined && options.scratchDir !== undefined) {
-		const requested = resolve(options.scratchDir);
-		let scratch: string;
-		try {
-			scratch = realpathSync(requested);
-		} catch {
-			scratch = requested;
-		}
-		if (!isInsidePath(workspaceRoot, scratch)) throw new ConfigError(`scratchDir must be inside workspaceRoot (${workspaceRoot}): ${options.scratchDir}`);
-	}
-
 	const listen = options.listen ?? DEFAULT_LISTEN;
 	const webApp = options.webApp ?? bundledWebApp();
 	if (webApp === undefined) log.warn("no web app to serve (`web/` is missing; in a checkout, run `pnpm setup:t3`)");
@@ -173,7 +144,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		label: options.label ?? "pi",
 		stateDir: options.stateDir,
 		scratchDir: options.scratchDir,
-		...(workspaceRoot === undefined ? {} : { workspaceRoot }),
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: webApp,

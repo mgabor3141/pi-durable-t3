@@ -1,8 +1,8 @@
 // The T3 view over the host's threads: a local client of the chord objects (`pi.threads`, `pi.transcript`,
 // `pi.models`, `pi.controller`). It holds the per-thread projection memory (rolled-back runs) and the sequence counter.
 import { randomUUID } from "node:crypto";
-import { mkdir, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
 	OrchestrationProjectShell,
@@ -12,7 +12,7 @@ import type {
 	OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
-import { isInsidePath, type Project } from "../config.ts";
+import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import type { Thread } from "../threads.ts";
@@ -262,24 +262,17 @@ export class Bridge {
 		switch (mutation.type) {
 			case "project.create": {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
-				const requested = this.config.registry.resolvePath(mutation.workspaceRoot);
-				await this.#assertWorkspaceRoot(requested);
-				await this.#ensureWorkspaceRoot(requested, mutation.createWorkspaceRootIfMissing === true);
+				await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), mutation.createWorkspaceRootIfMissing === true);
 				// Honor the id the client minted; the registry derives from the normalized path for everything else (design.md, IDs).
-				const added = this.#createProject(mutation.title, requested, mutation.projectId);
+				const added = this.#createProject(mutation.title, mutation.workspaceRoot, mutation.projectId);
 				return this.#projectResult(added, null);
 			}
 			case "project.update": {
 				// A move names a new root: T3 normalizes an update's root WITHOUT creating it (`ProjectService.update`).
-				let path: string | undefined;
-				if (mutation.workspaceRoot !== undefined) {
-					path = this.config.registry.resolvePath(mutation.workspaceRoot);
-					await this.#assertWorkspaceRoot(path);
-					await this.#ensureWorkspaceRoot(path, false);
-				}
+				if (mutation.workspaceRoot !== undefined) await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), false);
 				const updated = this.config.registry.update(mutation.projectId, {
 					...(mutation.title === undefined ? {} : { title: mutation.title }),
-					...(path === undefined ? {} : { path }),
+					...(mutation.workspaceRoot === undefined ? {} : { path: mutation.workspaceRoot }),
 				});
 				return this.#projectResult(updated, null);
 			}
@@ -323,36 +316,6 @@ export class Bridge {
 			if (stored === undefined) throw error;
 			return stored;
 		}
-	}
-
-	/**
-	 * Refuse a project root outside the integrator's `workspaceRoot`, resolving symlinks: a folder the workspace can
-	 * write must not become a window into the harness's data directory. A missing path checks its nearest existing
-	 * ancestor, before `#ensureWorkspaceRoot` creates anything.
-	 */
-	async #assertWorkspaceRoot(path: string): Promise<void> {
-		const root = this.config.workspaceRoot;
-		if (root === undefined) return;
-		const realRoot = await realpath(root).catch(() => undefined);
-		if (realRoot === undefined) throw new CommandError(`The workspace root does not exist: ${root}`);
-		let realTarget: string | undefined;
-		try {
-			realTarget = await realpath(path);
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-			for (let probe = dirname(path); ; probe = dirname(probe)) {
-				try {
-					realTarget = join(await realpath(probe), relative(probe, path));
-					break;
-				} catch (ancestorError) {
-					const ancestorCode = (ancestorError as NodeJS.ErrnoException).code;
-					if (ancestorCode !== "ENOENT" && ancestorCode !== "ENOTDIR") throw ancestorError;
-					if (dirname(probe) === probe) throw ancestorError;
-				}
-			}
-		}
-		if (!isInsidePath(realRoot, realTarget!)) throw new CommandError(`The project root must be inside the workspace root (${root}): ${path}`);
 	}
 
 	/**

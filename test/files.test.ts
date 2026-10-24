@@ -47,17 +47,6 @@ describe("roots", () => {
 		}
 	});
 
-	it("refuses a known root outside the configured workspace root, including through a symlink", async () => {
-		const { base, root, outside } = await fixture();
-		const alias = join(base, "outside-alias");
-		await symlink(outside, alias);
-		const files = new WorkspaceFiles({ roots: () => [root, outside, alias], root });
-		opened.push(files);
-		expect((await files.readFile({ cwd: root, relativePath: "README.md" })).contents).toBe("hello\n");
-		expect(((await failure(files.readFile({ cwd: outside, relativePath: "secret.txt" }))) as FileError).failure).toBe("workspace_path_outside_root");
-		expect(((await failure(files.readFile({ cwd: alias, relativePath: "secret.txt" }))) as FileError).failure).toBe("workspace_path_outside_root");
-	});
-
 	it("knows a root by its real path, and a subfolder of a root is not a root", async () => {
 		const { base, root, files } = await fixture();
 		const alias = join(base, "alias");

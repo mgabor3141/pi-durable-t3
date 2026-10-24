@@ -1,6 +1,6 @@
 // Small shared pieces the bridge needs from "configuration": the typed config error, the `~`-expanding path resolver,
 // and the path-derived `Project` record. The integrator's config FILE is not the bridge's concern (design.md, The split).
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 /** A configuration refusal; its message is meant for the user as is. */
 export class ConfigError extends Error {}
@@ -14,12 +14,6 @@ export function expandPath(value: string, base: string): string {
 	if (value === "~") return resolve(home);
 	if (value.startsWith("~/")) return resolve(home, value.slice(2));
 	return isAbsolute(value) ? value : resolve(base, value);
-}
-
-/** Whether `path` is `root` or lies under it, lexically (both should be resolved absolute paths). */
-export function isInsidePath(root: string, path: string): boolean {
-	const rel = relative(root, path);
-	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 export function fail(file: string, message: string): never {

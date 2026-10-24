@@ -20,9 +20,4 @@ describe("serverCwd (empty-environment fallback, B4)", () => {
 		expect(empty.registry.list()).toHaveLength(0);
 		expect(serverCwd(empty)).toBe(empty.stateDir);
 	});
-
-	it("the configured workspace root is the cwd, even when projects exist", () => {
-		const config = { ...bridgeConfig([{ id: "alpha", cwd: `${ROOT}/projects/alpha` }]), workspaceRoot: `${ROOT}/workspace` };
-		expect(serverCwd(config)).toBe(`${ROOT}/workspace`);
-	});
 });
