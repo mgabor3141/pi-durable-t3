@@ -3,6 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
 	OrchestrationProjectShell,
@@ -216,7 +218,7 @@ export class Bridge {
 	ensureScratch(): Promise<{ readonly projectId: string }> {
 		const root = this.config.scratchDir;
 		if (root === undefined) throw new CommandError("This host has no Scratch folder (no scratch dir is configured).");
-		return ensureScratchProject(this.config.registry, root);
+		return ensureScratchProject(this.config.registry, root, this.config.env, this.config.context ?? BACKGROUND_CONTEXT);
 	}
 
 	/** T3's `ManagedProjectFolders.isScratchProject`: the project is rooted at the scratch dir. */
@@ -323,6 +325,8 @@ export class Bridge {
 	 * anything (design.md, Invariants).
 	 */
 	async #ensureWorkspaceRoot(path: string, createIfMissing: boolean): Promise<void> {
+		const env = this.config.env;
+		if (env !== undefined) return this.#ensureWorkspaceRootInEnv(env, path, createIfMissing);
 		const info = await stat(path).catch((error: NodeJS.ErrnoException) => {
 			if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
 			throw new ProjectWorkspaceNotCreatable(path, error);
@@ -338,6 +342,22 @@ export class Bridge {
 			return;
 		}
 		if (!info.isDirectory()) throw new ProjectWorkspaceNotDirectory(path);
+	}
+
+	/** Validate (and when asked, create) a workspace root through the execution environment. */
+	async #ensureWorkspaceRootInEnv(env: ExecutionEnv, path: string, createIfMissing: boolean): Promise<void> {
+		const context = this.config.context ?? BACKGROUND_CONTEXT;
+		const canonical = await env.canonicalPath(path, context);
+		const found = canonical.ok ? await env.fileInfo(canonical.value, context) : canonical;
+		if (found.ok) {
+			if (found.value.kind !== "directory") throw new ProjectWorkspaceNotDirectory(path);
+			return;
+		}
+		if (found.error.code === "not_directory") throw new ProjectWorkspaceNotDirectory(path);
+		if (found.error.code !== "not_found") throw new ProjectWorkspaceNotCreatable(path, found.error);
+		if (!createIfMissing) throw new ProjectWorkspaceMissing(path);
+		const made = await env.createDir(path, { recursive: true }, context);
+		if (!made.ok) throw new ProjectWorkspaceNotCreatable(path, made.error);
 	}
 
 	/** A T3 `Project` for a mutation's result. Only the fields a paired client reads are set; the rest are the shell's nulls. */

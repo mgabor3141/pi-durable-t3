@@ -29,6 +29,7 @@ import {
 	UsageReadError,
 	WsRpcGroup,
 } from "@t3tools/contracts";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -367,7 +368,11 @@ export function makeRpcLayer(deps: RpcDeps) {
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
 		"filesystem.browse": (input: Any) =>
 			Effect.tryPromise({
-				try: () => browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) }),
+				try: () => {
+					const env = deps.bridge.config.env;
+					if (env === undefined) throw new Error("This host has no execution environment.");
+					return browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }), env, context: deps.bridge.config.context ?? BACKGROUND_CONTEXT });
+				},
 				catch: (error) =>
 					new FilesystemBrowseError({
 						partialPath: input.partialPath,

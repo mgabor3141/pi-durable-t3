@@ -2,7 +2,8 @@
 // Harness's conversations. Every rule it enforces is an invariant in docs/design.md; this file is the code, not the case.
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import {
 	type AgentChange,
 	AgentDoc,
@@ -74,6 +75,10 @@ type ThreadsDeps = {
 	readonly harness: Harness;
 	/** The live project registry: the foreign key's target, and the source of a new thread's `cwd`. */
 	readonly registry: ProjectRegistry;
+	/** The execution environment a thread's folder is checked in. Absent: a local stat (tests and older integrators). */
+	readonly env?: ExecutionEnv;
+	/** Invocation context for environment calls. */
+	readonly context?: Context;
 	/** Notified when a prompt's commit lands and its promote fails; the run stays ownerless until a later promote adopts it. */
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
@@ -132,11 +137,15 @@ async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> 
 export class Threads {
 	readonly #harness: Harness;
 	readonly #registry: ProjectRegistry;
+	readonly #env: ExecutionEnv | undefined;
+	readonly #context: Context;
 	readonly #onWarn: (message: string, error: unknown) => void;
 
 	constructor(deps: ThreadsDeps) {
 		this.#harness = deps.harness;
 		this.#registry = deps.registry;
+		this.#env = deps.env;
+		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#onWarn = deps.onWarn ?? (() => {});
 	}
 
@@ -257,11 +266,17 @@ export class Threads {
 		// A thread's folder must exist as a directory: a caller that names one (the Scratch claim) creates it first, and
 		// anything else is a refusal naming the path (design.md, Invariants).
 		let cwdIsDirectory = true;
-		try {
-			cwdIsDirectory = statSync(cwd).isDirectory();
-		}
-		catch {
-			/* missing/unreadable: the boot mkdir in `attachT3` (with its warning) owns the missing-project case. */
+		if (this.#env !== undefined) {
+			const info = await this.#env.fileInfo(cwd, this.#context);
+			if (info.ok) cwdIsDirectory = info.value.kind === "directory";
+			else if (info.error.code !== "not_found") throw hostError("unknown_project", `thread folder is not readable: ${cwd} (${info.error.message})`);
+		} else {
+			try {
+				cwdIsDirectory = statSync(cwd).isDirectory();
+			}
+			catch {
+				/* missing/unreadable: the boot mkdir in `attachT3` (with its warning) owns the missing-project case. */
+			}
 		}
 		if (!cwdIsDirectory) throw hostError("unknown_project", `thread folder is not a directory: ${cwd}`);
 		return this.#harness.commit(async (tx) => {

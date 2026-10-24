@@ -5,6 +5,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHost } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { HOST_PRINCIPAL } from "./objects.ts";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
@@ -50,6 +52,13 @@ export type AttachT3Options = {
 	 * sidebar; nothing here repairs the combination for you.
 	 */
 	readonly stateDir: string;
+	/**
+	 * The environment T3 works in. Its `cwd` is the root of every absolute path in the protocol: projects, scratch,
+	 * the file panel, the picker and scripts. The environment is the boundary; there is no host-filesystem fallback.
+	 */
+	readonly env: ExecutionEnv;
+	/** Invocation context for environment calls. Default: `BACKGROUND_CONTEXT`. */
+	readonly context?: Context;
 	/**
 	 * The Scratch project's ("No project") root — agent work output, NOT bridge state. Omitted: the feature is off,
 	 * the config advertises no `scratchWorkspaceRoot` and `projects.ensureScratch` is refused.
@@ -115,6 +124,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	const threads = new Threads({
 		harness,
 		registry,
+		env: options.env,
+		...(options.context === undefined ? {} : { context: options.context }),
 		onWarn: (message) => log.warn(message),
 	});
 
@@ -143,6 +154,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		port: listen.port,
 		label: options.label ?? "pi",
 		stateDir: options.stateDir,
+		env: options.env,
+		...(options.context === undefined ? {} : { context: options.context }),
 		scratchDir: options.scratchDir,
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],

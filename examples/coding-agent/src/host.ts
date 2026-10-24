@@ -7,6 +7,7 @@
 import { execFileSync } from "node:child_process";
 import { networkInterfaces } from "node:os";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Models } from "@earendil-works/pi-ai";
 import { attachT3, type Logger, mintPairingCode } from "../../../src/bridge.ts";
 import { ConfigError, loadConfig, resolvePaths } from "./config.ts";
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
 		t3 = await attachT3(runtime.harness, {
 			models,
 			stateDir: config.stateDir,
+			env: new NodeExecutionEnv({ cwd: "/" }),
 			scratchDir: config.scratchDir,
 			listen: config.listen,
 			label: config.label,

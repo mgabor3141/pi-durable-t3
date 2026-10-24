@@ -10,6 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ConversationId } from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { attachT3 } from "../src/bridge.ts";
 import { Threads } from "../src/threads.ts";
 import { FileProjectRegistry } from "../src/registry.ts";
@@ -48,6 +49,7 @@ const runtime = await openCodingHarness(config, model.models, { extensions: [def
 const attach = await attachT3(runtime.harness, {
 	models: model.models,
 	stateDir: config.stateDir,
+	env: new NodeExecutionEnv({ cwd: "/" }),
 	scratchDir: config.scratchDir,
 	listen: config.listen,
 	tokenTtlSeconds: config.tokenTtlSeconds,

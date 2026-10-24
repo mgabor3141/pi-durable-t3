@@ -14,6 +14,7 @@ import { type ConversationId, type EntryRecord, UserEntry } from "@earendil-work
 import { attachT3 } from "../../../src/bridge.ts";
 import { Threads } from "../../../src/threads.ts";
 import { FileProjectRegistry } from "../../../src/registry.ts";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { nullLogger } from "../../../src/t3/logging.ts";
 import { openCodingHarness } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../../../test/fake-model.ts";
@@ -63,6 +64,7 @@ describe("crash and restart (the example wiring)", () => {
 			const attach = await attachT3(runtime.harness, {
 				models: model.models,
 				stateDir: root,
+				env: new NodeExecutionEnv({ cwd: "/" }),
 				listen: { host: "127.0.0.1", port: PORT },
 				log: nullLogger,
 			});

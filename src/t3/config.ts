@@ -1,5 +1,7 @@
 // The T3 facet's configuration: the integrator-owned static fields from `attachT3`, the live project registry
 // (`../registry.ts`), and the live settings store over the state dir (`../settings.ts`). The facet reads them live.
+import type { Context } from "@earendil-works/chord/context";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
 import type { TitleThread } from "./title-thread.ts";
@@ -13,6 +15,11 @@ export interface FacetConfig {
 	readonly label: string;
 	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `projects.json`, `auth.json` live here. */
 	readonly stateDir: string;
+	/** The environment T3 works in: its `cwd` is the root of every absolute path in the protocol. Required by
+	 * `attachT3`; optional here only so tests and older direct `Bridge` callers keep a local fallback. */
+	readonly env?: ExecutionEnv;
+	/** Invocation context for the environment. */
+	readonly context?: Context;
 	/** The Scratch project's root, when the feature is on; `undefined` refuses `projects.ensureScratch`. */
 	readonly scratchDir: string | undefined;
 	readonly tokenTtlSeconds: number;

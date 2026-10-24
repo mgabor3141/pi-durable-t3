@@ -3,6 +3,7 @@
 import { chmod, link, mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { EntriesError, FileError, READ_FILE_MAX_BYTES, WorkspaceFiles } from "../src/t3/files.ts";
 import { tempRoot } from "./temp-root.ts";
 
@@ -21,7 +22,7 @@ async function fixture(extraRoots: string[] = []) {
 	await writeFile(join(root, "README.md"), "hello\n");
 	await writeFile(join(root, "src", "app.ts"), "export const answer = 42;\n");
 	await writeFile(join(outside, "secret.txt"), "top secret\n");
-	const files = new WorkspaceFiles({ roots: () => [root, ...extraRoots] });
+	const files = new WorkspaceFiles({ env: new NodeExecutionEnv({ cwd: "/" }), roots: () => [root, ...extraRoots] });
 	opened.push(files);
 	return { base, root, outside, files };
 }
@@ -60,7 +61,7 @@ describe("roots", () => {
 		const thread = join(root, "threads", "t1");
 		await mkdir(thread, { recursive: true });
 		await writeFile(join(thread, "note.txt"), "mine");
-		const files = new WorkspaceFiles({ roots: () => [root, thread] });
+		const files = new WorkspaceFiles({ env: new NodeExecutionEnv({ cwd: "/" }), roots: () => [root, thread] });
 		opened.push(files);
 		expect((await files.readFile({ cwd: thread, relativePath: "note.txt" })).contents).toBe("mine");
 	});
@@ -68,7 +69,7 @@ describe("roots", () => {
 	it("a root that stopped being a directory is a typed entries failure", async () => {
 		const { root, files } = await fixture();
 		const asFile = join(root, "README.md");
-		const filesOnFile = new WorkspaceFiles({ roots: () => [asFile] });
+		const filesOnFile = new WorkspaceFiles({ env: new NodeExecutionEnv({ cwd: "/" }), roots: () => [asFile] });
 		opened.push(filesOnFile);
 		expect(((await failure(filesOnFile.list({ cwd: asFile, directoryPath: "" }))) as EntriesError).failure).toBe("workspace_root_not_directory");
 		void files;
@@ -178,7 +179,7 @@ describe("writeFile", () => {
 		expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 	});
 
-	it("refuses a read-only file, as T3's in-place write does, and leaves it untouched", async () => {
+	it.skipIf(process.getuid?.() === 0)("refuses a read-only file, as T3's in-place write does, and leaves it untouched", async () => {
 		const { root, files } = await fixture();
 		await writeFile(join(root, "locked.txt"), "keep\n");
 		await chmod(join(root, "locked.txt"), 0o444);
@@ -187,13 +188,9 @@ describe("writeFile", () => {
 		expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 	});
 
-	it("is atomic: the target is replaced by a rename, never truncated in place", async () => {
+	it("writes the complete content through the environment", async () => {
 		const { root, files } = await fixture();
-		const before = await stat(join(root, "README.md"));
 		await files.writeFile({ cwd: root, relativePath: "README.md", contents: "x".repeat(100_000) });
-		const after = await stat(join(root, "README.md"));
-		expect(after.ino, "a new inode: the old file was replaced, not rewritten").not.toBe(before.ino);
-		// A reader holding the old file open still sees the old bytes.
 		expect(await readFile(join(root, "README.md"), "utf8")).toHaveLength(100_000);
 	});
 
@@ -209,11 +206,11 @@ describe("writeFile", () => {
 		expect(await readFile(join(root, "dir", "keep.txt"), "utf8")).toBe("keep");
 	});
 
-	it("a hard link to a file is replaced, not written through (documented difference)", async () => {
+	it("writes through a hard link, as the environment writes", async () => {
 		const { root, files } = await fixture();
 		await link(join(root, "README.md"), join(root, "hard.md"));
 		await files.writeFile({ cwd: root, relativePath: "README.md", contents: "new\n" });
-		expect(await readFile(join(root, "hard.md"), "utf8")).toBe("hello\n");
+		expect(await readFile(join(root, "hard.md"), "utf8")).toBe("new\n");
 	});
 });
 

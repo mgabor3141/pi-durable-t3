@@ -58,17 +58,19 @@ The bridge is a library. You build the pi-durable Harness (storage, tools, exten
 serves T3's wire over it.
 
 ```ts
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
 
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
+	env,           // REQUIRED: the ExecutionEnv T3 reads, writes and runs in; its cwd is the path root
 	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
 	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
-	scratchDir,    // optional: where "No project" threads run; omit to turn the feature off
+	scratchDir,    // optional: absolute path in `env` where "No project" threads run; omit to turn it off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
-	// optional: label, corsOrigins, tokenTtlSeconds, log
+	// optional: context, label, corsOrigins, tokenTtlSeconds, log
 });
 await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
 harness.resume();                            // yours to call, after attaching
@@ -77,6 +79,7 @@ await t3.closed;                             // the server stopped on its own
 await t3.close();
 ```
 
+- `env` is required: T3's file panel, project picker, project roots, Scratch folders and scripts use it. Its `cwd` is the root of every absolute path in the protocol. There is no harness-filesystem fallback. `stateDir` stays on the host: it holds bridge state, not workspace files.
 - `attachT3` resolves once it is listening and rejects if it can't bind.
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
@@ -124,8 +127,7 @@ crash resume, T3's settings (star, hide and reorder models in the picker), addin
 conversation shows as T3's subagent card with a read-only child thread; the example agent has one),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
-and the tailnet name in the link `pair` prints). T3's file panel works inside a project's folder: browse,
-open, edit and save (atomically; the agent may edit the same file, last write wins), quick-open and content search.
+and the tailnet name in the link `pair` prints). T3's file panel works inside a project's folder, through the execution environment: browse, open, edit and save (the agent may edit the same file, last write wins), quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
 Git, terminals and previews (including image and PDF previews of files) are
 refused on purpose: the agent works in real folders with `bash`. Every call and its status:
 [`docs/capabilities.md`](docs/capabilities.md).

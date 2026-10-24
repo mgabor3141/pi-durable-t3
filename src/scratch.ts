@@ -5,6 +5,8 @@
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { ProjectConflict, type ProjectRegistry } from "./registry.ts";
 
 /** What T3 titles the project (`title: "No project"` in `ensureScratchProject`). */
@@ -33,7 +35,12 @@ class ScratchProjectError extends Error {
 }
 
 /** T3's `makeScratchFolder`: recursive, and called on EVERY ensure — a deleted Scratch folder must still run threads. */
-async function makeScratchFolder(folder: string): Promise<void> {
+async function makeScratchFolder(folder: string, env?: ExecutionEnv, context: Context = BACKGROUND_CONTEXT): Promise<void> {
+	if (env !== undefined) {
+		const made = await env.createDir(folder, { recursive: true }, context);
+		if (!made.ok) throw new ScratchFolderError(made.error);
+		return;
+	}
 	try {
 		await mkdir(folder, { recursive: true });
 	} catch (cause) {
@@ -46,8 +53,8 @@ async function makeScratchFolder(folder: string): Promise<void> {
  * fresh id. A create that loses the race is the `ProjectConflictError` T3 maps to the winner's id, so the answer is
  * always the one project rooted at `root` — idempotent by state, not by a receipt store (design.md, Invariants).
  */
-export async function ensureScratchProject(registry: ProjectRegistry, root: string): Promise<{ readonly projectId: string }> {
-	await makeScratchFolder(root);
+export async function ensureScratchProject(registry: ProjectRegistry, root: string, env?: ExecutionEnv, context: Context = BACKGROUND_CONTEXT): Promise<{ readonly projectId: string }> {
+	await makeScratchFolder(root, env, context);
 	const existing = registry.list().find((project) => project.cwd === root);
 	if (existing !== undefined) return { projectId: existing.id };
 	const minted = randomUUID();
@@ -78,10 +85,10 @@ function folderWords(text: string): string {
  * the id's tail, a taken short name falls back to the full id, later attempts add a fresh random suffix. Each folder
  * is created WITHOUT `recursive`, so creating it IS the claim — of two racers for one name, one gets `EEXIST` and moves on.
  */
-export async function claimScratchThreadFolder(root: string, threadId: string, text: string): Promise<string> {
+export async function claimScratchThreadFolder(root: string, threadId: string, text: string, env?: ExecutionEnv, context: Context = BACKGROUND_CONTEXT): Promise<string> {
 	// The root first, recursively (T3's `makeScratchFolder(root)` before the claim): a deleted Scratch folder must still
 	// run threads, and the claim below is non-recursive.
-	await makeScratchFolder(root);
+	await makeScratchFolder(root, env, context);
 	const date = new Date().toISOString().slice(0, 10);
 	const words = folderWords(text);
 	const id = threadId.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -89,6 +96,20 @@ export async function claimScratchThreadFolder(root: string, threadId: string, t
 	const full = folderFor(id);
 	for (let attempt = 1; ; attempt++) {
 		const folder = attempt === 1 ? folderFor(id.slice(-8)) : attempt === 2 ? full : `${full}-${randomUUID().slice(0, 8)}`;
+		if (env !== undefined) {
+			const exists = await env.exists(folder, context);
+			if (!exists.ok) throw new ScratchFolderError(exists.error);
+			if (exists.value) continue;
+			const made = await env.createDir(folder, { recursive: false }, context);
+			if (!made.ok) {
+				// A lost race is the claim protocol: another creator owns this name. Without errno on the wire, ask the
+				// environment whether the path now exists; a real failure rethrows.
+				const now = await env.exists(folder, context);
+				if (now.ok && now.value) continue;
+				throw new ScratchFolderError(made.error);
+			}
+			return folder;
+		}
 		try {
 			await mkdir(folder);
 			return folder;

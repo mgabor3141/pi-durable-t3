@@ -68,7 +68,8 @@ export function startFacet(deps: {
 		});
 		httpServer.once("error", (error) => reject(error));
 	});
-	const files = new WorkspaceFiles({ roots: () => bridge.workspaceRoots() });
+	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
+	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, scheduledTasks, tailscale: deps.tailscale, files })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
