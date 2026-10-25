@@ -218,7 +218,9 @@ export class Bridge {
 	ensureScratch(): Promise<{ readonly projectId: string }> {
 		const root = this.config.scratchDir;
 		if (root === undefined) throw new CommandError("This host has no Scratch folder (no scratch dir is configured).");
-		return ensureScratchProject(this.config.registry, root, this.config.env, this.config.context ?? BACKGROUND_CONTEXT);
+		const env = this.config.env;
+		if (env === undefined) throw new CommandError("This host has no execution environment.");
+		return ensureScratchProject(this.config.registry, root, env, this.config.context ?? BACKGROUND_CONTEXT);
 	}
 
 	/** T3's `ManagedProjectFolders.isScratchProject`: the project is rooted at the scratch dir. */

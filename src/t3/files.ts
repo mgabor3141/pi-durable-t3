@@ -498,6 +498,10 @@ export class WorkspaceFiles {
 		if (!isInsideRealRoot(realWorkspaceRoot.value, realTargetPath)) {
 			throw new FileError("resolved_path_outside_root", `Workspace file '${input.relativePath}' resolves outside workspace root '${cwd}': ${realTargetPath}`, { resolvedPath: realTargetPath, resolvedWorkspaceRoot: realWorkspaceRoot.value });
 		}
+		// The lexical guard above cannot see a link's target: check the real path too, so `hooks -> .git/hooks` is refused.
+		if (inGitFolder(realTargetPath)) {
+			throw new FileError("resolved_path_outside_root", `Workspace file '${input.relativePath}' resolves outside workspace root '${cwd}': ${realTargetPath}`, { resolvedPath: realTargetPath, resolvedWorkspaceRoot: realWorkspaceRoot.value });
+		}
 		const directory = dirname(realTargetPath);
 		const made = await this.#env.createDir(directory, { recursive: true }, this.#context);
 		if (!made.ok) {

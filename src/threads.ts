@@ -267,9 +267,13 @@ export class Threads {
 		// anything else is a refusal naming the path (design.md, Invariants).
 		let cwdIsDirectory = true;
 		if (this.#env !== undefined) {
-			const info = await this.#env.fileInfo(cwd, this.#context);
-			if (info.ok) cwdIsDirectory = info.value.kind === "directory";
-			else if (info.error.code !== "not_found") throw hostError("unknown_project", `thread folder is not readable: ${cwd} (${info.error.message})`);
+			// A project may be registered at a symlink; `fileInfo` is an lstat, so resolve first and compare the target.
+			const canonical = await this.#env.canonicalPath(cwd, this.#context);
+			if (canonical.ok) {
+				const info = await this.#env.fileInfo(canonical.value, this.#context);
+				if (info.ok) cwdIsDirectory = info.value.kind === "directory";
+				else if (info.error.code !== "not_found") throw hostError("unknown_project", `thread folder is not readable: ${cwd} (${info.error.message})`);
+			} else if (canonical.error.code !== "not_found") throw hostError("unknown_project", `thread folder is not readable: ${cwd} (${canonical.error.message})`);
 		} else {
 			try {
 				cwdIsDirectory = statSync(cwd).isDirectory();

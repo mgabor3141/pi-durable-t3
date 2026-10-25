@@ -120,6 +120,10 @@ describe("containment", () => {
 		const { root, files } = await fixture();
 		await mkdir(join(root, ".git"), { recursive: true });
 		expect(((await failure(files.writeFile({ cwd: root, relativePath: ".git/config", contents: "[core]" }))) as FileError).failure).toBe("resolved_path_outside_root");
+		// The named path hides the target: a link into .git must be refused after canonicalization too.
+		await mkdir(join(root, ".git", "hooks"), { recursive: true });
+		await symlink(join(root, ".git", "hooks"), join(root, "hooks"));
+		expect(((await failure(files.writeFile({ cwd: root, relativePath: "hooks/pre-commit", contents: "#!/bin/sh" }))) as FileError).failure).toBe("resolved_path_outside_root");
 	});
 });
 
