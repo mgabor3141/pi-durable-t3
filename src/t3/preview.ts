@@ -123,6 +123,7 @@ class PreviewTab {
 	#frameWaiters = 0;
 	#frameSessionId: number | undefined;
 	#pageHooks = false;
+	#pageSize: { width: number; height: number } | undefined;
 
 	constructor(owner: PreviewSessions, snapshot: PreviewSessionSnapshot) {
 		this.#owner = owner;
@@ -151,6 +152,8 @@ class PreviewTab {
 		this.page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
 		this.page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 		this.cdp = await this.context.newCDPSession(this.page);
+		// Browserless opens pages at its own window size; a CDP override is what makes the screencast match the tab.
+		await this.#setViewport(size.width, size.height);
 		this.cdp.on("Page.screencastFrame", (event) => this.#onScreencastFrame(event));
 		this.#wirePage();
 		const loading = this.snapshot.navStatus;
@@ -220,11 +223,15 @@ class PreviewTab {
 		}
 	}
 
+	async #setViewport(width: number, height: number): Promise<void> {
+		this.#pageSize = { width, height };
+		await this.cdp?.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }).catch(() => undefined);
+	}
+
 	async #applyViewport(): Promise<void> {
-		const page = this.page;
 		const size = viewportSize(this.snapshot.viewport);
-		if (page === undefined || size === undefined) return;
-		await page.setViewportSize(size).catch(() => undefined);
+		if (this.page === undefined || size === undefined) return;
+		await this.#setViewport(size.width, size.height);
 	}
 
 	async #startScreencast(): Promise<void> {
@@ -288,7 +295,7 @@ class PreviewTab {
 	}
 
 	#sendViewport(viewer: PreviewViewerImpl): void {
-		const size = this.page?.viewportSize() ?? viewportSize(this.snapshot.viewport) ?? DEFAULT_VIEWPORT;
+		const size = this.#pageSize ?? viewportSize(this.snapshot.viewport) ?? DEFAULT_VIEWPORT;
 		viewer.sendJson({ type: "viewport", width: size.width, height: size.height });
 	}
 
@@ -411,7 +418,7 @@ class PreviewTab {
 				if (typeof message.width !== "number" || typeof message.height !== "number") return;
 				const width = Math.max(1, Math.round(message.width));
 				const height = Math.max(1, Math.round(message.height));
-				await page.setViewportSize({ width, height });
+				await this.#setViewport(width, height);
 				this.#owner.update(this, { viewport: { _tag: "freeform", width, height } });
 				this.#sendViewportAll();
 				return;
