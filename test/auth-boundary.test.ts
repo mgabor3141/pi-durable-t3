@@ -22,6 +22,8 @@ afterAll(async () => {
 
 const PROTECTED: Array<[string, string]> = [
 	["POST", "/api/auth/websocket-ticket"],
+	["POST", "/api/auth/websocket-ticket/rpc"],
+	["POST", "/api/auth/websocket-ticket/media"],
 	["POST", "/api/auth/pairing-token"],
 	["GET", "/api/auth/pairing-links"],
 	["POST", "/api/auth/pairing-links/revoke"],

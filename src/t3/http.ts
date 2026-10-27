@@ -60,7 +60,7 @@ import { makePreviewStreamHandler } from "./preview-http.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
-export const SERVER_VERSION = "0.1.1";
+export const SERVER_VERSION = "0.1.3";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
@@ -431,9 +431,23 @@ export function makeServerLayer(deps: {
 				return HttpServerResponse.jsonUnsafe(encode(AuthBrowserSessionResult, { authenticated: true, ...authScopeResponse(issued.scopes as Any), sessionMethod: "browser-session-cookie", expiresAt: DateTime.makeUnsafe(issued.session.expiresAt) }), { headers: { "set-cookie": sessionCookieHeader(issued.token, issued.session.expiresAt), "cache-control": "no-store", pragma: "no-cache" } });
 			}),
 		),
+		// The bare path is what T3 before ticket audiences called; `/:use` names the audience and is what the current
+		// client asks for. Both mint the same one-shot ticket: this host's tickets are short-lived and one-shot, and the
+		// session that mints them is the same session the stream upgrades with.
 		HttpRouter.add(
 			"POST",
 			"/api/auth/websocket-ticket",
+			authorized((request) =>
+				Effect.sync(() => {
+					const token = resolveSession(request)!;
+					const { ticket, expiresAt } = auth.issueTicket(token.hash);
+					return json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
+				}),
+			),
+		),
+		HttpRouter.add(
+			"POST",
+			"/api/auth/websocket-ticket/:use",
 			authorized((request) =>
 				Effect.sync(() => {
 					const token = resolveSession(request)!;

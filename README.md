@@ -31,7 +31,7 @@ The build on install needs the package's own devDependencies, so `pnpm install -
 That reuses the built package from the store and drops the dev tools. Once published, `pnpm add
 @mgabor3141/pi-durable-t3` needs neither.
 
-The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.1**) ships in the package, and the bridge serves
+The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.3**) ships in the package, and the bridge serves
 it. Node `>=22.19.0`. The public API is [listed below](#public-api); how to use it is
 [here](#attach-it-to-your-own-agent). For a
 whole agent to start from, copy the [example agent](examples/coding-agent/#use-it-as-a-template).

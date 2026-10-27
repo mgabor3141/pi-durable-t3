@@ -89,6 +89,19 @@ function viewportSize(setting: PreviewViewportSetting | undefined): { width: num
 	return { width: setting.width, height: setting.height };
 }
 
+/** The device toolbar's selected viewport: fill, freeform, or a preset (kept as freeform here). */
+function viewportSetting(value: unknown): PreviewViewportSetting | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const setting = value as Record<string, unknown>;
+	if (setting._tag === "fill") return FILL_PREVIEW_VIEWPORT;
+	if ((setting._tag === "freeform" || setting._tag === "preset") && typeof setting.width === "number" && typeof setting.height === "number") {
+		const width = Math.max(1, Math.round(setting.width));
+		const height = Math.max(1, Math.round(setting.height));
+		return { _tag: "freeform", width, height };
+	}
+	return undefined;
+}
+
 function controlMessage(tab: PreviewTab, viewer: PreviewViewerImpl): Record<string, unknown> {
 	const dialog = tab.dialog;
 	return {
@@ -420,6 +433,15 @@ class PreviewTab {
 				const height = Math.max(1, Math.round(message.height));
 				await this.#setViewport(width, height);
 				this.#owner.update(this, { viewport: { _tag: "freeform", width, height } });
+				this.#sendViewportAll();
+				return;
+			}
+			case "viewport": {
+				// T3's device toolbar sends the selected setting; fill follows the panel through `resize` instead.
+				const setting = viewportSetting(message.setting);
+				if (setting === undefined) return;
+				if (setting._tag !== "fill") await this.#setViewport(setting.width, setting.height);
+				this.#owner.update(this, { viewport: setting });
 				this.#sendViewportAll();
 				return;
 			}
