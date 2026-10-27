@@ -70,6 +70,7 @@ const t3 = await attachT3(harness, {
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
+	preview,       // optional: { cdpUrl, token? } for T3's Browser panel; absent = preview.* stays unsupported
 	// optional: context, label, corsOrigins, tokenTtlSeconds, log
 });
 await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
@@ -80,6 +81,7 @@ await t3.close();
 ```
 
 - `env` is required: T3's file panel, project picker, project roots, Scratch folders and scripts use it. Its `cwd` is the root of every absolute path in the protocol. There is no harness-filesystem fallback. `stateDir` stays on the host: it holds bridge state, not workspace files.
+- `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused.
 - `attachT3` resolves once it is listening and rejects if it can't bind.
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
@@ -128,8 +130,9 @@ conversation shows as T3's subagent card with a read-only child thread; the exam
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
 and the tailnet name in the link `pair` prints). T3's file panel works inside a project's folder, through the execution environment: browse, open, edit and save (the agent may edit the same file, last write wins), quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
-Git, terminals and previews (including image and PDF previews of files) are
-refused on purpose: the agent works in real folders with `bash`. Every call and its status:
+Git and terminals are refused on purpose: the agent works in real folders with `bash`. Image and PDF previews
+of workspace files are also refused. T3's Browser panel is available only when the host configures `preview`; it
+is a real browser tab, not a file viewer. Every call and its status:
 [`docs/capabilities.md`](docs/capabilities.md).
 
 Known limitations:
