@@ -16,6 +16,7 @@ import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
+import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
@@ -94,6 +95,8 @@ export type AttachT3Options = {
 	 * first message's seed and renames still work, and "Regenerate title" is refused.
 	 */
 	readonly titleThread?: TitleThread;
+	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
+	readonly preview?: PreviewBrowserConfig;
 	readonly log?: Logger;
 };
 
@@ -165,6 +168,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 			options.tailscaleServe === undefined
 				? undefined
 				: { port: options.tailscaleServe.port ?? DEFAULT_TAILSCALE_SERVE_PORT },
+		...(options.preview === undefined ? {} : { preview: options.preview }),
 	};
 	const tailscale = makeTailscaleCli();
 	const facet = startFacet({ host: server, catalog, log, config, tailscale });

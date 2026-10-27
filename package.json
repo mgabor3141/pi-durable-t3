@@ -1,54 +1,69 @@
 {
-	"name": "@mgabor3141/pi-durable-t3",
-	"version": "0.1.0",
-	"description": "T3 Code as a frontend for a pi-durable Harness: attachT3(harness, options).",
-	"license": "MIT",
-	"repository": { "type": "git", "url": "git+https://github.com/mgabor3141/pi-durable-t3.git" },
-	"packageManager": "pnpm@10.32.1",
-	"type": "module",
-	"engines": { "node": ">=22.19.0" },
-	"exports": {
-		".": { "types": "./dist/bridge.d.ts", "default": "./dist/bridge.js" },
-		"./package.json": "./package.json"
-	},
-	"files": ["dist", "web", "LICENSE", "THIRD_PARTY_LICENSES", "README.md"],
-	"scripts": {
-		"typecheck": "tsc --noEmit",
-		"test": "vitest run",
-		"test:watch": "vitest",
-		"start": "node --experimental-strip-types examples/coding-agent/src/host.ts",
-		"setup:t3": "bash dev/setup-t3.sh",
-		"build": "bash build/build.sh",
-		"prepare": "bash dev/setup-t3.sh && bash build/build.sh",
-		"smoke": "bash dev/browser-smoke.sh"
-	},
-	"dependencies": {
-		"@effect/platform-node": "4.0.5",
-		"@effect/platform-node-shared": "4.0.5",
-		"@ff-labs/fff-node": "0.11.0",
-		"effect": "4.0.5",
-		"typebox": "1.3.27"
-	},
-	"peerDependencies": {
-		"@earendil-works/chord": "^1.4.0",
-		"@earendil-works/pi-ai": "^1.4.0",
-		"@earendil-works/pi-durable": "^1.4.0"
-	},
-	"devDependencies": {
-		"@earendil-works/chord": "1.4.0",
-		"@earendil-works/pi-ai": "1.4.0",
-		"@earendil-works/pi-coding-agent": "1.4.0",
-		"@earendil-works/pi-durable": "1.4.0",
-		"@types/node": "22.19.19",
-		"playwright-core": "1.56.1",
-		"smol-toml": "1.9.0",
-		"tsdown": "0.23.1",
-		"typescript": "7.0.2",
-		"vitest": "4.1.11"
-	},
-	"pnpm": {
-		"overrides": {
-			"effect": "4.0.5"
-		}
-	}
+  "name": "@mgabor3141/pi-durable-t3",
+  "version": "0.1.0",
+  "description": "T3 Code as a frontend for a pi-durable Harness: attachT3(harness, options).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgabor3141/pi-durable-t3.git"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/bridge.d.ts",
+      "default": "./dist/bridge.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "web",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node --experimental-strip-types examples/coding-agent/src/host.ts",
+    "setup:t3": "bash dev/setup-t3.sh",
+    "build": "bash build/build.sh",
+    "prepare": "bash dev/setup-t3.sh && bash build/build.sh",
+    "smoke": "bash dev/browser-smoke.sh"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.5",
+    "@effect/platform-node-shared": "4.0.5",
+    "@ff-labs/fff-node": "0.11.0",
+    "effect": "4.0.5",
+    "typebox": "1.3.27",
+    "playwright-core": "1.64.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/chord": "^1.4.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-durable": "^1.4.0"
+  },
+  "devDependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
+    "@types/node": "22.19.19",
+    "playwright-core": "1.64.1",
+    "smol-toml": "1.9.0",
+    "tsdown": "0.23.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  },
+  "pnpm": {
+    "overrides": {
+      "effect": "4.0.5"
+    }
+  }
 }

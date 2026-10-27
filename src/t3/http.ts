@@ -55,6 +55,8 @@ import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import type { TailscaleCli } from "./tailscale.ts";
+import type { PreviewSessions } from "./preview.ts";
+import { makePreviewStreamHandler } from "./preview-http.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -63,7 +65,7 @@ export const SERVER_VERSION = "0.1.1";
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
 
-function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnvironmentDescriptor {
+function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSessions | undefined): () => ExecutionEnvironmentDescriptor {
 	const os = platform() === "darwin" ? "darwin" : platform() === "linux" ? "linux" : platform() === "win32" ? "windows" : "unknown";
 	const cpu = arch() === "arm64" ? "arm64" : arch() === "x64" ? "x64" : "other";
 	return () =>
@@ -79,6 +81,8 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore): () => ExecutionEnviron
 				serverResolvedCommandContext: true,
 				// The web app offers "Regenerate title" only when this is true: only with the integrator's generator.
 				threadTitleRegeneration: bridge.config.titleThread !== undefined,
+				// T3's preview panel uses the server browser when this is true; the stream route is below.
+				serverBrowser: preview !== undefined,
 			},
 		}) as Any;
 }
@@ -228,10 +232,11 @@ export function makeServerLayer(deps: {
 	scheduledTasks: ScheduledTasks;
 	tailscale: TailscaleCli;
 	files: WorkspaceFiles;
+	preview: PreviewSessions | undefined;
 }) {
-	const { bridge, auth, log, httpServer, attachments } = deps;
-	const descriptor = makeDescriptor(bridge, auth);
-	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale });
+	const { bridge, auth, log, httpServer, attachments, preview } = deps;
+	const descriptor = makeDescriptor(bridge, auth, preview);
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
@@ -269,6 +274,18 @@ export function makeServerLayer(deps: {
 		const cookie = request.cookies[SESSION_COOKIE_NAME];
 		if (cookie === undefined || !cookieOriginAllowed(request)) return undefined;
 		return auth.verifySessionToken(cookie);
+	};
+
+	// A media request (WebSocket or `<img>`) authenticates like the `/ws` upgrade: a one-shot ticket, else the
+	// bearer/cookie session. T3's preview stream uses a ticket minted over authenticated HTTP.
+	const resolveMediaSession = (request: HttpServerRequest.HttpServerRequest): ReturnType<typeof resolveSession> => {
+		const url = new URL(request.url, "http://bridge");
+		const ticketHash = auth.consumeTicket(url.searchParams.get("wsTicket"));
+		if (ticketHash !== undefined) {
+			const session = auth.sessionOfTokenHash(ticketHash);
+			return session;
+		}
+		return resolveSession(request);
 	};
 
 	const authorized = <A, E, R>(
@@ -578,6 +595,7 @@ export function makeServerLayer(deps: {
 				});
 			}),
 		),
+		...(preview === undefined ? [] : [HttpRouter.add("GET", "/api/preview-stream/*", makePreviewStreamHandler({ auth, preview, resolveSession: resolveMediaSession, log }))]),
 		HttpRouter.add(
 			"GET",
 			"/ws",

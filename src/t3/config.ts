@@ -5,6 +5,7 @@ import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
 import type { TitleThread } from "./title-thread.ts";
+import type { PreviewBrowserConfig } from "./preview-config.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
@@ -31,6 +32,8 @@ export interface FacetConfig {
 	readonly tailscaleServe?: { readonly port: number };
 	/** Title generation, delegated to the integrator. Absent: seeds and renames work, "Regenerate title" is refused. */
 	readonly titleThread?: TitleThread;
+	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
+	readonly preview?: PreviewBrowserConfig;
 }
 
 /** The fully-assembled facet config: the integrator's static fields plus the two live sources of truth. */

@@ -4,6 +4,8 @@ import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
 	AuthFilesystemReadScope,
+	AuthPreviewOperateScope,
+	AuthOrchestrationReadScope,
 	AuthFilesystemWriteScope,
 	authScopeRequiredResponse,
 	EnvironmentAuthorizationError,
@@ -52,6 +54,8 @@ import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from ".
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
+import { PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
+import type { PreviewSessions } from "./preview.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -126,6 +130,7 @@ interface RpcDeps {
 	readonly attachments: AttachmentStore;
 	readonly scheduledTasks: ScheduledTasks;
 	readonly tailscale: TailscaleCli;
+	readonly preview: PreviewSessions | undefined;
 	readonly log: Logger;
 }
 
@@ -205,7 +210,7 @@ const scheduled = <A>(run: () => Promise<A>) =>
  * (`CurrentAuthSession`); a grant without the scope is refused with the contract's `EnvironmentAuthorizationError`, the
  * error T3's middleware raises — the client shows it as a missing permission.
  */
-const withScope = <A, E>(scope: typeof AuthFilesystemReadScope | typeof AuthFilesystemWriteScope, run: () => Effect.Effect<A, E>) =>
+const withScope = <A, E>(scope: AuthEnvironmentScope, run: () => Effect.Effect<A, E>) =>
 	Effect.gen(function* () {
 		const { scopes } = yield* CurrentAuthSession;
 		if (!scopes.includes(scope)) {
@@ -227,6 +232,14 @@ const fileFailure = (error: unknown) =>
 export function makeRpcLayer(deps: RpcDeps) {
 	const { bridge, log } = deps;
 	const stubbed = new Set<string>();
+	const previewCall = <A>(run: () => Promise<A>) =>
+		Effect.tryPromise({ try: run, catch: (error) => error as Error }).pipe(
+			Effect.catch((error) =>
+				error instanceof PreviewInvalidUrlError || error instanceof PreviewSessionLookupError
+					? Effect.fail(error)
+					: Effect.die(error),
+			),
+		);
 	const noteStub = (tag: string) => {
 		if (stubbed.has(tag)) return;
 		stubbed.add(tag);
@@ -571,6 +584,23 @@ export function makeRpcLayer(deps: RpcDeps) {
 				(message) => new OrchestrationSearchThreadsError({ message }),
 			),
 	};
+
+	if (deps.preview !== undefined) {
+		const preview = deps.preview;
+		Object.assign(handlers, {
+			"preview.open": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(async () => preview.open(input))),
+			"preview.navigate": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.navigate(input))),
+			"preview.resize": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.resize(input))),
+			"preview.adjust": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.adjust(input))),
+			"preview.refresh": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.refresh(input))),
+			"preview.close": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.close(input))),
+			"preview.list": (input: Any) => withScope(AuthOrchestrationReadScope, () => Effect.sync(() => preview.list(input.threadId))),
+			"preview.clearProfile": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.clearProfile())),
+			"preview.reportProfiles": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.reportProfiles())),
+			"preview.reportStatus": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.reportStatus(input))),
+			subscribePreviewEvents: () => fromListener<Any>((emit) => preview.subscribe(emit)),
+		});
+	}
 
 	const all: Record<string, (payload: Any) => Any> = {};
 	for (const [tag, rpc] of WsRpcGroup.requests as unknown as Map<string, Any>) {

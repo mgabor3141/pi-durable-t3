@@ -11,6 +11,7 @@ import { AttachmentStore } from "./attachment-store.ts";
 import { Bridge } from "./bridge.ts";
 import type { BridgeConfig } from "./config.ts";
 import { makeServerLayer } from "./http.ts";
+import { PreviewSessions } from "./preview.ts";
 import type { Logger } from "./logging.ts";
 import { WorkspaceFiles } from "./files.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -43,6 +44,7 @@ export function startFacet(deps: {
 	const attachments = new AttachmentStore(join(config.stateDir, "attachments"), auth);
 
 	const bridge = new Bridge(config, log, host, attachments);
+	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);
 	// Opened at boot (a scheduled-tasks.json the host cannot read stops it here), polled while the facet runs.
 	const scheduledTasks = new ScheduledTasks({ stateDir: config.stateDir, dispatch: scheduledTaskDispatch(bridge), log });
 	bridge.start();
@@ -70,7 +72,7 @@ export function startFacet(deps: {
 	});
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, scheduledTasks, tailscale: deps.tailscale, files })) as Effect.Effect<never>);
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, scheduledTasks, tailscale: deps.tailscale, files, preview })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
@@ -94,6 +96,7 @@ export function startFacet(deps: {
 		close: async () => {
 			closing = true;
 			await scheduledTasks.stop();
+			await preview?.closeAll();
 			await files.close();
 			await bridge.close();
 			// Interrupting the launch fiber runs the server layer's finalizers, which close the listener and release the port.
