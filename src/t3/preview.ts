@@ -655,7 +655,8 @@ export class PreviewSessions {
 		});
 		if (tab.page !== undefined) {
 			if (input.hardReload === true) await tab.page.reload({ waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
-			if (input.clear !== undefined && tab.context !== undefined) await tab.context.clearCookies().catch(() => undefined);
+			if (input.clear === "cookies" && tab.context !== undefined) await tab.context.clearCookies().catch(() => undefined);
+			else if (input.clear === "cache") await tab.cdp?.send("Network.clearBrowserCache").catch(() => undefined);
 		}
 		await tab.applySetting();
 		return tab.snapshot;
