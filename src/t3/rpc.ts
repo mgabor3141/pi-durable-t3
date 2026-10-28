@@ -3,9 +3,6 @@
 import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
-	AssetWorkspaceAssetNotFoundError,
-	AssetWorkspaceAssetInspectionError,
-	AssetWorkspacePathValidationError,
 	AuthFilesystemReadScope,
 	AuthPreviewOperateScope,
 	AuthOrchestrationReadScope,
