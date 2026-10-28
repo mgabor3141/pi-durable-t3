@@ -168,13 +168,17 @@ Known limitations:
 ## Tests
 
 ```sh
-pnpm test        # no credentials, no network, never touches ~/.pi
+pnpm test        # serial: each file starts real hosts; no credentials, no network, never touches ~/.pi
 pnpm typecheck
 pnpm smoke       # T3's web app in Chromium: pairing, prompts, undo, crash resume, projects, Connections
 FACET_PORT=5070 dev/pack-proof.sh   # the packed tarball and a git install, each outside the repo, in a browser
 ```
 
 `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm test` also runs one real-model turn.
+
+The suite runs one file at a time on purpose. It starts real host processes and SQLite stores; a parallel run on a
+small host can exhaust memory and swap. Keep `fileParallelism: false` in `vitest.config.ts` unless the host has
+headroom, and do not add `--no-file-parallelism=false` by habit.
 
 Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents/skills/bump-pins`](.agents/skills/bump-pins/SKILL.md).
 

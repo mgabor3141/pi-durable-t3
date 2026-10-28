@@ -7,5 +7,10 @@ export default defineConfig({
 	test: {
 		environment: "node",
 		include: ["test/**/*.test.ts", "examples/**/*.test.ts"],
+		// Every file starts real hosts, SQLite stores and child processes. The default 16-way run can exhaust a small
+		// host's memory and swap before the first timeout; one file at a time keeps the peak bounded and fixed-port tests
+		// deterministic. Do not raise this without checking the host's headroom.
+		fileParallelism: false,
+		maxWorkers: 1,
 	},
 });
