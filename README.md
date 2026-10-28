@@ -130,9 +130,10 @@ conversation shows as T3's subagent card with a read-only child thread; the exam
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
 and the tailnet name in the link `pair` prints). T3's file panel works inside a project's folder, through the execution environment: browse, open, edit and save (the agent may edit the same file, last write wins), quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
-Git and terminals are refused on purpose: the agent works in real folders with `bash`. Image and PDF previews
-of workspace files are also refused. T3's Browser panel is available only when the host configures `preview`; it
-is a real browser tab, not a file viewer. Every call and its status:
+Git and terminals are refused on purpose: the agent works in real folders with `bash`. Workspace images, HTML and
+PDFs preview through signed asset URLs served from the execution environment; audio and video files preview the same
+way, and an HTML page's relative CSS, scripts, fonts and images load under its token. T3's Browser panel is available
+only when the host configures `preview`; it is a real browser tab, not a file viewer. Every call and its status:
 [`docs/capabilities.md`](docs/capabilities.md).
 
 Known limitations:

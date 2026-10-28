@@ -3,6 +3,9 @@
 import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
+	AssetWorkspaceAssetNotFoundError,
+	AssetWorkspaceAssetInspectionError,
+	AssetWorkspacePathValidationError,
 	AuthFilesystemReadScope,
 	AuthPreviewOperateScope,
 	AuthOrchestrationReadScope,
@@ -53,6 +56,7 @@ import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
+import type { WorkspaceAssets } from "./workspace-assets.ts";
 import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
 import { PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
 import type { PreviewSessions } from "./preview.ts";
@@ -128,6 +132,7 @@ interface RpcDeps {
 	readonly authDescriptor: Any;
 	readonly auth: AuthStore;
 	readonly attachments: AttachmentStore;
+	readonly assets: WorkspaceAssets;
 	readonly scheduledTasks: ScheduledTasks;
 	readonly tailscale: TailscaleCli;
 	readonly preview: PreviewSessions | undefined;
@@ -447,9 +452,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}),
 		"assets.createUrl": (input: Any) => {
 			const resource = input.resource;
-			// Only the `attachment` resource is served: every other asset resource names a host file (workspace/media/
-			// favicon/tool-output/github): the file panel reads text through `projects.readFile`, but serving a file by URL is not
-			// built (capabilities.md), so the client gets the contract's typed preview refusal rather than a fabricated URL.
+						if (resource?._tag === "workspace-file" || resource?._tag === "media-file" || resource?._tag === "draft-workspace-file") {
+				return Effect.tryPromise({ try: () => deps.assets.issue(resource), catch: (error) => error as Error });
+			}
+			// Favicon/tool-output/github resources are not served by this host: the file panel reads text through `projects.readFile`.
 			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource } as Any));
 			const minted = deps.attachments.mintAssetUrl({
 				attachmentId: resource.attachmentId,

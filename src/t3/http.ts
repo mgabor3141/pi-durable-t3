@@ -46,6 +46,7 @@ import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import { listClientSessions, listPairingLinks } from "./access.ts";
 import { type AuthStore, type ClientMetadata, PairingRateLimit } from "./auth.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
+import type { WorkspaceAssets } from "./workspace-assets.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
@@ -229,14 +230,15 @@ export function makeServerLayer(deps: {
 	log: Logger;
 	httpServer: Server;
 	attachments: AttachmentStore;
+	assets: WorkspaceAssets;
 	scheduledTasks: ScheduledTasks;
 	tailscale: TailscaleCli;
 	files: WorkspaceFiles;
 	preview: PreviewSessions | undefined;
 }) {
-	const { bridge, auth, log, httpServer, attachments, preview } = deps;
+	const { bridge, auth, log, httpServer, attachments, assets, preview } = deps;
 	const descriptor = makeDescriptor(bridge, auth, preview);
-	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview });
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
@@ -601,7 +603,8 @@ export function makeServerLayer(deps: {
 				if (slash <= 0) return HttpServerResponse.text("Not Found", { status: 404 });
 				const token = suffix.slice(0, slash);
 				const filename = decodeURIComponent(suffix.slice(slash + 1));
-				const asset = attachments.resolveAsset(token, filename);
+				const attachment = attachments.resolveAsset(token, filename);
+				const asset = attachment ?? (yield* Effect.promise(() => assets.resolve(token, filename).catch(() => null)));
 				if (asset === null) return HttpServerResponse.text("Not Found", { status: 404 });
 				return HttpServerResponse.uint8Array(asset.bytes, {
 					contentType: asset.mimeType,

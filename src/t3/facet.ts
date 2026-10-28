@@ -14,6 +14,7 @@ import { makeServerLayer } from "./http.ts";
 import { PreviewSessions } from "./preview.ts";
 import type { Logger } from "./logging.ts";
 import { WorkspaceFiles } from "./files.ts";
+import { WorkspaceAssets } from "./workspace-assets.ts";
 import type { ModelCatalog } from "./models.ts";
 import { ScheduledTasks, scheduledTaskDispatch } from "./scheduled-tasks.ts";
 import type { TailscaleCli } from "./tailscale.ts";
@@ -72,7 +73,8 @@ export function startFacet(deps: {
 	});
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, scheduledTasks, tailscale: deps.tailscale, files, preview })) as Effect.Effect<never>);
+	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, tailscale: deps.tailscale, files, preview })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
