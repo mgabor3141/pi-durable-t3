@@ -97,8 +97,16 @@ export class WorkspaceAssets {
 		return { root: realRoot, relativePath: relative(realRoot, realFile).replaceAll("\\", "/"), absolutePath: realFile };
 	}
 
+	async #isKnownRoot(root: string): Promise<boolean> {
+		const real = await this.#canonical(root);
+		if (real === null) return false;
+		for (const candidate of this.#roots()) if ((await this.#canonical(candidate)) === real) return true;
+		return false;
+	}
+
 	/** Resolve a workspace path: absolute paths are matched to a known root; a relative one is joined to `rootHint`. */
 	async #workspaceTarget(path: string, rootHint?: string): Promise<WorkspaceTarget | null> {
+		if (rootHint !== undefined && !(await this.#isKnownRoot(rootHint))) return null;
 		const roots = rootHint === undefined ? this.#roots() : [rootHint];
 		for (const root of roots) {
 			const candidate = isAbsolute(path) ? path : join(root, path);
