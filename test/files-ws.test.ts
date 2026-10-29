@@ -1,5 +1,6 @@
-// The file calls on the wire, against a real host: T3's typed errors (never a defect), the roots a call may name, and
-// T3's scope split — a client granted `filesystem:read` only reads; one granted `filesystem:write` too edits.
+// The file calls on the wire, against a real host: T3's typed errors (never a defect), environment-wide reads,
+// writes limited to a registered root, and T3's scope split — a client granted `filesystem:read` only reads; one
+// granted `filesystem:write` too edits.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,12 +59,13 @@ it("serves the file panel's calls to a full-scope client, with typed refusals", 
 
 		// Refusals are the contract's own tagged errors (exitError throws on a defect).
 		expect(exitError(await ws.call("projects.readFile", { cwd: project, relativePath: "../../../etc/passwd" }), "read ..")).toMatchObject({ _tag: "ProjectReadFileError", failure: "workspace_path_outside_root" });
-		expect(exitError(await ws.call("projects.readFile", { cwd: project, relativePath: "/etc/passwd" }), "read absolute")).toMatchObject({ _tag: "ProjectReadFileError", failure: "workspace_path_outside_root" });
-		expect(exitError(await ws.call("projects.readFile", { cwd: "/etc", relativePath: "passwd" }), "read unknown root")).toMatchObject({ _tag: "ProjectReadFileError", failure: "workspace_path_outside_root" });
+		expect((exitValue(await ws.call("projects.readFile", { cwd: project, relativePath: join(root, "config.toml") }), "read absolute") as { contents: string }).contents).toContain("listen");
+		const outsideRead = exitValue(await ws.call("projects.readFile", { cwd: root, relativePath: "config.toml" }), "read outside cwd") as { contents: string };
+		expect(outsideRead.contents).toContain("listen");
 		expect(exitError(await ws.call("projects.writeFile", { cwd: "/tmp", relativePath: "x", contents: "x" }), "write unknown root")).toMatchObject({ _tag: "ProjectWriteFileError", failure: "workspace_path_outside_root" });
-		expect(exitError(await ws.call("projects.listEntries", { cwd: "/etc", directoryPath: "" }), "list unknown root")).toMatchObject({ _tag: "ProjectListEntriesError", failure: "workspace_root_not_found" });
-		expect(exitError(await ws.call("projects.searchEntries", { cwd: "/etc", query: "p", limit: 5 }), "search unknown root")).toMatchObject({ _tag: "ProjectSearchEntriesError", failure: "workspace_root_not_found" });
-		expect(exitError(await ws.call("projects.searchContents", { cwd: "/etc", query: "p", limit: 5, caseSensitive: false, wholeWord: false, useRegex: false }), "contents unknown root")).toMatchObject({ _tag: "ProjectSearchContentsError", failure: "workspace_root_not_found" });
+		expect(exitValue(await ws.call("projects.listEntries", { cwd: root, directoryPath: "" }), "list outside project")).toMatchObject({ entries: expect.arrayContaining([expect.objectContaining({ path: "config.toml", kind: "file" })]) });
+		expect(exitValue(await ws.call("projects.searchEntries", { cwd: root, query: "config", limit: 5 }), "search outside project")).toMatchObject({ entries: expect.arrayContaining([expect.objectContaining({ path: "config.toml", kind: "file" })]) });
+		expect(exitValue(await ws.call("projects.searchContents", { cwd: root, query: "listen", limit: 5, caseSensitive: false, wholeWord: false, useRegex: false }), "contents outside project")).toMatchObject({ matches: expect.arrayContaining([expect.objectContaining({ path: "config.toml", lineNumber: 1 })]) });
 		expect(exitError(await ws.call("projects.readFile", { cwd: project, relativePath: "missing.txt" }), "read missing")).toMatchObject({ _tag: "ProjectReadFileError", failure: "operation_failed" });
 	} finally {
 		ws.close();

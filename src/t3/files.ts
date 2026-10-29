@@ -3,13 +3,13 @@
 // WorkspaceEntries, WorkspaceSearchIndex, KnownWorkspaces) at the pinned release, and no more (docs/capabilities.md).
 //
 // Every read and write goes through the caller's `ExecutionEnv`, never `node:fs`: the file panel sees the same
-// environment the agent's `read`/`write`/`bash` see. A `cwd` must be a workspace root this host knows (a registered
-// project's root or a thread's working folder) for EVERY call; that scopes the panel, and the environment itself is
-// the boundary. T3's contract still talks in paths relative to the project root for file calls.
+// environment the agent's `read`/`write`/`bash` see. Reads, listings and searches may name any existing directory in
+// that environment; writes stay inside a registered project root or a thread's working folder. T3's contract still
+// talks in paths relative to the named `cwd` for file calls.
 //
 // Differences from T3, all deliberate (docs/capabilities.md, "File access"):
-//   - a `cwd` must be a workspace root this host knows for every call, not only writes;
-//   - an absolute (or `~/`) path is refused on read, where T3 reads it in place;
+//   - reads, listings and searches may name any existing directory, not only workspace roots;
+//   - an absolute read path is accepted; relative read paths stay confined to the named `cwd`;
 //   - files are written through the environment, so atomicity and mode preservation are the environment's business,
 //     not this layer's. A read-only file is refused as the environment refuses it.
 //
@@ -249,7 +249,7 @@ export interface WorkspaceFilesOptions {
 	readonly env: ExecutionEnv;
 	/** Invocation context for environment calls; default `BACKGROUND_CONTEXT`. */
 	readonly context?: Context;
-	/** The folders a client-named `cwd` may act in: every registered project's root and every thread's working folder. */
+	/** The folders a client-named `cwd` may write in: every registered project's root and every thread's working folder. Reads may name any existing directory. */
 	readonly roots: () => readonly string[];
 }
 
@@ -283,10 +283,9 @@ export class WorkspaceFiles {
 		return false;
 	}
 
-	/** `WorkspacePaths.normalizeWorkspaceRoot` for a known root; an unknown one is `workspace_root_not_found`. */
+	/** `WorkspacePaths.normalizeWorkspaceRoot` for any existing directory; a missing one is `workspace_root_not_found`. */
 	async #entriesRoot(cwd: string): Promise<string> {
 		const normalized = normalizeCwd(cwd);
-		if (!(await this.#isKnown(cwd))) throw new EntriesError("workspace_root_not_found", `Workspace root does not exist: ${normalized}`, { normalizedCwd: normalized });
 		const canonical = await this.#canonical(normalized);
 		const info = canonical.ok ? await this.#env.fileInfo(canonical.value, this.#context) : canonical;
 		if (!info.ok) {
@@ -297,7 +296,7 @@ export class WorkspaceFiles {
 		return normalized;
 	}
 
-	/** A file call on an unknown root is `workspace_path_outside_root`, as T3 maps its `UnknownWorkspaceError`. */
+	/** A write call on an unknown root is `workspace_path_outside_root`, as T3 maps its `UnknownWorkspaceError`. */
 	async #assertKnownFileRoot(cwd: string): Promise<void> {
 		if (!(await this.#isKnown(cwd))) {
 			throw new FileError("workspace_path_outside_root", `'${cwd}' is not a registered project or a thread's working folder.`);
@@ -423,27 +422,29 @@ export class WorkspaceFiles {
 	// --- projects.readFile --------------------------------------------------------------------------------------------
 
 	async readFile(input: { readonly cwd: string; readonly relativePath: string; readonly allowMissing?: boolean }): Promise<ProjectReadFileResult> {
-		await this.#assertKnownFileRoot(input.cwd);
 		const cwd = normalizeCwd(input.cwd);
 		const requested = input.relativePath.trim();
-		// T3 reads an absolute or `~/` host path in place; this host has no host-wide reads (capabilities.md).
-		if (requested.startsWith("~/") || requested === "~" || isAbsolute(requested)) {
-			throw new FileError("workspace_path_outside_root", `Workspace file path must be relative to the project root: ${input.relativePath}`);
-		}
-		const target = resolveWithinRoot(cwd, input.relativePath);
+		const absolute = isAbsolute(requested);
+		const target = absolute
+			? { absolutePath: resolve(requested), relativePath: toPosix(requested) }
+			: resolveWithinRoot(cwd, requested);
 		if (target === null) throw new FileError("workspace_path_outside_root", `Workspace file path must be relative to the project root: ${input.relativePath}`);
-		const realWorkspaceRoot = await this.#canonical(cwd).catch((cause: unknown) => {
-			throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, cause);
-		});
-		if (!realWorkspaceRoot.ok) throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, realWorkspaceRoot.error);
+		let realWorkspaceRootPath: string | undefined;
+		if (!absolute) {
+			const realWorkspaceRoot = await this.#canonical(cwd).catch((cause: unknown) => {
+				throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, cause);
+			});
+			if (!realWorkspaceRoot.ok) throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, realWorkspaceRoot.error);
+			realWorkspaceRootPath = realWorkspaceRoot.value;
+		}
 		let resolved: { path: string; exists: boolean };
 		try {
-			resolved = await this.#canonicalTarget(realWorkspaceRoot.value, target.absolutePath, input.allowMissing === true);
+			resolved = await this.#canonicalTarget(realWorkspaceRootPath ?? "", target.absolutePath, input.allowMissing === true);
 		} catch (cause) {
 			throw new FileError("operation_failed", `Workspace file operation 'realpath-target' failed at '${target.absolutePath}'.`, { resolvedPath: target.absolutePath, operation: "realpath-target", operationPath: target.absolutePath }, cause);
 		}
-		if (!isInsideRealRoot(realWorkspaceRoot.value, resolved.path)) {
-			throw new FileError("resolved_path_outside_root", `Workspace file '${input.relativePath}' resolves outside workspace root '${cwd}': ${resolved.path}`, { resolvedPath: resolved.path, resolvedWorkspaceRoot: realWorkspaceRoot.value });
+		if (realWorkspaceRootPath !== undefined && !isInsideRealRoot(realWorkspaceRootPath, resolved.path)) {
+			throw new FileError("resolved_path_outside_root", `Workspace file '${input.relativePath}' resolves outside workspace root '${cwd}': ${resolved.path}`, { resolvedPath: resolved.path, resolvedWorkspaceRoot: realWorkspaceRootPath });
 		}
 		const absent = { relativePath: target.relativePath, contents: "", byteLength: 0, truncated: false, exists: false };
 		if (!resolved.exists) return absent;

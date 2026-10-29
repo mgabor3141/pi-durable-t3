@@ -37,23 +37,26 @@ const failure = async (run: Promise<unknown>) => {
 };
 
 describe("roots", () => {
-	it("refuses a cwd that is not a known root, for every call", async () => {
+	it("reads, lists and searches any existing directory, but writes only in a known root", async () => {
 		const { base, outside, files } = await fixture();
+		expect((await files.readFile({ cwd: outside, relativePath: "secret.txt" })).contents).toBe("top secret\n");
+		expect((await files.list({ cwd: outside, directoryPath: "" })).entries).toEqual([{ path: "secret.txt", kind: "file" }]);
+		expect((await files.searchEntries({ cwd: outside, query: "secret", limit: 5 })).entries).toEqual([{ path: "secret.txt", kind: "file" }]);
+		expect((await files.searchContents({ cwd: outside, query: "secret", limit: 5, caseSensitive: false, wholeWord: false, useRegex: false })).matches).toHaveLength(1);
 		for (const cwd of [outside, base, "/etc", join(base, "nope")]) {
-			expect(((await failure(files.readFile({ cwd, relativePath: "secret.txt" }))) as FileError).failure).toBe("workspace_path_outside_root");
 			expect(((await failure(files.writeFile({ cwd, relativePath: "x.txt", contents: "x" }))) as FileError).failure).toBe("workspace_path_outside_root");
-			expect(((await failure(files.list({ cwd, directoryPath: "" }))) as EntriesError).failure).toBe("workspace_root_not_found");
-			expect(((await failure(files.searchEntries({ cwd, query: "a", limit: 5 }))) as EntriesError).failure).toBe("workspace_root_not_found");
-			expect(((await failure(files.searchContents({ cwd, query: "a", limit: 5, caseSensitive: false, wholeWord: false, useRegex: false }))) as EntriesError).failure).toBe("workspace_root_not_found");
 		}
+		expect(((await failure(files.list({ cwd: join(base, "nope"), directoryPath: "" }))) as EntriesError).failure).toBe("workspace_root_not_found");
 	});
 
-	it("knows a root by its real path, and a subfolder of a root is not a root", async () => {
+	it("reads through a real-path alias or a subfolder, but only the registered root may write", async () => {
 		const { base, root, files } = await fixture();
 		const alias = join(base, "alias");
 		await symlink(root, alias);
 		expect((await files.readFile({ cwd: alias, relativePath: "README.md" })).contents).toBe("hello\n");
-		expect(((await failure(files.readFile({ cwd: join(root, "src"), relativePath: "app.ts" }))) as FileError).failure).toBe("workspace_path_outside_root");
+		const subfolder = join(root, "src");
+		expect((await files.readFile({ cwd: subfolder, relativePath: "app.ts" })).contents).toContain("answer");
+		expect(((await failure(files.writeFile({ cwd: subfolder, relativePath: "x.txt", contents: "x" }))) as FileError).failure).toBe("workspace_path_outside_root");
 	});
 
 	it("accepts a thread's folder of its own as a root", async () => {
@@ -77,18 +80,19 @@ describe("roots", () => {
 });
 
 describe("containment", () => {
-	it("refuses `..`, an absolute path and `~/` as outside the root", async () => {
+	it("confines relative reads to the cwd, while absolute reads use the environment", async () => {
 		const { root, outside, files } = await fixture();
-		for (const relativePath of ["../outside/secret.txt", "src/../../outside/secret.txt", join(outside, "secret.txt"), "/etc/passwd", "~/secret.txt", "..", "."]) {
+		for (const relativePath of ["../outside/secret.txt", "src/../../outside/secret.txt", "..", "."]) {
 			expect(((await failure(files.readFile({ cwd: root, relativePath }))) as FileError).failure, `read ${relativePath}`).toBe("workspace_path_outside_root");
-			// A write names a path inside the root, so `~/x` is just a folder called `~` there, as in T3.
-			if (relativePath === "~/secret.txt") continue;
+		}
+		expect((await files.readFile({ cwd: root, relativePath: join(outside, "secret.txt") })).contents).toBe("top secret\n");
+		for (const relativePath of ["../outside/secret.txt", "src/../../outside/secret.txt", join(outside, "secret.txt"), "..", "."]) {
 			expect(((await failure(files.writeFile({ cwd: root, relativePath, contents: "x" }))) as FileError).failure, `write ${relativePath}`).toBe("workspace_path_outside_root");
 		}
 		await expect(readFile(join(outside, "secret.txt"), "utf8")).resolves.toBe("top secret\n");
 	});
 
-	it("refuses a symlink that leads out of the root, for a file and for a directory", async () => {
+	it("refuses a relative symlink that leads out of the cwd, for a file and for a directory", async () => {
 		const { root, outside, files } = await fixture();
 		await symlink(join(outside, "secret.txt"), join(root, "leak.txt"));
 		await symlink(outside, join(root, "leakdir"));
@@ -98,6 +102,7 @@ describe("containment", () => {
 			expect(error.context.resolvedWorkspaceRoot).toBeTruthy();
 			expect(((await failure(files.writeFile({ cwd: root, relativePath, contents: "pwn" }))) as FileError).failure).toBe("resolved_path_outside_root");
 		}
+		expect((await files.readFile({ cwd: root, relativePath: join(outside, "secret.txt") })).contents).toBe("top secret\n");
 		// A write through a symlinked directory must not create anything outside either.
 		expect(((await failure(files.writeFile({ cwd: root, relativePath: "leakdir/new/deep.txt", contents: "pwn" }))) as FileError).failure).toBe("resolved_path_outside_root");
 		expect(await readdir(outside)).toEqual(["secret.txt"]);
