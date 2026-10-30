@@ -770,7 +770,7 @@ export function projectThread(
 
 	const liveRuns = runs.filter((run) => run.status !== "rolled_back");
 	const latestRun = liveRuns.at(-1);
-	const activeRun = latestRun?.status === "running" ? latestRun : undefined;
+	const activeRun = liveRuns.findLast((run) => run.status === "running");
 	const lastVisibleMessage = messages.at(-1);
 	const lastUser = messages.findLast((message) => message.role === "user");
 	const shell: OrchestrationV2ThreadShell = {
