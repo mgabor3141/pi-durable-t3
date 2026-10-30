@@ -40,6 +40,6 @@ describe("preview sessions", () => {
 
 	it("an unknown tab is the contract's lookup error", async () => {
 		const preview = new PreviewSessions(config, nullLogger);
-		await expect(preview.navigate({ threadId: thread, tabId: "missing", url: "http://workspace:3000/" })).rejects.toBeInstanceOf(PreviewSessionLookupError);
+		await expect(preview.resize({ threadId: thread, tabId: "missing", viewport: { _tag: "fill" } })).rejects.toBeInstanceOf(PreviewSessionLookupError);
 	});
 });

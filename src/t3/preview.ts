@@ -15,9 +15,7 @@ import {
 	type PreviewCloseInput,
 	type PreviewEvent,
 	type PreviewListResult,
-	type PreviewNavigateInput,
 	type PreviewOpenInput,
-	type PreviewRefreshInput,
 	type PreviewReportStatusInput,
 	type PreviewResizeInput,
 	type PreviewSessionSnapshot,
@@ -651,17 +649,6 @@ export class PreviewSessions {
 		this.#publish({ type: "failed", threadId: tab.threadId, tabId: tab.tabId, createdAt: updatedAt, url, title, code: 0, description });
 	}
 
-	async navigate(input: PreviewNavigateInput): Promise<PreviewSessionSnapshot> {
-		const tab = this.require(input.threadId, input.tabId);
-		const url = normalizeUrl(input.url);
-		if (tab.page === undefined) {
-			this.update(tab, { navStatus: { _tag: "Loading", url, title: input.resolvedTitle ?? "" }, canGoBack: false, canGoForward: false });
-		} else {
-			await tab.navigate(url);
-		}
-		return tab.snapshot;
-	}
-
 	async resize(input: PreviewResizeInput): Promise<PreviewSessionSnapshot> {
 		const tab = this.require(input.threadId, input.tabId);
 		this.update(tab, { viewport: input.viewport });
@@ -682,11 +669,6 @@ export class PreviewSessions {
 		}
 		await tab.applySetting();
 		return tab.snapshot;
-	}
-
-	async refresh(input: PreviewRefreshInput): Promise<void> {
-		const tab = this.require(input.threadId, input.tabId);
-		await tab.page?.reload({ waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
 	}
 
 	async reportStatus(input: PreviewReportStatusInput): Promise<void> {

@@ -610,10 +610,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 		const preview = deps.preview;
 		Object.assign(handlers, {
 			"preview.open": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(async () => preview.open(input))),
-			"preview.navigate": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.navigate(input))),
 			"preview.resize": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.resize(input))),
 			"preview.adjust": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.adjust(input))),
-			"preview.refresh": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.refresh(input))),
 			"preview.close": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.close(input))),
 			"preview.list": (input: Any) => withScope(AuthOrchestrationReadScope, () => Effect.sync(() => preview.list(input.threadId))),
 			"preview.clearProfile": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.clearProfile())),
