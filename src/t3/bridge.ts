@@ -1201,6 +1201,16 @@ export class Bridge {
 		}
 	}
 
+	async startQueued(threadId: string, runId: string | undefined, requestId: string): Promise<void> {
+		this.#writable(threadId);
+		const release = this.acquire(threadId);
+		try {
+			await this.#call(threadId, (controller, _models, c) => controller.startQueued({ ...(runId === undefined ? {} : { runId }), requestId }, c));
+		} finally {
+			release();
+		}
+	}
+
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);

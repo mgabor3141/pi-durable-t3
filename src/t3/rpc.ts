@@ -289,7 +289,11 @@ export function makeRpcLayer(deps: RpcDeps) {
 				case "queued-message.promote-to-steer":
 					await bridge.promoteQueued(command.threadId, command.queuedRunId);
 					break;
+				case "queued-run.start":
+					await bridge.startQueued(command.threadId, command.runId, command.commandId);
+					break;
 				case "queue.resume":
+					await bridge.startQueued(command.threadId, undefined, command.commandId);
 					break;
 				case "thread.settle":
 					await bridge.settleThread(command.threadId);

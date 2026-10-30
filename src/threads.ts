@@ -27,7 +27,7 @@ import { type Harness, ToolTask } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
-import { withQueuedText } from "./t3/queued.ts";
+import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
@@ -412,6 +412,57 @@ export class Threads {
 		const result = await this.#harness.abortSubmission(submissionId, BACKGROUND_CONTEXT, conversationId);
 		if (result === "already_placed" || result === "settled" || result === "not_found") {
 			throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+		}
+	}
+
+	/** T3's "Send now" (`queued-run.start`) and `queue.resume`: start the named queued input (or the first) now, leaving
+	 * the others queued. pi has no "start this queued item" primitive, so remove the queued user items, submit the
+	 * selected one as a fresh run, then restore the others in place. */
+	async startQueued(threadId: string, runId: string | undefined, requestId: string): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const submissionId = runId === undefined ? undefined : this.#queuedSubmission(runId);
+		const held = await this.#harness.commit(async (tx) => {
+			// A read of the live run first: a Send now while a turn is live would only queue the message again.
+			const live = await tx.doc(LiveDoc, conversationId);
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			if (live.run !== undefined) throw hostError("turn_running", "a turn is running");
+			const candidates = inbox.items.filter((item) => item.mode !== "write");
+			if (candidates.length === 0) {
+				// `queue.resume` may arrive with nothing queued; there is nothing to do.
+				if (runId === undefined) return undefined;
+				throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+			}
+			const target = submissionId === undefined ? candidates[0] : candidates.find((item) => item.id === submissionId);
+			if (target === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+			const [input] = readQueuedInputs([target]);
+			if (input === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is not a user message`);
+			const rest = candidates.filter((item) => item.id !== target.id).map((item) => structuredClone(item));
+			// The selected submission becomes the new run; the others keep their queued submissions while they wait.
+			tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
+			for (let index = inbox.items.length - 1; index >= 0; index--) {
+				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
+			}
+			return { input, rest };
+		}, BACKGROUND_CONTEXT);
+		if (held === undefined) return;
+		const content = held.input.content;
+		const blocks = Array.isArray(content)
+			? content.filter((block): block is ContentBlock => typeof block === "object" && block !== null && (block as { type?: unknown }).type !== "text")
+			: undefined;
+		await this.submit({
+			threadId,
+			conversationId,
+			requestId,
+			message: held.input.text,
+			messageId: held.input.messageId,
+			...(blocks === undefined || blocks.length === 0 ? {} : { blocks }),
+			...(held.input.attachments.length === 0 ? {} : { attachments: held.input.attachments }),
+		}, undefined);
+		if (held.rest.length > 0) {
+			await this.#harness.commit(async (tx) => {
+				const inbox = await tx.doc(InboxDoc, conversationId);
+				inbox.items.push(...held.rest);
+			}, BACKGROUND_CONTEXT);
 		}
 	}
 

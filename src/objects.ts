@@ -142,6 +142,7 @@ export const PiController = local("pi.controller", {
 		cancelQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
 		editQueued: method(Type.Object({ runId: Type.String(), text: Type.String(), attachments: Type.Optional(Type.Array(AttachmentRecordSchema)) }), Type.Null()),
 		promoteQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
+		startQueued: method(Type.Object({ runId: Type.Optional(Type.String()), requestId: Type.String() }), Type.Null()),
 	},
 });
 
@@ -385,6 +386,14 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			promoteQueued: async (args) => {
 				try {
 					await threads.promoteQueued(threadId, args.runId);
+					return null;
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
+			startQueued: async (args) => {
+				try {
+					await threads.startQueued(threadId, args.runId, args.requestId);
 					return null;
 				} catch (error) {
 					throw toChordError(error);
