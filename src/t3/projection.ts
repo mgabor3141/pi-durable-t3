@@ -570,19 +570,6 @@ export function projectThread(
 			}
 		}
 		draft.steps.forEach((step, stepIndex) => {
-			if (step.kind === "pi.compaction") {
-				const message = firstMessage(step);
-				const at = message?.timestamp ?? requestedAt;
-				const summary = textOf(message?.role === "user" ? message.content : undefined);
-				turnItems.push({
-					...base(`ti-k${step.id}`, at, "completed", true),
-					title: "Context compacted",
-					type: "compaction",
-					driver: id(PROVIDER_DRIVER),
-					...(summary.length === 0 ? {} : { summary }),
-				} as Any);
-				return;
-			}
 			if (isUserEntry(step)) {
 				pushUser(step, "steer");
 				return;
@@ -606,6 +593,34 @@ export function projectThread(
 			);
 		}
 	});
+
+	// Compaction summaries are write entries between runs; project them as standalone compaction items so T3 can show
+	// the card and settle its “compacting” state even when the entry has no user turn of its own.
+	for (const entry of view?.entries ?? []) {
+		if (entry.kind !== "pi.compaction") continue;
+		const message = firstMessage(entry);
+		const at = message?.timestamp ?? meta.createdAt;
+		const summary = textOf(message?.role === "user" ? message.content : undefined);
+		turnItems.push({
+			id: id(`ti-k${entry.id}`),
+			threadId: id(threadId),
+			runId: null,
+			nodeId: null,
+			providerThreadId: id(providerThreadId),
+			providerTurnId: null,
+			nativeItemRef: null,
+			parentItemId: null,
+			ordinal: runs.length + 1,
+			status: "completed",
+			title: "Context compacted",
+			startedAt: time(at),
+			completedAt: time(at),
+			updatedAt: time(at),
+			type: "compaction",
+			driver: id(PROVIDER_DRIVER),
+			...(summary.length === 0 ? {} : { summary }),
+		} as Any);
+	}
 
 	// Queued follow-ups live in pi's inbox until a boundary places them. T3's queue reads them as runs, so project each
 	// follow-up as a queued run now; it disappears from here when the inbox item is placed and a real run replaces it.
