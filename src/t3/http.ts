@@ -82,6 +82,8 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				serverResolvedCommandContext: true,
 				// The web app offers "Regenerate title" only when this is true: only with the integrator's generator.
 				threadTitleRegeneration: bridge.config.titleThread !== undefined,
+				// T3's sidebar settlement: manual settle/un-settle is durable on the thread row.
+				threadSettlement: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
 			},

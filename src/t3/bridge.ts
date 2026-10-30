@@ -521,6 +521,9 @@ export class Bridge {
 			model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(thread?.parent?.threadId === undefined ? {} : { parentThreadId: thread.parent.threadId }),
+			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
+			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
+			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
 			subagents: new Map([...this.#subagents.values()].filter((ref) => ref.parentThreadId === threadId).map((ref) => [ref.taskId, ref])),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			titleRegeneration: this.#titleRequests.has(threadId)
@@ -1131,6 +1134,24 @@ export class Bridge {
 		}
 	}
 
+	/** T3's `thread.settle`: a durable sidebar settlement, reflected in the shell immediately. */
+	async settleThread(threadId: string): Promise<void> {
+		this.#writable(threadId);
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).settle({ threadId }, c));
+		this.#syncDirectory();
+		this.#titleChanged(threadId);
+	}
+
+	/** T3's `thread.unsettle`: put the thread back in the active section, durably. */
+	async unsettleThread(threadId: string): Promise<void> {
+		this.#writable(threadId);
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		await this.#host.root(async (c) => (await c.get(PiThreads, {})).unsettle({ threadId }, c));
+		this.#syncDirectory();
+		this.#titleChanged(threadId);
+	}
+
 	async interrupt(threadId: string): Promise<void> {
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
@@ -1169,6 +1190,16 @@ export class Bridge {
 		const release = this.acquire(threadId);
 		try {
 			await this.#call(threadId, (controller, _models, c) => controller.promoteQueued({ runId }, c));
+		} finally {
+			release();
+		}
+	}
+
+	async reorderQueued(threadId: string, runId: string, beforeRunId: string | null): Promise<void> {
+		this.#writable(threadId);
+		const release = this.acquire(threadId);
+		try {
+			await this.#call(threadId, (controller, _models, c) => controller.reorderQueued({ runId, beforeRunId }, c));
 		} finally {
 			release();
 		}

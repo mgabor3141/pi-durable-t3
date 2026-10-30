@@ -38,6 +38,9 @@ const ThreadSchema = Type.Object({
 	title: Type.String(),
 	createdAt: Type.Number(),
 	parent: Type.Optional(ParentSchema),
+	settledOverride: Type.Optional(Type.Union([Type.Literal("settled"), Type.Literal("active")])),
+	settledAt: Type.Optional(Type.Number()),
+	unsettledAt: Type.Optional(Type.Number()),
 });
 const ThreadsCell = Type.Object({
 	revision: Type.Number(),
@@ -108,6 +111,9 @@ export const PiThreads = local("pi.threads", {
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 		// Set a thread's title (a rename, a seed, a generated title); durable in the threads document.
 		rename: method(Type.Object({ threadId: Type.String(), title: Type.String() }), Type.Null()),
+		// T3's manual settlement; durable in the threads document.
+		settle: method(Type.Object({ threadId: Type.String(), settledAt: Type.Optional(Type.Number()) }), Type.Null()),
+		unsettle: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 		// T3's thread search over the threads the host has: a query and a limit, answered with T3's match shape (ms timestamps;
 		// the facet converts to ISO for the wire).
 		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
@@ -134,6 +140,7 @@ export const PiController = local("pi.controller", {
 		cancelQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
 		editQueued: method(Type.Object({ runId: Type.String(), text: Type.String(), attachments: Type.Optional(Type.Array(AttachmentRecordSchema)) }), Type.Null()),
 		promoteQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
+		reorderQueued: method(Type.Object({ runId: Type.String(), beforeRunId: Type.Union([Type.String(), Type.Null()]) }), Type.Null()),
 	},
 });
 
@@ -213,6 +220,24 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				rename: async (args, ctx) => {
 					try {
 						await threads.rename(args.threadId, args.title);
+						await publish(ctx);
+						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				settle: async (args, ctx) => {
+					try {
+						await threads.settle(args.threadId, args.settledAt);
+						await publish(ctx);
+						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				unsettle: async (args, ctx) => {
+					try {
+						await threads.unsettle(args.threadId);
 						await publish(ctx);
 						return null;
 					} catch (error) {
@@ -350,6 +375,14 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			promoteQueued: async (args) => {
 				try {
 					await threads.promoteQueued(threadId, args.runId);
+					return null;
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
+			reorderQueued: async (args) => {
+				try {
+					await threads.reorderQueued(threadId, args.runId, args.beforeRunId);
 					return null;
 				} catch (error) {
 					throw toChordError(error);

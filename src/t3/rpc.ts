@@ -80,8 +80,6 @@ const fromListener = <A>(
 const SIDEBAR_NO_OPS = new Set([
 	"thread.visit",
 	"thread.mark-unread",
-	"thread.settle",
-	"thread.unsettle",
 	"thread.auto-settle",
 	"thread.auto-settle.set",
 	"thread.pin",
@@ -291,7 +289,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 				case "queued-message.promote-to-steer":
 					await bridge.promoteQueued(command.threadId, command.queuedRunId);
 					break;
+				case "queued-run.reorder":
+					await bridge.reorderQueued(command.threadId, command.runId, command.beforeRunId);
+					break;
 				case "queue.resume":
+					break;
+				case "thread.settle":
+					await bridge.settleThread(command.threadId);
+					break;
+				case "thread.unsettle":
+					await bridge.unsettleThread(command.threadId);
 					break;
 				case "thread.model-selection.set":
 					await bridge.applySelection(command.threadId, command.modelSelection);

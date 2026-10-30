@@ -53,6 +53,10 @@ export type Thread = {
 	title: string;
 	createdAt: number;
 	parent?: ThreadParent;
+	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
+	settledOverride?: "settled" | "active";
+	settledAt?: number;
+	unsettledAt?: number;
 };
 
 /** The applied result of an undo, so a retried `requestId` returns the same fork instead of forking again. */
@@ -430,6 +434,51 @@ export class Threads {
 				entry.data = { ...(entry.data ?? {}), ...(attachments.length === 0 ? {} : { attachments: attachments.map((attachment) => ({ type: "image", ...attachment })) }) };
 				if (attachments.length === 0) delete entry.data.attachments;
 			}
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** T3's `thread.settle`: a durable manual settlement, keeping the first stamp when it is already settled. */
+	async settle(threadId: string, settledAt?: number): Promise<void> {
+		const at = settledAt ?? Date.now();
+		await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
+			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+			const already = thread.settledOverride === "settled";
+			thread.settledOverride = "settled";
+			thread.settledAt = already ? (thread.settledAt ?? at) : at;
+			delete thread.unsettledAt;
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. */
+	async unsettle(threadId: string): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
+			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+			const already = thread.settledOverride === "active";
+			thread.settledOverride = "active";
+			delete thread.settledAt;
+			thread.unsettledAt = already ? (thread.unsettledAt ?? Date.now()) : Date.now();
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** T3's `queued-run.reorder`: move one queued follow-up before another (or to the end), in the inbox's queue order. */
+	async reorderQueued(threadId: string, runId: string, beforeRunId: string | null): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const submissionId = this.#queuedSubmission(runId);
+		const beforeId = beforeRunId === null ? undefined : this.#queuedSubmission(beforeRunId);
+		await this.#harness.commit(async (tx) => {
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const index = inbox.items.findIndex((item) => item.id === submissionId && item.mode !== "write");
+			if (index < 0) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+			const target = beforeId === undefined
+				? inbox.items.length
+				: inbox.items.findIndex((item) => item.id === beforeId && item.mode !== "write");
+			if (target < 0) throw hostError("unknown_queued_message", `queued message ${beforeRunId} is no longer queued`);
+			const [item] = inbox.items.splice(index, 1);
+			inbox.items.splice(index < target ? target - 1 : target, 0, item!);
 		}, BACKGROUND_CONTEXT);
 	}
 

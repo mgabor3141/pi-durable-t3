@@ -57,6 +57,10 @@ export interface ThreadMeta {
 	readonly thinkingLevel?: string;
 	/** When this thread was promoted/forked from another, that thread's id (lineage → a "fork"). */
 	readonly parentThreadId?: string;
+	/** T3's manual settlement, durable on the thread row. */
+	readonly settledOverride?: "settled" | "active";
+	readonly settledAt?: number;
+	readonly unsettledAt?: number;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
 	/** The subagents this thread's tool calls own, by the owning call's task (`subagents.ts`): a call whose details name
@@ -739,8 +743,9 @@ export function projectThread(
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		archivedAt: null,
-		settledOverride: null,
-		settledAt: null,
+		settledOverride: meta.settledOverride ?? null,
+		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
+		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
 		lastVisitedAt: null,
 		deletedAt: null,
 		...(memory.rollbackRequestId === undefined ? {} : { rollbackRequestId: id(memory.rollbackRequestId) }),
@@ -817,8 +822,9 @@ export function projectThread(
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		archivedAt: null,
-		settledOverride: null,
-		settledAt: null,
+		settledOverride: meta.settledOverride ?? null,
+		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
+		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
 		deletedAt: null,
 	} as Any;
 
