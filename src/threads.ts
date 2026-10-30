@@ -18,6 +18,7 @@ import {
 	LiveDoc,
 	type ModelRef,
 	type Submission,
+	type SubmissionId,
 	type Tx,
 	UserEntry,
 	type UserInput,
@@ -26,6 +27,7 @@ import { type Harness, ToolTask } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
+import { withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
@@ -382,6 +384,64 @@ export class Threads {
 			}
 			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
 			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId }));
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** The head conversation a queued-message command edits, and the thread it belongs to. */
+	async #queueTarget(threadId: string): Promise<{ thread: Thread; conversationId: ConversationId }> {
+		const thread = await this.thread(threadId);
+		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+		return { thread, conversationId: thread.head as ConversationId };
+	}
+
+	/** The queued follow-up a T3 run id (`q<submissionId>`) names; a plain id addresses a submission directly. */
+	#queuedSubmission(runId: string): SubmissionId {
+		const value = runId.startsWith("q") ? runId.slice(1) : runId;
+		if (!/^[0-9]+$/.test(value)) throw hostError("unknown_queued_message", `not a queued message: ${runId}`);
+		return Number(value) as unknown as SubmissionId;
+	}
+
+	/** Cancel a queued follow-up: withdraw its submission, which removes it from the inbox and the queue row. */
+	async cancelQueued(threadId: string, runId: string): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const submissionId = this.#queuedSubmission(runId);
+		const result = await this.#harness.abortSubmission(submissionId, BACKGROUND_CONTEXT, conversationId);
+		if (result === "already_placed" || result === "settled" || result === "not_found") {
+			throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+		}
+	}
+
+	/** Edit a queued follow-up in place: keep its submission id and message id, replace the text, keep image blocks. */
+	async editQueued(
+		threadId: string,
+		runId: string,
+		text: string,
+		attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[],
+	): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const submissionId = this.#queuedSubmission(runId);
+		await this.#harness.commit(async (tx) => {
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const item = inbox.items.find((candidate) => candidate.id === submissionId);
+			if (item === undefined || item.mode === "write") throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+			item.content = withQueuedText(item.content, text) as never;
+			if (attachments !== undefined && item.entry !== undefined) {
+				const entry = item.entry as { kind: string; data?: Record<string, unknown> };
+				entry.data = { ...(entry.data ?? {}), ...(attachments.length === 0 ? {} : { attachments: attachments.map((attachment) => ({ type: "image", ...attachment })) }) };
+				if (attachments.length === 0) delete entry.data.attachments;
+			}
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/** Promote a queued follow-up to a steer: the next boundary places it in the active run. */
+	async promoteQueued(threadId: string, runId: string): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const submissionId = this.#queuedSubmission(runId);
+		await this.#harness.commit(async (tx) => {
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const item = inbox.items.find((candidate) => candidate.id === submissionId);
+			if (item === undefined || item.mode === "write") throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
+			item.mode = "steer";
 		}, BACKGROUND_CONTEXT);
 	}
 

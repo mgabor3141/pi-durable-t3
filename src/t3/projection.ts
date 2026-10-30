@@ -23,6 +23,7 @@ import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMes
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 
@@ -574,6 +575,48 @@ export function projectThread(
 				liveTools,
 			);
 		}
+	});
+
+	// Queued follow-ups live in pi's inbox until a boundary places them. T3's queue reads them as runs, so project each
+	// follow-up as a queued run now; it disappears from here when the inbox item is placed and a real run replaces it.
+	const queued = readQueuedInputs((view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items).filter((item) => item.mode === "followUp");
+	queued.forEach((item, index) => {
+		const ordinal = drafts.length + index + 1;
+		const queuedRunId = `q${item.submissionId}`;
+		const queuedNodeId = `nq${item.submissionId}`;
+		const requestedAt = meta.updatedAt;
+		runs.push({
+			id: id(queuedRunId),
+			threadId: id(threadId),
+			ordinal,
+			providerInstanceId: id(PROVIDER_INSTANCE_ID),
+			modelSelection,
+			providerThreadId: id(providerThreadId),
+			userMessageId: id(item.messageId),
+			rootNodeId: null,
+			activeAttemptId: null,
+			status: "queued",
+			queuePosition: index + 1,
+			requestedAt: time(requestedAt),
+			startedAt: null,
+			completedAt: null,
+			checkpointId: null,
+			contextHandoffId: null,
+		} as Any);
+		messages.push({
+			createdBy: "user",
+			creationSource: "web",
+			id: id(item.messageId),
+			threadId: id(threadId),
+			runId: id(queuedRunId),
+			nodeId: id(queuedNodeId),
+			role: "user",
+			text: item.text,
+			attachments: [...item.attachments],
+			streaming: false,
+			createdAt: time(requestedAt),
+			updatedAt: time(requestedAt),
+		} as Any);
 	});
 
 	// A subagent's thread carries the root node T3's provider-native children have (`runId: null`): the web app reads the

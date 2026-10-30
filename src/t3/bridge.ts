@@ -1144,6 +1144,36 @@ export class Bridge {
 		}
 	}
 
+	async cancelQueued(threadId: string, runId: string): Promise<void> {
+		this.#writable(threadId);
+		const release = this.acquire(threadId);
+		try {
+			await this.#call(threadId, (controller, _models, c) => controller.cancelQueued({ runId }, c));
+		} finally {
+			release();
+		}
+	}
+
+	async editQueued(threadId: string, runId: string, text: string, attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[]): Promise<void> {
+		this.#writable(threadId);
+		const release = this.acquire(threadId);
+		try {
+			await this.#call(threadId, (controller, _models, c) => controller.editQueued({ runId, text, ...(attachments === undefined ? {} : { attachments: [...attachments] }) }, c));
+		} finally {
+			release();
+		}
+	}
+
+	async promoteQueued(threadId: string, runId: string): Promise<void> {
+		this.#writable(threadId);
+		const release = this.acquire(threadId);
+		try {
+			await this.#call(threadId, (controller, _models, c) => controller.promoteQueued({ runId }, c));
+		} finally {
+			release();
+		}
+	}
+
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);

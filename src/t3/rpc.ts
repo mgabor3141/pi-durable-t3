@@ -282,6 +282,17 @@ export function makeRpcLayer(deps: RpcDeps) {
 				case "thread.stop":
 					await bridge.interrupt(command.threadId);
 					break;
+				case "queued-run.cancel":
+					await bridge.cancelQueued(command.threadId, command.runId);
+					break;
+				case "queued-run.edit":
+					await bridge.editQueued(command.threadId, command.runId, command.text, imageRecords(command.attachments));
+					break;
+				case "queued-message.promote-to-steer":
+					await bridge.promoteQueued(command.threadId, command.queuedRunId);
+					break;
+				case "queue.resume":
+					break;
 				case "thread.model-selection.set":
 					await bridge.applySelection(command.threadId, command.modelSelection);
 					break;

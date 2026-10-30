@@ -131,6 +131,9 @@ export const PiController = local("pi.controller", {
 		followUp: method(MessageArgs, SubmissionRef),
 		abort: method(AbortArgs, Type.Null()),
 		rewind: method(RewindArgs, ConversationRef),
+		cancelQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
+		editQueued: method(Type.Object({ runId: Type.String(), text: Type.String(), attachments: Type.Optional(Type.Array(AttachmentRecordSchema)) }), Type.Null()),
+		promoteQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
 	},
 });
 
@@ -324,6 +327,30 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			rewind: async (args) => {
 				try {
 					return { conversationId: await threads.rewind({ threadId, expectedHead: args.expectedHead, entryId: args.entryId, requestId: args.requestId }) };
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
+			cancelQueued: async (args) => {
+				try {
+					await threads.cancelQueued(threadId, args.runId);
+					return null;
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
+			editQueued: async (args) => {
+				try {
+					await threads.editQueued(threadId, args.runId, args.text, args.attachments);
+					return null;
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
+			promoteQueued: async (args) => {
+				try {
+					await threads.promoteQueued(threadId, args.runId);
+					return null;
 				} catch (error) {
 					throw toChordError(error);
 				}
