@@ -959,6 +959,12 @@ export class Bridge {
 		try {
 			const state = this.#state(input.threadId);
 			const head = await this.#awaitHead(state);
+			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run.
+			if (this.#summary(input.threadId)?.settledOverride !== undefined) {
+				await this.#host.root(async (c) => (await c.get(PiThreads, {})).wake({ threadId: input.threadId }, c));
+				this.#syncDirectory();
+				this.#titleChanged(input.threadId);
+			}
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();

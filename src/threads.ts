@@ -464,6 +464,19 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
+	/** T3's automatic un-settle on new activity: no explicit override remains, only a wake stamp. */
+	async wake(threadId: string): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
+			if (thread === undefined || thread.settledOverride === undefined) return;
+			const wasActive = thread.settledOverride === "active";
+			delete thread.settledOverride;
+			delete thread.settledAt;
+			if (!wasActive) thread.unsettledAt = Date.now();
+		}, BACKGROUND_CONTEXT);
+	}
+
 	/** T3's `queued-run.reorder`: move one queued follow-up before another (or to the end), in the inbox's queue order. */
 	async reorderQueued(threadId: string, runId: string, beforeRunId: string | null): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);

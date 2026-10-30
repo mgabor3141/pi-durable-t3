@@ -331,7 +331,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					break;
 				default:
 					if (!SIDEBAR_NO_OPS.has(command.type)) throw new CommandError(unsupportedMessage(command.type));
-					// Sidebar bookkeeping (settle, pin, visit, …) has no host state yet; accepting it changes nothing visible.
+					// Sidebar bookkeeping (pin, visit, …) has no host state yet; accepting it changes nothing visible.
 					log.info("command accepted without effect", { type: command.type });
 			}
 			return bridge.nextSequence();

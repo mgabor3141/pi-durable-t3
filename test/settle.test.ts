@@ -19,6 +19,13 @@ describe("thread settlement", () => {
 		const reopened = await restart(fixture);
 		expect((await reopened.threads.list()).find((thread) => thread.threadId === "t")).toMatchObject({ settledOverride: "settled", settledAt: stamp });
 
+		await reopened.threads.wake("t");
+		const woke = (await reopened.threads.list()).find((thread) => thread.threadId === "t")!;
+		expect(woke.settledOverride).toBeUndefined();
+		expect(woke.settledAt).toBeUndefined();
+		expect(woke.unsettledAt).toBeTypeOf("number");
+
+		await reopened.threads.settle("t");
 		await reopened.threads.unsettle("t");
 		const awake = (await reopened.threads.list()).find((thread) => thread.threadId === "t")!;
 		expect(awake.settledOverride).toBe("active");

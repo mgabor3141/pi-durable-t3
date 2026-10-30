@@ -114,6 +114,8 @@ export const PiThreads = local("pi.threads", {
 		// T3's manual settlement; durable in the threads document.
 		settle: method(Type.Object({ threadId: Type.String(), settledAt: Type.Optional(Type.Number()) }), Type.Null()),
 		unsettle: method(Type.Object({ threadId: Type.String() }), Type.Null()),
+		// T3's automatic un-settle: a new message wakes a settled thread without an explicit active override.
+		wake: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 		// T3's thread search over the threads the host has: a query and a limit, answered with T3's match shape (ms timestamps;
 		// the facet converts to ISO for the wire).
 		search: method(Type.Object({ query: Type.String(), limit: Type.Number() }), Type.Array(ThreadSearchMatchSchema)),
@@ -238,6 +240,15 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				unsettle: async (args, ctx) => {
 					try {
 						await threads.unsettle(args.threadId);
+						await publish(ctx);
+						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				wake: async (args, ctx) => {
+					try {
+						await threads.wake(args.threadId);
 						await publish(ctx);
 						return null;
 					} catch (error) {

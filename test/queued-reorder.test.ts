@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
-import { conversation, createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,6 +33,5 @@ describe("queued reorder", () => {
 			gate.release();
 			await idle(fixture.harness, thread.head);
 		}
-		await conversation(fixture.harness, thread.head);
 	});
 });
