@@ -20,11 +20,12 @@ describe("starting a queued message", () => {
 		const queued = await fixture.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "queued", message: "queued" }, "followUp");
 		release();
 		await idle(fixture.harness, thread.head);
-		const inboxBefore = await fixture.harness.snapshot(InboxDoc, thread.head);
+		const readInbox = async () => await fixture.harness.commit(async (tx) => JSON.parse(JSON.stringify(await tx.doc(InboxDoc, thread.head as never))), BACKGROUND_CONTEXT);
+		const inboxBefore = await readInbox();
 		expect(inboxBefore?.items).toMatchObject([{ id: queued.id, mode: "followUp", content: "queued" }]);
 		await fixture.threads.startQueued("t", `q${queued.id}`, "start");
 		await idle(fixture.harness, thread.head);
-		expect((await fixture.harness.snapshot(InboxDoc, thread.head))?.items).toEqual([]);
+		expect((await readInbox()).items).toEqual([]);
 		const entries = await (await conversation(fixture.harness, thread.head)).context(BACKGROUND_CONTEXT);
 		expect(JSON.stringify(entries.entries)).toContain("queued");
 	});

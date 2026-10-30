@@ -45,7 +45,7 @@ import { WsRpcGroup } from "@t3tools/contracts";
 import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import { listClientSessions, listPairingLinks } from "./access.ts";
 import { type AuthStore, type ClientMetadata, PairingRateLimit } from "./auth.ts";
-import type { AttachmentStore } from "./attachment-store.ts";
+import { ATTACHMENT_UPLOAD_ROUTE_PREFIX, type AttachmentStore } from "./attachment-store.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -86,6 +86,7 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				threadSettlement: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
+				attachmentUploads: true,
 			},
 		}) as Any;
 }
@@ -612,6 +613,20 @@ export function makeServerLayer(deps: {
 					contentType: asset.mimeType,
 					headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
 				});
+			}),
+		),
+		// The upload route (T3's `AttachmentUpload`): the signed URL is the credential, and the POST body is the file's
+		// exact bytes. The minted claims fix the id, mime type, and size, so this cannot write arbitrary content.
+		HttpRouter.add(
+			"POST",
+			`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/*`,
+			Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
+				const path = new URL(request.url, "http://bridge").pathname;
+				const token = path.slice(ATTACHMENT_UPLOAD_ROUTE_PREFIX.length + 1);
+				const body = yield* request.arrayBuffer.pipe(Effect.catch(() => Effect.succeed(new ArrayBuffer(0))));
+				const stored = attachments.storeUpload(token, Buffer.from(new Uint8Array(body)));
+				return stored.ok ? HttpServerResponse.empty({ status: 204 }) : json({ _tag: "AttachmentUploadError", message: stored.detail }, stored.status);
 			}),
 		),
 		...(preview === undefined ? [] : [HttpRouter.add("GET", "/api/preview-stream/*", makePreviewStreamHandler({ auth, preview, resolveSession: resolveMediaSession, log }))]),

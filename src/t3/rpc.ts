@@ -5,6 +5,7 @@ import {
 	AssetAttachmentNotFoundError,
 	AuthFilesystemReadScope,
 	AuthPreviewOperateScope,
+	AuthOrchestrationOperateScope,
 	AuthOrchestrationReadScope,
 	AuthFilesystemWriteScope,
 	authScopeRequiredResponse,
@@ -457,6 +458,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 						: new UsageReadError({ reason: "scanFailed", detail: (error as Error).message || "The usage scan failed.", cause: error }),
 			}),
 		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
+		"attachments.createUploadUrl": (input: Any) =>
+			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => deps.attachments.mintUpload(input))),
+		"attachments.delete": (input: Any) =>
+			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => { deps.attachments.deleteUpload(input.attachmentId); return null; })),
 		// Image attachments, the data-URL path (capabilities.md): the client sends the bytes inline, this host stores
 		// them under the bridge's dir and answers a persisted record; display is served by `assets.createUrl` + the
 		// `/api/assets/*` HTTP route (signature-authed, no bearer — like T3). The upload-URL path (`attachments.*`) is

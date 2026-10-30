@@ -111,3 +111,27 @@ describe("helpers", () => {
 		expect(inferImageExtension({ mimeType: "application/octet-stream", fileName: "x.xyz" })).toBe(".bin");
 	});
 });
+
+describe("upload URLs", () => {
+	it("mints a signed upload URL, stores its exact bytes, serves the attachment, and deletes it", () => {
+		const minted = store.mintUpload({ name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength });
+		expect(minted.relativeUrl.startsWith("/api/attachments/upload/")).toBe(true);
+		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
+		expect(store.storeUpload(token, PNG_BYTES)).toEqual({ ok: true });
+		expect(store.readForModel(minted.attachmentId)?.mimeType).toBe("image/png");
+		const asset = store.mintAssetUrl({ attachmentId: minted.attachmentId })!;
+		const assetToken = asset.relativeUrl.slice("/api/assets/".length).split("/")[0]!;
+		expect(store.resolveAsset(assetToken, "pic.png")?.bytes.equals(PNG_BYTES)).toBe(true);
+		store.deleteUpload(minted.attachmentId);
+		expect(store.resolvePath(minted.attachmentId)).toBeNull();
+	});
+
+	it("refuses a wrong size, a tampered token, and a second upload of different bytes", () => {
+		const minted = store.mintUpload({ name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength });
+		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
+		expect(store.storeUpload(token, Buffer.from("short"))).toMatchObject({ ok: false, status: 400 });
+		expect(store.storeUpload(`${token.slice(0, -1)}A`, PNG_BYTES)).toMatchObject({ ok: false, status: 401 });
+		expect(store.storeUpload(token, PNG_BYTES)).toEqual({ ok: true });
+		expect(store.storeUpload(token, Buffer.alloc(PNG_BYTES.byteLength))).toMatchObject({ ok: false });
+	});
+});

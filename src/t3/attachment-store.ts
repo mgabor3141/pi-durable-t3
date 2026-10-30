@@ -2,10 +2,10 @@
 // `stateDir/attachments/`. It replicates the pieces of T3's attachment layer the data-URL image path uses (design.md:
 // faithfully, and only what the client calls): deterministic ids so a retried persist is idempotent, the
 // `<payload>.<hmac>` signed token format T3 mints for asset URLs, and containment of every read to this one dir.
-// The upload-URL path (a streaming endpoint + pending→thread claim) is out of scope: the bridge does not advertise
-// `attachmentUploads`, so the client sends images as data URLs and never calls `attachments.*` (capabilities.md).
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+// T3 v0.1.5 uploads every attachment through `attachments.createUploadUrl` + the signed POST route, so the store also
+// mints short-lived upload URLs and writes their bytes; the message entry remains the durable record.
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, join, normalize, resolve, sep } from "node:path";
 
 /** The prefix of a minted asset URL, exactly T3's (`ASSET_ROUTE_PREFIX`); the client resolves it against the facet. */
@@ -32,10 +32,54 @@ export type ImageUpload = {
 	readonly dataUrl: string;
 };
 
+/** One upload URL the client mints before sending the bytes. */
+export type AttachmentUploadInput = {
+	readonly type?: "image" | "file";
+	readonly name: string;
+	readonly mimeType: string;
+	readonly sizeBytes: number;
+};
+
+export type AttachmentUploadResult = {
+	readonly attachmentId: string;
+	readonly relativeUrl: string;
+	readonly expiresAt: number;
+};
+
 /** The signature side, supplied by the auth store (the durable HMAC key lives in `auth.json`). */
 export type Signer = {
 	signPayload(payload: string): string;
 	verifySignature(payload: string, signature: string): boolean;
+};
+
+// ── T3's upload-URL path (`/api/attachments/upload`): a short-lived signed URL, then the bytes ─────────────────────
+
+/** T3's `ATTACHMENT_UPLOAD_ROUTE_PREFIX`: a same-origin POST endpoint authenticated by the URL's signature. */
+export const ATTACHMENT_UPLOAD_ROUTE_PREFIX = "/api/attachments/upload";
+/** T3's `ATTACHMENT_UPLOAD_URL_TTL_MS`: ten minutes to send the bytes. */
+const ATTACHMENT_UPLOAD_TTL_MS = 10 * 60_000;
+
+type UploadClaims = {
+	version: 1;
+	kind: "attachment-upload";
+	type: "image" | "file";
+	attachmentId: string;
+	name: string;
+	mimeType: string;
+	sizeBytes: number;
+	expiresAt: number;
+};
+
+const decodeUploadClaims = (payload: string): UploadClaims | null => {
+	try {
+		const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Partial<UploadClaims>;
+		if (value.version !== 1 || value.kind !== "attachment-upload" || typeof value.attachmentId !== "string") return null;
+		if (value.type !== "image" && value.type !== "file") return null;
+		if (typeof value.name !== "string" || typeof value.mimeType !== "string" || typeof value.sizeBytes !== "number" || typeof value.expiresAt !== "number") return null;
+		return value as UploadClaims;
+	} catch {
+		return null;
+	}
 };
 
 // ── T3's image-mime / path pieces (apps/server/src/imageMime.ts, attachmentStore.ts, attachmentPaths.ts) ──────────
@@ -166,6 +210,71 @@ export class AttachmentStore {
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		this.#dir = dir;
 		this.#signer = signer;
+	}
+
+	/** Mint a one-use upload URL for an image or file, with a fresh attachment id. The token carries the size and
+	 * mime type the later POST must match, so an upload cannot write arbitrary bytes under another id. */
+	mintUpload(input: AttachmentUploadInput): AttachmentUploadResult {
+		const type = input.type === "file" ? "file" : "image";
+		const extension = type === "file" ? extname(input.name).toLowerCase().replace(/^\./, "") : inferImageExtension({ mimeType: input.mimeType, fileName: input.name }).replace(/^\./, "");
+		const suffix = /^[a-z0-9]{1,10}$/.test(extension) ? extension : "bin";
+		const attachmentId = `att-${randomUUID()}-${suffix}`;
+		const expiresAt = Date.now() + ATTACHMENT_UPLOAD_TTL_MS;
+		const claims: UploadClaims = {
+			version: 1,
+			kind: "attachment-upload",
+			type,
+			attachmentId,
+			name: input.name,
+			mimeType: input.mimeType,
+			sizeBytes: input.sizeBytes,
+			expiresAt,
+		};
+		const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+		return {
+			attachmentId,
+			relativeUrl: `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/${payload}.${this.#signer.signPayload(payload)}`,
+			expiresAt,
+		};
+	}
+
+	/** Store the bytes an upload URL names: verify the signature and expiry, require the claimed body size, then write
+	 * `<id><.ext>` under the attachment dir. A retry of the same token is idempotent when the bytes already exist. */
+	storeUpload(token: string, bytes: Buffer): { readonly ok: true } | { readonly ok: false; readonly status: number; readonly detail: string } {
+		const dot = token.indexOf(".");
+		if (dot <= 0) return { ok: false, status: 400, detail: "Invalid upload URL." };
+		const payload = token.slice(0, dot);
+		const signature = token.slice(dot + 1);
+		if (!this.#signer.verifySignature(payload, signature)) return { ok: false, status: 401, detail: "Invalid upload URL." };
+		const claims = decodeUploadClaims(payload);
+		if (claims === null || claims.expiresAt <= Date.now()) return { ok: false, status: 401, detail: "Upload URL expired." };
+		if (bytes.byteLength !== claims.sizeBytes) return { ok: false, status: 400, detail: `Body was ${bytes.byteLength} bytes, expected ${claims.sizeBytes}.` };
+		const extension = claims.type === "file" ? extname(claims.name).toLowerCase().replace(/^\./, "") : inferImageExtension({ mimeType: claims.mimeType, fileName: claims.name }).replace(/^\./, "");
+		const suffix = /^[a-z0-9]{1,10}$/.test(extension) ? extension : "bin";
+		const path = resolveAttachmentRelativePath(this.#dir, `${claims.attachmentId}.${suffix}`);
+		if (path === null) return { ok: false, status: 500, detail: "Could not resolve the upload path." };
+		try {
+			writeFileSync(path, bytes, { mode: 0o600, flag: "wx" });
+		} catch (error) {
+			// A retried upload of the same token is harmless if the first attempt already wrote the same bytes.
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !existsSync(path)) {
+				return { ok: false, status: 500, detail: "Could not store the upload." };
+			}
+			try {
+				if (!readFileSync(path).equals(bytes)) return { ok: false, status: 409, detail: "That upload token already names different bytes." };
+			} catch {
+				return { ok: false, status: 500, detail: "Could not read the stored upload." };
+			}
+		}
+		return { ok: true };
+	}
+
+	/** Remove an upload that was minted but will never be sent (`attachments.delete`). Persisted message attachments
+	 * must not be removed: only ids minted by `mintUpload` start with `att-`. */
+	deleteUpload(attachmentId: string): void {
+		if (!attachmentId.startsWith("att-")) return;
+		const path = this.resolvePath(attachmentId);
+		if (path !== null) unlinkSync(path);
 	}
 
 	/** Persist one message's image uploads: validate each data URL, mint a deterministic id, write the bytes, and
