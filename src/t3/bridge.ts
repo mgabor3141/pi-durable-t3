@@ -1201,16 +1201,6 @@ export class Bridge {
 		}
 	}
 
-	async reorderQueued(threadId: string, runId: string, beforeRunId: string | null): Promise<void> {
-		this.#writable(threadId);
-		const release = this.acquire(threadId);
-		try {
-			await this.#call(threadId, (controller, _models, c) => controller.reorderQueued({ runId, beforeRunId }, c));
-		} finally {
-			release();
-		}
-	}
-
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);

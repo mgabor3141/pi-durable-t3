@@ -477,24 +477,6 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
-	/** T3's `queued-run.reorder`: move one queued follow-up before another (or to the end), in the inbox's queue order. */
-	async reorderQueued(threadId: string, runId: string, beforeRunId: string | null): Promise<void> {
-		const { conversationId } = await this.#queueTarget(threadId);
-		const submissionId = this.#queuedSubmission(runId);
-		const beforeId = beforeRunId === null ? undefined : this.#queuedSubmission(beforeRunId);
-		await this.#harness.commit(async (tx) => {
-			const inbox = await tx.doc(InboxDoc, conversationId);
-			const index = inbox.items.findIndex((item) => item.id === submissionId && item.mode !== "write");
-			if (index < 0) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
-			const target = beforeId === undefined
-				? inbox.items.length
-				: inbox.items.findIndex((item) => item.id === beforeId && item.mode !== "write");
-			if (target < 0) throw hostError("unknown_queued_message", `queued message ${beforeRunId} is no longer queued`);
-			const [item] = inbox.items.splice(index, 1);
-			inbox.items.splice(index < target ? target - 1 : target, 0, item!);
-		}, BACKGROUND_CONTEXT);
-	}
-
 	/** Promote a queued follow-up to a steer: the next boundary places it in the active run. */
 	async promoteQueued(threadId: string, runId: string): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
