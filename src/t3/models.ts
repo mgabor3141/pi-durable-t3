@@ -5,7 +5,7 @@ import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
 import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 
-export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[] };
+export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[]; contextWindow: number };
 
 const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
 	off: "Off",
@@ -71,6 +71,7 @@ export class ModelCatalog {
 				supportsConversationRollback: true,
 				supportedRuntimeModes: ["full-access"],
 				showInteractionModeToggle: false,
+				reportsContextWindow: true,
 				enabled: true,
 				installed: true,
 				version: "1.1.0",
@@ -85,7 +86,7 @@ export class ModelCatalog {
 					isCustom: false,
 					capabilities: thinkingCapabilities(model.thinkingLevels),
 				})),
-				slashCommands: [],
+				slashCommands: [{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } }],
 				skills: [],
 			} as unknown as ServerProvider,
 		];

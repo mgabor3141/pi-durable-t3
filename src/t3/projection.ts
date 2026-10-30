@@ -55,6 +55,8 @@ export interface ThreadMeta {
 	readonly model: ModelRef | null;
 	/** The Session's thinking level, reported back as the selection's `thinking` option. */
 	readonly thinkingLevel?: string;
+	/** The selected model's context window, for T3's context meter. */
+	readonly contextWindow?: number;
 	/** When this thread was promoted/forked from another, that thread's id (lineage → a "fork"). */
 	readonly parentThreadId?: string;
 	/** T3's manual settlement, durable on the thread row. */
@@ -193,6 +195,8 @@ export function projectThread(
 		const requestedAt = userMessage.timestamp ?? meta.createdAt;
 		const assistants = draft.steps.filter(isAssistantEntry);
 		const lastAssistant = assistants.at(-1);
+		const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
+		const usage = lastAssistantMessage?.role === "assistant" ? lastAssistantMessage.usage : undefined;
 		const running = isLast && busy;
 		let status: OrchestrationV2Run["status"];
 		if (running) status = "running";
@@ -277,6 +281,15 @@ export function projectThread(
 			status: attemptStatus as OrchestrationV2ProviderTurn["status"],
 			startedAt: time(requestedAt),
 			completedAt: completedMs === null ? null : time(completedMs),
+			...(usage === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0 ? {} : { tokenUsage: {
+				usedTokens: usage.totalTokens,
+				maxTokens: meta.contextWindow,
+				inputTokens: usage.input,
+				cachedInputTokens: usage.cacheRead,
+				outputTokens: usage.output,
+				...(usage.reasoning === undefined ? {} : { reasoningOutputTokens: usage.reasoning }),
+				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
+			} }),
 		});
 		checkpointScopes.push({
 			id: id(`cs${u.id}`),
@@ -557,6 +570,19 @@ export function projectThread(
 			}
 		}
 		draft.steps.forEach((step, stepIndex) => {
+			if (step.kind === "pi.compaction") {
+				const message = firstMessage(step);
+				const at = message?.timestamp ?? requestedAt;
+				const summary = textOf(message?.role === "user" ? message.content : undefined);
+				turnItems.push({
+					...base(`ti-k${step.id}`, at, "completed", true),
+					title: "Context compacted",
+					type: "compaction",
+					driver: id(PROVIDER_DRIVER),
+					...(summary.length === 0 ? {} : { summary }),
+				} as Any);
+				return;
+			}
 			if (isUserEntry(step)) {
 				pushUser(step, "steer");
 				return;

@@ -91,7 +91,7 @@ const SubmissionRef = Type.Object({ submissionId: Type.Number() });
 const ConversationRef = Type.Object({ conversationId: Type.Number() });
 
 const ModelRefSchema = Type.Object({ provider: Type.String(), modelId: Type.String() });
-const Catalog = Type.Array(Type.Object({ provider: Type.String(), modelId: Type.String(), input: Type.Array(Type.String()) }));
+const Catalog = Type.Array(Type.Object({ provider: Type.String(), modelId: Type.String(), input: Type.Array(Type.String()), contextWindow: Type.Number() }));
 const ConfigurationSchema = Type.Object({ model: Type.Union([ModelRefSchema, Type.Null()]), thinkingLevel: Type.String() });
 
 // Mirrors pi-ai's model thinking levels (the array is not exported from the package index).
@@ -143,6 +143,7 @@ export const PiController = local("pi.controller", {
 		editQueued: method(Type.Object({ runId: Type.String(), text: Type.String(), attachments: Type.Optional(Type.Array(AttachmentRecordSchema)) }), Type.Null()),
 		promoteQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
 		startQueued: method(Type.Object({ runId: Type.Optional(Type.String()), requestId: Type.String() }), Type.Null()),
+		compact: method(Type.Object({ guidance: Type.Optional(Type.String()) }), Type.Null()),
 	},
 });
 
@@ -399,11 +400,19 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 					throw toChordError(error);
 				}
 			},
+			compact: async (args) => {
+				try {
+					await threads.compact(threadId, args.guidance);
+					return null;
+				} catch (error) {
+					throw toChordError(error);
+				}
+			},
 		};
 	});
 
 	api.serve(PiModels, ({ threadId }, _principal, self) => {
-		const catalog = models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input] }));
+		const catalog = models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow }));
 		const state = {
 			catalog: self.state("catalog", Catalog, catalog),
 			configuration: self.state("configuration", ConfigurationSchema, { model: null, thinkingLevel: "off" }),

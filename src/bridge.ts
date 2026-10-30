@@ -142,6 +142,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		provider: model.provider,
 		modelId: model.id,
 		name: model.name,
+		contextWindow: model.contextWindow,
 		// pi-ai's own rule for which thinking levels a model has — the picker declares exactly these (capabilities.md).
 		thinkingLevels: getSupportedThinkingLevels(model),
 	})));

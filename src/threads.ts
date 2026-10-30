@@ -528,6 +528,14 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
+	/** T3's `/compact`: admit a manual compaction task for the head conversation. */
+	async compact(threadId: string, guidance: string | undefined): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
+		await conversation.compact(guidance, BACKGROUND_CONTEXT);
+	}
+
 	/** Promote a queued follow-up to a steer: the next boundary places it in the active run. */
 	async promoteQueued(threadId: string, runId: string): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);

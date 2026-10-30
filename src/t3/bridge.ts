@@ -73,7 +73,7 @@ interface ThreadState {
 	view: ConversationView | undefined;
 	configuration: { model: ModelRef | null; thinkingLevel: string } | undefined;
 	/** The catalog entries, each with its input modalities, so the send path knows which models accept images. */
-	catalog: { provider: string; modelId: string; input: string[] }[];
+	catalog: { provider: string; modelId: string; input: string[]; contextWindow: number }[];
 }
 
 type ShellItem =
@@ -520,6 +520,7 @@ export class Bridge {
 			updatedAt: thread?.createdAt ?? Date.now(),
 			model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
 			...(thread?.parent?.threadId === undefined ? {} : { parentThreadId: thread.parent.threadId }),
 			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
@@ -648,7 +649,7 @@ export class Bridge {
 			state.view = peek(transcript.transcript)?.view as ConversationView | undefined;
 			state.conversationId = peek(transcript.transcript)?.conversationId;
 			if (models !== undefined) {
-				state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [] }));
+state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [], contextWindow: model.contextWindow }));
 				const configuration = peek(models.configuration);
 				if (configuration !== undefined) state.configuration = { model: configuration.model ?? null, thinkingLevel: configuration.thinkingLevel };
 			}
@@ -964,6 +965,13 @@ export class Bridge {
 				await this.#host.root(async (c) => (await c.get(PiThreads, {})).wake({ threadId: input.threadId }, c));
 				this.#syncDirectory();
 				this.#titleChanged(input.threadId);
+			}
+			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
+			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
+			if (compact !== null) {
+				const guidance = compact[1]?.trim();
+				await this.#call(input.threadId, (controller, _models, c) => controller.compact({ ...(guidance === undefined || guidance === "" ? {} : { guidance }) }, c));
+				return;
 			}
 			const busy = state.view?.docs["pi.live"]?.run !== undefined;
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.

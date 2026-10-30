@@ -67,6 +67,7 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			else runs.push({ userEntry: entry, steps: [] });
 			continue;
 		}
+		if (entry.kind === "pi.compaction") { runs.at(-1)?.steps.push(entry); continue; }
 		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") runs.at(-1)?.steps.push(entry);
 	}
 	return runs;

@@ -100,7 +100,7 @@ the threads layer through chord objects that any pi client could also call:
 |---|---|
 | `pi.threads` | `create`, `remove`, `rename`, `settle`, `unsettle`, `search` |
 | `pi.transcript` | (state: the head's conversation view) |
-| `pi.controller` | `prompt`, `steer`, `followUp`, `abort`, `rewind`, `cancelQueued`, `editQueued`, `promoteQueued`, `startQueued` |
+| `pi.controller` | `prompt`, `steer`, `followUp`, `abort`, `rewind`, `cancelQueued`, `editQueued`, `promoteQueued`, `startQueued`, `compact` |
 | `pi.models` | `select`, `selectThinking` |
 
 Rate limiting keys on the socket address, never on a client-supplied header.
