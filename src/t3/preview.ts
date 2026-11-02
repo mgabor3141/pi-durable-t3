@@ -11,6 +11,7 @@ import {
 	FILL_PREVIEW_VIEWPORT,
 	PreviewInvalidUrlError,
 	PreviewSessionLookupError,
+	ThreadId,
 	type PreviewAdjustInput,
 	type PreviewCloseInput,
 	type PreviewEvent,
@@ -45,6 +46,13 @@ export interface PreviewViewer {
 	input(value: unknown): Promise<void>;
 	close(code?: number, reason?: string): void;
 }
+
+/** A preview tab an agent can drive: the same Playwright page T3 streams to the user. */
+export type PreviewAgentSession = {
+	readonly id: string;
+	readonly page: Page;
+	close(): Promise<void>;
+};
 
 type EventDraft =
 	| { type: "opened" | "navigated" | "resized"; threadId: string; tabId: string; createdAt: string; snapshot: PreviewSessionSnapshot }
@@ -146,6 +154,13 @@ class PreviewTab {
 
 	get closed(): boolean {
 		return this.#closed;
+	}
+
+	/** The page an agent drives. It is the same page T3's preview viewers see. */
+	async agentPage(): Promise<Page> {
+		await this.ensurePage();
+		if (this.page === undefined) throw new Error("The preview page is closed.");
+		return this.page;
 	}
 
 	/** Keep the page work off the RPC path: a tab with no URL stays a snapshot until a viewer or a navigate needs it. */
@@ -590,6 +605,22 @@ export class PreviewSessions {
 	subscribe(listener: (event: PreviewEvent) => void): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
+	}
+
+	/**
+	 * Open a preview tab an agent can drive. The tab is marked for reveal, so T3 shows it to the user (floating or in
+	 * the Browser panel, per the client's setting) instead of creating a second, invisible browser.
+	 */
+	async openAgentSession(threadId: string, url: string): Promise<PreviewAgentSession> {
+		const thread = ThreadId.make(threadId);
+		const snapshot = this.open({ threadId: thread, url, reveal: true });
+		const tab = this.require(threadId, snapshot.tabId);
+		const page = await tab.agentPage();
+		return {
+			id: snapshot.tabId,
+			page,
+			close: () => this.close({ threadId: thread, tabId: snapshot.tabId }),
+		};
 	}
 
 	open(input: PreviewOpenInput): PreviewSessionSnapshot {

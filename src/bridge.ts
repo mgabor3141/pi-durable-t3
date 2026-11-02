@@ -17,6 +17,7 @@ import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
+import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
@@ -100,12 +101,26 @@ export type AttachT3Options = {
 	readonly log?: Logger;
 };
 
+/** The page an agent drives in T3; the page is the one T3 streams to the user. */
+export type AgentPreviewSession = {
+	readonly id: string;
+	readonly page: Page;
+	close(): Promise<void>;
+};
+
 export type T3Attachment = {
 	/** Resolves when the facet stops serving on its own. Exiting over that is the integrator's policy. */
 	readonly closed: Promise<void>;
 	close(): Promise<void>;
 	/** Rename a thread, as a user rename in T3 does: durable, and it cancels a pending title generation. */
 	setTitle(threadId: string, title: string): Promise<void>;
+	/**
+	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
+	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
+	 */
+	readonly previewBrowser?: {
+		open(conversationId: number, url: string): Promise<AgentPreviewSession | undefined>;
+	};
 };
 
 /** Mint a single-use pairing code for the bridge whose dir you name — no server needed; the running host reads the
@@ -215,6 +230,16 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	return {
 		closed: facet.closed,
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
+		...(facet.preview === undefined
+			? {}
+			: {
+				previewBrowser: {
+					open: async (conversationId: number, url: string) => {
+						const threadId = await threads.threadIdForConversation(conversationId);
+						return threadId === undefined ? undefined : facet.preview!.openAgentSession(threadId, url);
+					},
+				},
+			}),
 		close: async () => {
 			// Release our own mapping first, so tailnet traffic stops before the listener does (T3's acquireRelease
 			// order). Only an armed port is released: the status check above guarantees an armed mapping is ours.

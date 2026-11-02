@@ -170,6 +170,12 @@ export class Threads {
 		return state?.threads.map((thread) => ({ ...thread })) ?? [];
 	}
 
+	/** The sidebar thread whose head is `conversationId`, if any. */
+	async threadIdForConversation(conversationId: number): Promise<string | undefined> {
+		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
+		return state?.threads.find((thread) => thread.head === conversationId)?.threadId;
+	}
+
 	/**
 	 * T3's `orchestration.searchThreads`, answered from the conversations this host already has (design.md). It mirrors
 	 * T3's `ThreadSearch.search` semantics (in `t3/thread-search.ts`): every thread's committed user/assistant messages are

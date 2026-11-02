@@ -30,6 +30,8 @@ type FacetHandle = {
 	close(): Promise<void>;
 	/** A user rename of a thread (`T3Attachment.setTitle`). */
 	setTitle(threadId: string, title: string): Promise<void>;
+	/** The preview browser, when configured. */
+	readonly preview?: PreviewSessions;
 };
 
 export function startFacet(deps: {
@@ -91,6 +93,7 @@ export function startFacet(deps: {
 	return {
 		ready,
 		closed,
+		...(preview === undefined ? {} : { preview }),
 		setTitle: async (threadId, title) => {
 			await bridge.loaded();
 			await bridge.renameThread(threadId, title);
