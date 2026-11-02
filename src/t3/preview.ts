@@ -209,10 +209,6 @@ class PreviewTab {
 			this.#broadcastControl();
 		});
 		page.on("close", () => void this.#owner.closeTab(this));
-		// A preview is one page. Popups would create tabs in the CDP browser that no T3 tab owns.
-		this.context?.on("page", (popup) => {
-			if (popup !== page) void popup.close().catch(() => undefined);
-		});
 	}
 
 	async #settle(): Promise<void> {
