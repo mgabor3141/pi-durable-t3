@@ -42,7 +42,7 @@ export interface ThreadSearchMatch {
 export const textOf = (content: string | ContentBlock[] | undefined): string =>
 	typeof content === "string"
 		? content
-		: (content ?? []).flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+		: (content ?? []).flatMap((block) => (block.type === "text" && block.hidden !== true ? [block.text] : [])).join("");
 
 /** A searchable candidate from an entry, or `undefined` when the entry is not a user/assistant message (T3 searches only
  * `role IN ('user','assistant')`, and never a streaming message — the committed entries a scan reads carry no live partial). */

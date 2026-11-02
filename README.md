@@ -145,7 +145,7 @@ Known limitations:
   itself once when a lazily loaded chunk fails to fetch, and during the restart there is nothing to reload into. Reload
   the page — the thread and its messages come back exactly as they were, including one holding a message the host was
   sent just before it died.
-- Attachments are images only. Deleting a thread leaves its images in `stateDir/attachments/`.
+- Attachments are images and files. Deleting a thread leaves its attachments in `stateDir/attachments/`; files are copied into the workspace at `/home/agent/attachments/` so the agent can read them by path.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - A task parked by pi's crash-loop guard (after 5 crashes without progress) keeps its thread "running"; Stop clears it.

@@ -1,4 +1,4 @@
-// The bridge's image-attachment store: T3's `assets.persistChatAttachments` and asset-URL minting/serving, over
+// The bridge's attachment store: T3's `assets.persistChatAttachments` and asset-URL minting/serving, over
 // `stateDir/attachments/`. It replicates the pieces of T3's attachment layer the data-URL image path uses (design.md:
 // faithfully, and only what the client calls): deterministic ids so a retried persist is idempotent, the
 // `<payload>.<hmac>` signed token format T3 mints for asset URLs, and containment of every read to this one dir.
@@ -13,10 +13,10 @@ export const ASSET_ROUTE_PREFIX = "/api/assets";
 /** An asset URL's lifetime (T3's `ASSET_TOKEN_TTL_MS`): a signed URL is good for an hour; the client re-mints. */
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
 
-/** A persisted image, shaped as T3's `ChatImageAttachment` (the record `assets.persistChatAttachments` answers, and
- * the projection carries on the message; it rides in the pi entry's data, so it survives a restart). */
+/** A persisted image or file, shaped as T3's `ChatAttachment` (the record the projection carries on the message;
+ * it rides in the pi entry's data, so it survives a restart). Legacy records had no type and were images. */
 export type AttachmentRecord = {
-	readonly type: "image";
+	readonly type?: "image" | "file";
 	readonly id: string;
 	readonly name: string;
 	readonly mimeType: string;
@@ -358,6 +358,18 @@ export class AttachmentStore {
 		// The stored file's extension decides the content type, never a client-declared mime: this origin is the API's.
 		const mimeType = mediaTypeFromPath(path);
 		return { bytes, mimeType, fileName: claims.fileName ?? filename };
+	}
+
+	/** Read a persisted attachment's bytes; null when it is missing. Images use `readForModel` for the model block;
+	 * files are copied into the workspace and named by path in the prompt. */
+	readBytes(attachmentId: string): Uint8Array | null {
+		const path = this.resolvePath(attachmentId);
+		if (path === null) return null;
+		try {
+			return readFileSync(path);
+		} catch {
+			return null;
+		}
 	}
 
 	/** Read a persisted image's bytes as base64 for the model (the prompt content block); null when it is missing. */

@@ -99,8 +99,8 @@ type MessageInput = {
 	readonly messageId?: string;
 	/** Extra content blocks (an image) appended after the text block, so the model receives the image inline. */
 	readonly blocks?: readonly ContentBlock[];
-	/** The message's persisted images, placed in the entry's `data` (the projection shows them after a restart). */
-	readonly attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[];
+	/** The message's persisted images and files, placed in the entry's `data` (the projection shows them after a restart). */
+	readonly attachments?: readonly { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[];
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -466,12 +466,12 @@ export class Threads {
 		}
 	}
 
-	/** Edit a queued follow-up in place: keep its submission id and message id, replace the text, keep image blocks. */
+	/** Edit a queued follow-up in place: keep its submission id and message id, replace the text, keep the attachments. */
 	async editQueued(
 		threadId: string,
 		runId: string,
 		text: string,
-		attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[],
+		attachments?: readonly { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[],
 	): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const submissionId = this.#queuedSubmission(runId);
@@ -482,7 +482,7 @@ export class Threads {
 			item.content = withQueuedText(item.content, text) as never;
 			if (attachments !== undefined && item.entry !== undefined) {
 				const entry = item.entry as { kind: string; data?: Record<string, unknown> };
-				entry.data = { ...(entry.data ?? {}), ...(attachments.length === 0 ? {} : { attachments: attachments.map((attachment) => ({ type: "image", ...attachment })) }) };
+				entry.data = { ...(entry.data ?? {}), ...(attachments.length === 0 ? {} : { attachments: attachments.map((attachment) => ({ ...attachment })) }) };
 				if (attachments.length === 0) delete entry.data.attachments;
 			}
 		}, BACKGROUND_CONTEXT);

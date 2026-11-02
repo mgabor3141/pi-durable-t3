@@ -72,8 +72,14 @@ const SubagentSchema = Type.Object({
 });
 
 const ThreadKey = Type.Object({ threadId: Type.String() });
-/** A persisted image, shaped for the entry's data (the projection reads it back as the message's attachments). */
-const AttachmentRecordSchema = Type.Object({ id: Type.String(), name: Type.String(), mimeType: Type.String(), sizeBytes: Type.Number() });
+/** A persisted image or file, shaped for the entry's data (the projection reads it back as the message's attachments). */
+const AttachmentRecordSchema = Type.Object({
+	type: Type.Optional(Type.Union([Type.Literal("image"), Type.Literal("file")])),
+	id: Type.String(),
+	name: Type.String(),
+	mimeType: Type.String(),
+	sizeBytes: Type.Number(),
+});
 const MessageArgs = Type.Object({
 	conversationId: Type.Number(),
 	requestId: Type.String(),

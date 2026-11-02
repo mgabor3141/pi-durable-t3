@@ -2,6 +2,7 @@
 // `pi.models`, `pi.controller`). It holds the per-thread projection memory (rolled-back runs) and the sequence counter.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { basename } from "node:path";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
@@ -30,6 +31,9 @@ import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolle
 
 export class CommandError extends Error {}
 
+/** Where file attachments are copied so the workspace tools can read them by path. */
+export const ATTACHMENT_WORKSPACE_DIR = "/home/agent/attachments";
+
 /** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
  * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
  * attachment is still recorded on the entry for display. pi-ai accepts image content only for image-input models. */
@@ -44,7 +48,7 @@ export function selectImageBlocks(
 	if (entry === undefined || !entry.input.includes("image")) return undefined;
 	const blocks: ContentBlock[] = [];
 	for (const attachment of attachments) {
-		if (attachment.type !== "image") continue;
+		if (attachment.type === "file") continue;
 		const image = read(attachment.id);
 		if (image === null) continue;
 		blocks.push({ type: "image", data: image.data, mimeType: attachment.mimeType });
@@ -945,6 +949,28 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		return selectImageBlocks(state.catalog, model, attachments, (id) => this.#attachments!.readForModel(id));
 	}
 
+	/** Copy file attachments into the workspace and return the path-bearing prompt line the model reads. */
+	async #filePrompt(attachments: readonly AttachmentRecord[] | undefined): Promise<string | undefined> {
+		const files = (attachments ?? []).filter((attachment) => attachment.type === "file");
+		if (files.length === 0) return undefined;
+		const env = this.config.env;
+		if (env === undefined || this.#attachments === undefined) throw new CommandError("This host cannot store file attachments.");
+		const context = this.config.context ?? BACKGROUND_CONTEXT;
+		const made = await env.createDir(ATTACHMENT_WORKSPACE_DIR, { recursive: true }, context);
+		if (!made.ok) throw new CommandError(`Cannot create the attachment directory: ${made.error.message}`);
+		const lines: string[] = [];
+		for (const file of files) {
+			const bytes = this.#attachments.readBytes(file.id);
+			const local = this.#attachments.resolvePath(file.id);
+			if (bytes === null || local === null) throw new CommandError(`Attachment ${file.name} is missing.`);
+			const target = `${ATTACHMENT_WORKSPACE_DIR}/${basename(local)}`;
+			const written = await env.writeFile(target, bytes, context);
+			if (!written.ok) throw new CommandError(`Cannot save attachment ${file.name}: ${written.error.message}`);
+			lines.push(`[Attached file "${file.name}" is saved at: ${target}]`);
+		}
+		return lines.join("\n\n");
+	}
+
 	async sendMessage(input: {
 		threadId: string;
 		commandId: string;
@@ -985,14 +1011,16 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			}
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
 			// commandId for durable dedup (design.md, Invariants). Images ride along as content blocks (model) and entry
-			// data (display), only when the model accepts them.
+			// data (display), only when the model accepts them; files are copied to the workspace and named by path.
 			const blocks = this.#imageBlocks(state, input.attachments);
+			const filePrompt = await this.#filePrompt(input.attachments);
+			const promptBlocks = filePrompt === undefined ? blocks : [{ type: "text" as const, text: filePrompt, hidden: true }, ...(blocks ?? [])];
 			const request = {
 				conversationId: head,
 				requestId: input.commandId,
 				message: input.text,
 				messageId: input.messageId,
-				...(blocks === undefined ? {} : { blocks }),
+				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
 				...(input.attachments === undefined || input.attachments.length === 0 ? {} : { attachments: [...input.attachments] }),
 			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`

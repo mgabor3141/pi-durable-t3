@@ -7,6 +7,7 @@ import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { projectThread, type ThreadMeta } from "../src/t3/projection.ts";
 
 const IMAGE = { type: "image" as const, id: "a-00000000-0000-4000-8000-000000000000-png", name: "p.png", mimeType: "image/png", sizeBytes: 75 };
+const FILE = { type: "file" as const, id: "a-00000000-0000-4000-8000-000000000000-pdf", name: "spec.pdf", mimeType: "application/pdf", sizeBytes: 42 };
 const read = (id: string): { data: string; mimeType: string } | null => (id === IMAGE.id ? { data: "AAAA", mimeType: "image/png" } : null);
 const visionCatalog = [{ provider: "pi", modelId: "vision", input: ["text", "image"] }];
 const textCatalog = [{ provider: "pi", modelId: "text", input: ["text"] }];
@@ -21,6 +22,10 @@ describe("selectImageBlocks (the model image gate)", () => {
 		expect(selectImageBlocks(textCatalog, { provider: "pi", modelId: "text" }, [IMAGE], read)).toBeUndefined();
 		expect(selectImageBlocks(visionCatalog, null, [IMAGE], read)).toBeUndefined();
 		expect(selectImageBlocks(visionCatalog, { provider: "pi", modelId: "unknown" }, [IMAGE], read)).toBeUndefined();
+	});
+
+	it("a file attachment is not an image block", () => {
+		expect(selectImageBlocks(visionCatalog, { provider: "pi", modelId: "vision" }, [FILE], read)).toBeUndefined();
 	});
 
 	it("no attachments, and an attachment whose bytes are missing, yield no blocks", () => {
@@ -46,6 +51,17 @@ describe("projection: the user message carries its entry's attachments", () => {
 		expect(message.attachments).toEqual([IMAGE]);
 		const item = projection.turnItems.find((i) => i.type === "user_message") as { attachments?: unknown };
 		expect(item.attachments).toEqual([IMAGE]);
+	});
+
+	it("a file attachment projects on the message and is not part of its visible text", () => {
+		const entries = [
+			{ id: 10, kind: "app.user", data: { messageId: "m1", attachments: [FILE] }, model: [{ role: "user", content: [{ type: "text", text: "read this" }, { type: "text", text: `[Attached file "spec.pdf" is saved at: /home/agent/attachments/a.pdf]`, hidden: true }], timestamp: 1 }] } as unknown as EntryRecord,
+			assistant(11),
+		];
+		const { projection } = projectThread(meta, view(entries), { rolledBack: [] });
+		const message = projection.messages.find((m) => m.role === "user")!;
+		expect(message.attachments).toEqual([FILE]);
+		expect(message.text).toBe("read this");
 	});
 
 	it("an entry with no attachments projects an empty list (unchanged shape for text-only turns)", () => {

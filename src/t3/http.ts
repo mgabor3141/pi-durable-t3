@@ -21,6 +21,7 @@ import {
 	AuthPairingLink,
 	AuthStandardClientScopes,
 	type ExecutionEnvironmentDescriptor,
+	PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 	ORCHESTRATION_PROTOCOL_HEADER,
 	ORCHESTRATION_PROTOCOL_QUERY_PARAM,
 	ORCHESTRATION_PROTOCOL_VERSION,
@@ -87,6 +88,7 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
 				attachmentUploads: true,
+				fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
 			},
 		}) as Any;
 }

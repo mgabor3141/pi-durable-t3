@@ -39,7 +39,7 @@ the two together; a mismatched pair shows an empty sidebar, and nothing repairs 
 | `projects.json` (the state dir) | The project registry: id, path, title | Project names; threads keep their `cwd` |
 | `auth.json` (the state dir) | Environment id; hashed pairing links and device sessions (bearer or browser cookie), each with its scopes and client metadata; the key that signs attachment URLs | Every device re-pairs |
 | `scheduled-tasks.json` (the state dir) | Scheduled tasks as T3 stores them: trigger, prompt, project/thread, model, run state (`nextRunAt`, last run, count) | The tasks; the threads they made stay |
-| `attachments/` (the state dir) | Image attachments, one file per attachment id | Past images stop rendering; the model's copy in pi-durable survives |
+| `attachments/` (the state dir) | Image and file attachments, one file per attachment id | Past attachments stop rendering; the model's copy in pi-durable survives |
 | The scratch dir (`scratchDir`, if set) | "No project" threads: one folder per thread | Nothing the bridge needs; threads keep their recorded `cwd` |
 
 The JSON files are written atomically, mode 0600, and so are attachments. `scheduled-tasks.json` is read strictly: one the host cannot read stops it at boot, naming the file. The scratch dir is agent work

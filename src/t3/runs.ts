@@ -22,8 +22,8 @@ export const messageIdOf = (entry: EntryRecord): string | undefined => {
 	return typeof id === "string" ? id : undefined;
 };
 
-/** A persisted image on a message, as the projection reports it (T3's `ChatImageAttachment`). */
-export type UserAttachment = { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number };
+/** A persisted image or file on a message, as the projection reports it (T3's `ChatAttachment`). */
+export type UserAttachment = { type: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number };
 
 /** The images a user entry carries in its `data` (`app.user` entries set them — `Threads.submit`); empty for a
  * message with none. The projection reports these as the message's attachments, so the thread shows them after a
@@ -36,8 +36,9 @@ export const attachmentsOf = (entry: EntryRecord): UserAttachment[] => {
 	return list.flatMap((item): UserAttachment[] => {
 		if (typeof item !== "object" || item === null) return [];
 		const a = item as Record<string, unknown>;
-		if (a.type !== "image" || typeof a.id !== "string") return [];
-		return [{ type: "image", id: a.id, name: String(a.name ?? "image"), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }];
+		if ((a.type !== "image" && a.type !== "file" && a.type !== undefined) || typeof a.id !== "string") return [];
+		const type = a.type === "file" ? "file" : "image";
+		return [{ type, id: a.id, name: String(a.name ?? (type === "file" ? "file" : "image")), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }];
 	});
 };
 export const isAssistantEntry = (entry: EntryRecord) => firstMessage(entry)?.role === "assistant";

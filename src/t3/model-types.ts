@@ -32,7 +32,7 @@ export function thinkingOf(options: readonly { id: string; value: string | boole
 
 /** Durable message content as pi-ai encodes it (the subset the projection reads). */
 export type ContentBlock =
-	| { type: "text"; text: string }
+	| { type: "text"; text: string; /** Model-visible, but not shown as the message's text (an attachment path line). */ hidden?: boolean }
 	| { type: "thinking"; thinking: string }
 	| { type: "image"; data: string; mimeType: string }
 	| { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> };

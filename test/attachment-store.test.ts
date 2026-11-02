@@ -126,6 +126,19 @@ describe("upload URLs", () => {
 		expect(store.resolvePath(minted.attachmentId)).toBeNull();
 	});
 
+	it("mints and stores a file upload, with its bytes and extension", () => {
+		const bytes = Buffer.from("%PDF-1.4\nnot really a PDF\n");
+		const minted = store.mintUpload({ type: "file", name: "spec.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength });
+		expect(minted.attachmentId.startsWith("att-")).toBe(true);
+		expect(minted.attachmentId.endsWith("-pdf")).toBe(true);
+		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
+		expect(store.storeUpload(token, bytes)).toEqual({ ok: true });
+		expect(store.resolvePath(minted.attachmentId)).not.toBeNull();
+		expect(Buffer.from(store.readBytes(minted.attachmentId)!).equals(bytes)).toBe(true);
+		store.deleteUpload(minted.attachmentId);
+		expect(store.resolvePath(minted.attachmentId)).toBeNull();
+	});
+
 	it("refuses a wrong size, a tampered token, and a second upload of different bytes", () => {
 		const minted = store.mintUpload({ name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength });
 		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
