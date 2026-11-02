@@ -105,6 +105,7 @@ export type AttachT3Options = {
 export type AgentPreviewSession = {
 	readonly id: string;
 	readonly page: Page;
+	touch(): void;
 	close(): Promise<void>;
 };
 

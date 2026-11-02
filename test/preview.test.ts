@@ -38,6 +38,15 @@ describe("preview sessions", () => {
 		expect(() => preview.open({ threadId: thread, url: "file:///etc/passwd" })).toThrow(PreviewInvalidUrlError);
 	});
 
+	it("caps tabs at eight per thread and thirty-two overall", async () => {
+		const preview = new PreviewSessions(config, nullLogger);
+		for (let index = 0; index < 8; index += 1) preview.open({ threadId: thread });
+		expect(() => preview.open({ threadId: thread })).toThrow("Too many preview tabs for this thread");
+		for (let index = 0; index < 24; index += 1) preview.open({ threadId: ThreadId.make(`thread-${String(index)}`) });
+		expect(() => preview.open({ threadId: ThreadId.make("one-too-many") })).toThrow("Too many preview tabs overall");
+		await preview.closeAll();
+	});
+
 	it("an unknown tab is the contract's lookup error", async () => {
 		const preview = new PreviewSessions(config, nullLogger);
 		await expect(preview.resize({ threadId: thread, tabId: "missing", viewport: { _tag: "fill" } })).rejects.toBeInstanceOf(PreviewSessionLookupError);

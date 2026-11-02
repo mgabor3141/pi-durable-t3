@@ -30,7 +30,12 @@ import type { PreviewBrowserConfig } from "./preview-config.ts";
 const CONNECT_TIMEOUT_MS = 30_000;
 const NAVIGATION_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 } as const;
-const MAX_TABS = 8;
+const MAX_TABS_PER_THREAD = 8;
+const MAX_TABS_TOTAL = 32;
+const AGENT_TAB_IDLE_MS = 30 * 60_000;
+const USER_TAB_IDLE_MS = 24 * 60 * 60_000;
+const TAB_SWEEP_MS = 60_000;
+const BROWSER_IDLE_MS = 15 * 60_000;
 const MAX_VIEWERS = 4;
 const MAX_URL_LENGTH = 2_048;
 const SAVE_INTERVAL_MS = 30_000;
@@ -57,6 +62,7 @@ export interface PreviewViewer {
 export type PreviewAgentSession = {
 	readonly id: string;
 	readonly page: Page;
+	touch(): void;
 	close(): Promise<void>;
 };
 
@@ -134,6 +140,8 @@ class PreviewTab {
 	readonly threadId: string;
 	readonly tabId: string;
 	readonly createdAt: number;
+	readonly origin: "agent" | "user";
+	usedAt: number;
 	snapshot: PreviewSessionSnapshot;
 	page: Page | undefined;
 	context: BrowserContext | undefined;
@@ -150,11 +158,13 @@ class PreviewTab {
 	#pageHooks = false;
 	#pageSize: { width: number; height: number } | undefined;
 
-	constructor(owner: PreviewSessions, snapshot: PreviewSessionSnapshot) {
+	constructor(owner: PreviewSessions, snapshot: PreviewSessionSnapshot, origin: "agent" | "user") {
 		this.#owner = owner;
 		this.threadId = snapshot.threadId;
 		this.tabId = snapshot.tabId;
 		this.createdAt = Date.now();
+		this.origin = origin;
+		this.usedAt = this.createdAt;
 		this.snapshot = snapshot;
 	}
 
@@ -167,6 +177,10 @@ class PreviewTab {
 		await this.ensurePage();
 		if (this.page === undefined) throw new Error("The preview page is closed.");
 		return this.page;
+	}
+
+	touch(): void {
+		this.usedAt = Date.now();
 	}
 
 	/** Keep the page work off the RPC path: a tab with no URL stays a snapshot until a viewer or a navigate needs it. */
@@ -226,6 +240,7 @@ class PreviewTab {
 				canGoBack: index > 0,
 				canGoForward: index < count - 1,
 			});
+			this.touch();
 			this.#owner.scheduleSave();
 		} catch {
 			// A page that vanished between load and title collection has no status to report.
@@ -237,6 +252,7 @@ class PreviewTab {
 	}
 
 	async #navigate(url: string): Promise<void> {
+		this.touch();
 		const page = this.page;
 		if (page === undefined) return;
 		this.#owner.update(this, { navStatus: { _tag: "Loading", url, title: "" }, canGoBack: false, canGoForward: false });
@@ -311,7 +327,10 @@ class PreviewTab {
 			viewer.busy = false;
 			if (this.#frameWaiters > 0) this.#frameWaiters -= 1;
 		}
-		if (this.viewers.size === 0) void this.#stopScreencast();
+		if (this.viewers.size === 0) {
+			if (this.controller === null) this.touch();
+			void this.#stopScreencast();
+		}
 		this.#broadcastControl();
 	}
 
@@ -354,6 +373,7 @@ class PreviewTab {
 
 	async input(viewer: PreviewViewerImpl, raw: unknown): Promise<void> {
 		if (!viewer.canOperate) return;
+		this.touch();
 		if (typeof raw !== "object" || raw === null) return;
 		const message = raw as Record<string, unknown>;
 		const type = message.type;
@@ -582,10 +602,14 @@ export class PreviewSessions {
 	#saveTimer: NodeJS.Timeout | undefined;
 	#saveDebounce: NodeJS.Timeout | undefined;
 	#saveQueue: Promise<void> = Promise.resolve();
+	#sweepTimer: NodeJS.Timeout | undefined;
+	#browserIdleTimer: NodeJS.Timeout | undefined;
 
 	constructor(config: PreviewBrowserConfig, log: Logger) {
 		this.#config = config;
 		this.#log = log;
+		this.#sweepTimer = setInterval(() => void this.sweepIdleTabs(), TAB_SWEEP_MS);
+		this.#sweepTimer.unref();
 	}
 
 	async browser(): Promise<Browser> {
@@ -697,19 +721,27 @@ export class PreviewSessions {
 	 * Open a preview tab an agent can drive and reveal it. The tab is visible in T3; there is no hidden preview.
 	 */
 	async openAgentSession(threadId: string, url: string): Promise<PreviewAgentSession> {
+		await this.sweepIdleTabs();
 		const thread = ThreadId.make(threadId);
-		const snapshot = this.open({ threadId: thread, url, reveal: true });
+		const snapshot = this.openTab({ threadId: thread, url, reveal: true }, "agent");
 		const tab = this.require(threadId, snapshot.tabId);
 		const page = await tab.agentPage();
 		return {
 			id: snapshot.tabId,
 			page,
+			touch: () => this.touch(tab),
 			close: () => this.close({ threadId: thread, tabId: snapshot.tabId }),
 		};
 	}
 
 	open(input: PreviewOpenInput): PreviewSessionSnapshot {
-		if (this.#tabs.size >= MAX_TABS) throw new PreviewSessionLookupError({ threadId: input.threadId, tabId: "new" });
+		return this.openTab(input, "user");
+	}
+
+	private openTab(input: PreviewOpenInput, origin: "agent" | "user"): PreviewSessionSnapshot {
+		const threadTabs = [...this.#tabs.values()].filter((tab) => tab.threadId === input.threadId).length;
+		if (threadTabs >= MAX_TABS_PER_THREAD) throw new Error(`Too many preview tabs for this thread (limit ${MAX_TABS_PER_THREAD}). Close one first.`);
+		if (this.#tabs.size >= MAX_TABS_TOTAL) throw new Error(`Too many preview tabs overall (limit ${MAX_TABS_TOTAL}). Close one first.`);
 		const url = input.url === undefined ? undefined : normalizeUrl(input.url);
 		const updatedAt = now();
 		const tabId = randomUUID().replace(/-/g, "");
@@ -725,10 +757,55 @@ export class PreviewSessions {
 			...(input.reveal === undefined ? {} : { reveal: input.reveal }),
 			updatedAt,
 		};
-		const tab = new PreviewTab(this, snapshot);
+		const tab = new PreviewTab(this, snapshot, origin);
 		this.#tabs.set(keyOf(input.threadId, tabId), tab);
+		this.#clearBrowserIdle();
 		this.#publish({ type: "opened", threadId: input.threadId, tabId, createdAt: updatedAt, snapshot });
 		return snapshot;
+	}
+
+	/** Record user/agent activity on a tab, so the idle sweep does not close a page in use. */
+	touch(tab: PreviewTab): void {
+		tab.touch();
+	}
+
+	/** Close expired tabs with no viewer. Agent tabs idle after 30 minutes; user tabs after 24 hours. */
+	async sweepIdleTabs(): Promise<void> {
+		const now = Date.now();
+		const expired = [...this.#tabs.values()].filter((tab) =>
+			tab.viewers.size === 0 && tab.usedAt <= now - (tab.origin === "agent" ? AGENT_TAB_IDLE_MS : USER_TAB_IDLE_MS),
+		);
+		await Promise.all(expired.map((tab) => this.closeTab(tab, "idle")));
+	}
+
+	/** Close all tabs of one thread, for example when T3 deletes it. */
+	async closeThread(threadId: string): Promise<void> {
+		await this.close({ threadId: ThreadId.make(threadId) });
+	}
+
+	#clearBrowserIdle(): void {
+		if (this.#browserIdleTimer !== undefined) clearTimeout(this.#browserIdleTimer);
+		this.#browserIdleTimer = undefined;
+	}
+
+	#maybeCloseBrowser(): void {
+		if (this.#tabs.size > 0 || this.#browserIdleTimer !== undefined) return;
+		this.#browserIdleTimer = setTimeout(() => void this.#closeIdleBrowser(), BROWSER_IDLE_MS);
+		this.#browserIdleTimer.unref();
+	}
+
+	async #closeIdleBrowser(): Promise<void> {
+		this.#browserIdleTimer = undefined;
+		if (this.#tabs.size > 0) return;
+		await this.saveState();
+		this.#stopSaveTimers();
+		const context = this.#context;
+		this.#context = undefined;
+		await context?.close().catch(() => undefined);
+		const browser = this.#browser;
+		this.#browser = undefined;
+		await browser?.close().catch(() => undefined);
+		this.#log.info("preview browser idle-closed");
 	}
 
 	list(threadId: string): PreviewListResult {
@@ -767,6 +844,7 @@ export class PreviewSessions {
 
 	async resize(input: PreviewResizeInput): Promise<PreviewSessionSnapshot> {
 		const tab = this.require(input.threadId, input.tabId);
+		this.touch(tab);
 		this.update(tab, { viewport: input.viewport });
 		await tab.applySetting();
 		return tab.snapshot;
@@ -774,6 +852,7 @@ export class PreviewSessions {
 
 	async adjust(input: PreviewAdjustInput): Promise<PreviewSessionSnapshot> {
 		const tab = this.require(input.threadId, input.tabId);
+		this.touch(tab);
 		this.update(tab, {
 			...(input.colorScheme === undefined ? {} : { colorScheme: input.colorScheme }),
 			...(input.zoomFactor === undefined ? {} : { zoomFactor: input.zoomFactor }),
@@ -805,6 +884,7 @@ export class PreviewSessions {
 		await tab.close();
 		this.#publish({ type: "closed", threadId: tab.threadId, tabId: tab.tabId, createdAt: now() });
 		this.#log.info("preview tab closed", { tabId: tab.tabId, reason });
+		this.#maybeCloseBrowser();
 	}
 
 	async attach(input: { threadId: string; tabId: string; canOperate: boolean; maxWidth: number; maxHeight: number }, sink: PreviewViewerSink): Promise<PreviewViewer> {
@@ -825,8 +905,12 @@ export class PreviewSessions {
 	}
 
 	async closeAll(): Promise<void> {
+		if (this.#sweepTimer !== undefined) clearInterval(this.#sweepTimer);
+		this.#sweepTimer = undefined;
+		this.#clearBrowserIdle();
 		await this.saveState();
 		await Promise.all([...this.#tabs.values()].map((tab) => this.closeTab(tab)));
+		this.#clearBrowserIdle();
 		this.#stopSaveTimers();
 		const context = this.#context;
 		this.#context = undefined;

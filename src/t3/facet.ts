@@ -59,6 +59,9 @@ export function startFacet(deps: {
 		} catch (error) {
 			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) });
 		}
+		void preview?.closeThread(threadId).catch((error: unknown) =>
+			log.warn("could not close the preview tabs of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) }),
+		);
 	});
 
 	// Bind eagerly: await "listening" before the host prints "ready", and surface a bind error to the caller. Keep the
