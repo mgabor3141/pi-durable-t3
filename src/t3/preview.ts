@@ -694,12 +694,11 @@ export class PreviewSessions {
 	}
 
 	/**
-	 * Open a preview tab an agent can drive. The tab is always created; `foreground` decides whether T3 reveals it
-	 * (floating or focused) or leaves it in the Browser panel.
+	 * Open a preview tab an agent can drive and reveal it. The tab is visible in T3; there is no hidden preview.
 	 */
-	async openAgentSession(threadId: string, url: string, foreground = false): Promise<PreviewAgentSession> {
+	async openAgentSession(threadId: string, url: string): Promise<PreviewAgentSession> {
 		const thread = ThreadId.make(threadId);
-		const snapshot = this.open({ threadId: thread, url, reveal: foreground });
+		const snapshot = this.open({ threadId: thread, url, reveal: true });
 		const tab = this.require(threadId, snapshot.tabId);
 		const page = await tab.agentPage();
 		return {

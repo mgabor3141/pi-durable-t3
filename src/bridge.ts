@@ -119,7 +119,7 @@ export type T3Attachment = {
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
 	 */
 	readonly previewBrowser?: {
-		open(conversationId: number, url: string, foreground?: boolean): Promise<AgentPreviewSession | undefined>;
+		open(conversationId: number, url: string): Promise<AgentPreviewSession | undefined>;
 	};
 };
 
@@ -234,9 +234,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 			? {}
 			: {
 				previewBrowser: {
-					open: async (conversationId: number, url: string, foreground?: boolean) => {
+					open: async (conversationId: number, url: string) => {
 						const threadId = await threads.threadIdForConversation(conversationId);
-						return threadId === undefined ? undefined : facet.preview!.openAgentSession(threadId, url, foreground ?? false);
+						return threadId === undefined ? undefined : facet.preview!.openAgentSession(threadId, url);
 					},
 				},
 			}),
