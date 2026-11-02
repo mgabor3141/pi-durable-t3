@@ -185,13 +185,13 @@ async function readServerConfig(deps: RpcDeps): Promise<ServerConfig> {
 	return serverConfig(deps, served === null ? [] : [served]);
 }
 
-/** The image attachments of a command (the persisted records the client sent), shaped for `Bridge.sendMessage`. Files
- * are dropped: this host sends only images to the model (the file-attachment path needs the upload store, refused). */
-function imageRecords(attachments: unknown): { type: "image"; id: string; name: string; mimeType: string; sizeBytes: number }[] | undefined {
+/** The image and file attachments of a command (the persisted records the client sent), shaped for
+ * `Bridge.sendMessage`. Unknown attachment types are dropped. */
+function attachmentRecords(attachments: unknown): { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[] | undefined {
 	if (!Array.isArray(attachments)) return undefined;
 	const records = attachments
-		.filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null && a.type === "image" && typeof a.id === "string")
-		.map((a) => ({ type: "image" as const, id: a.id as string, name: String(a.name ?? "image"), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }));
+		.filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null && typeof a.id === "string" && (a.type === "image" || a.type === "file"))
+		.map((a) => ({ type: a.type as "image" | "file", id: a.id as string, name: String(a.name ?? (a.type === "file" ? "file" : "image")), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }));
 	return records.length > 0 ? records : undefined;
 }
 
@@ -273,7 +273,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						text: command.text,
 						mode,
 						...(typeof command.titleSeed === "string" ? { titleSeed: command.titleSeed } : {}),
-						...(imageRecords(command.attachments) === undefined ? {} : { attachments: imageRecords(command.attachments) }),
+						...(attachmentRecords(command.attachments) === undefined ? {} : { attachments: attachmentRecords(command.attachments) }),
 					});
 					break;
 				}
@@ -285,7 +285,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					await bridge.cancelQueued(command.threadId, command.runId);
 					break;
 				case "queued-run.edit":
-					await bridge.editQueued(command.threadId, command.runId, command.text, imageRecords(command.attachments));
+					await bridge.editQueued(command.threadId, command.runId, command.text, attachmentRecords(command.attachments));
 					break;
 				case "queued-message.promote-to-steer":
 					await bridge.promoteQueued(command.threadId, command.queuedRunId);
@@ -576,7 +576,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						generateTitle: input.generateTitle === true,
 						modelSelection: input.modelSelection,
 						workspaceStrategy: input.workspaceStrategy,
-						initialMessage: message === undefined ? undefined : { messageId: message.messageId, text: message.text, attachments: imageRecords(message.attachments) },
+						initialMessage: message === undefined ? undefined : { messageId: message.messageId, text: message.text, attachments: attachmentRecords(message.attachments) },
 					});
 					const { projection } = await bridge.projection(threadId);
 					return { threadId, projection, resumed: false };
