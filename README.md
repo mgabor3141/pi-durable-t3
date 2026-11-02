@@ -81,7 +81,7 @@ await t3.close();
 ```
 
 - `env` is required: T3's file panel, project picker, project roots, Scratch folders and scripts use it. Its `cwd` is the root of every absolute path in the protocol. There is no harness-filesystem fallback. `stateDir` stays on the host: it holds bridge state, not workspace files.
-- `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused. `storageStatePath` (optional) adds a durable profile: all preview tabs share one context, cookies and origins' localStorage load from that file at start, and changes are written back. With preview, `T3Attachment.previewBrowser.open(conversationId, url)` returns the Playwright page of a newly revealed preview tab for that conversation's thread, so an agent's browser tools can drive the exact page T3 streams; `undefined` means the conversation is not a thread head and the caller should use a private browser.
+- `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused. `storageStatePath` (optional) adds a durable profile: all preview tabs share one context, cookies and origins' localStorage load from that file at start, and changes are written back. With preview, `T3Attachment.previewBrowser.open(conversationId, url, foreground?)` returns the Playwright page of a newly created preview tab; `foreground` controls whether it is revealed for that conversation's thread, so an agent's browser tools can drive the exact page T3 streams; `undefined` means the conversation is not a thread head and the caller should use a private browser.
 - `attachT3` resolves once it is listening and rejects if it can't bind.
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
@@ -188,7 +188,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 
 - `attachT3(harness, options): Promise<T3Attachment>` and the `AttachT3Options` type (options are documented in the
   type's comments).
-- `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, and (when `preview` is configured) `previewBrowser.open(conversationId, url)`.
+- `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, and (when `preview` is configured) `previewBrowser.open(conversationId, url, foreground?)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
 - `ConfigError`, `Logger`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
