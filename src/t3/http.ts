@@ -62,7 +62,7 @@ import { makePreviewStreamHandler } from "./preview-http.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
-export const SERVER_VERSION = "0.1.5";
+export const SERVER_VERSION = "0.1.6";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
