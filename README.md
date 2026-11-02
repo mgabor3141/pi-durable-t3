@@ -70,7 +70,7 @@ const t3 = await attachT3(harness, {
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
-	preview,       // optional: { cdpUrl, token? } for T3's Browser panel; absent = preview.* stays unsupported
+	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
 	// optional: context, label, corsOrigins, tokenTtlSeconds, log
 });
 await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
@@ -81,7 +81,7 @@ await t3.close();
 ```
 
 - `env` is required: T3's file panel, project picker, project roots, Scratch folders and scripts use it. Its `cwd` is the root of every absolute path in the protocol. There is no harness-filesystem fallback. `stateDir` stays on the host: it holds bridge state, not workspace files.
-- `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused. With it, `T3Attachment.previewBrowser.open(conversationId, url)` returns the Playwright page of a newly revealed preview tab for that conversation's thread, so an agent's browser tools can drive the exact page T3 streams; `undefined` means the conversation is not a thread head and the caller should use a private browser.
+- `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused. `storageStatePath` (optional) adds a durable profile: all preview tabs share one context, cookies and origins' localStorage load from that file at start, and changes are written back. With preview, `T3Attachment.previewBrowser.open(conversationId, url)` returns the Playwright page of a newly revealed preview tab for that conversation's thread, so an agent's browser tools can drive the exact page T3 streams; `undefined` means the conversation is not a thread head and the caller should use a private browser.
 - `attachT3` resolves once it is listening and rejects if it can't bind.
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
