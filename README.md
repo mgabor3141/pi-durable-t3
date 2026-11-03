@@ -71,6 +71,7 @@ const t3 = await attachT3(harness, {
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
 	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
+	rpcLog,        // optional: { onSuccess, onFailure, onStubbed } per-call debug sink for the T3 wire
 	// optional: context, label, corsOrigins, tokenTtlSeconds, log
 });
 await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
@@ -82,6 +83,7 @@ await t3.close();
 
 - `env` is required: T3's file panel, project picker, project roots, Scratch folders and scripts use it. Its `cwd` is the root of every absolute path in the protocol. There is no harness-filesystem fallback. `stateDir` stays on the host: it holds bridge state, not workspace files.
 - `preview` points at a Chromium CDP endpoint (Browserless, or any Chromium speaking the same protocol) and turns on T3's server browser: `preview.*`, `subscribePreviewEvents`, `/api/preview-stream/ws` and the `serverBrowser` capability. The bridge owns the tab bookkeeping and the screencast; the browser process lives outside the bridge. Without it, the preview calls are refused. `storageStatePath` (optional) adds a durable profile: all preview tabs share one context, cookies and origins' localStorage load from that file at start, and changes are written back. With preview, `T3Attachment.previewBrowser.open(conversationId, url)` returns the Playwright page of a newly revealed preview tab for that conversation's thread, so an agent's browser tools can drive the exact page T3 streams; `undefined` means the conversation is not a thread head and the caller should use a private browser.
+- `rpcLog` is the low-noise way to see what T3 is calling. `onSuccess` fires for a request handler that succeeds or a stream that opens, `onFailure` carries the method, kind, duration and error message, and `onStubbed` names a method this host does not implement (every invocation, with the refusal reason). Callback exceptions are caught and logged as warnings, so a debug sink never breaks a call.
 - `attachT3` resolves once it is listening and rejects if it can't bind.
 - It throws `ConfigError`, naming the file, if a file in `stateDir` doesn't parse.
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
@@ -191,7 +193,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, and (when `preview` is configured) `previewBrowser.open(conversationId, url)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
-- `ConfigError`, `Logger`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
+- `ConfigError`, `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
 
 T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,
 exact dependencies, so the bridge and the bundled contracts share one Effect: do not override `effect`.

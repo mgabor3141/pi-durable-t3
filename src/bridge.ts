@@ -19,14 +19,14 @@ import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
-import { type Logger, nullLogger } from "./t3/logging.ts";
+import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandError } from "./t3/tailscale.ts";
 
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 export { ConfigError } from "./config.ts";
-export type { Logger } from "./t3/logging.ts";
+export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
@@ -98,6 +98,12 @@ export type AttachT3Options = {
 	readonly titleThread?: TitleThread;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
+	/**
+	 * Optional per-call observation for debugging the T3 wire: `onSuccess` for a request handler that succeeds or a
+	 * stream that opens, `onFailure` for a failing request, and `onStubbed` for a method this host does not implement.
+	 * The callbacks run synchronously and their exceptions are caught and logged, so a debug sink never breaks a call.
+	 */
+	readonly rpcLog?: RpcLog;
 	readonly log?: Logger;
 };
 
@@ -186,6 +192,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 				? undefined
 				: { port: options.tailscaleServe.port ?? DEFAULT_TAILSCALE_SERVE_PORT },
 		...(options.preview === undefined ? {} : { preview: options.preview }),
+		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
 	};
 	const tailscale = makeTailscaleCli();
 	const facet = startFacet({ host: server, catalog, log, config, tailscale });

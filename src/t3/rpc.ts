@@ -33,6 +33,7 @@ import {
 	WsRpcGroup,
 } from "@t3tools/contracts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -240,6 +241,55 @@ export function makeRpcLayer(deps: RpcDeps) {
 					: Effect.die(error),
 			),
 		);
+	const rpcLog = bridge.config.rpcLog;
+	const now = () => Date.now();
+	const elapsed = (started: number) => Math.max(0, now() - started);
+	const callSink = (sink: ((call: Any) => void) | undefined, call: Any) => {
+		if (sink === undefined) return;
+		try {
+			sink(call);
+		} catch (error) {
+			// A debug callback must never turn into a broken RPC: report the sink's own failure and continue.
+			log.warn("RPC log callback failed", { method: call.method, error: error instanceof Error ? error.message : String(error) });
+		}
+	};
+	const failureMessage = (cause: Any) => {
+		const error = Cause.isCause(cause) ? Cause.squash(cause) : cause;
+		return error instanceof Error ? error.message : String(error);
+	};
+	/** Wrap one implemented handler: success/failure callbacks carry the method, kind and duration. Streams report when
+	 * they open (their later failures are the stream's own). */
+	const observe = (tag: string, handler: (payload: Any) => Any, stream: boolean): ((payload: Any) => Any) =>
+		(payload) => {
+			const started = now();
+			if (stream) {
+				try {
+					const value = handler(payload);
+					callSink(rpcLog?.onSuccess, { method: tag, kind: "stream", durationMs: elapsed(started) });
+					return value;
+				} catch (error) {
+					callSink(rpcLog?.onFailure, { method: tag, kind: "stream", durationMs: elapsed(started), error: error instanceof Error ? error.message : String(error) });
+					throw error;
+				}
+			}
+			let effect: Any;
+			try {
+				effect = handler(payload);
+			} catch (error) {
+				callSink(rpcLog?.onFailure, { method: tag, kind: "request", durationMs: elapsed(started), error: error instanceof Error ? error.message : String(error) });
+				throw error;
+			}
+			return Effect.matchCauseEffect(effect, {
+				onFailure: (cause) => {
+					callSink(rpcLog?.onFailure, { method: tag, kind: "request", durationMs: elapsed(started), error: failureMessage(cause) });
+					return Effect.failCause(cause);
+				},
+				onSuccess: (value) => {
+					callSink(rpcLog?.onSuccess, { method: tag, kind: "request", durationMs: elapsed(started) });
+					return Effect.succeed(value);
+				},
+			});
+		};
 	const noteStub = (tag: string) => {
 		if (stubbed.has(tag)) return;
 		stubbed.add(tag);
@@ -638,16 +688,19 @@ export function makeRpcLayer(deps: RpcDeps) {
 	const all: Record<string, (payload: Any) => Any> = {};
 	for (const [tag, rpc] of WsRpcGroup.requests as unknown as Map<string, Any>) {
 		const implemented = handlers[tag];
+		const stream = RpcSchema.isStreamSchema(rpc.successSchema);
 		if (implemented !== undefined) {
-			all[tag] = implemented;
+			all[tag] = observe(tag, implemented, stream);
 			continue;
 		}
 		// Every refusal names why, streams included: a stream that never ends leaves T3 waiting on a blank panel
 		// (capabilities.md).
 		all[tag] = () => {
+			const started = now();
 			noteStub(tag);
 			const message = tag.startsWith("terminal.") ? "Terminals are not supported by pi-durable-t3." : unsupportedMessage(tag);
-			return RpcSchema.isStreamSchema(rpc.successSchema) ? Stream.die(new CommandError(message)) : Effect.die(new CommandError(message));
+			callSink(rpcLog?.onStubbed, { method: tag, kind: stream ? "stream" : "request", reason: message, durationMs: elapsed(started) });
+			return stream ? Stream.die(new CommandError(message)) : Effect.die(new CommandError(message));
 		};
 	}
 

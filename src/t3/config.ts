@@ -6,6 +6,7 @@ import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
 import type { TitleThread } from "./title-thread.ts";
 import type { PreviewBrowserConfig } from "./preview-config.ts";
+import type { RpcLog } from "./logging.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
@@ -34,6 +35,8 @@ export interface FacetConfig {
 	readonly titleThread?: TitleThread;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
+	/** Optional per-call RPC observation for debugging the wire. Absent: nothing is called. */
+	readonly rpcLog?: RpcLog;
 }
 
 /** The fully-assembled facet config: the integrator's static fields plus the two live sources of truth. */
