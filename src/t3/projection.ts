@@ -183,16 +183,50 @@ export function projectThread(
 		capturedAt: time(meta.createdAt),
 	});
 
+	// A compaction is the context head: the view starts with the newest summary and everything after it is kept. Emit
+	// the card first, at the cut, so clients place it above the kept entries instead of after the newest message.
+	const headEntry = view?.entries?.[0];
+	const headSummary = headEntry?.kind === "pi.compaction" ? headEntry : undefined;
+	if (headSummary !== undefined) {
+		const message = firstMessage(headSummary);
+		const at = message?.timestamp ?? meta.createdAt;
+		const summary = textOf(message?.role === "user" ? message.content : undefined);
+		const synthetic = drafts[0]?.synthetic === true;
+		turnItems.push({
+			id: id(`ti-k${headSummary.id}`),
+			threadId: id(threadId),
+			runId: synthetic ? id(`r${headSummary.id}`) : null,
+			nodeId: synthetic ? id(`n${headSummary.id}`) : null,
+			providerThreadId: id(providerThreadId),
+			providerTurnId: synthetic ? id(`ptu${headSummary.id}`) : null,
+			nativeItemRef: null,
+			parentItemId: null,
+			ordinal: 1,
+			status: "completed",
+			title: "Context compacted",
+			startedAt: time(at),
+			completedAt: time(at),
+			updatedAt: time(at),
+			type: "compaction",
+			driver: id(PROVIDER_DRIVER),
+			...(summary.length === 0 ? {} : { summary }),
+		} as Any);
+	}
+
 	drafts.forEach((draft, index) => {
 		const ordinal = index + 1;
 		const isLast = index === drafts.length - 1;
+		const synthetic = draft.synthetic === true;
 		const u = draft.userEntry;
 		const runId = `r${u.id}`;
 		const nodeId = `n${u.id}`;
 		const attemptId = `a${u.id}`;
 		const turnId = `ptu${u.id}`;
 		const userMessage = firstMessage(u)!;
-		const requestedAt = userMessage.timestamp ?? meta.createdAt;
+		const anchorAt = userMessage.timestamp ?? meta.createdAt;
+		// A synthetic run starts where its kept entries start: the compaction summary is only a marker, not a prompt.
+		const firstStep = draft.steps[0];
+		const requestedAt = synthetic ? (firstStep === undefined ? anchorAt : (firstMessage(firstStep)?.timestamp ?? anchorAt)) : anchorAt;
 		const assistants = draft.steps.filter(isAssistantEntry);
 		const lastAssistant = assistants.at(-1);
 		const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
@@ -200,6 +234,7 @@ export function projectThread(
 		const running = isLast && busy;
 		let status: OrchestrationV2Run["status"];
 		if (running) status = "running";
+		else if (synthetic && lastAssistant === undefined) status = "completed";
 		else {
 			const reason = stopReason(lastAssistant);
 			status =
@@ -222,7 +257,8 @@ export function projectThread(
 				: modelSelection;
 		})();
 		const settled = !running;
-		const checkpointId = settled ? `cp${u.id}` : null;
+		// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
+		const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
 		runs.push({
 			id: id(runId),
 			threadId: id(threadId),
@@ -291,19 +327,21 @@ export function projectThread(
 				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
 			} }),
 		});
-		checkpointScopes.push({
-			id: id(`cs${u.id}`),
-			threadId: id(threadId),
-			runId: id(runId),
-			nodeId: id(nodeId),
-			parentScopeId: null,
-			providerThreadId: id(providerThreadId),
-			kind: "root_run",
-			ordinalWithinParent: index,
-			advancesAppRunCount: true,
-			cwd: meta.cwd,
-			createdAt: time(requestedAt),
-		});
+		if (!synthetic) {
+			checkpointScopes.push({
+				id: id(`cs${u.id}`),
+				threadId: id(threadId),
+				runId: id(runId),
+				nodeId: id(nodeId),
+				parentScopeId: null,
+				providerThreadId: id(providerThreadId),
+				kind: "root_run",
+				ordinalWithinParent: index,
+				advancesAppRunCount: true,
+				cwd: meta.cwd,
+				createdAt: time(requestedAt),
+			});
+		}
 		if (checkpointId !== null) {
 			checkpoints.push({
 				id: id(checkpointId),
@@ -320,7 +358,7 @@ export function projectThread(
 				capturedAt: time(completedMs ?? requestedAt),
 			});
 		}
-		projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
+		if (!synthetic) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
 
 		// ---- items ----
 		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
@@ -342,10 +380,13 @@ export function projectThread(
 		const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
 			const message = firstMessage(entry)!;
 			const messageId = messageIdOf(entry) ?? `m${entry.id}`;
-			const at = message.timestamp ?? requestedAt;
-			const text = textOf(message.role === "user" ? message.content : undefined);
+			// The compaction anchor is shown as the card, not as the summary in a bubble: report the prompt the clients
+			// already know how to hide when the same run carries a compaction item (`/compact`).
+			const anchor = synthetic && entry === u;
+			const at = anchor ? requestedAt : (message.timestamp ?? requestedAt);
+			const text = anchor ? "/compact" : textOf(message.role === "user" ? message.content : undefined);
 			// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
-			const attachments = attachmentsOf(entry);
+			const attachments = anchor ? [] : attachmentsOf(entry);
 			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
 			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
@@ -593,34 +634,6 @@ export function projectThread(
 			);
 		}
 	});
-
-	// Compaction summaries are write entries between runs; project them as standalone compaction items so T3 can show
-	// the card and settle its “compacting” state even when the entry has no user turn of its own.
-	for (const entry of view?.entries ?? []) {
-		if (entry.kind !== "pi.compaction") continue;
-		const message = firstMessage(entry);
-		const at = message?.timestamp ?? meta.createdAt;
-		const summary = textOf(message?.role === "user" ? message.content : undefined);
-		turnItems.push({
-			id: id(`ti-k${entry.id}`),
-			threadId: id(threadId),
-			runId: null,
-			nodeId: null,
-			providerThreadId: id(providerThreadId),
-			providerTurnId: null,
-			nativeItemRef: null,
-			parentItemId: null,
-			ordinal: runs.length + 1,
-			status: "completed",
-			title: "Context compacted",
-			startedAt: time(at),
-			completedAt: time(at),
-			updatedAt: time(at),
-			type: "compaction",
-			driver: id(PROVIDER_DRIVER),
-			...(summary.length === 0 ? {} : { summary }),
-		} as Any);
-	}
 
 	// Queued follow-ups live in pi's inbox until a boundary places them. T3's queue reads them as runs, so project each
 	// follow-up as a queued run now; it disappears from here when the inbox item is placed and a real run replaces it.

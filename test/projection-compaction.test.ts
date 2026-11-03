@@ -1,0 +1,110 @@
+// Compaction is a context head: the summary replaces the history above the cut, and the entries after the cut are
+// kept. pi's split-turn compaction can cut inside a turn, so the kept tail may start with assistant/tool entries that
+// no user prompt precedes. These cases pin that the tail stays visible (anchored by the summary) and that the card is
+// emitted first, at the cut, instead of after the newest message.
+import { describe, expect, it } from "vitest";
+import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
+import { projectThread, type ThreadMeta } from "../src/t3/projection.ts";
+
+const meta: ThreadMeta = {
+	threadId: "t1",
+	projectId: "p",
+	title: "t",
+	cwd: "/",
+	createdAt: 0,
+	updatedAt: 0,
+	model: null,
+	running: false,
+};
+
+const view = (entries: EntryRecord[]): ConversationView => ({ conversation: { id: 1 }, entries, docs: {} }) as unknown as ConversationView;
+
+const compaction = (id: number, head: number, summary = "Prior work."): EntryRecord =>
+	({
+		id,
+		kind: "pi.compaction",
+		data: { reason: "threshold" },
+		model: [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${summary}\n</summary>`,
+					},
+				],
+				timestamp: 50,
+			},
+		],
+	}) as unknown as EntryRecord;
+
+const assistant = (id: number, text: string, timestamp: number): EntryRecord =>
+	({
+		id,
+		kind: "pi.assistant",
+		model: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp }],
+	}) as unknown as EntryRecord;
+
+const user = (id: number, text: string, timestamp: number): EntryRecord =>
+	({ id, kind: "app.user", data: { messageId: `message-${id}` }, model: [{ role: "user", content: text, timestamp }] }) as unknown as EntryRecord;
+
+describe("projection: compaction keeps its tail", () => {
+	it("anchors a tail that starts inside a turn, so the kept entries stay visible", () => {
+		const entries = [compaction(100, 101), assistant(101, "kept reply", 60)];
+		const result = projectThread(meta, view(entries), { rolledBack: [] });
+
+		// The kept assistant entry is still projected, under a run anchored by the compaction summary.
+		expect(result.projection.runs).toHaveLength(1);
+		expect(result.projection.runs[0]!.status).toBe("completed");
+		expect(result.projection.messages.map((m) => [m.role, m.text])).toEqual([
+			["user", "/compact"],
+			["assistant", "kept reply"],
+		]);
+
+		// The card is first, at the cut, and belongs to that run so clients hide the `/compact` prompt.
+		const card = result.projection.turnItems[0]!;
+		expect(card.type).toBe("compaction");
+		expect(card.runId).toBe(result.projection.runs[0]!.id);
+		expect((card as { summary?: string }).summary).toContain("Prior work.");
+		const prompt = result.projection.turnItems.find((item) => item.type === "user_message") as { text?: string };
+		expect(prompt.text).toBe("/compact");
+
+		// No user turn was cut into, so the synthetic run is not a rewind checkpoint.
+		expect(result.projection.runs[0]!.checkpointId).toBe(null);
+		expect(result.runs).toHaveLength(0);
+	});
+
+	it("keeps a later user turn as its own run after a split-turn tail", () => {
+		const entries = [
+			compaction(100, 101),
+			assistant(101, "kept reply", 60),
+			user(102, "next question", 70),
+			assistant(103, "next answer", 80),
+		];
+		const result = projectThread(meta, view(entries), { rolledBack: [] });
+		expect(result.projection.runs).toHaveLength(2);
+		expect(result.projection.runs[0]!.userMessageId).toBe("m100");
+		expect(result.projection.runs[1]!.userMessageId).toBe("message-102");
+		expect(result.runs.map((run) => run.userEntryId)).toEqual([102]);
+	});
+
+	it("shows the card at the cut when the kept tail starts with a user turn", () => {
+		const entries = [compaction(100, 102), user(102, "kept question", 70), assistant(103, "kept answer", 80)];
+		const result = projectThread(meta, view(entries), { rolledBack: [] });
+		expect(result.projection.turnItems[0]!.type).toBe("compaction");
+		expect(result.projection.turnItems[0]!.runId).toBe(null);
+		expect(result.projection.runs).toHaveLength(1);
+		expect(result.projection.messages.map((m) => [m.role, m.text])).toEqual([
+			["user", "kept question"],
+			["assistant", "kept answer"],
+		]);
+	});
+
+	it("keeps the card as the only item when the compaction kept nothing", () => {
+		const entries = [compaction(100, 100)];
+		const result = projectThread(meta, view(entries), { rolledBack: [] });
+		expect(result.projection.runs).toHaveLength(0);
+		expect(result.projection.turnItems).toHaveLength(1);
+		expect(result.projection.turnItems[0]!.type).toBe("compaction");
+	});
+});
