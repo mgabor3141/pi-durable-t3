@@ -191,14 +191,15 @@ export function projectThread(
 		const message = firstMessage(headSummary);
 		const at = message?.timestamp ?? meta.createdAt;
 		const summary = textOf(message?.role === "user" ? message.content : undefined);
-		const synthetic = drafts[0]?.synthetic === true;
 		turnItems.push({
 			id: id(`ti-k${headSummary.id}`),
 			threadId: id(threadId),
-			runId: synthetic ? id(`r${headSummary.id}`) : null,
-			nodeId: synthetic ? id(`n${headSummary.id}`) : null,
+			// Runless on purpose: attached to the run, a client puts the run's fold above the card. At the cut it is
+			// a divider before the run, so the kept tail's fold comes after it.
+			runId: null,
+			nodeId: null,
 			providerThreadId: id(providerThreadId),
-			providerTurnId: synthetic ? id(`ptu${headSummary.id}`) : null,
+			providerTurnId: null,
 			nativeItemRef: null,
 			parentItemId: null,
 			ordinal: 1,
@@ -597,7 +598,9 @@ export function projectThread(
 			}
 		};
 
-		pushUser(u, "turn_start");
+		// A synthetic run has no prompt to show: the card at the cut is its start. Emitting the summary as a
+		// `/compact` user message would put it inside the run, where the fold and the compaction marker disagree.
+		if (!synthetic) pushUser(u, "turn_start");
 		const toolResults = new Map<string, EntryRecord>();
 		for (const step of draft.steps) {
 			const m = firstMessage(step);

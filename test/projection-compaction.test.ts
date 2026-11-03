@@ -56,18 +56,15 @@ describe("projection: compaction keeps its tail", () => {
 		// The kept assistant entry is still projected, under a run anchored by the compaction summary.
 		expect(result.projection.runs).toHaveLength(1);
 		expect(result.projection.runs[0]!.status).toBe("completed");
-		expect(result.projection.messages.map((m) => [m.role, m.text])).toEqual([
-			["user", "/compact"],
-			["assistant", "kept reply"],
-		]);
+		expect(result.projection.messages.map((m) => [m.role, m.text])).toEqual([["assistant", "kept reply"]]);
 
-		// The card is first, at the cut, and belongs to that run so clients hide the `/compact` prompt.
+		// The card is first, at the cut, and runless: attached to the run, its fold would sit above the card.
 		const card = result.projection.turnItems[0]!;
 		expect(card.type).toBe("compaction");
-		expect(card.runId).toBe(result.projection.runs[0]!.id);
+		expect(card.runId).toBe(null);
 		expect((card as { summary?: string }).summary).toContain("Prior work.");
-		const prompt = result.projection.turnItems.find((item) => item.type === "user_message") as { text?: string };
-		expect(prompt.text).toBe("/compact");
+		// No synthetic prompt: the card stands in for it, so clients have nothing to hide and no stray bubble.
+		expect(result.projection.turnItems.some((item) => item.type === "user_message")).toBe(false);
 
 		// No user turn was cut into, so the synthetic run is not a rewind checkpoint.
 		expect(result.projection.runs[0]!.checkpointId).toBe(null);
