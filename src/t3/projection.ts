@@ -214,7 +214,6 @@ export function projectThread(
 		} as Any);
 	};
 
-	const historyIds = new Set(history.map((entry) => entry.id));
 	drafts.forEach((draft, index) => {
 		const ordinal = index + 1;
 		if (draft.card !== undefined) pushCompaction(draft.card, ordinal);
@@ -222,8 +221,6 @@ export function projectThread(
 		const isLast = index === drafts.length - 1;
 		const synthetic = draft.synthetic === true;
 		const u = draft.userEntry;
-		// History is display-only: no checkpoint, no rewind target. It still renders as a run (and folds like one).
-		const historical = historyIds.has(u.id);
 		const runId = `r${u.id}`;
 		const nodeId = `n${u.id}`;
 		const attemptId = `a${u.id}`;
@@ -263,9 +260,9 @@ export function projectThread(
 				: modelSelection;
 		})();
 		const settled = !running;
-		// A synthetic run has no user turn to rewind to, and history is not in the active context, so neither carries a
-		// checkpoint (undo.ts maps checkpoints to prompts).
-		const checkpointId = settled && !synthetic && !historical ? `cp${u.id}` : null;
+		// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
+		// History runs do: a rewind into the transcript above a compaction is a real rewind, not display-only.
+		const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
 		runs.push({
 			id: id(runId),
 			threadId: id(threadId),
@@ -334,7 +331,7 @@ export function projectThread(
 				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
 			} }),
 		});
-		if (!synthetic && !historical) {
+		if (!synthetic) {
 			checkpointScopes.push({
 				id: id(`cs${u.id}`),
 				threadId: id(threadId),
@@ -365,7 +362,7 @@ export function projectThread(
 				capturedAt: time(completedMs ?? requestedAt),
 			});
 		}
-		if (!synthetic && !historical) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
+		if (!synthetic) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
 
 		// ---- items ----
 		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({

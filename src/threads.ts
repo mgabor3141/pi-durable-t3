@@ -620,6 +620,28 @@ export class Threads {
 	}
 
 	/**
+	 * T3's `thread.fork`: a new thread whose head is a fork of `sourceThreadId`'s head at `entryId` (inclusive), so a
+	 * response can be continued in its own thread. The target id is the client's, so a retried fork returns the same row.
+	 */
+	async fork(input: { sourceThreadId: string; targetThreadId: string; entryId: number; title?: string }): Promise<Thread> {
+		return this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const existing = doc.threads.find((candidate) => candidate.threadId === input.targetThreadId);
+			if (existing !== undefined) return { ...existing };
+			const source = doc.threads.find((candidate) => candidate.threadId === input.sourceThreadId);
+			if (source === undefined) throw hostError("unknown_thread", `no such thread: ${input.sourceThreadId}`);
+			const fork = await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
+			const projectId = await this.#projectForConversation(tx, fork.id);
+			if (projectId === undefined) throw hostError("unknown_project", `the fork of ${input.sourceThreadId} matches no registered project`);
+			const thread = this.#newThread(fork.id, projectId, input.title ?? source.title, { threadId: source.threadId });
+			// The client chose the target id; keep that id, not one minted by #newThread.
+			thread.threadId = input.targetThreadId;
+			doc.threads.push(thread);
+			return { ...thread };
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/**
 	 * Delete a thread: abort its head first — so the abort→commit window leaves nothing owed running — then drop the
 	 * pointer and tombstone the removal. Conversations stay: storage only grows (design.md, Invariants).
 	 */

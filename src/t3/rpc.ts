@@ -91,7 +91,6 @@ const SIDEBAR_NO_OPS = new Set([
 ]);
 
 const UNSUPPORTED: Record<string, string> = {
-	"thread.fork": "Forking is not supported by pi-durable-t3 yet.",
 	"thread.merge_back": "Merging a fork back is not supported by pi-durable-t3 yet.",
 	"thread.archive": "Archiving is not supported by pi-durable-t3 yet.",
 	"orchestration.subscribeArchivedShell": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
@@ -322,6 +321,15 @@ export function makeRpcLayer(deps: RpcDeps) {
 				case "thread.create":
 					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId, title: command.title });
 					await bridge.applySelection(command.threadId, command.modelSelection);
+					break;
+				case "thread.fork":
+					if (command.sideChat === true) throw new CommandError("Side chats are not supported by pi-durable-t3 yet.");
+					await bridge.forkThread({
+						sourceThreadId: command.sourceThreadId,
+						targetThreadId: command.targetThreadId,
+						...(command.sourcePoint.type === "run" ? { runId: command.sourcePoint.runId } : {}),
+						...(command.title === undefined ? {} : { title: command.title }),
+					});
 					break;
 				case "thread.runtime-mode.set":
 					if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");

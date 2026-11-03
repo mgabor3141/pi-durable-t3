@@ -114,6 +114,7 @@ export const PiThreads = local("pi.threads", {
 		// `title` is a launch's title (absent: untitled, "New thread"). `cwd` is a folder of its own under the project (a
 		// Scratch thread's); absent, the project's root.
 		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()), title: Type.Optional(Type.String()) }), ThreadSchema),
+		fork: method(Type.Object({ sourceThreadId: Type.String(), targetThreadId: Type.String(), entryId: Type.Number(), title: Type.Optional(Type.String()) }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
 		// Set a thread's title (a rename, a seed, a generated title); durable in the threads document.
 		rename: method(Type.Object({ threadId: Type.String(), title: Type.String() }), Type.Null()),
@@ -211,6 +212,15 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				create: async (args, ctx) => {
 					try {
 						const thread = await threads.create(args);
+						await publish(ctx);
+						return thread;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				fork: async (args, ctx) => {
+					try {
+						const thread = await threads.fork(args);
 						await publish(ctx);
 						return thread;
 					} catch (error) {
