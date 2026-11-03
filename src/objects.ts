@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { AgentChange, ConversationId, ConversationView, ConversationWatch } from "@earendil-works/pi-durable";
+import type { AgentChange, Conversation, ConversationId, ConversationView, ConversationWatch, Cursor, EntryRecord } from "@earendil-works/pi-durable";
 import { HostError } from "./host-errors.ts";
 import { ThreadsDoc, type Thread, type Threads } from "./threads.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
@@ -58,7 +58,7 @@ const ThreadSearchMatchSchema = Type.Object({
 });
 
 // The head's durable view, carried through as-is (an opaque JSON value; the facet reads the fields it needs).
-const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown() });
+const TranscriptState = Type.Object({ conversationId: Type.Number(), view: Type.Unknown(), history: Type.Array(Type.Unknown()) });
 
 // A subagent, as `pi.threads.subagents` discovers it (`t3/subagents.ts`).
 const SubagentSchema = Type.Object({
@@ -282,26 +282,56 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 	);
 
 	api.serve(PiTranscript, ({ threadId }, _principal, self) => {
-		const state = { transcript: self.state("transcript", TranscriptState, { conversationId: 0, view: EMPTY_VIEW }) };
+		const state = { transcript: self.state("transcript", TranscriptState, { conversationId: 0, view: EMPTY_VIEW, history: [] }) };
 		// Follow the thread's head: watch the thread list for the head, and the head conversation's view for its value.
 		self.task(async (ctx) => {
 			let conversationWatch: ConversationWatch | undefined;
 			let currentHead = -1;
-			const setView = (conversationId: number, view: ConversationView): void => {
-				state.transcript.replace(ctx, { conversationId, view }, { diff: true });
+			// The cut a cached history was loaded for. Compaction keeps the pre-cut entries durably but drops them from
+			// the active view; the transcript shows them above the card. The cutoff is the first kept entry, so the cache
+			// survives every later write until the next compaction moves the cut.
+			let historyCutoff = -1;
+			let history: EntryRecord[] = [];
+			const cutoffOf = (view: ConversationView): number => {
+				const head = view.entries[0];
+				if (head?.kind !== "pi.compaction") return -1;
+				const firstKept = view.entries[1];
+				return (firstKept?.id ?? head.id) - 1;
+			};
+			const loadHistory = async (conversation: Conversation, cutoff: number): Promise<EntryRecord[]> => {
+				if (cutoff <= 0) return [];
+				const items: EntryRecord[] = [];
+				let cursor: Cursor | undefined;
+				do {
+					const page = await conversation.entries({ order: "ascending", maxEntryId: cutoff as EntryRecord["id"] }, 500, cursor, BACKGROUND_CONTEXT);
+					items.push(...page.items);
+					cursor = page.next;
+				} while (cursor !== undefined);
+				// Compaction markers are rendered as cards by the projection; an older summary here would be a stray bubble.
+				return items.filter((entry) => entry.kind !== "pi.compaction" && entry.id <= cutoff);
+			};
+			const setView = async (head: number, view: ConversationView, conversation: Conversation | undefined): Promise<void> => {
+				const cutoff = cutoffOf(view);
+				if (cutoff !== historyCutoff) {
+					history = conversation === undefined ? [] : await loadHistory(conversation, cutoff).catch(() => []);
+					historyCutoff = cutoff;
+				}
+				state.transcript.replace(ctx, { conversationId: head, view, history }, { diff: true });
 			};
 			const rebind = async (head: number): Promise<void> => {
 				if (head === currentHead) return;
 				currentHead = head;
+				historyCutoff = -1;
+				history = [];
 				await conversationWatch?.stop().catch(() => {});
 				const conversation = await harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
 				if (conversation === undefined) {
-					setView(head, EMPTY_VIEW);
+					await setView(head, EMPTY_VIEW, undefined);
 					return;
 				}
 				conversationWatch = await conversation.watch(BACKGROUND_CONTEXT);
-				conversationWatch.start(async (view) => setView(head, view));
-				setView(head, conversationWatch.value);
+				conversationWatch.start(async (view) => setView(head, view, conversation));
+				await setView(head, conversationWatch.value, conversation);
 			};
 			// A subagent's thread is its child conversation, fixed by the id: the bridge opens it only for a child it
 			// discovered (`Bridge.hasThread`), and it is no thread's head, so it never enters the threads document.

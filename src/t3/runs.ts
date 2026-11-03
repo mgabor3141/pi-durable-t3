@@ -10,6 +10,10 @@ export interface RunDraft {
 	/** The anchor is a compaction summary, not a prompt. The kept entries have no user turn of their own, so the run
 	 * has no user entry to rewind to and the projection shows the compaction card where the prompt would be. */
 	synthetic?: boolean;
+	/** The compaction divider that belongs immediately before this run: at the cut, after the history it replaces. */
+	card?: EntryRecord;
+	/** A compaction that kept nothing: the draft carries only its card, no run. */
+	markerOnly?: boolean;
 }
 
 export const firstMessage = (entry: EntryRecord): DurableMessage | undefined => entry.model?.[0];
@@ -64,30 +68,40 @@ export const isAbortedToolResult = (entry: EntryRecord) =>
  * still going: its last step is a completed tool round (every call of the last assistant entry has a result, none of
  * them aborted). After an interrupted tool round the run has ended, so the next user entry starts a new one.
  *
- * A compaction is a context head, not a step of a run: the entries after it are kept. When the cut fell inside a
- * turn (pi's split-turn compaction) the kept tail starts with assistant/tool entries that no user prompt precedes,
- * so the compaction entry anchors a synthetic run and the tail stays visible instead of being dropped.
+ * A compaction is a context head, not a step of a run: it closes the run before it and its card belongs at the cut.
+ * When the cut fell inside a turn (pi's split-turn compaction) the kept tail starts with assistant/tool entries that
+ * no user prompt precedes, so the compaction entry anchors a synthetic run and the tail stays visible instead of
+ * being dropped. A compaction that kept a user turn attaches its card to that turn's run; one that kept nothing is a
+ * marker-only draft.
  */
 export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 	const runs: RunDraft[] = [];
+	let steerable = false;
+	let pendingCard: EntryRecord | undefined;
 	for (const [index, entry] of entries.entries()) {
-		if (isUserEntry(entry)) {
-			const current = runs.at(-1);
-			if (current !== undefined && endsWithCompletedToolRound(current.steps)) current.steps.push(entry);
-			else runs.push({ userEntry: entry, steps: [] });
+		if (entry.kind === "pi.compaction") {
+			steerable = false;
+			pendingCard = entry;
+			const next = entries[index + 1];
+			if (next !== undefined && !isUserEntry(next)) {
+				runs.push({ userEntry: entry, steps: [], synthetic: true, card: entry });
+				pendingCard = undefined;
+			}
 			continue;
 		}
-		if (entry.kind === "pi.compaction") {
+		if (isUserEntry(entry)) {
 			const current = runs.at(-1);
-			if (current !== undefined) current.steps.push(entry);
+			if (steerable && current !== undefined && endsWithCompletedToolRound(current.steps)) current.steps.push(entry);
 			else {
-				const next = entries[index + 1];
-				if (next !== undefined && !isUserEntry(next)) runs.push({ userEntry: entry, steps: [], synthetic: true });
+				runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
+				pendingCard = undefined;
+				steerable = true;
 			}
 			continue;
 		}
 		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") runs.at(-1)?.steps.push(entry);
 	}
+	if (pendingCard !== undefined) runs.push({ userEntry: pendingCard, steps: [], synthetic: true, card: pendingCard, markerOnly: true });
 	return runs;
 }
 

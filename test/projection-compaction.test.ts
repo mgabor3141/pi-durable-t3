@@ -97,6 +97,28 @@ describe("projection: compaction keeps its tail", () => {
 		]);
 	});
 
+	it("shows the compacted history above the card without making it a rewind target", () => {
+		const past = [user(10, "older question", 10), assistant(11, "older answer", 20)];
+		const entries = [compaction(100, 101), assistant(101, "kept reply", 60)];
+		const result = projectThread(meta, view(entries), { rolledBack: [], history: past });
+
+		expect(result.projection.messages.map((m) => [m.role, m.text])).toEqual([
+			["user", "older question"],
+			["assistant", "older answer"],
+			["assistant", "kept reply"],
+		]);
+		expect(result.projection.turnItems.map((item) => item.type)).toEqual([
+			"user_message",
+			"assistant_message",
+			"compaction",
+			"assistant_message",
+		]);
+		// History renders as a run but carries no checkpoint, and the active synthetic run adds no projected run either.
+		expect(result.projection.runs).toHaveLength(2);
+		expect(result.projection.runs[0]!.checkpointId).toBe(null);
+		expect(result.runs).toHaveLength(0);
+	});
+
 	it("keeps the card as the only item when the compaction kept nothing", () => {
 		const entries = [compaction(100, 100)];
 		const result = projectThread(meta, view(entries), { rolledBack: [] });

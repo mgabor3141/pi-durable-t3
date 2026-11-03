@@ -75,6 +75,8 @@ interface ThreadState {
 	/** The head conversation id (the write target) and its assembled view, from `pi.transcript` / `pi.models`. */
 	conversationId: number | undefined;
 	view: ConversationView | undefined;
+	/** Display-only transcript above the active context's compaction cut, from `pi.transcript`. */
+	history: EntryRecord[] | undefined;
 	configuration: { model: ModelRef | null; thinkingLevel: string } | undefined;
 	/** The catalog entries, each with its input modalities, so the send path knows which models accept images. */
 	catalog: { provider: string; modelId: string; input: string[]; contextWindow: number }[];
@@ -630,6 +632,7 @@ export class Bridge {
 				stops: [],
 				conversationId: undefined,
 				view: undefined,
+				history: undefined,
 				configuration: undefined,
 				catalog: [],
 			};
@@ -651,6 +654,7 @@ export class Bridge {
 		const models = this.isSubagentThread(state.threadId) ? undefined : this.#host.hold(PiModels, key);
 		const fire = (): void => {
 			state.view = peek(transcript.transcript)?.view as ConversationView | undefined;
+			state.history = peek(transcript.transcript)?.history as EntryRecord[] | undefined;
 			state.conversationId = peek(transcript.transcript)?.conversationId;
 			if (models !== undefined) {
 state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [], contextWindow: model.contextWindow }));
@@ -723,7 +727,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,
-			{ rolledBack: state.rolledBack, rollbackRequestId: state.rollbackRequestId, rollbackFailure: state.rollbackFailure },
+			{ rolledBack: state.rolledBack, rollbackRequestId: state.rollbackRequestId, rollbackFailure: state.rollbackFailure, history: state.history },
 		);
 		this.#publishShell(state.threadId);
 		if (state.listeners.size === 0 || state.emitTimer !== undefined) return;

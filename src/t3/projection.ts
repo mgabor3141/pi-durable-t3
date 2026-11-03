@@ -80,6 +80,9 @@ interface ThreadMemory {
 	/** Runs removed by rewinds, kept as `rolled_back` so a client looking at a forked head reads them as history —
 	 * load-bearing, not cosmetic (design.md, Invariants). */
 	readonly rolledBack: readonly RolledBackRun[];
+	/** Transcript before the active context's cut, for display only. Compaction keeps these entries on disk but drops
+	 * them from the model context; without them the thread appears to start at the divider. They are never rewound. */
+	readonly history?: readonly EntryRecord[];
 	readonly rollbackRequestId?: string | undefined;
 	readonly rollbackFailure?: { requestId: string; message: string } | null | undefined;
 }
@@ -120,7 +123,8 @@ export function projectThread(
 		model: meta.model === null ? "default" : modelSlug(meta.model),
 		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
 	};
-	const drafts = groupRuns(view?.entries ?? []);
+	const history = memory.history ?? [];
+	const drafts = groupRuns([...history, ...(view?.entries ?? [])]);
 	// The thread's folder of its own, as T3 spells it on a thread row: a folder UNDER the project root (the registry's
 	// cover rule, `Threads.#projectForConversation`), null for a thread running at the root itself.
 	const worktreePath = meta.projectPath === undefined || !meta.cwd.startsWith(`${meta.projectPath}/`) ? null : meta.cwd;
@@ -183,26 +187,22 @@ export function projectThread(
 		capturedAt: time(meta.createdAt),
 	});
 
-	// A compaction is the context head: the view starts with the newest summary and everything after it is kept. Emit
-	// the card first, at the cut, so clients place it above the kept entries instead of after the newest message.
-	const headEntry = view?.entries?.[0];
-	const headSummary = headEntry?.kind === "pi.compaction" ? headEntry : undefined;
-	if (headSummary !== undefined) {
-		const message = firstMessage(headSummary);
+	// A compaction is the context head. Its card is emitted where the cut is: after the history it replaces and
+	// before the kept entries. It is runless on purpose: attached to a run, a client puts that run's fold above it.
+	const pushCompaction = (entry: EntryRecord, ordinal: number): void => {
+		const message = firstMessage(entry);
 		const at = message?.timestamp ?? meta.createdAt;
 		const summary = textOf(message?.role === "user" ? message.content : undefined);
 		turnItems.push({
-			id: id(`ti-k${headSummary.id}`),
+			id: id(`ti-k${entry.id}`),
 			threadId: id(threadId),
-			// Runless on purpose: attached to the run, a client puts the run's fold above the card. At the cut it is
-			// a divider before the run, so the kept tail's fold comes after it.
 			runId: null,
 			nodeId: null,
 			providerThreadId: id(providerThreadId),
 			providerTurnId: null,
 			nativeItemRef: null,
 			parentItemId: null,
-			ordinal: 1,
+			ordinal,
 			status: "completed",
 			title: "Context compacted",
 			startedAt: time(at),
@@ -212,13 +212,18 @@ export function projectThread(
 			driver: id(PROVIDER_DRIVER),
 			...(summary.length === 0 ? {} : { summary }),
 		} as Any);
-	}
+	};
 
+	const historyIds = new Set(history.map((entry) => entry.id));
 	drafts.forEach((draft, index) => {
 		const ordinal = index + 1;
+		if (draft.card !== undefined) pushCompaction(draft.card, ordinal);
+		if (draft.markerOnly === true) return;
 		const isLast = index === drafts.length - 1;
 		const synthetic = draft.synthetic === true;
 		const u = draft.userEntry;
+		// History is display-only: no checkpoint, no rewind target. It still renders as a run (and folds like one).
+		const historical = historyIds.has(u.id);
 		const runId = `r${u.id}`;
 		const nodeId = `n${u.id}`;
 		const attemptId = `a${u.id}`;
@@ -258,8 +263,9 @@ export function projectThread(
 				: modelSelection;
 		})();
 		const settled = !running;
-		// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
-		const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
+		// A synthetic run has no user turn to rewind to, and history is not in the active context, so neither carries a
+		// checkpoint (undo.ts maps checkpoints to prompts).
+		const checkpointId = settled && !synthetic && !historical ? `cp${u.id}` : null;
 		runs.push({
 			id: id(runId),
 			threadId: id(threadId),
@@ -328,7 +334,7 @@ export function projectThread(
 				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
 			} }),
 		});
-		if (!synthetic) {
+		if (!synthetic && !historical) {
 			checkpointScopes.push({
 				id: id(`cs${u.id}`),
 				threadId: id(threadId),
@@ -359,7 +365,7 @@ export function projectThread(
 				capturedAt: time(completedMs ?? requestedAt),
 			});
 		}
-		if (!synthetic) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
+		if (!synthetic && !historical) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
 
 		// ---- items ----
 		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
