@@ -628,10 +628,13 @@ export function makeRpcLayer(deps: RpcDeps) {
 									bridge.subscribeThread(
 										input.threadId,
 										({ sequence, projection }) => {
-											const snapshot =
-												input.acceptCompactTurnItems === true
-													? compactThreadProjection(projection)
-													: { projection };
+											// Always send the compact form. The T3 web client can receive the
+											// first socket snapshot before its bounded HTTP request finishes,
+											// so it never sets its own acceptCompactTurnItems flag; a full
+											// snapshot here would then cost megabytes and poison the cache.
+											// The snapshot field is self-describing and T3 restores local
+											// visible items from it regardless of the request flag.
+											const snapshot = compactThreadProjection(projection);
 											emit({
 												kind: "snapshot",
 												snapshotSequence: sequence,
