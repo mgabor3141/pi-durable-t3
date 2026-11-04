@@ -628,13 +628,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 									bridge.subscribeThread(
 										input.threadId,
 										({ sequence, projection }) => {
-											// Always send the compact form. The T3 web client can receive the
-											// first socket snapshot before its bounded HTTP request finishes,
-											// so it never sets its own acceptCompactTurnItems flag; a full
-											// snapshot here would then cost megabytes and poison the cache.
-											// The snapshot field is self-describing and T3 restores local
-											// visible items from it regardless of the request flag.
-											const snapshot = compactThreadProjection(projection);
+											// A client that opts into deduped bodies is on the same T3
+											// contract and can restore compact snapshots, even if it has not
+											// set acceptCompactTurnItems yet. That race is real for the web
+											// client: its first socket snapshot can beat the bounded HTTP
+											// request that would set the flag, and a full snapshot here would
+											// then cost megabytes on every update. Older clients that send
+											// neither flag keep receiving the full projection.
+											const acceptsCompact =
+												input.acceptCompactTurnItems === true || input.acceptDedupedBodies === true;
+											const snapshot = acceptsCompact ? compactThreadProjection(projection) : { projection };
 											emit({
 												kind: "snapshot",
 												snapshotSequence: sequence,
