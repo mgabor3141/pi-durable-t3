@@ -69,6 +69,15 @@ describe("projection: compaction keeps its tail", () => {
 		// No user turn was cut into, so the synthetic run is not a rewind checkpoint.
 		expect(result.projection.runs[0]!.checkpointId).toBe(null);
 		expect(result.runs).toHaveLength(0);
+		// It is still forkable at its last kept entry: the card is a run anchor, not a user turn.
+		expect(result.forkRuns).toHaveLength(1);
+		expect(result.forkRuns[0]).toMatchObject({
+			runId: "r100",
+			ordinal: 1,
+			userEntryId: 100,
+			lastEntryId: 101,
+			status: "completed",
+		});
 	});
 
 	it("keeps a later user turn as its own run after a split-turn tail", () => {
@@ -83,6 +92,11 @@ describe("projection: compaction keeps its tail", () => {
 		expect(result.projection.runs[0]!.userMessageId).toBe("m100");
 		expect(result.projection.runs[1]!.userMessageId).toBe("message-102");
 		expect(result.runs.map((run) => run.userEntryId)).toEqual([102]);
+		// The synthetic tail and the later user turn are both fork targets, in order.
+		expect(result.forkRuns.map((run) => [run.runId, run.lastEntryId])).toEqual([
+			["r100", 101],
+			["r102", 103],
+		]);
 	});
 
 	it("shows the card at the cut when the kept tail starts with a user turn", () => {
@@ -123,6 +137,7 @@ describe("projection: compaction keeps its tail", () => {
 		const entries = [compaction(100, 100)];
 		const result = projectThread(meta, view(entries), { rolledBack: [] });
 		expect(result.projection.runs).toHaveLength(0);
+		expect(result.forkRuns).toHaveLength(0);
 		expect(result.projection.turnItems).toHaveLength(1);
 		expect(result.projection.turnItems[0]!.type).toBe("compaction");
 	});

@@ -93,7 +93,7 @@ interface ThreadMemory {
 interface ProjectedRun {
 	readonly runId: string;
 	readonly ordinal: number;
-	/** Entry ID of the user message that started the run. */
+	/** Entry ID that anchors the run: a user prompt, or the compaction summary for a synthetic run. */
 	readonly userEntryId: number;
 	/** Entry ID of the run's last durable entry (the checkpoint's `ref`). */
 	readonly lastEntryId: number;
@@ -103,7 +103,10 @@ interface ProjectedRun {
 export interface ProjectionResult {
 	readonly projection: OrchestrationV2ThreadProjection;
 	readonly shell: OrchestrationV2ThreadShell;
+	/** Runs with a user turn, which undo can fork before. */
 	readonly runs: readonly ProjectedRun[];
+	/** Every run a client can fork from, including a synthetic run anchored by a compaction summary. */
+	readonly forkRuns: readonly ProjectedRun[];
 }
 
 const thinkingOf = (content: ContentBlock[]): string =>
@@ -142,6 +145,7 @@ export function projectThread(
 	const checkpointScopes: OrchestrationV2CheckpointScope[] = [];
 	const checkpoints: OrchestrationV2Checkpoint[] = [];
 	const projectedRuns: ProjectedRun[] = [];
+	const forkRuns: ProjectedRun[] = [];
 	let lastActivity = meta.updatedAt;
 
 	// The baseline checkpoint (before the first turn) hangs off a synthetic system node.
@@ -365,7 +369,10 @@ export function projectThread(
 				capturedAt: time(completedMs ?? requestedAt),
 			});
 		}
-		if (!synthetic) projectedRuns.push({ runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status });
+		const projectedRun = { runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status };
+		// A synthetic run has no user turn to rewind to, but its last entry is still a valid fork point.
+		forkRuns.push(projectedRun);
+		if (!synthetic) projectedRuns.push(projectedRun);
 
 		// ---- items ----
 		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
@@ -903,5 +910,5 @@ export function projectThread(
 		deletedAt: null,
 	} as Any;
 
-	return { projection, shell, runs: projectedRuns };
+	return { projection, shell, runs: projectedRuns, forkRuns };
 }

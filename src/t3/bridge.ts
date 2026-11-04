@@ -1400,15 +1400,17 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	}
 
 	/** T3's `thread.fork`: a new thread continuing from a run's last durable entry (or the head's last entry for a
-	 * `latest_stable` fork). The client names the target id, so a retried command returns the same thread. */
+	 * `latest_stable` fork). A synthetic run anchored by a compaction summary has no user turn to rewind to, but its
+	 * last kept entry is still a valid fork point. The client names the target id, so a retried command returns the
+	 * same thread. */
 	async forkThread(input: { sourceThreadId: string; targetThreadId: string; runId?: string | undefined; title?: string | undefined }): Promise<string> {
 		this.#writable(input.targetThreadId);
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
 		if (parseSubagentThreadId(input.targetThreadId) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${input.targetThreadId}`);
 		const source = await this.projection(input.sourceThreadId);
 		const entryId = input.runId === undefined
-			? source.runs.at(-1)?.lastEntryId
-			: source.runs.find((run) => run.runId === input.runId)?.lastEntryId;
+			? source.forkRuns.at(-1)?.lastEntryId
+			: source.forkRuns.find((run) => run.runId === input.runId)?.lastEntryId;
 		if (entryId === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
 		await this.#host.root(async (c) => (await c.get(PiThreads, {})).fork({ sourceThreadId: input.sourceThreadId, targetThreadId: input.targetThreadId, entryId, ...(input.title === undefined ? {} : { title: input.title }) }, c));
 		this.#syncDirectory();
