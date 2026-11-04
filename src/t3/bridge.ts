@@ -700,10 +700,14 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		fire();
 	}
 
-	/** Detach and release a thread's references (idle release); its result is dropped and recomputed on the next open. */
+	/** Detach and release a thread's references (idle release); its result and transcript are dropped and re-read on the
+	 * next open. Keeping `view.entries` and `history` here retains every opened transcript for the life of the process. */
 	#release(state: ThreadState): void {
 		for (const stop of state.stops.splice(0)) stop();
 		state.result = undefined;
+		state.history = undefined;
+		// Keep the small `docs` for shell metadata; release the entry arrays that dominate memory.
+		if (state.view !== undefined) state.view = { ...state.view, entries: [] };
 		state.loadedView = false;
 	}
 

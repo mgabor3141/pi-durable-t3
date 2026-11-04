@@ -655,11 +655,19 @@ export function makeServerLayer(deps: {
 				if (tokenHash === undefined) {
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", message: "Invalid WebSocket ticket." }, 401);
 				}
-				log.info("client connected");
 				const connectedAt = Date.now();
 				// The socket's session: the Connections list marks this client `current`, and the access stream filters by it.
 				const session = auth.sessionOfTokenHash(tokenHash);
 				const sessionId = session?.id ?? "";
+				// The client fields make a disconnect attributable: mobile crashes and reconnects otherwise look identical.
+				const client = {
+					sessionId,
+					...(session?.label === undefined ? {} : { label: session.label }),
+					...(session?.deviceType === undefined ? {} : { deviceType: session.deviceType }),
+					...(session?.os === undefined ? {} : { os: session.os }),
+					...(session?.browser === undefined ? {} : { browser: session.browser }),
+				};
+				log.info("client connected", client);
 				// `connected` is the live-socket count in the store: mark this one on acquire, drop it on release (the stream
 				// pushes the connect/disconnect so the Connections list updates without a re-poll).
 				const connection = yield* Effect.acquireUseRelease(
@@ -689,7 +697,8 @@ export function makeServerLayer(deps: {
 						}),
 					() => Effect.sync(() => {
 						auth.markDisconnected(tokenHash);
-						log.info("client disconnected", { durationMs: Date.now() - connectedAt });
+						const memory = process.memoryUsage();
+						log.info("client disconnected", { ...client, durationMs: Date.now() - connectedAt, heapUsed: memory.heapUsed, rss: memory.rss });
 					}),
 				);
 				return connection;
