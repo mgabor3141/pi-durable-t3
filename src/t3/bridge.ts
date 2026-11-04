@@ -9,6 +9,7 @@ import { DateTime } from "effect";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
+	OrchestrationMessageContext,
 	OrchestrationProjectShell,
 	OrchestrationSearchThreadsResult,
 	OrchestrationV2ShellSnapshot,
@@ -38,6 +39,23 @@ export const ATTACHMENT_WORKSPACE_DIR = "/home/agent/attachments";
 /** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
  * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
  * attachment is still recorded on the entry for display. pi-ai accepts image content only for image-input models. */
+/** Rebind the context's attachment ids to the adopted copies, so its inline image/file references keep resolving
+ * after the client deletes the pending upload. */
+function rebindContext(
+	context: OrchestrationMessageContext | undefined,
+	before: readonly AttachmentRecord[] | undefined,
+	after: readonly AttachmentRecord[] | undefined,
+): OrchestrationMessageContext | undefined {
+	if (context === undefined || before === undefined || after === undefined) return context;
+	const ids = new Map(before.map((attachment, index) => [attachment.id, after[index]?.id ?? attachment.id]));
+	return {
+		version: 1,
+		records: context.records.map((record) =>
+			"attachmentId" in record ? { ...record, attachmentId: ids.get(record.attachmentId) ?? record.attachmentId } : record,
+		),
+	};
+}
+
 export function selectImageBlocks(
 	catalog: readonly { provider: string; modelId: string; input: string[] }[],
 	model: { provider: string; modelId: string } | null,
@@ -943,7 +961,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		generateTitle?: boolean | undefined;
 		modelSelection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined;
 		workspaceStrategy?: { type?: string } | undefined;
-		initialMessage?: { messageId?: string; text: string; attachments?: readonly AttachmentRecord[] | undefined } | undefined;
+		initialMessage?: { messageId?: string; text: string; context?: OrchestrationMessageContext | undefined; attachments?: readonly AttachmentRecord[] | undefined } | undefined;
 	}): Promise<string> {
 		// A Scratch launch names the folder it claims: T3 names it from the first message, else the title.
 		const launchText = input.initialMessage?.text ?? input.title;
@@ -967,6 +985,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 					mode: "start",
 					...(input.generateTitle === true && input.title !== undefined && input.title.trim() !== "" ? { titleSeed: input.title.trim() } : {}),
 					...(message.attachments === undefined ? {} : { attachments: message.attachments }),
+					...(message.context === undefined ? {} : { context: message.context }),
 				});
 				return this.nextSequence();
 			});
@@ -1055,6 +1074,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		messageId: string;
 		text: string;
 		mode: "start" | "queue" | "steer" | "restart";
+		context?: OrchestrationMessageContext | undefined;
 		attachments?: readonly AttachmentRecord[] | undefined;
 		/** T3's `titleSeed`: honoured only on a thread with no messages yet (Orchestrator's message count 0). */
 		titleSeed?: string | undefined;
@@ -1093,6 +1113,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			// The client's upload is only a pending record: adopt it under a deterministic id before the message references
 			// it, because the client may delete the pending upload once the send is acknowledged.
 			const attachments = input.attachments === undefined || this.#attachments === undefined ? input.attachments : this.#attachments.adopt(input.threadId, input.messageId, input.attachments);
+			const context = rebindContext(input.context, input.attachments, attachments);
 			const blocks = this.#imageBlocks(state, attachments);
 			const filePrompt = await this.#filePrompt(attachments);
 			const promptBlocks = filePrompt === undefined ? blocks : [{ type: "text" as const, text: filePrompt, hidden: true }, ...(blocks ?? [])];
@@ -1103,6 +1124,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 				messageId: input.messageId,
 				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
 				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
+				...(context === undefined ? {} : { context }),
 			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.

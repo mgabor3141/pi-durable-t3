@@ -1,5 +1,6 @@
 // What a run is, and what a steer is: one user turn — the user entry that started it plus the entries that followed.
 // A leaf: it reads entry shapes only, so the projection, a test, or any other reader groups a conversation the same way.
+import type { OrchestrationMessageContext } from "@t3tools/contracts";
 import type { DurableMessage, EntryRecord } from "./model-types.ts";
 
 export interface RunDraft {
@@ -49,6 +50,51 @@ export const attachmentsOf = (entry: EntryRecord): UserAttachment[] => {
 		const type = a.type === "file" ? "file" : "image";
 		return [{ type, id: a.id, name: String(a.name ?? (type === "file" ? "file" : "image")), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }];
 	});
+};
+export type MessageContext = OrchestrationMessageContext;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The composer context a user entry carries in its `data` (`Threads.submit`); T3 resolves its text references
+ * against these records. Empty for a message without one. */
+export const contextOf = (entry: EntryRecord): MessageContext | undefined => {
+	const data = entry.data;
+	if (!isRecord(data)) return undefined;
+	const context = data.context;
+	if (!isRecord(context) || context.version !== 1 || !Array.isArray(context.records)) return undefined;
+	const records = context.records.filter(isRecord).map((record) => ({ ...record }));
+	return { version: 1, records } as unknown as MessageContext;
+};
+
+/** Older entries only kept the attachment list, not the composer context. Rebuild the image/file records from the
+ * text's `t3-context://v1/<kind>/<id>` references and the attachments they name, so their inline labels do not show
+ * "(unavailable)" after the client lost its composer state. */
+export const contextFromText = (text: string, attachments: readonly UserAttachment[]): MessageContext | undefined => {
+	if (!text.includes("t3-context://v1/") || attachments.length === 0) return undefined;
+	const used = new Set<number>();
+	const records: Record<string, unknown>[] = [];
+	for (const match of text.matchAll(/!?\[([^\]]*)\]\(t3-context:\/\/v1\/(image|file)\/([a-z0-9_-]+)\)/gi)) {
+		const kind = match[2] === "file" ? "file" : "image";
+		const contextId = match[3]!;
+		let index = attachments.findIndex((attachment, i) => !used.has(i) && attachment.type === kind && attachment.name === match[1]);
+		if (index < 0) index = attachments.findIndex((attachment, i) => !used.has(i) && attachment.type === kind);
+		if (index < 0) continue;
+		used.add(index);
+		const attachment = attachments[index]!;
+		const label = (match[1] === "" ? attachment.name : match[1]!).slice(0, 200);
+		records.push({
+			version: 1,
+			contextId,
+			kind,
+			label,
+			attachmentId: attachment.id,
+			name: attachment.name,
+			mimeType: attachment.mimeType,
+			sizeBytes: attachment.sizeBytes,
+		});
+	}
+	return records.length === 0 ? undefined : ({ version: 1, records } as unknown as MessageContext);
 };
 export const isAssistantEntry = (entry: EntryRecord) => firstMessage(entry)?.role === "assistant";
 export const stopReason = (entry: EntryRecord | undefined) => {

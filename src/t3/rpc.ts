@@ -323,6 +323,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						mode,
 						...(typeof command.titleSeed === "string" ? { titleSeed: command.titleSeed } : {}),
 						...(attachmentRecords(command.attachments) === undefined ? {} : { attachments: attachmentRecords(command.attachments) }),
+						...(command.context === undefined ? {} : { context: command.context }),
 					});
 					break;
 				}
@@ -634,7 +635,15 @@ export function makeRpcLayer(deps: RpcDeps) {
 						generateTitle: input.generateTitle === true,
 						modelSelection: input.modelSelection,
 						workspaceStrategy: input.workspaceStrategy,
-						initialMessage: message === undefined ? undefined : { messageId: message.messageId, text: message.text, attachments: attachmentRecords(message.attachments) },
+						initialMessage:
+							message === undefined
+								? undefined
+								: {
+										messageId: message.messageId,
+										text: message.text,
+										...(message.context === undefined ? {} : { context: message.context }),
+										attachments: attachmentRecords(message.attachments),
+									},
 					});
 					const { projection } = await bridge.projection(threadId);
 					return { threadId, projection, resumed: false };

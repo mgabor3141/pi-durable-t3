@@ -106,6 +106,8 @@ const MessageArgs = Type.Object({
 	blocks: Type.Optional(Type.Array(Type.Unknown())),
 	/** The message's persisted images, placed in the entry's data so the thread shows them after a restart. */
 	attachments: Type.Optional(Type.Array(AttachmentRecordSchema)),
+	/** T3's composer context records, placed in the entry's data; the projection returns them to the client. */
+	context: Type.Optional(Type.Unknown()),
 });
 const AbortArgs = Type.Object({ conversationId: Type.Number() });
 const RewindArgs = Type.Object({ expectedHead: Type.Number(), entryId: Type.Number(), requestId: Type.String() });
@@ -402,7 +404,7 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 
 	api.serve(PiController, ({ threadId }, _principal, _self) => {
 		const submit = async (
-			args: { conversationId: number; requestId: string; message: string; messageId?: string; blocks?: unknown[]; attachments?: AttachmentRecord[] },
+			args: { conversationId: number; requestId: string; message: string; messageId?: string; blocks?: unknown[]; attachments?: AttachmentRecord[]; context?: unknown },
 			whenBusy: "steer" | "followUp" | undefined,
 		): Promise<{ submissionId: number }> => {
 			try {
@@ -415,6 +417,7 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 						...(args.messageId === undefined ? {} : { messageId: args.messageId }),
 						...(args.blocks === undefined ? {} : { blocks: args.blocks as ContentBlock[] }),
 						...(args.attachments === undefined ? {} : { attachments: args.attachments }),
+						...(args.context === undefined ? {} : { context: args.context as Parameters<typeof threads.submit>[0]["context"] }),
 					},
 					whenBusy,
 				);

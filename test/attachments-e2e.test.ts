@@ -45,7 +45,14 @@ const poll = async (fn: () => Promise<boolean>, ms = 30_000): Promise<boolean> =
 	return false;
 };
 
-type Projection = { messages: { role: string; attachments?: { type: string; id: string }[] }[]; runs: { status: string }[] };
+type Projection = {
+	messages: {
+		role: string;
+		attachments?: { type: string; id: string }[];
+		context?: { records: { contextId?: string; attachmentId?: string }[] };
+	}[];
+	runs: { status: string }[];
+};
 const userAttachments = async (ws: WsRpc): Promise<{ type: string; id: string }[]> => {
 	const projection = exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-att" }), "projection") as Projection;
 	return projection.messages.find((m) => m.role === "user")?.attachments ?? [];
@@ -136,13 +143,24 @@ it("adopts an upload before the client deletes the pending record, so reopening 
 		exitValue(await ws.call("orchestration.launchThread", {
 			commandId: "cmd-up-launch", threadId: "t-up", projectId: "p-alpha", title: "Upload", modelSelection,
 			runtimeMode: "full-access", interactionMode: "default", workspaceStrategy: { type: "root" },
-			initialMessage: { messageId: "m-up-1", role: "user", text: "look", attachments: [pending] },
+			initialMessage: {
+			messageId: "m-up-1",
+			role: "user",
+			text: "![up.png](t3-context://v1/image/ctx-up) look",
+			attachments: [pending],
+			context: {
+				version: 1,
+				records: [{ version: 1, contextId: "ctx-up", kind: "image", label: "up.png", attachmentId: pending.id, name: pending.name, mimeType: pending.mimeType, sizeBytes: pending.sizeBytes }],
+			},
+		},
 		}), "launch upload thread");
 		expect(await poll(async () => ((exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-up" }), "projection") as Projection).runs.some((r) => r.status === "completed"))), "the turn completed").toBe(true);
 		const shown = exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-up" }), "projection") as Projection;
 		const adopted = shown.messages.find((m) => m.role === "user")?.attachments?.[0];
 		expect(adopted?.id).toMatch(/^t-up-[0-9a-f-]{36}-png$/i);
 		expect(adopted?.id).not.toBe(minted.attachmentId);
+		// The inline reference's context record moves with the adoption, so the text resolves to the copied image.
+		expect(shown.messages.find((m) => m.role === "user")?.context?.records[0]?.attachmentId).toBe(adopted!.id);
 		// The client cleans up its pending upload after the send; the message's own copy must remain.
 		exitValue(await ws.call("attachments.delete", { attachmentId: minted.attachmentId }), "delete pending");
 		const url = exitValue(await ws.call("assets.createUrl", { resource: { _tag: "attachment", attachmentId: adopted!.id, mimeType: "image/png" } }), "createUrl") as { relativeUrl: string };

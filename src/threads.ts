@@ -113,6 +113,8 @@ type MessageInput = {
 	readonly blocks?: readonly ContentBlock[];
 	/** The message's persisted images and files, placed in the entry's `data` (the projection shows them after a restart). */
 	readonly attachments?: readonly { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[];
+	/** T3's structured composer context: the records its text references resolve against. Placed in the entry's `data`. */
+	readonly context?: JsonValue;
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -375,6 +377,7 @@ export class Threads {
 		const data: Record<string, JsonValue> = {};
 		if (input.messageId !== undefined) data.messageId = input.messageId;
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
+		if (input.context !== undefined) data.context = input.context;
 		const submission = await conversation.submit(
 			{
 				type: "input",

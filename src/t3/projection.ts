@@ -22,7 +22,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
@@ -394,6 +394,9 @@ export function projectThread(
 			const text = anchor ? "/compact" : textOf(message.role === "user" ? message.content : undefined);
 			// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
 			const attachments = anchor ? [] : attachmentsOf(entry);
+			// The composer records its text references resolve against. Older entries only kept the attachments; rebuild
+			// the image/file bindings from the references so their inline labels do not render "(unavailable)".
+			const context = anchor ? undefined : contextOf(entry) ?? contextFromText(text, attachments);
 			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
 			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
@@ -411,6 +414,7 @@ export function projectThread(
 				inputIntent: intent,
 				text,
 				attachments,
+				...(context === undefined ? {} : { context }),
 			} as Any);
 			messages.push({
 				...author,
@@ -423,6 +427,7 @@ export function projectThread(
 				role: "user",
 				text,
 				attachments,
+				...(context === undefined ? {} : { context }),
 				streaming: false,
 				createdAt: time(at),
 				updatedAt: time(at),
