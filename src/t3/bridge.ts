@@ -65,6 +65,8 @@ interface ThreadState {
 	rollbackRequestId: string | undefined;
 	rollbackFailure: { requestId: string; message: string } | null | undefined;
 	result: ProjectionResult | undefined;
+	/** The real transcript (not `pi.transcript`'s empty placeholder) has been projected once. */
+	loadedView: boolean;
 	snapshotSequence: number;
 	listeners: Set<(snapshot: { sequence: number; projection: OrchestrationV2ThreadProjection }) => void>;
 	/** Called when the thread is gone (deleted, or unknown to the host); subscriptions end. */
@@ -632,6 +634,7 @@ export class Bridge {
 				rollbackRequestId: undefined,
 				rollbackFailure: undefined,
 				result: undefined,
+				loadedView: false,
 				snapshotSequence: 0,
 				listeners: new Set(),
 				enders: new Set(),
@@ -683,6 +686,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	#release(state: ThreadState): void {
 		for (const stop of state.stops.splice(0)) stop();
 		state.result = undefined;
+		state.loadedView = false;
 	}
 
 	/** Drop a thread that no longer exists: end its subscriptions. */
@@ -721,7 +725,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	/** Fill the sidebar snapshot for rows from before summaries existed. Sequential, so a boot does not load every
 	 * transcript at once; each load writes its summary and the shell follows the directory. */
 	async #primeSummaries(): Promise<void> {
-		for (const thread of this.#directory.filter((candidate) => candidate.summary === undefined)) {
+		for (const thread of this.#directory.filter((candidate) => candidate.summary === undefined || candidate.summary.itemCount === 0)) {
 			try {
 				await this.projection(thread.threadId);
 			} catch (error) {
@@ -768,7 +772,9 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			});
 			if (stale.length > 0) void this.#syncSubagents(state.threadId);
 		}
-		const loaded = state.result === undefined;
+		// The first projection is `pi.transcript`'s empty placeholder; only the real view counts as loaded.
+		const loaded = (state.conversationId ?? 0) > 0 && !state.loadedView;
+		if (loaded) state.loadedView = true;
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,
@@ -801,7 +807,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		try {
 			const state = this.#state(threadId);
 			const deadline = Date.now() + timeoutMs;
-			while (state.result === undefined) {
+			while (state.result === undefined || !state.loadedView) {
 				if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${threadId}`);
 				if (Date.now() > deadline) throw new CommandError(`Timed out loading thread ${threadId}`);
 				await new Promise((resolve) => setTimeout(resolve, 50));
