@@ -301,6 +301,50 @@ export class AttachmentStore {
 		});
 	}
 
+	/** Make uploaded attachments durable before a message references them: copy each upload to a deterministic id
+	 * derived from the message and bytes. The client may delete its pending upload after the send; this copy is the
+	 * message's own record and must outlive it. Already deterministic records and missing files pass through. */
+	adopt(threadId: string, messageId: string, records: readonly AttachmentRecord[]): AttachmentRecord[] {
+		return records.map((record, index) => {
+			const from = this.resolvePath(record.id);
+			if (from === null) return { ...record };
+			let bytes: Buffer;
+			try {
+				bytes = readFileSync(from);
+			} catch {
+				return { ...record };
+			}
+			const extension = record.type === "file" ? extname(record.name).toLowerCase().replace(/^\./, "") : inferImageExtension({ mimeType: record.mimeType, fileName: record.name }).replace(/^\./, "");
+			const suffix = /^[a-z0-9]{1,10}$/.test(extension) ? extension : "bin";
+			const stableKey = `${messageId}:${index}:${createHash("sha256").update(bytes).digest("hex")}`;
+			const id = createDeterministicAttachmentId(threadId, stableKey, extension);
+			if (id === null) return { ...record };
+			const path = resolveAttachmentRelativePath(this.#dir, `${id}.${suffix}`);
+			if (path === null) return { ...record };
+			try {
+				writeFileSync(path, bytes, { mode: 0o600 });
+			} catch {
+				return { ...record };
+			}
+			return { ...record, type: record.type ?? "image", id, mimeType: record.mimeType, sizeBytes: bytes.byteLength, name: record.name };
+		});
+	}
+
+	/** Put back a missing image from the bytes an entry's model already carries (a repaired old upload). */
+	restoreFromData(record: AttachmentRecord, base64: string): boolean {
+		const path = resolveAttachmentRelativePath(this.#dir, recordRelativePath(record));
+		if (path === null) return false;
+		if (existsSync(path)) return true;
+		try {
+			const bytes = Buffer.from(base64, "base64");
+			if (bytes.byteLength === 0) return false;
+			writeFileSync(path, bytes, { mode: 0o600 });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/** The stored path of a persisted image, by its id; null when it is missing (a removed/expired attachment). */
 	resolvePath(attachmentId: string): string | null {
 		const normalized = normalizeRelative(attachmentId);

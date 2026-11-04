@@ -23,6 +23,7 @@ import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMes
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { attachmentsOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
@@ -51,6 +52,8 @@ export interface ThreadMeta {
 	readonly projectPath?: string;
 	readonly createdAt: number;
 	readonly updatedAt: number;
+	/** The durable sidebar snapshot, used when the transcript is not loaded. */
+	readonly summary?: ThreadSummary;
 	/** The Session's model, for the thread's model selection. */
 	readonly model: ModelRef | null;
 	/** The Session's thinking level, reported back as the selection's `thinking` option. */
@@ -865,20 +868,27 @@ export function projectThread(
 		pendingRuntimeRequest: null,
 		latestVisibleMessage:
 			lastVisibleMessage === undefined
-				? null
+				? (meta.summary?.latestVisibleMessage === null || meta.summary?.latestVisibleMessage === undefined
+					? null
+					: {
+							id: meta.summary.latestVisibleMessage.id,
+							role: meta.summary.latestVisibleMessage.role,
+							text: meta.summary.latestVisibleMessage.text.slice(0, 500),
+							updatedAt: time(meta.summary.latestVisibleMessage.updatedAt),
+						})
 				: {
 						id: lastVisibleMessage.id,
 						role: lastVisibleMessage.role,
 						text: lastVisibleMessage.text.slice(0, 500),
 						updatedAt: lastVisibleMessage.updatedAt,
 					},
-		latestUserMessageAt: lastUser?.createdAt ?? null,
-		latestUserAuthoredMessageAt: lastUser?.createdAt ?? null,
+		latestUserMessageAt: lastUser?.createdAt ?? (meta.summary?.latestUserMessageAt == null ? null : time(meta.summary.latestUserMessageAt)),
+		latestUserAuthoredMessageAt: lastUser?.createdAt ?? (meta.summary?.latestUserMessageAt == null ? null : time(meta.summary.latestUserMessageAt)),
 		hasActionableProposedPlan: false,
 		pendingBackgroundTasks: [],
 		providerInstanceHistory: [id(PROVIDER_INSTANCE_ID)],
-		itemCount: turnItems.length,
-		visibleItemCount: visibleTurnItems.length,
+		itemCount: meta.summary === undefined || view !== undefined ? turnItems.length : meta.summary.itemCount,
+		visibleItemCount: meta.summary === undefined || view !== undefined ? visibleTurnItems.length : meta.summary.visibleItemCount,
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		archivedAt: null,

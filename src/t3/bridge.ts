@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { basename } from "node:path";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { DateTime } from "effect";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
@@ -25,7 +26,7 @@ import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { Logger } from "./logging.ts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
-import { USER_ENTRY_KINDS } from "./runs.ts";
+import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
 
@@ -152,6 +153,8 @@ export class Bridge {
 	#threadsHandle: Ref<typeof PiThreads> | undefined;
 	#directoryStop: (() => void) | undefined;
 	#registryStop: (() => void) | undefined;
+	/** One boot scan of rows written before summaries existed; later boots reuse the stored snapshot. */
+	#summariesPrimed = false;
 	#sequence = 0;
 	#startedAt = new Date().toISOString();
 
@@ -177,6 +180,10 @@ export class Bridge {
 				} else {
 					this.#subagentsBooted = true;
 					void this.#syncSubagents().finally(() => this.#loaded.resolve());
+				}
+				if (!this.#summariesPrimed) {
+					this.#summariesPrimed = true;
+					void this.#primeSummaries();
 				}
 			}
 		};
@@ -523,7 +530,8 @@ export class Bridge {
 			cwd,
 			...(project === undefined ? {} : { projectPath: project.path }),
 			createdAt: thread?.createdAt ?? Date.now(),
-			updatedAt: thread?.createdAt ?? Date.now(),
+			updatedAt: thread?.summary?.updatedAt ?? thread?.createdAt ?? Date.now(),
+			...(thread?.summary === undefined ? {} : { summary: thread.summary }),
 			model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
@@ -710,8 +718,44 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		};
 	}
 
+	/** Fill the sidebar snapshot for rows from before summaries existed. Sequential, so a boot does not load every
+	 * transcript at once; each load writes its summary and the shell follows the directory. */
+	async #primeSummaries(): Promise<void> {
+		for (const thread of this.#directory.filter((candidate) => candidate.summary === undefined)) {
+			try {
+				await this.projection(thread.threadId);
+			} catch (error) {
+				this.#log.warn("sidebar summary backfill failed", { threadId: thread.threadId, error: error instanceof Error ? error.message : String(error) });
+			}
+		}
+	}
+
+	#remember(state: ThreadState): void {
+		const shell = state.result?.shell;
+		if (shell === undefined) return;
+		const latest = shell.latestVisibleMessage;
+		void this.#host
+			.root(async (context) =>
+				(await context.get(PiThreads, {})).remember(
+					{
+						threadId: state.threadId,
+						summary: {
+							updatedAt: DateTime.toEpochMillis(shell.updatedAt),
+							latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
+							latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
+							itemCount: shell.itemCount,
+							visibleItemCount: shell.visibleItemCount,
+						},
+					},
+					context,
+				),
+			)
+			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: state.threadId, error: error instanceof Error ? error.message : String(error) }));
+	}
+
 	#recompute(state: ThreadState): void {
 		if (state.view === undefined) return;
+		const wasRunning = state.result?.shell.status === "running";
 		// A call that names a child this thread's discovery has not seen (a subagent made just now): scan this thread alone,
 		// once per call. (A subagent's own thread names no children: a subagent of a subagent is not discovered.)
 		if (!this.#subagents.has(state.threadId)) {
@@ -724,11 +768,15 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			});
 			if (stale.length > 0) void this.#syncSubagents(state.threadId);
 		}
+		const loaded = state.result === undefined;
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,
 			{ rolledBack: state.rolledBack, rollbackRequestId: state.rollbackRequestId, rollbackFailure: state.rollbackFailure, history: state.history },
 		);
+		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
+		if (loaded) this.#restoreAttachments([...(state.history ?? []), ...state.view.entries]);
+		if (loaded || (wasRunning && state.result.shell.status !== "running")) this.#remember(state);
 		this.#publishShell(state.threadId);
 		if (state.listeners.size === 0 || state.emitTimer !== undefined) return;
 		state.emitTimer = setTimeout(() => {
@@ -946,6 +994,26 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		}
 	}
 
+	/** Restore an old uploaded image from the bytes its entry already carries. The client used to delete its pending
+	 * upload after sending; the model's image block is the remaining copy, so a missing file is repaired on first load. */
+	#restoreAttachments(entries: readonly EntryRecord[] | undefined): void {
+		if (this.#attachments === undefined || entries === undefined) return;
+		for (const entry of entries) {
+			const records = attachmentsOf(entry);
+			if (records.length === 0) continue;
+			const images: { data: string }[] = [];
+			for (const message of entry.model ?? []) {
+				if (!Array.isArray(message.content)) continue;
+				for (const block of message.content) if (block.type === "image") images.push(block);
+			}
+			records.forEach((record, index) => {
+				if (record.type === "file" || this.#attachments!.resolvePath(record.id) !== null) return;
+				const image = images[index];
+				if (image !== undefined) this.#attachments!.restoreFromData(record, image.data);
+			});
+		}
+	}
+
 	/** The image content blocks for a prompt, gated on the head's model (see `selectImageBlocks`). */
 	#imageBlocks(state: ThreadState, attachments: readonly AttachmentRecord[] | undefined): ContentBlock[] | undefined {
 		if (this.#attachments === undefined) return undefined;
@@ -1016,8 +1084,11 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
 			// commandId for durable dedup (design.md, Invariants). Images ride along as content blocks (model) and entry
 			// data (display), only when the model accepts them; files are copied to the workspace and named by path.
-			const blocks = this.#imageBlocks(state, input.attachments);
-			const filePrompt = await this.#filePrompt(input.attachments);
+			// The client's upload is only a pending record: adopt it under a deterministic id before the message references
+			// it, because the client may delete the pending upload once the send is acknowledged.
+			const attachments = input.attachments === undefined || this.#attachments === undefined ? input.attachments : this.#attachments.adopt(input.threadId, input.messageId, input.attachments);
+			const blocks = this.#imageBlocks(state, attachments);
+			const filePrompt = await this.#filePrompt(attachments);
 			const promptBlocks = filePrompt === undefined ? blocks : [{ type: "text" as const, text: filePrompt, hidden: true }, ...(blocks ?? [])];
 			const request = {
 				conversationId: head,
@@ -1025,7 +1096,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 				message: input.text,
 				messageId: input.messageId,
 				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
-				...(input.attachments === undefined || input.attachments.length === 0 ? {} : { attachments: [...input.attachments] }),
+				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
 			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.

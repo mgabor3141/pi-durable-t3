@@ -26,8 +26,8 @@ desktop's machine. Both are expected.
 
 - Models and credentials come from `~/.pi/agent` (or `PI_CODING_AGENT_DIR`). None configured:
   `PI_DURABLE_T3_FAKE=1 pnpm start` uses an offline reply model.
-- `PI_DURABLE_T3_RPC_LOG=1` logs every T3 RPC call, including the methods this host stubs; use it to find
-  endpoints the client is calling that the bridge does not implement yet.
+- `PI_DURABLE_T3_RPC_LOG=errors` logs failed and stubbed T3 RPC calls; `all` (or `1`) logs every call too. Use it
+  to find endpoints the client calls that the bridge does not implement yet.
 - The web app is the bridge's default: T3's own build, in the package's `web/` (fetched by `setup:t3`, part of `prepare`).
 
 ## Use it as a template

@@ -45,6 +45,16 @@ const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_
  * `relationshipToParent: "fork"` (design.md). Only the id is kept. */
 type ThreadParent = { threadId: string };
 
+/** The sidebar's durable snapshot of a thread's latest visible message, so an unopened thread still sorts and previews
+ * correctly after a restart. Updated on prompts and at run boundaries, not per token. */
+export type ThreadSummary = {
+	updatedAt: number;
+	latestVisibleMessage: { id: string; role: string; text: string; updatedAt: number } | null;
+	latestUserMessageAt: number | null;
+	itemCount: number;
+	visibleItemCount: number;
+};
+
 /** One sidebar entry: a named pointer to a head conversation. Stored in `pi-durable-t3.threads`. */
 export type Thread = {
 	threadId: string;
@@ -53,6 +63,8 @@ export type Thread = {
 	title: string;
 	createdAt: number;
 	parent?: ThreadParent;
+	/** The last committed projection summary, for shell snapshots when the transcript is not loaded. */
+	summary?: ThreadSummary;
 	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
 	settledOverride?: "settled" | "active";
 	settledAt?: number;
@@ -168,6 +180,26 @@ export class Threads {
 	async list(): Promise<Thread[]> {
 		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 		return state?.threads.map((thread) => ({ ...thread })) ?? [];
+	}
+
+	/** Keep the sidebar snapshot current without loading the transcript again: a prompt writes the user message, and a
+	 * loaded or finished run writes its projection. A late, older write never overwrites a newer snapshot. */
+	async remember(threadId: string, summary: Partial<ThreadSummary> & { updatedAt: number }): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ThreadsDoc);
+			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
+			if (thread === undefined) return;
+			const incomingMessageAt = summary.latestVisibleMessage?.updatedAt ?? -Infinity;
+			const existingMessageAt = thread.summary?.latestVisibleMessage?.updatedAt ?? -Infinity;
+			if (thread.summary !== undefined && summary.updatedAt < thread.summary.updatedAt && incomingMessageAt <= existingMessageAt) return;
+			thread.summary = {
+				updatedAt: thread.summary === undefined ? summary.updatedAt : Math.max(thread.summary.updatedAt, summary.updatedAt),
+				latestVisibleMessage: summary.latestVisibleMessage === undefined ? (thread.summary?.latestVisibleMessage ?? null) : summary.latestVisibleMessage,
+				latestUserMessageAt: summary.latestUserMessageAt === undefined ? (thread.summary?.latestUserMessageAt ?? null) : summary.latestUserMessageAt,
+				itemCount: summary.itemCount ?? thread.summary?.itemCount ?? 0,
+				visibleItemCount: summary.visibleItemCount ?? thread.summary?.visibleItemCount ?? 0,
+			};
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/** The sidebar thread whose head is `conversationId`, if any. */
@@ -359,6 +391,17 @@ export class Threads {
 			await this.promote(input.threadId, input.conversationId);
 		} catch (error) {
 			this.#onWarn(`prompt committed but its thread promote failed (the run lives; the next promote of this conversation adopts it): ${String(error)}`, error);
+		}
+		// The sidebar preview must show the prompt before the run starts; the run boundary updates the assistant reply.
+		try {
+			const at = Date.now();
+			await this.remember(input.threadId, {
+				updatedAt: at,
+				latestVisibleMessage: { id: input.messageId ?? `user-${at}`, role: "user", text: input.message.slice(0, 500), updatedAt: at },
+				latestUserMessageAt: at,
+			});
+		} catch (error) {
+			this.#onWarn(`prompt committed but its sidebar summary failed: ${String(error)}`, error);
 		}
 		return submission;
 	}

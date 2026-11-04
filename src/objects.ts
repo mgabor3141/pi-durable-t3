@@ -31,6 +31,21 @@ type AttachmentRecord = { readonly id: string; readonly name: string; readonly m
 
 const ProjectSchema = Type.Object({ id: Type.String(), name: Type.String(), cwd: Type.String() });
 const ParentSchema = Type.Object({ threadId: Type.String() });
+const LatestMessageSchema = Type.Object({ id: Type.String(), role: Type.String(), text: Type.String(), updatedAt: Type.Number() });
+const ThreadSummarySchema = Type.Object({
+	updatedAt: Type.Number(),
+	latestVisibleMessage: Type.Union([LatestMessageSchema, Type.Null()]),
+	latestUserMessageAt: Type.Union([Type.Number(), Type.Null()]),
+	itemCount: Type.Number(),
+	visibleItemCount: Type.Number(),
+});
+const ThreadSummaryPatchSchema = Type.Object({
+	updatedAt: Type.Number(),
+	latestVisibleMessage: Type.Optional(Type.Union([LatestMessageSchema, Type.Null()])),
+	latestUserMessageAt: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+	itemCount: Type.Optional(Type.Number()),
+	visibleItemCount: Type.Optional(Type.Number()),
+});
 const ThreadSchema = Type.Object({
 	threadId: Type.String(),
 	projectId: Type.String(),
@@ -38,6 +53,7 @@ const ThreadSchema = Type.Object({
 	title: Type.String(),
 	createdAt: Type.Number(),
 	parent: Type.Optional(ParentSchema),
+	summary: Type.Optional(ThreadSummarySchema),
 	settledOverride: Type.Optional(Type.Union([Type.Literal("settled"), Type.Literal("active")])),
 	settledAt: Type.Optional(Type.Number()),
 	unsettledAt: Type.Optional(Type.Number()),
@@ -116,6 +132,9 @@ export const PiThreads = local("pi.threads", {
 		create: method(Type.Object({ threadId: Type.String(), projectId: Type.String(), cwd: Type.Optional(Type.String()), title: Type.Optional(Type.String()) }), ThreadSchema),
 		fork: method(Type.Object({ sourceThreadId: Type.String(), targetThreadId: Type.String(), entryId: Type.Number(), title: Type.Optional(Type.String()) }), ThreadSchema),
 		remove: method(Type.Object({ threadId: Type.String() }), Type.Null()),
+		// A compact sidebar snapshot (last visible message, recency, counts) kept beside the thread so an unopened thread
+		// still previews after a restart. Partial updates merge; a late older update is ignored.
+		remember: method(Type.Object({ threadId: Type.String(), summary: ThreadSummaryPatchSchema }), Type.Null()),
 		// Set a thread's title (a rename, a seed, a generated title); durable in the threads document.
 		rename: method(Type.Object({ threadId: Type.String(), title: Type.String() }), Type.Null()),
 		// T3's manual settlement; durable in the threads document.
@@ -230,6 +249,15 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 				remove: async (args, ctx) => {
 					try {
 						await threads.remove(args.threadId);
+						await publish(ctx);
+						return null;
+					} catch (error) {
+						throw toChordError(error);
+					}
+				},
+				remember: async (args, ctx) => {
+					try {
+						await threads.remember(args.threadId, args.summary);
 						await publish(ctx);
 						return null;
 					} catch (error) {

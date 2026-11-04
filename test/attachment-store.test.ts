@@ -126,6 +126,27 @@ describe("upload URLs", () => {
 		expect(store.resolvePath(minted.attachmentId)).toBeNull();
 	});
 
+	it("adopts an upload under a deterministic id that survives deleting the pending upload", () => {
+		const minted = store.mintUpload({ name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength });
+		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
+		expect(store.storeUpload(token, PNG_BYTES)).toEqual({ ok: true });
+		const [adopted] = store.adopt("thread-adopt", "msg-1", [{ type: "image", id: minted.attachmentId, name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength }]);
+		expect(adopted?.id).toMatch(/thread-adopt-[0-9a-f-]{36}-png$/i);
+		expect(Buffer.from(store.readBytes(adopted!.id)!).equals(PNG_BYTES)).toBe(true);
+		store.deleteUpload(minted.attachmentId);
+		expect(store.resolvePath(minted.attachmentId), "the pending upload is gone").toBeNull();
+		expect(store.readForModel(adopted!.id)?.mimeType, "the message's copy remains").toBe("image/png");
+	});
+
+	it("restores a missing image from an entry's base64 and leaves an existing file alone", () => {
+		const record = { type: "image" as const, id: "thread-old-00000000-0000-4000-8000-000000000000-png", name: "old.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength };
+		expect(store.resolvePath(record.id), "the file is missing").toBeNull();
+		expect(store.restoreFromData(record, PNG_B64)).toBe(true);
+		expect(Buffer.from(store.readBytes(record.id)!).equals(PNG_BYTES)).toBe(true);
+		expect(store.restoreFromData(record, "AAAA"), "an existing file is not overwritten").toBe(true);
+		expect(Buffer.from(store.readBytes(record.id)!).equals(PNG_BYTES)).toBe(true);
+	});
+
 	it("mints and stores a file upload, with its bytes and extension", () => {
 		const bytes = Buffer.from("%PDF-1.4\nnot really a PDF\n");
 		const minted = store.mintUpload({ type: "file", name: "spec.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength });

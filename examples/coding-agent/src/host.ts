@@ -23,14 +23,16 @@ const log: Logger = {
 	warn: (message, fields) => console.log(JSON.stringify({ t: new Date().toISOString(), level: "warn", message, ...fields })),
 };
 
-/** `PI_DURABLE_T3_RPC_LOG=1`: one line per T3 RPC call, plus every stubbed method. Off by default. */
-const rpcLog = process.env["PI_DURABLE_T3_RPC_LOG"] === "1"
-	? {
-		onSuccess: (call: { method: string; kind: string; durationMs: number }) => log.info("rpc call", { ...call }),
+/** `PI_DURABLE_T3_RPC_LOG=1` or `all`: one line per T3 RPC call; `errors`: failures and stubbed methods only.
+ * Off by default. */
+const rpcLogMode = process.env["PI_DURABLE_T3_RPC_LOG"];
+const rpcLog = rpcLogMode === undefined || rpcLogMode === "0" || rpcLogMode === ""
+	? undefined
+	: {
+		...(rpcLogMode === "errors" || rpcLogMode === "failures" ? {} : { onSuccess: (call: { method: string; kind: string; durationMs: number }) => log.info("rpc call", { ...call }) }),
 		onFailure: (call: { method: string; kind: string; durationMs: number; error: string }) => log.warn("rpc call failed", { ...call }),
 		onStubbed: (call: { method: string; kind: string; reason: string; durationMs: number }) => log.warn("rpc not implemented", { ...call }),
-	}
-	: undefined;
+	};
 
 /** Pairing links for a minted code (the `/pair#token=` form T3's web page and desktop app both parse). A wildcard
  * bind is spelled out per LAN address, so every printed link opens. */

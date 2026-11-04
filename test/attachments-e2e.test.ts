@@ -120,3 +120,36 @@ it("persist → mint a signed URL → serve the bytes → dispatch → the threa
 		ws2.close();
 	}
 }, 120_000);
+
+it("adopts an upload before the client deletes the pending record, so reopening still serves the image", async () => {
+	expect(await waitListening(PORT), "host is up").toBe(true);
+	const token = await pair(PORT, pairCode(root));
+	const ws = await connectWs(PORT, token);
+	try {
+		const minted = exitValue(await ws.call("attachments.createUploadUrl", { type: "image", name: "up.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength }), "mint upload") as { attachmentId: string; relativeUrl: string };
+		const uploaded = await fetch(`http://127.0.0.1:${PORT}${minted.relativeUrl}`, { method: "POST", headers: { "content-type": "image/png" }, body: PNG_BYTES, signal: AbortSignal.timeout(8000) });
+		expect(uploaded.status, "the bytes land on the upload route").toBe(204);
+		const pending = { type: "image" as const, id: minted.attachmentId, name: "up.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength };
+		const providers = exitValue(await ws.call("server.refreshProviders", {}), "refreshProviders") as { providers: { instanceId: string; models: { slug: string }[] }[] };
+		const provider = providers.providers.find((p) => p.models.length > 0)!;
+		const modelSelection = { instanceId: provider.instanceId, model: provider.models[0]!.slug, options: [] };
+		exitValue(await ws.call("orchestration.launchThread", {
+			commandId: "cmd-up-launch", threadId: "t-up", projectId: "p-alpha", title: "Upload", modelSelection,
+			runtimeMode: "full-access", interactionMode: "default", workspaceStrategy: { type: "root" },
+			initialMessage: { messageId: "m-up-1", role: "user", text: "look", attachments: [pending] },
+		}), "launch upload thread");
+		expect(await poll(async () => ((exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-up" }), "projection") as Projection).runs.some((r) => r.status === "completed"))), "the turn completed").toBe(true);
+		const shown = exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-up" }), "projection") as Projection;
+		const adopted = shown.messages.find((m) => m.role === "user")?.attachments?.[0];
+		expect(adopted?.id).toMatch(/^t-up-[0-9a-f-]{36}-png$/i);
+		expect(adopted?.id).not.toBe(minted.attachmentId);
+		// The client cleans up its pending upload after the send; the message's own copy must remain.
+		exitValue(await ws.call("attachments.delete", { attachmentId: minted.attachmentId }), "delete pending");
+		const url = exitValue(await ws.call("assets.createUrl", { resource: { _tag: "attachment", attachmentId: adopted!.id, mimeType: "image/png" } }), "createUrl") as { relativeUrl: string };
+		const served = await fetch(`http://127.0.0.1:${PORT}${url.relativeUrl}`, { signal: AbortSignal.timeout(8000) });
+		expect(served.status, "the adopted copy still serves after the pending upload is deleted").toBe(200);
+		expect(Buffer.from(await served.arrayBuffer()).equals(PNG_BYTES)).toBe(true);
+	} finally {
+		ws.close();
+	}
+}, 120_000);
