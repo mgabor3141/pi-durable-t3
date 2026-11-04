@@ -656,6 +656,7 @@ export function makeServerLayer(deps: {
 					return json({ _tag: "EnvironmentAuthInvalidError", code: "auth_invalid", message: "Invalid WebSocket ticket." }, 401);
 				}
 				log.info("client connected");
+				const connectedAt = Date.now();
 				// The socket's session: the Connections list marks this client `current`, and the access stream filters by it.
 				const session = auth.sessionOfTokenHash(tokenHash);
 				const sessionId = session?.id ?? "";
@@ -686,7 +687,10 @@ export function makeServerLayer(deps: {
 							});
 							return yield* Effect.raceFirst(httpEffect, revoked.pipe(Effect.as(HttpServerResponse.empty({ status: 401 }))));
 						}),
-					() => Effect.sync(() => auth.markDisconnected(tokenHash)),
+					() => Effect.sync(() => {
+						auth.markDisconnected(tokenHash);
+						log.info("client disconnected", { durationMs: Date.now() - connectedAt });
+					}),
 				);
 				return connection;
 			}),
