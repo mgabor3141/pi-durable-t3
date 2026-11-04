@@ -51,6 +51,7 @@ import type { WorkspaceAssets } from "./workspace-assets.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
+import { compactThreadProjection } from "./compact.ts";
 import type { ProjectionResult } from "./projection.ts";
 import { makeRpcLayer } from "./rpc.ts";
 import type { WorkspaceFiles } from "./files.ts";
@@ -328,13 +329,16 @@ export function makeServerLayer(deps: {
 
 	// The two `/api/orchestration/threads/:threadId*` routes share their preamble: read the route's threadId, await its
 	// projection, and answer an unknown thread with the 404 T3 renders as a missing resource (design.md, Invariants).
-	const withProjection = (render: (projection: ProjectionResult) => HttpServerResponse.HttpServerResponse) =>
+	const withProjection = (
+		render: (projection: ProjectionResult, request: HttpServerRequest.HttpServerRequest) => HttpServerResponse.HttpServerResponse,
+	) =>
 		authorized(() =>
 			Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
 				const { threadId } = yield* HttpRouter.params;
 				const projected = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
 				if (Option.isNone(projected)) return json({ _tag: "EnvironmentResourceNotFoundError", reason: "thread_not_found", message: "Unknown thread" }, 404);
-				return render(projected.value);
+				return render(projected.value, request);
 			}),
 		);
 
@@ -544,17 +548,20 @@ export function makeServerLayer(deps: {
 		HttpRouter.add(
 			"GET",
 			"/api/orchestration/threads/:threadId/bounded",
-			withProjection((projection) =>
-				json(
+			withProjection((projection, request) => {
+				const params = new URL(request.url, "http://localhost").searchParams;
+				const snapshot = params.get("compactTurnItems") === "1" ? compactThreadProjection(projection.projection) : { projection: projection.projection };
+				return json(
 					encode(OrchestrationV2ThreadBoundedSnapshot, {
 						snapshotSequence: bridge.nextSequence(),
-						projection: projection.projection,
+						projection: snapshot.projection,
 						historyCursor: null,
 						hasMoreHistory: false,
 						latestLocalTurnOrdinal: projection.runs.at(-1)?.ordinal ?? null,
+						...(snapshot.turnItemsOmitLocalVisible === true ? { turnItemsOmitLocalVisible: true as const } : {}),
 					}),
-				),
-			),
+				);
+			}),
 		),
 		HttpRouter.add(
 			"GET",

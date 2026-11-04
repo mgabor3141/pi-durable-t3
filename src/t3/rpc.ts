@@ -50,6 +50,7 @@ import { serverCwd } from "./config.ts";
 import { EntriesError, FileError, type WorkspaceFiles } from "./files.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
+import { compactThreadProjection } from "./compact.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
@@ -71,6 +72,26 @@ const fromListener = <A>(
 			Effect.sync(() =>
 				subscribe(
 					(value) => Queue.offerUnsafe(queue, value),
+					() => Queue.endUnsafe(queue),
+				),
+			),
+			(unsubscribe) => Effect.sync(unsubscribe),
+		),
+	);
+
+/** A slow subscriber should skip stale full snapshots, not retain every one of them in an unbounded queue. */
+const fromLatest = <A>(
+	subscribe: (emit: (value: A) => void, end: () => void) => () => void,
+	isLatest: (value: A) => boolean,
+): Stream.Stream<A> =>
+	Stream.callback<A>((queue) =>
+		Effect.acquireRelease(
+			Effect.sync(() =>
+				subscribe(
+					(value) => {
+						if (isLatest(value)) Queue.flushUnsafe(queue);
+						Queue.offerUnsafe(queue, value);
+					},
 					() => Queue.endUnsafe(queue),
 				),
 			),
@@ -601,19 +622,28 @@ export function makeRpcLayer(deps: RpcDeps) {
 					// A thread the host does not know fails the stream with the contract's typed not-found — never a fabricated
 					// snapshot that leaves the panel open (design.md, Invariants).
 					bridge.hasThread(input.threadId)
-						? fromListener<Any>((emit, end) => {
-								let first = true;
-								// The stream ends when the thread is deleted.
-								return bridge.subscribeThread(
-									input.threadId,
-									({ sequence, projection }) => {
-										emit({ kind: "snapshot", snapshotSequence: sequence, projection });
-										if (first && input.requestCompletionMarker === true) emit({ kind: "synchronized" });
-										first = false;
-									},
-									end,
-								);
-							})
+						? fromLatest<Any>(
+								(emit, end) =>
+									// The stream ends when the thread is deleted.
+									bridge.subscribeThread(
+										input.threadId,
+										({ sequence, projection }) => {
+											const snapshot =
+												input.acceptCompactTurnItems === true
+													? compactThreadProjection(projection)
+													: { projection };
+											emit({
+												kind: "snapshot",
+												snapshotSequence: sequence,
+												projection: snapshot.projection,
+												...(snapshot.turnItemsOmitLocalVisible === true ? { turnItemsOmitLocalVisible: true as const } : {}),
+											});
+											if (input.requestCompletionMarker === true) emit({ kind: "synchronized" });
+										},
+										end,
+									),
+								(item) => item.kind === "snapshot",
+							)
 						: Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` } as Any)),
 				),
 			),

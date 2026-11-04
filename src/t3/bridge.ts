@@ -112,6 +112,8 @@ type ShellItem =
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
 const EMIT_THROTTLE_MS = 60;
+const LARGE_EMIT_THROTTLE_MS = 250;
+const LARGE_THREAD_TURN_ITEMS = 500;
 
 /** One `projects.mutate` payload, as the facet decoded it. */
 export type ProjectMutation = {
@@ -807,10 +809,11 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		if (loaded || (wasRunning && state.result.shell.status !== "running")) this.#remember(state);
 		this.#publishShell(state.threadId);
 		if (state.listeners.size === 0 || state.emitTimer !== undefined) return;
+		const throttle = (state.result.projection.turnItems.length >= LARGE_THREAD_TURN_ITEMS ? LARGE_EMIT_THROTTLE_MS : EMIT_THROTTLE_MS);
 		state.emitTimer = setTimeout(() => {
 			state.emitTimer = undefined;
 			this.#emitThread(state);
-		}, EMIT_THROTTLE_MS);
+		}, throttle);
 	}
 
 	#emitThread(state: ThreadState): void {
