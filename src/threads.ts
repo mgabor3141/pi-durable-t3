@@ -19,6 +19,7 @@ import {
 	type ModelRef,
 	type Submission,
 	type SubmissionId,
+	type TaskId,
 	type Tx,
 	UserEntry,
 	type UserInput,
@@ -160,6 +161,8 @@ export class Threads {
 	readonly #env: ExecutionEnv | undefined;
 	readonly #context: Context;
 	readonly #onWarn: (message: string, error: unknown) => void;
+	/** One compaction wait per thread. Repeated clicks join the running summary instead of starting another one. */
+	readonly #compacting = new Map<string, Promise<void>>();
 
 	constructor(deps: ThreadsDeps) {
 		this.#harness = deps.harness;
@@ -580,12 +583,36 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
-	/** T3's `/compact`: admit a manual compaction task for the head conversation. */
+	/** T3's `/compact`: run a manual compaction for the head conversation and wait for it.
+	 * Waiting keeps the prompt request open, so T3 shows its working state and does not accept another compact
+	 * click while the summary is being generated. A repeated call joins the running compaction. */
 	async compact(threadId: string, guidance: string | undefined): Promise<void> {
+		const running = this.#compacting.get(threadId);
+		if (running !== undefined) return running;
+		const pending = this.#compactConversation(threadId, guidance);
+		this.#compacting.set(threadId, pending);
+		try {
+			await pending;
+		} finally {
+			if (this.#compacting.get(threadId) === pending) this.#compacting.delete(threadId);
+		}
+	}
+
+	async #compactConversation(threadId: string, guidance: string | undefined): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
-		await conversation.compact(guidance, BACKGROUND_CONTEXT);
+		// A compaction may still be live after a bridge restart, when the per-thread map is empty. Join it rather
+		// than summarize the same cut twice.
+		const view = await conversation.viewState(BACKGROUND_CONTEXT);
+		const live = view.value.docs["pi.live"] as { compactions?: readonly { taskId: number }[] } | undefined;
+		const active = live?.compactions?.[0];
+		if (active !== undefined) {
+			await this.#harness.waitForTask(active.taskId as TaskId<unknown>, BACKGROUND_CONTEXT);
+			return;
+		}
+		const taskId = await conversation.compact(guidance, BACKGROUND_CONTEXT);
+		await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT);
 	}
 
 	/** Promote a queued follow-up to a steer: the next boundary places it in the active run. */
