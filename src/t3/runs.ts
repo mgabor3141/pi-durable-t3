@@ -17,12 +17,31 @@ export interface RunDraft {
 	markerOnly?: boolean;
 }
 
-export const firstMessage = (entry: EntryRecord): DurableMessage | undefined => entry.model?.[0];
+export const APP_COMPACT_ENTRY = "app.compact";
+
+/** The text a compact command entry carries for display; the entry has no model messages, so pi never sees it. */
+const compactCommandMessage = (entry: EntryRecord): DurableMessage | undefined => {
+	const data = entry.data;
+	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const text = (data as { text?: unknown }).text;
+	if (typeof text !== "string") return undefined;
+	const timestamp = (data as { timestamp?: unknown }).timestamp;
+	return { role: "user", content: [{ type: "text", text }], ...(typeof timestamp === "number" ? { timestamp } : {}) };
+};
+
+/** A display-only `/compact` command. It anchors the compaction run for T3, but pi ignores it because it has no model. */
+export const isCompactCommandEntry = (entry: EntryRecord): boolean =>
+	entry.kind === APP_COMPACT_ENTRY ||
+	(entry.kind === "app.user" && (entry.data as { compact?: unknown } | undefined)?.compact === true);
+
+/** Model-visible message, or the display-only command T3 shows for a manual compaction. */
+export const firstMessage = (entry: EntryRecord): DurableMessage | undefined =>
+	entry.model?.[0] ?? (entry.kind === APP_COMPACT_ENTRY ? compactCommandMessage(entry) : undefined);
 /**
- * Entry kinds that carry a user turn: pi-durable's default placement, and this host's `app.user`, which rides the
- * client's message id in the entry's `data` (see `Threads.submit`).
+ * Entry kinds that carry a user turn: pi-durable's default placement, this host's `app.user`, which rides the
+ * client's message id in the entry's `data` (see `Threads.submit`), and the display-only compact command.
  */
-export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user"]);
+export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user", APP_COMPACT_ENTRY]);
 export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
 /** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
 export const messageIdOf = (entry: EntryRecord): string | undefined => {

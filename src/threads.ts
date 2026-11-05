@@ -30,6 +30,7 @@ import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
+import { APP_COMPACT_ENTRY } from "./t3/runs.ts";
 import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
@@ -624,9 +625,11 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
-	/** T3's `/compact`: run a manual compaction for the head conversation and wait for it.
-	 * Waiting keeps the prompt request open, so T3 shows its working state and does not accept another compact
-	 * click while the summary is being generated. A repeated call joins the running compaction. */
+	/** T3's `/compact`: start a manual compaction and return at once.
+	 * The prompt request must not stay open for the whole summary: that serializes the bridge and makes a prompt sent
+	 * during compaction time out. The live compaction is projected as the command's run, so T3 still shows the work;
+	 * prompts submitted while it runs are queued and land at the summary boundary. A repeated call while a compaction
+	 * is live is a no-op. */
 	async compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void> {
 		const running = this.#compacting.get(threadId);
 		if (running !== undefined) return running;
@@ -643,31 +646,41 @@ export class Threads {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
-		// A compaction may still be live after a bridge restart, when the per-thread map is empty. Join it rather
+		// A compaction may still be live after a bridge restart, when the per-thread map is empty. Leave it be rather
 		// than summarize the same cut twice.
 		const view = await conversation.viewState(BACKGROUND_CONTEXT);
-		const live = view.value.docs["pi.live"] as { compactions?: readonly { taskId: number }[] } | undefined;
-		const active = live?.compactions?.[0];
-		if (active !== undefined) {
-			await this.#harness.waitForTask(active.taskId as TaskId<unknown>, BACKGROUND_CONTEXT);
-			await this.#drainQueuedAfterCompact(threadId, conversationId);
-			return;
-		}
-		// Keep the slash command as a real user entry so a reload does not lose it; the compaction task consumes it
-		// as the prompt that asked for the summary, not as a synthetic T3 bubble.
+		const live = view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined;
+		if ((live?.compactions?.length ?? 0) > 0) return;
+		// A display-only command belongs to T3's projection and the durable thread, not to pi's model context. It must
+		// not carry `model`: otherwise a later turn sees `/compact` as if the user had typed it as a prompt.
 		if (messageId !== undefined) {
-			const text = guidance === undefined || guidance === "" ? "/compact" : `/compact ${guidance}`;
+			// T3 recognizes a compaction command by its text, and the guidance lives in the compaction task, not the
+			// transcript; keep the display text stable so the command and its card become one row.
+			const text = "/compact";
 			await this.#harness.commit(async (tx) => {
 				await tx.appendEntry(conversationId, {
-					kind: APP_USER_ENTRY,
-					data: { messageId, compact: true },
-					model: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
+					kind: APP_COMPACT_ENTRY,
+					data: { messageId, compact: true, text, timestamp: Date.now() },
 				});
 			}, BACKGROUND_CONTEXT);
 		}
 		const taskId = await conversation.compact(guidance, BACKGROUND_CONTEXT);
-		await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT);
-		await this.#drainQueuedAfterCompact(threadId, conversationId);
+		// The task is now live and projected. Wait in the background only so a failed compaction does not strand
+		// queued prompts; the successful path places them at the summary boundary itself.
+		void this.#finishCompaction(threadId, conversationId, taskId);
+	}
+
+	async #finishCompaction(threadId: string, conversationId: ConversationId, taskId: TaskId<unknown>): Promise<void> {
+		try {
+			await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT);
+		} catch (error) {
+			this.#onWarn("manual compaction task ended without a summary", error);
+		}
+		try {
+			await this.#drainQueuedAfterCompact(threadId, conversationId);
+		} catch (error) {
+			this.#onWarn("manual compaction did not drain its queued prompts", error);
+		}
 	}
 
 	/** Start a queued follow-up if a compaction ended without a summary boundary to place it (failure/abort). */

@@ -22,7 +22,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
@@ -133,7 +133,7 @@ export function projectThread(
 	const drafts = groupRuns([...history, ...(view?.entries ?? [])]);
 	// A live manual compaction has a durable /compact user entry. Treat that entry as its run, so T3 paints the
 	// compacting state with a real run id (its composer queues instead of starting a parallel turn).
-	const compactDraft = drafts.findLast((draft) => draft.userEntry.kind === "app.user" && (draft.userEntry.data as { compact?: unknown } | undefined)?.compact === true);
+	const compactDraft = drafts.findLast((draft) => isCompactCommandEntry(draft.userEntry));
 	const liveCompactionRunId = compactDraft === undefined ? null : `r${compactDraft.userEntry.id}`;
 	const busy = view === undefined ? meta.running : live?.run !== undefined || (liveCompactions.length > 0 && liveCompactionRunId !== null);
 	// The thread's folder of its own, as T3 spells it on a thread row: a folder UNDER the project root (the registry's
@@ -200,15 +200,16 @@ export function projectThread(
 	});
 
 	// A compaction is the context head. Its card is emitted where the cut is: after the history it replaces and
-	// before the kept entries. It is runless on purpose: attached to a run, a client puts that run's fold above it.
-	const pushCompaction = (entry: EntryRecord, ordinal: number): void => {
+	// before the kept entries. It is normally runless; a manual `/compact` command owns it, so T3 can fold the command
+	// and the card into one compaction row rather than showing both.
+	const pushCompaction = (entry: EntryRecord, ordinal: number, runId: string | null = null): void => {
 		const message = firstMessage(entry);
 		const at = message?.timestamp ?? meta.createdAt;
 		const summary = textOf(message?.role === "user" ? message.content : undefined);
 		turnItems.push({
 			id: id(`ti-k${entry.id}`),
 			threadId: id(threadId),
-			runId: null,
+			runId: runId === null ? null : id(runId),
 			nodeId: null,
 			providerThreadId: id(providerThreadId),
 			providerTurnId: null,
@@ -228,7 +229,9 @@ export function projectThread(
 
 	drafts.forEach((draft, index) => {
 		const ordinal = index + 1;
-		if (draft.card !== undefined) pushCompaction(draft.card, ordinal);
+		const previous = index === 0 ? undefined : drafts[index - 1];
+		const compactCardRunId = previous !== undefined && isCompactCommandEntry(previous.userEntry) ? `r${previous.userEntry.id}` : null;
+		if (draft.card !== undefined) pushCompaction(draft.card, ordinal, compactCardRunId);
 		if (draft.markerOnly === true) return;
 		const isLast = index === drafts.length - 1;
 		const synthetic = draft.synthetic === true;
@@ -247,9 +250,10 @@ export function projectThread(
 		const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
 		const usage = lastAssistantMessage?.role === "assistant" ? lastAssistantMessage.usage : undefined;
 		const running = isLast && busy;
+		const compactCommand = isCompactCommandEntry(u);
 		let status: OrchestrationV2Run["status"];
 		if (running) status = "running";
-		else if (synthetic && lastAssistant === undefined) status = "completed";
+		else if ((synthetic || compactCommand) && lastAssistant === undefined) status = "completed";
 		else {
 			const reason = stopReason(lastAssistant);
 			status =

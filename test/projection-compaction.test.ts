@@ -68,7 +68,7 @@ describe("projection: compaction keeps its tail", () => {
 
 	it("attaches a live compaction to its persisted /compact run", () => {
 		const entries = [
-			({ id: 3, kind: "app.user", data: { compact: true }, model: [{ role: "user", content: "/compact", timestamp: 10 }] }) as unknown as EntryRecord,
+			({ id: 3, kind: "app.compact", data: { messageId: "compact-command", compact: true, text: "/compact", timestamp: 10 } }) as unknown as EntryRecord,
 		];
 		const result = projectThread(
 			meta,
@@ -76,6 +76,15 @@ describe("projection: compaction keeps its tail", () => {
 			{ rolledBack: [] },
 		);
 		expect(result.projection.turnItems.find((item) => item.type === "compaction")).toMatchObject({ runId: "r3", status: "running" });
+	});
+
+	it("gives the completed compaction card the same run as its /compact command", () => {
+		const entries = [
+			({ id: 3, kind: "app.compact", data: { messageId: "compact-command", compact: true, text: "/compact", timestamp: 10 } }) as unknown as EntryRecord,
+			compaction(4, 4),
+		];
+		const result = projectThread(meta, view(entries), { rolledBack: [] });
+		expect(result.projection.turnItems.find((item) => item.type === "compaction")).toMatchObject({ runId: "r3", status: "completed" });
 	});
 
 	it("anchors a tail that starts inside a turn, so the kept entries stay visible", () => {
