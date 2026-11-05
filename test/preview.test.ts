@@ -1,15 +1,27 @@
 // The preview manager's state machine, without a browser: T3's `preview.open` is bookkeeping; the page starts only
 // when a viewer attaches. These cover URL normalization, the list/close shape, and the event stream that the client
 // folds into its preview store.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PreviewSessionLookupError, PreviewInvalidUrlError, ThreadId } from "@t3tools/contracts";
 import { nullLogger } from "../src/t3/logging.ts";
-import { PreviewSessions } from "../src/t3/preview.ts";
+import { PreviewSessions, withTimeout } from "../src/t3/preview.ts";
 
 const config = { cdpUrl: "ws://127.0.0.1:1/chromium" };
 const thread = ThreadId.make("thread");
 
 describe("preview sessions", () => {
+	it("bounds a promise that a dead CDP target never settles", async () => {
+		vi.useFakeTimers();
+		try {
+			const pending = withTimeout(new Promise<never>(() => undefined), 1_000, "preview step");
+			const failed = expect(pending).rejects.toThrow("preview step timed out after 1000 ms");
+			await vi.advanceTimersByTimeAsync(1_000);
+			await failed;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("open records a loading snapshot, list returns it, close emits closed", async () => {
 		const preview = new PreviewSessions(config, nullLogger);
 		const events: string[] = [];

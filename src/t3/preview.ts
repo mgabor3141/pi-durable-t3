@@ -40,6 +40,10 @@ const MAX_VIEWERS = 4;
 const MAX_URL_LENGTH = 2_048;
 const SAVE_INTERVAL_MS = 30_000;
 const SAVE_DEBOUNCE_MS = 500;
+const PAGE_OPEN_TIMEOUT_MS = 20_000;
+const CDP_TIMEOUT_MS = 5_000;
+const SAVE_TIMEOUT_MS = 10_000;
+const AGENT_OPEN_TIMEOUT_MS = 60_000;
 
 type PreviewStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
@@ -73,6 +77,24 @@ type EventDraft =
 
 const now = () => new Date().toISOString();
 const keyOf = (threadId: string, tabId: string) => `${threadId}\u0000${tabId}`;
+
+/** A CDP/Playwright promise can wait forever when a target dies mid-command. Bound every step that crosses that line. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`${what} timed out after ${String(ms)} ms`)), ms);
+		timer.unref();
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error: unknown) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
 
 function endpoint(config: PreviewBrowserConfig): string {
 	const url = new URL(config.cdpUrl);
@@ -188,18 +210,18 @@ class PreviewTab {
 		if (this.#closed) throw new Error("The preview tab is closed.");
 		if (this.page !== undefined) return;
 		const size = viewportSize(this.snapshot.viewport) ?? DEFAULT_VIEWPORT;
-		this.context = await this.#owner.context();
+		this.context = await withTimeout(this.#owner.context(), PAGE_OPEN_TIMEOUT_MS, "preview context");
 		if (this.#closed) throw new Error("The preview tab was closed while it was opening.");
-		this.page = await this.context.newPage();
+		this.page = await withTimeout(this.context.newPage(), PAGE_OPEN_TIMEOUT_MS, "preview page");
 		this.page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
 		this.page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
-		this.cdp = await this.context.newCDPSession(this.page);
+		this.cdp = await withTimeout(this.context.newCDPSession(this.page), PAGE_OPEN_TIMEOUT_MS, "preview CDP session");
 		// Browserless opens pages at its own window size; a CDP override is what makes the screencast match the tab.
 		await this.#setViewport(size.width, size.height);
 		this.cdp.on("Page.screencastFrame", (event) => this.#onScreencastFrame(event));
 		this.#wirePage();
 		const loading = this.snapshot.navStatus;
-		if (loading._tag === "Loading") await this.#navigate(loading.url);
+		if (loading._tag === "Loading") await withTimeout(this.#navigate(loading.url), NAVIGATION_TIMEOUT_MS + CDP_TIMEOUT_MS, "preview navigation");
 		else {
 			await this.#applyViewport();
 			this.#sendViewportAll();
@@ -217,6 +239,7 @@ class PreviewTab {
 			this.#owner.update(this, { navStatus: { _tag: "Loading", url, title: "" }, canGoBack: false, canGoForward: false });
 		});
 		page.on("load", () => void this.#settle());
+		page.on("crash", () => this.#owner.pageCrashed(this));
 		page.on("dialog", (dialog) => {
 			this.dialog = dialog;
 			this.controlGeneration += 1;
@@ -229,8 +252,8 @@ class PreviewTab {
 		const page = this.page;
 		if (page === undefined || this.#closed) return;
 		try {
-			const history = await this.cdp?.send("Page.getNavigationHistory");
-			const title = await page.title().catch(() => "");
+			const history = this.cdp === undefined ? undefined : await withTimeout(this.cdp.send("Page.getNavigationHistory"), CDP_TIMEOUT_MS, "preview history");
+			const title = await withTimeout(page.title(), CDP_TIMEOUT_MS, "preview title").catch(() => "");
 			const url = page.url();
 			if (url === "about:blank") return;
 			const index = history?.currentIndex ?? 0;
@@ -259,14 +282,15 @@ class PreviewTab {
 		try {
 			await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS });
 		} catch (error) {
-			const title = await page.title().catch(() => "");
+			const title = await withTimeout(page.title(), CDP_TIMEOUT_MS, "preview title").catch(() => "");
 			this.#owner.fail(this, url, title, (error as Error).message || String(error));
 		}
 	}
 
 	async #setViewport(width: number, height: number): Promise<void> {
 		this.#pageSize = { width, height };
-		await this.cdp?.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }).catch(() => undefined);
+		if (this.cdp === undefined) return;
+		await withTimeout(this.cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }), CDP_TIMEOUT_MS, "preview viewport").catch(() => undefined);
 	}
 
 	async #applyViewport(): Promise<void> {
@@ -282,13 +306,13 @@ class PreviewTab {
 		if (viewer === undefined) return;
 		this.#screencastStarted = true;
 		try {
-			await cdp.send("Page.startScreencast", {
+			await withTimeout(cdp.send("Page.startScreencast", {
 				format: "jpeg",
 				quality: 70,
 				maxWidth: Math.max(1, Math.round(viewer.maxWidth)),
 				maxHeight: Math.max(1, Math.round(viewer.maxHeight)),
 				everyNthFrame: 1,
-			});
+			}), CDP_TIMEOUT_MS, "preview screencast start");
 		} catch {
 			this.#screencastStarted = false;
 		}
@@ -302,7 +326,7 @@ class PreviewTab {
 		this.#screencastStarted = false;
 		this.#frameWaiters = 0;
 		this.#frameSessionId = undefined;
-		await this.cdp.send("Page.stopScreencast").catch(() => undefined);
+		await withTimeout(this.cdp.send("Page.stopScreencast"), CDP_TIMEOUT_MS, "preview screencast stop").catch(() => undefined);
 	}
 
 	async attach(canOperate: boolean, maxWidth: number, maxHeight: number, sink: PreviewViewerSink): Promise<PreviewViewer> {
@@ -526,14 +550,14 @@ class PreviewTab {
 		for (const viewer of [...this.viewers]) viewer.close(4404, "tab closed");
 		this.viewers.clear();
 		if (this.dialog !== null) {
-			await this.dialog.dismiss().catch(() => undefined);
+			await withTimeout(this.dialog.dismiss(), CDP_TIMEOUT_MS, "preview dialog dismiss").catch(() => undefined);
 			this.dialog = null;
 		}
 		const page = this.page;
 		this.context = undefined;
 		this.page = undefined;
 		this.cdp = undefined;
-		if (page !== undefined) await page.close().catch(() => undefined);
+		if (page !== undefined) await withTimeout(page.close(), CDP_TIMEOUT_MS, "preview page close").catch(() => undefined);
 		this.#owner.scheduleSave();
 	}
 }
@@ -604,6 +628,7 @@ export class PreviewSessions {
 	#saveQueue: Promise<void> = Promise.resolve();
 	#sweepTimer: NodeJS.Timeout | undefined;
 	#browserIdleTimer: NodeJS.Timeout | undefined;
+	#recovering = false;
 
 	constructor(config: PreviewBrowserConfig, log: Logger) {
 		this.#config = config;
@@ -641,10 +666,10 @@ export class PreviewSessions {
 	async #createContext(): Promise<BrowserContext> {
 		const browser = await this.browser();
 		const storageState = await this.#readState();
-		const context = await browser.newContext({
+		const context = await withTimeout(browser.newContext({
 			viewport: DEFAULT_VIEWPORT,
 			...(storageState === undefined ? {} : { storageState }),
-		});
+		}), PAGE_OPEN_TIMEOUT_MS, "preview context create");
 		this.#context = context;
 		context.on("close", () => {
 			if (this.#context === context) this.#context = undefined;
@@ -683,13 +708,18 @@ export class PreviewSessions {
 		this.#saveQueue = this.#saveQueue
 			.catch(() => undefined)
 			.then(async () => {
-				const state = await context.storageState();
+				const state = await withTimeout(context.storageState(), SAVE_TIMEOUT_MS, "browser profile save");
 				await mkdir(dirname(path), { recursive: true });
 				const temporary = `${path}.tmp`;
 				await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
 				await rename(temporary, path);
 			})
-			.catch((error: unknown) => this.#log.warn("could not save the browser profile", { path, error: (error as Error).message }));
+			.catch((error: unknown) => {
+				const message = (error as Error).message || String(error);
+				this.#log.warn("could not save the browser profile", { path, error: message });
+				// A crashed target leaves the context unusable; keeping it makes every later page open wait forever.
+				if (/target crashed|detached|crashed|timed out/i.test(message)) void this.#discardBrowser("browser profile context failed");
+			});
 		return this.#saveQueue;
 	}
 
@@ -725,13 +755,46 @@ export class PreviewSessions {
 		const thread = ThreadId.make(threadId);
 		const snapshot = this.openTab({ threadId: thread, url, reveal: true }, "agent");
 		const tab = this.require(threadId, snapshot.tabId);
-		const page = await tab.agentPage();
-		return {
-			id: snapshot.tabId,
-			page,
-			touch: () => this.touch(tab),
-			close: () => this.close({ threadId: thread, tabId: snapshot.tabId }),
-		};
+		try {
+			const page = await withTimeout(tab.agentPage(), AGENT_OPEN_TIMEOUT_MS, "preview agent page");
+			return {
+				id: snapshot.tabId,
+				page,
+				touch: () => this.touch(tab),
+				close: () => this.close({ threadId: thread, tabId: snapshot.tabId }),
+			};
+		} catch (error) {
+			await withTimeout(this.closeTab(tab, "agent open failed"), PAGE_OPEN_TIMEOUT_MS, "preview tab close").catch(() => undefined);
+			void this.#discardBrowser("agent preview failed");
+			throw error;
+		}
+	}
+
+	/** A crashed Chromium target is not recoverable: drop the context and its tabs so the next open starts clean. */
+	pageCrashed(tab: PreviewTab): void {
+		this.#log.warn("preview page crashed", { tabId: tab.tabId });
+		void this.#discardBrowser("page crashed");
+	}
+
+	async #discardBrowser(reason: string): Promise<void> {
+		if (this.#recovering) return;
+		this.#recovering = true;
+		this.#clearBrowserIdle();
+		this.#stopSaveTimers();
+		const context = this.#context;
+		const browser = this.#browser;
+		this.#context = undefined;
+		this.#browser = undefined;
+		try {
+			await Promise.all([...this.#tabs.values()].map((tab) =>
+				withTimeout(this.closeTab(tab, reason), PAGE_OPEN_TIMEOUT_MS, "preview tab close").catch(() => undefined),
+			));
+			if (context !== undefined) await withTimeout(context.close(), CDP_TIMEOUT_MS, "preview context close").catch(() => undefined);
+			if (browser !== undefined) await withTimeout(browser.close(), CDP_TIMEOUT_MS, "preview browser close").catch(() => undefined);
+		} finally {
+			this.#recovering = false;
+			this.#maybeCloseBrowser();
+		}
 	}
 
 	open(input: PreviewOpenInput): PreviewSessionSnapshot {
@@ -801,10 +864,10 @@ export class PreviewSessions {
 		this.#stopSaveTimers();
 		const context = this.#context;
 		this.#context = undefined;
-		await context?.close().catch(() => undefined);
+		if (context !== undefined) await withTimeout(context.close(), CDP_TIMEOUT_MS, "preview context close").catch(() => undefined);
 		const browser = this.#browser;
 		this.#browser = undefined;
-		await browser?.close().catch(() => undefined);
+		if (browser !== undefined) await withTimeout(browser.close(), CDP_TIMEOUT_MS, "preview browser close").catch(() => undefined);
 		this.#log.info("preview browser idle-closed");
 	}
 
