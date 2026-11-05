@@ -1101,10 +1101,14 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
 			if (compact !== null) {
 				const guidance = compact[1]?.trim();
-				await this.#call(input.threadId, (controller, _models, c) => controller.compact({ ...(guidance === undefined || guidance === "" ? {} : { guidance }) }, c));
+				await this.#call(input.threadId, (controller, _models, c) => controller.compact({ ...(guidance === undefined || guidance === "" ? {} : { guidance }), messageId: input.messageId }, c));
 				return;
 			}
-			const busy = state.view?.docs["pi.live"]?.run !== undefined;
+			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
+			const busy = live?.run !== undefined;
+			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
+			// Prompts sent while it runs must queue, not start a turn alongside the summary.
+			const compacting = (live?.compactions?.length ?? 0) > 0;
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();
 			const seeded = seed !== undefined && seed !== "" && !this.#hasMessages(state);
@@ -1138,7 +1142,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			await this.#call(input.threadId, async (controller, _models, c) => {
 				if (input.mode === "restart" && busy) await controller.abort({ conversationId: head }, c);
 				if (input.mode === "steer") await controller.steer(request, c);
-				else if (busy && input.mode !== "restart") await controller.followUp(request, c);
+				else if ((busy || compacting) && input.mode !== "restart") await controller.followUp(request, c);
 				else await controller.prompt(request, c);
 			}).catch((error: unknown) => {
 				if (seeded) {

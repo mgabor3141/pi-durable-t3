@@ -66,6 +66,18 @@ describe("projection: compaction keeps its tail", () => {
 		});
 	});
 
+	it("attaches a live compaction to its persisted /compact run", () => {
+		const entries = [
+			({ id: 3, kind: "app.user", data: { compact: true }, model: [{ role: "user", content: "/compact", timestamp: 10 }] }) as unknown as EntryRecord,
+		];
+		const result = projectThread(
+			meta,
+			view(entries, { "pi.live": { compactions: [{ taskId: 42, reason: "manual", blocking: false, attempt: 1 }] } }),
+			{ rolledBack: [] },
+		);
+		expect(result.projection.turnItems.find((item) => item.type === "compaction")).toMatchObject({ runId: "r3", status: "running" });
+	});
+
 	it("anchors a tail that starts inside a turn, so the kept entries stay visible", () => {
 		const entries = [compaction(100, 101), assistant(101, "kept reply", 60)];
 		const result = projectThread(meta, view(entries), { rolledBack: [] });

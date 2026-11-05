@@ -381,6 +381,20 @@ export class Threads {
 		if (input.messageId !== undefined) data.messageId = input.messageId;
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
+		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
+		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
+		const view = await conversation.viewState(BACKGROUND_CONTEXT);
+		const compacting = (((view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined)?.compactions?.length) ?? 0) > 0;
+		if (compacting) {
+			const queued = await this.#enqueueInput(
+				input.conversationId as ConversationId,
+				input.requestId,
+				content,
+				Object.keys(data).length === 0 ? undefined : { kind: APP_USER_ENTRY, data },
+			);
+			await this.#rememberInput(input);
+			return queued;
+		}
 		const submission = await conversation.submit(
 			{
 				type: "input",
@@ -399,6 +413,34 @@ export class Threads {
 			this.#onWarn(`prompt committed but its thread promote failed (the run lives; the next promote of this conversation adopts it): ${String(error)}`, error);
 		}
 		// The sidebar preview must show the prompt before the run starts; the run boundary updates the assistant reply.
+		await this.#rememberInput(input);
+		return submission;
+	}
+
+	/** Queue a prompt behind a live manual compaction without starting a run. The summary's write submission sees the
+	 * queued inbox items and places them at its final boundary, so the prompt starts after the new context exists. */
+	async #enqueueInput(
+		conversationId: ConversationId,
+		requestId: string,
+		content: UserInput,
+		entry: { kind: string; data: Record<string, JsonValue> } | undefined,
+	): Promise<Submission> {
+		return this.#harness.commit(async (tx) => {
+			const existing = await tx.submissionByRequest(conversationId, requestId);
+			if (existing !== undefined) return { id: existing.id, status: existing.status } as unknown as Submission;
+			const created = await tx.createSubmission({ conversationId, requestId, type: "input", status: "queued" });
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			inbox.items.push({
+				id: created.id,
+				mode: "followUp",
+				content: structuredClone(content) as never,
+				...(entry === undefined ? {} : { entry: { kind: entry.kind, data: structuredClone(entry.data) } }),
+			});
+			return { id: created.id, status: "queued" } as unknown as Submission;
+		}, BACKGROUND_CONTEXT);
+	}
+
+	async #rememberInput(input: MessageInput): Promise<void> {
 		try {
 			const at = Date.now();
 			await this.remember(input.threadId, {
@@ -409,7 +451,6 @@ export class Threads {
 		} catch (error) {
 			this.#onWarn(`prompt committed but its sidebar summary failed: ${String(error)}`, error);
 		}
-		return submission;
 	}
 
 	/**
@@ -586,10 +627,10 @@ export class Threads {
 	/** T3's `/compact`: run a manual compaction for the head conversation and wait for it.
 	 * Waiting keeps the prompt request open, so T3 shows its working state and does not accept another compact
 	 * click while the summary is being generated. A repeated call joins the running compaction. */
-	async compact(threadId: string, guidance: string | undefined): Promise<void> {
+	async compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void> {
 		const running = this.#compacting.get(threadId);
 		if (running !== undefined) return running;
-		const pending = this.#compactConversation(threadId, guidance);
+		const pending = this.#compactConversation(threadId, guidance, messageId);
 		this.#compacting.set(threadId, pending);
 		try {
 			await pending;
@@ -598,7 +639,7 @@ export class Threads {
 		}
 	}
 
-	async #compactConversation(threadId: string, guidance: string | undefined): Promise<void> {
+	async #compactConversation(threadId: string, guidance: string | undefined, messageId: string | undefined): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
@@ -609,10 +650,37 @@ export class Threads {
 		const active = live?.compactions?.[0];
 		if (active !== undefined) {
 			await this.#harness.waitForTask(active.taskId as TaskId<unknown>, BACKGROUND_CONTEXT);
+			await this.#drainQueuedAfterCompact(threadId, conversationId);
 			return;
+		}
+		// Keep the slash command as a real user entry so a reload does not lose it; the compaction task consumes it
+		// as the prompt that asked for the summary, not as a synthetic T3 bubble.
+		if (messageId !== undefined) {
+			const text = guidance === undefined || guidance === "" ? "/compact" : `/compact ${guidance}`;
+			await this.#harness.commit(async (tx) => {
+				await tx.appendEntry(conversationId, {
+					kind: APP_USER_ENTRY,
+					data: { messageId, compact: true },
+					model: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
+				});
+			}, BACKGROUND_CONTEXT);
 		}
 		const taskId = await conversation.compact(guidance, BACKGROUND_CONTEXT);
 		await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT);
+		await this.#drainQueuedAfterCompact(threadId, conversationId);
+	}
+
+	/** Start a queued follow-up if a compaction ended without a summary boundary to place it (failure/abort). */
+	async #drainQueuedAfterCompact(threadId: string, conversationId: ConversationId): Promise<void> {
+		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) return;
+		const view = await conversation.viewState(BACKGROUND_CONTEXT);
+		const live = view.value.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
+		if (live?.run !== undefined || (live?.compactions?.length ?? 0) > 0) return;
+		const inbox = view.value.docs["pi.inbox"] as { items?: readonly { mode: string }[] } | undefined;
+		if ((inbox?.items ?? []).some((item) => item.mode !== "write")) {
+			await this.startQueued(threadId, undefined, randomUUID());
+		}
 	}
 
 	/** Promote a queued follow-up to a steer: the next boundary places it in the active run. */

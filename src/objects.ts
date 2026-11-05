@@ -171,7 +171,7 @@ export const PiController = local("pi.controller", {
 		editQueued: method(Type.Object({ runId: Type.String(), text: Type.String(), attachments: Type.Optional(Type.Array(AttachmentRecordSchema)) }), Type.Null()),
 		promoteQueued: method(Type.Object({ runId: Type.String() }), Type.Null()),
 		startQueued: method(Type.Object({ runId: Type.Optional(Type.String()), requestId: Type.String() }), Type.Null()),
-		compact: method(Type.Object({ guidance: Type.Optional(Type.String()) }), Type.Null()),
+		compact: method(Type.Object({ guidance: Type.Optional(Type.String()), messageId: Type.Optional(Type.String()) }), Type.Null()),
 	},
 });
 
@@ -479,7 +479,7 @@ export function serveServerObjects(api: Pick<FacetApi, "serve">, threads: Thread
 			},
 			compact: async (args) => {
 				try {
-					await threads.compact(threadId, args.guidance);
+					await threads.compact(threadId, args.guidance, args.messageId);
 					return null;
 				} catch (error) {
 					throw toChordError(error);

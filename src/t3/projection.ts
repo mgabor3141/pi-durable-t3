@@ -121,7 +121,7 @@ export function projectThread(
 	const threadId = meta.threadId;
 	const providerThreadId = `pt-${threadId}`;
 	const live = view?.docs["pi.live"];
-	const busy = view === undefined ? meta.running : live?.run !== undefined;
+	const liveCompactions = ((live as { compactions?: readonly Any[] } | undefined)?.compactions ?? []);
 	// The thread's selection, reported as the client named it: the model and the `thinking` level the conversation
 	// carries. No model yet is the `"default"` slug, which answers no catalog entry (capabilities.md).
 	const modelSelection: Any = {
@@ -131,6 +131,11 @@ export function projectThread(
 	};
 	const history = memory.history ?? [];
 	const drafts = groupRuns([...history, ...(view?.entries ?? [])]);
+	// A live manual compaction has a durable /compact user entry. Treat that entry as its run, so T3 paints the
+	// compacting state with a real run id (its composer queues instead of starting a parallel turn).
+	const compactDraft = drafts.findLast((draft) => draft.userEntry.kind === "app.user" && (draft.userEntry.data as { compact?: unknown } | undefined)?.compact === true);
+	const liveCompactionRunId = compactDraft === undefined ? null : `r${compactDraft.userEntry.id}`;
+	const busy = view === undefined ? meta.running : live?.run !== undefined || (liveCompactions.length > 0 && liveCompactionRunId !== null);
 	// The thread's folder of its own, as T3 spells it on a thread row: a folder UNDER the project root (the registry's
 	// cover rule, `Threads.#projectForConversation`), null for a thread running at the root itself.
 	const worktreePath = meta.projectPath === undefined || !meta.cwd.startsWith(`${meta.projectPath}/`) ? null : meta.cwd;
@@ -658,14 +663,13 @@ export function projectThread(
 
 	// A manual compaction is a durable task, not an optimistic client request. Project its live status so a reload
 	// still shows that the context is being compacted; the completed summary replaces this item at the cut.
-	const liveCompactions = ((live as { compactions?: readonly Any[] } | undefined)?.compactions ?? []);
 	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
 	for (const compaction of liveCompactions) {
 		const startedAt = Date.now();
 		turnItems.push({
 			id: id(`ti-live-compaction-${compaction.taskId ?? liveOrdinal}`),
 			threadId: id(threadId),
-			runId: null,
+			runId: liveCompactionRunId === null ? null : id(liveCompactionRunId),
 			nodeId: null,
 			providerThreadId: id(providerThreadId),
 			providerTurnId: null,
