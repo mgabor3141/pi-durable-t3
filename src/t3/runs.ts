@@ -154,6 +154,13 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			}
 			continue;
 		}
+		if (isCompactCommandEntry(entry)) {
+			// The display-only command always starts its own compaction run; it is never a steer of a tool round.
+			runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
+			pendingCard = undefined;
+			steerable = false;
+			continue;
+		}
 		if (isUserEntry(entry)) {
 			const current = runs.at(-1);
 			if (steerable && current !== undefined && endsWithCompletedToolRound(current.steps)) current.steps.push(entry);
