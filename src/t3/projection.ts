@@ -656,6 +656,32 @@ export function projectThread(
 		}
 	});
 
+	// A manual compaction is a durable task, not an optimistic client request. Project its live status so a reload
+	// still shows that the context is being compacted; the completed summary replaces this item at the cut.
+	const liveCompactions = ((live as { compactions?: readonly Any[] } | undefined)?.compactions ?? []);
+	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
+	for (const compaction of liveCompactions) {
+		const startedAt = Date.now();
+		turnItems.push({
+			id: id(`ti-live-compaction-${compaction.taskId ?? liveOrdinal}`),
+			threadId: id(threadId),
+			runId: null,
+			nodeId: null,
+			providerThreadId: id(providerThreadId),
+			providerTurnId: null,
+			nativeItemRef: null,
+			parentItemId: null,
+			ordinal: liveOrdinal++,
+			status: "running",
+			title: "Compacting context",
+			startedAt: time(startedAt),
+			completedAt: null,
+			updatedAt: time(startedAt),
+			type: "compaction",
+			driver: id(PROVIDER_DRIVER),
+		} as Any);
+	}
+
 	// Queued follow-ups live in pi's inbox until a boundary places them. T3's queue reads them as runs, so project each
 	// follow-up as a queued run now; it disappears from here when the inbox item is placed and a real run replaces it.
 	const queued = readQueuedInputs((view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items).filter((item) => item.mode === "followUp");

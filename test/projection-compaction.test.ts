@@ -17,7 +17,8 @@ const meta: ThreadMeta = {
 	running: false,
 };
 
-const view = (entries: EntryRecord[]): ConversationView => ({ conversation: { id: 1 }, entries, docs: {} }) as unknown as ConversationView;
+const view = (entries: EntryRecord[], docs: Record<string, unknown> = {}): ConversationView =>
+	({ conversation: { id: 1 }, entries, docs }) as unknown as ConversationView;
 
 const compaction = (id: number, head: number, summary = "Prior work."): EntryRecord =>
 	({
@@ -49,6 +50,22 @@ const user = (id: number, text: string, timestamp: number): EntryRecord =>
 	({ id, kind: "app.user", data: { messageId: `message-${id}` }, model: [{ role: "user", content: text, timestamp }] }) as unknown as EntryRecord;
 
 describe("projection: compaction keeps its tail", () => {
+	it("projects a live manual compaction as a running card after a reload", () => {
+		const entries = [user(1, "before", 10), assistant(2, "answer", 20)];
+		const result = projectThread(
+			meta,
+			view(entries, { "pi.live": { compactions: [{ taskId: 42, reason: "manual", blocking: false, attempt: 1 }] } }),
+			{ rolledBack: [] },
+		);
+
+		const live = result.projection.turnItems.find((item) => item.type === "compaction");
+		expect(live).toMatchObject({
+			runId: null,
+			status: "running",
+			title: "Compacting context",
+		});
+	});
+
 	it("anchors a tail that starts inside a turn, so the kept entries stay visible", () => {
 		const entries = [compaction(100, 101), assistant(101, "kept reply", 60)];
 		const result = projectThread(meta, view(entries), { rolledBack: [] });
