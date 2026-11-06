@@ -25,6 +25,8 @@ import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { Logger } from "./logging.ts";
+import type { WsItem, WsSuccess } from "./ws-types.ts";
+import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
@@ -103,11 +105,8 @@ interface ThreadState {
 	catalog: { provider: string; modelId: string; input: string[]; contextWindow: number }[];
 }
 
-type ShellItem =
-	| { kind: "thread.updated"; sequence: number; location: "active"; thread: OrchestrationV2ThreadShell }
-	| { kind: "thread.removed"; sequence: number; location: "active"; threadId: string }
-	| { kind: "project.updated"; sequence: number; project: OrchestrationProjectShell }
-	| { kind: "project.removed"; sequence: number; projectId: string };
+/** A live shell item: everything \`orchestration.subscribeShell\` streams after its snapshot. */
+type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind: "snapshot" } | { readonly kind: "synchronized" }>;
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
@@ -223,7 +222,7 @@ export class Bridge {
 		const currentIds = new Set(current.map((project) => project.id));
 		for (const id of [...this.#projectIds]) {
 			if (currentIds.has(id)) continue;
-			this.#emitShell({ kind: "project.removed", sequence: this.nextSequence(), projectId: id });
+			this.#emitShell({ kind: "project.removed", sequence: this.nextSequence(), projectId: ProjectId.make(id) });
 		}
 		for (const project of current) {
 			this.#emitShell({ kind: "project.updated", sequence: this.nextSequence(), project: this.#projectShell(project) });
@@ -250,12 +249,13 @@ export class Bridge {
 	 * waits for the project in its own store — which is what a registry change emits over the shell stream. With no
 	 * scratch dir configured the feature is off: refused with a message the UI shows.
 	 */
-	ensureScratch(): Promise<{ readonly projectId: string }> {
+	async ensureScratch(): Promise<{ readonly projectId: ProjectId }> {
 		const root = this.config.scratchDir;
 		if (root === undefined) throw new CommandError("This host has no Scratch folder (no scratch dir is configured).");
 		const env = this.config.env;
 		if (env === undefined) throw new CommandError("This host has no execution environment.");
-		return ensureScratchProject(this.config.registry, root, env, this.config.context ?? BACKGROUND_CONTEXT);
+		const { projectId } = await ensureScratchProject(this.config.registry, root, env, this.config.context ?? BACKGROUND_CONTEXT);
+		return { projectId: ProjectId.make(projectId) };
 	}
 
 	/** T3's `ManagedProjectFolders.isScratchProject`: the project is rooted at the scratch dir. */
@@ -293,11 +293,11 @@ export class Bridge {
 		/**
 	 * One project mutation, answered from the state — no receipt store (design.md, Invariants).
 	 */
-	mutateProject(mutation: ProjectMutation): Promise<Record<string, unknown>> {
+	mutateProject(mutation: ProjectMutation): Promise<WsSuccess<"projects.mutate">> {
 		return this.#applyMutation(mutation);
 	}
 
-	async #applyMutation(mutation: ProjectMutation): Promise<Record<string, unknown>> {
+	async #applyMutation(mutation: ProjectMutation): Promise<WsSuccess<"projects.mutate">> {
 		switch (mutation.type) {
 			case "project.create": {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
@@ -398,9 +398,9 @@ export class Bridge {
 	}
 
 	/** A T3 `Project` for a mutation's result. Only the fields a paired client reads are set; the rest are the shell's nulls. */
-	#projectResult(project: { id: string; name: string; cwd: string }, deletedAt: string | null): Record<string, unknown> {
+	#projectResult(project: { id: string; name: string; cwd: string }, deletedAt: string | null): WsSuccess<"projects.mutate"> {
 		return {
-			id: project.id,
+			id: ProjectId.make(project.id),
 			title: project.name,
 			workspaceRoot: project.cwd,
 			repositoryIdentity: null,
@@ -628,7 +628,7 @@ export class Bridge {
 			this.#shells.delete(threadId);
 			const state = this.#threads.get(threadId);
 			if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was removed`));
-			this.#emitShell({ kind: "thread.removed", sequence: this.nextSequence(), location: "active", threadId });
+			this.#emitShell({ kind: "thread.removed", sequence: this.nextSequence(), location: "active", threadId: ThreadId.make(threadId) });
 		}
 	}
 

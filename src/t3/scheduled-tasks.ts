@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { ScheduledTask, ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
+import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
 import { writeJsonAtomic } from "./json-store.ts";
@@ -295,7 +295,7 @@ export class ScheduledTasks {
 		this.#notify();
 	}
 
-	delete(input: { id: string }): { id: string } {
+	delete(input: { id: ScheduledTaskId }): { id: ScheduledTaskId } {
 		const previous = this.#tasks.get(input.id);
 		if (previous === undefined) return { id: input.id };
 		this.#tasks.delete(input.id);

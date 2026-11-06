@@ -43,7 +43,7 @@ export interface FacetConfig {
 export interface BridgeConfig extends FacetConfig {
 	/** The live project registry: the shell's `projects`, and what `projects.mutate` writes. */
 	readonly registry: ProjectRegistry;
-	/** T3's server settings: what `server.getSettings`/`server.updateSettings` answer, and what emits `settingsUpdated`. */
+	/** T3's server settings: what `server.getConfig`/`server.updateSettings` answer, and what emits `settingsUpdated`. */
 	readonly settings: ServerSettingsStore;
 }
 

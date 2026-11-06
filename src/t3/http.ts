@@ -21,6 +21,8 @@ import {
 	AuthPairingLink,
 	AuthStandardClientScopes,
 	type ExecutionEnvironmentDescriptor,
+	EnvironmentId,
+	type ServerConfig,
 	PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 	ORCHESTRATION_PROTOCOL_HEADER,
 	ORCHESTRATION_PROTOCOL_QUERY_PARAM,
@@ -71,9 +73,8 @@ type Any = any;
 function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSessions | undefined): () => ExecutionEnvironmentDescriptor {
 	const os = platform() === "darwin" ? "darwin" : platform() === "linux" ? "linux" : platform() === "win32" ? "windows" : "unknown";
 	const cpu = arch() === "arm64" ? "arm64" : arch() === "x64" ? "x64" : "other";
-	return () =>
-		({
-			environmentId: auth.environmentId,
+	return (): ExecutionEnvironmentDescriptor => ({
+			environmentId: EnvironmentId.make(auth.environmentId),
 			label: bridge.config.label,
 			platform: { os, arch: cpu, machine: "server" },
 			serverVersion: SERVER_VERSION,
@@ -91,7 +92,7 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				attachmentUploads: true,
 				fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
 			},
-		}) as Any;
+		});
 }
 
 
@@ -113,10 +114,10 @@ function authenticatedSession(token: { scopes: string[]; expiresAt: number; meth
  * call — HTTP and the WS ticket — with it, since a page served from this origin sends cookies, not a bearer. */
 export const SESSION_COOKIE_NAME = "pi_durable_t3_session";
 
-export const authDescriptor = {
+export const authDescriptor: ServerConfig["auth"] = {
 	policy: "remote-reachable",
 	bootstrapMethods: ["one-time-token"],
-	sessionMethods: ["bearer-access-token", "browser-session-cookie"] as const,
+	sessionMethods: ["bearer-access-token", "browser-session-cookie"],
 	sessionCookieName: SESSION_COOKIE_NAME,
 };
 

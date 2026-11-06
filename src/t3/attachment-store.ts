@@ -280,7 +280,7 @@ export class AttachmentStore {
 	/** Persist one message's image uploads: validate each data URL, mint a deterministic id, write the bytes, and
 	 * answer the persisted records. Idempotent per (thread, message, index, bytes) — a retried persist rewrites the
 	 * same id. Throws on any invalid payload (the caller maps it to T3's `PersistChatAttachmentsError`). */
-	persist(threadId: string, messageId: string, uploads: readonly ImageUpload[]): AttachmentRecord[] {
+	persist(threadId: string, messageId: string, uploads: readonly ImageUpload[]): (AttachmentRecord & { readonly type: "image" })[] {
 		return uploads.map((upload, index) => {
 			const parsed = parseBase64DataUrl(upload.dataUrl);
 			if (parsed === null || parsed.mimeType !== upload.mimeType.toLowerCase()) {

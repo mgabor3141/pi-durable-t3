@@ -58,11 +58,15 @@ import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { AttachmentStore } from "./attachment-store.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
 import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
-import { PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
+import { AssetAccessError, AssetWorkspaceResolutionError, ThreadId, PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
+
+const isAssetAccessError = Schema.is(AssetAccessError);
 import type { PreviewSessions } from "./preview.ts";
+import type { WsHandlers, WsItem, WsPayload } from "./ws-types.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
+
 
 const fromListener = <A>(
 	subscribe: (emit: (value: A) => void, end: () => void) => () => void,
@@ -146,7 +150,7 @@ interface RpcDeps {
 	readonly files: WorkspaceFiles;
 	readonly catalog: ModelCatalog;
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
-	readonly authDescriptor: Any;
+	readonly authDescriptor: ServerConfig["auth"];
 	readonly auth: AuthStore;
 	readonly attachments: AttachmentStore;
 	readonly assets: WorkspaceAssets;
@@ -191,7 +195,7 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[])
 		// (`availableScratchWorkspaceRoot`), and the same config answers `projects.ensureScratch` for it (rpc.ts). A host
 		// with no scratch dir advertises nothing, and the client offers no such thread.
 		...(deps.bridge.scratchRoot === undefined ? {} : { scratchWorkspaceRoot: deps.bridge.scratchRoot }),
-	} as Any;
+	};
 }
 
 /** A config read: the static fields plus the served tailnet URL (bounded: a machine with no `tailscale` CLI answers
@@ -206,6 +210,13 @@ async function readServerConfig(deps: RpcDeps): Promise<ServerConfig> {
 	return serverConfig(deps, served === null ? [] : [served]);
 }
 
+/** A config read as the contract declares its failure: the settings error T3 raises when it cannot read its config. */
+const readConfigEffect = (deps: RpcDeps) =>
+	Effect.tryPromise({
+		try: () => readServerConfig(deps),
+		catch: (cause) => new ServerSettingsError({ settingsPath: deps.bridge.config.settings.path, operation: "read-file", cause }),
+	});
+
 /** The image and file attachments of a command (the persisted records the client sent), shaped for
  * `Bridge.sendMessage`. Unknown attachment types are dropped. */
 function attachmentRecords(attachments: unknown): { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[] | undefined {
@@ -216,7 +227,7 @@ function attachmentRecords(attachments: unknown): { type?: "image" | "file"; id:
 	return records.length > 0 ? records : undefined;
 }
 
-const toPromiseEffect = <A>(run: () => Promise<A>, onError: (message: string) => Any) =>
+const toPromiseEffect = <A, E>(run: () => Promise<A>, onError: (message: string) => E): Effect.Effect<A, E> =>
 	Effect.tryPromise({ try: run, catch: (error) => onError((error as Error).message || String(error)) });
 
 /** A scheduled-task call: its refusals are already the contract's `ScheduledTaskError`; anything else becomes one. */
@@ -317,7 +328,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 		log.info("stubbed RPC called", { method: tag });
 	};
 
-	const dispatch = (command: Any) => {
+	const dispatch = (command: WsPayload<"orchestration.dispatchCommand">) => {
 		const fail = (message: string) =>
 			new OrchestrationV2DispatchCommandError({ commandId: command.commandId, commandType: command.type, message });
 		const run = async (): Promise<number> => {
@@ -420,23 +431,21 @@ export function makeRpcLayer(deps: RpcDeps) {
 		};
 		return toPromiseEffect(() => bridge.idempotent(command.commandId, run), fail).pipe(
 			Effect.map((sequence) => ({ sequence })),
-			Effect.tapError((error: Any) => Effect.sync(() => log.warn("command failed", { type: command.type, error: error.message }))),
+			Effect.tapError((error) => Effect.sync(() => log.warn("command failed", { type: command.type, error: error.message }))),
 		);
 	};
 
-	const handlers: Record<string, (payload: Any) => Any> = {
+	const handlers: WsHandlers = {
 		"server.probe": () => Effect.succeed({}),
-		"server.getConfig": () =>
-			toPromiseEffect(() => readServerConfig(deps), (message) => new Error(message) as Any),
+		"server.getConfig": () => readConfigEffect(deps),
 		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
-		"server.getSettings": () => Effect.sync(() => serverSettings(deps)),
 		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
 		// agent's conversations live in pi-durable, not in a Codex/Claude home directory — so it is answered truthfully
 		// with an empty scan. The rest of `agentSessions.*` (import) stays refused (capabilities.md).
 		"agentSessions.scan": () => Effect.sync(() => ({ candidates: [], scannedAt: new Date().toISOString() })),
 		// T3's settings write, replicated (design.md): a PATCH merged into the current settings, optionally with one
 		// provider-instance mutation applied to the same snapshot.
-		"server.updateSettings": (input: Any) =>
+		"server.updateSettings": (input) =>
 			Effect.try({
 				try: () => {
 					const settings = deps.bridge.config.settings;
@@ -463,7 +472,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					Effect.tapError((error: ServerSettingsError) => Effect.sync(() => log.warn("settings update refused", { operation: error.operation, cause: error.cause instanceof Error ? error.cause.message : String(error.cause) }))),
 				),
 		// Projects through `projects.mutate` (the sendable surface); every refusal is the contract's `ProjectMutationError`.
-		"projects.mutate": (mutation: Any) =>
+		"projects.mutate": (mutation) =>
 			Effect.tryPromise({
 				try: () => bridge.mutateProject(mutation),
 				catch: (error) =>
@@ -481,7 +490,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 				(message) => new OrchestrationDispatchCommandError({ message }),
 			),
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
-		"filesystem.browse": (input: Any) =>
+		"filesystem.browse": (input) =>
 			Effect.tryPromise({
 				try: () => {
 					const env = deps.bridge.config.env;
@@ -503,33 +512,33 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}),
 		// T3's file panel and quick-open (`files.ts`, replicated from `apps/server/src/workspace`). The `cwd` must be a root this
 		// host knows; every failure is the contract's own typed error.
-		"projects.listEntries": (input: Any) =>
+		"projects.listEntries": (input) =>
 			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.list(input), catch: (error) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(error) } as Any) }),
+				Effect.tryPromise({ try: () => deps.files.list(input), catch: (error) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(error) }) }),
 			),
-		"projects.searchEntries": (input: Any) =>
+		"projects.searchEntries": (input) =>
 			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.searchEntries(input), catch: (error) => new ProjectSearchEntriesError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) } as Any) }),
+				Effect.tryPromise({ try: () => deps.files.searchEntries(input), catch: (error) => new ProjectSearchEntriesError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
 			),
-		"projects.searchContents": (input: Any) =>
+		"projects.searchContents": (input) =>
 			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.searchContents(input), catch: (error) => new ProjectSearchContentsError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) } as Any) }),
+				Effect.tryPromise({ try: () => deps.files.searchContents(input), catch: (error) => new ProjectSearchContentsError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
 			),
-		"projects.readFile": (input: Any) =>
+		"projects.readFile": (input) =>
 			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) } as Any) }),
+				Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 			),
-		"projects.writeFile": (input: Any) =>
+		"projects.writeFile": (input) =>
 			withScope(AuthFilesystemWriteScope, () =>
-				Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) } as Any) }),
+				Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 			),
-		"server.reportClientActivity": () => Effect.succeed({}),
+		"server.reportClientActivity": () => Effect.void,
 		// T3's usage view. `server.getUsageSummary` is answered from what pi-durable records per turn (tokens, cost,
 		// model) — replicated bucketing from T3, provider-reported cost, fields pi has no value for omitted (see
 		// `usage.ts`). An invalid window is T3's typed `UsageReadError` (the client shows it); a scan that throws while
 		// reading conversations is `scanFailed`. `server.refreshUsageRates` is on the client's refresh path: it answers
 		// this host's pricing truthfully (no rate table — pi prices its own turns), never a fetched LiteLLM table.
-		"server.getUsageSummary": (input: Any) =>
+		"server.getUsageSummary": (input) =>
 			Effect.tryPromise({
 				try: () => bridge.usageConversations().then((conversations) => summarizeUsage(input, conversations, bridge.config.stateDir)),
 				catch: (error) =>
@@ -538,43 +547,47 @@ export function makeRpcLayer(deps: RpcDeps) {
 						: new UsageReadError({ reason: "scanFailed", detail: (error as Error).message || "The usage scan failed.", cause: error }),
 			}),
 		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
-		"attachments.createUploadUrl": (input: Any) =>
+		"attachments.createUploadUrl": (input) =>
 			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => deps.attachments.mintUpload(input))),
-		"attachments.delete": (input: Any) =>
-			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => { deps.attachments.deleteUpload(input.attachmentId); return null; })),
+		"attachments.delete": (input) =>
+			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => deps.attachments.deleteUpload(input.attachmentId))),
 		// Image attachments, the data-URL path (capabilities.md): the client sends the bytes inline, this host stores
 		// them under the bridge's dir and answers a persisted record; display is served by `assets.createUrl` + the
 		// `/api/assets/*` HTTP route (signature-authed, no bearer — like T3). The upload-URL path (`attachments.*`) is
 		// refused: this host does not advertise `attachmentUploads`, so the client never calls it.
-		"assets.persistChatAttachments": (input: Any) =>
+		"assets.persistChatAttachments": (input) =>
 			Effect.try({
 				try: () => ({ attachments: deps.attachments.persist(input.threadId, input.messageId, input.attachments ?? []) }),
 				catch: (error) => new PersistChatAttachmentsError({ message: (error as Error).message || String(error) }),
 			}),
-		"assets.createUrl": (input: Any) => {
+		"assets.createUrl": (input) => {
 			const resource = input.resource;
 						if (resource?._tag === "workspace-file" || resource?._tag === "media-file" || resource?._tag === "draft-workspace-file") {
-				return Effect.tryPromise({ try: () => deps.assets.issue(resource), catch: (error) => error as Error });
+				return Effect.tryPromise({
+					try: () => deps.assets.issue(resource),
+					// \`issue\` throws the contract's own asset errors; anything else (the environment failing) is a resolution failure.
+					catch: (error) => (isAssetAccessError(error) ? error : new AssetWorkspaceResolutionError({ resource, cause: error })),
+				});
 			}
 			// Favicon/tool-output/github resources are not served by this host: the file panel reads text through `projects.readFile`.
-			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource } as Any));
+			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource }));
 			const minted = deps.attachments.mintAssetUrl({
 				attachmentId: resource.attachmentId,
 				...(typeof resource.fileName === "string" ? { fileName: resource.fileName } : {}),
 				...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
 			});
 			return minted === null
-				? Effect.fail(new AssetAttachmentNotFoundError({ resource } as Any))
+				? Effect.fail(new AssetAttachmentNotFoundError({ resource }))
 				: Effect.succeed(minted);
 		},
 		// The config stream: the store's change signal is what emits `settingsUpdated`, the event on which the projection
 		// replaces `config.settings` (capabilities.md).
 		subscribeServerConfig: () =>
 			Stream.concat(
-				Stream.fromEffect(toPromiseEffect(() => readServerConfig(deps), (message) => new Error(message) as Any)).pipe(
+				Stream.fromEffect(readConfigEffect(deps)).pipe(
 					Stream.map((config) => ({ version: 1 as const, type: "snapshot" as const, config })),
 				),
-				fromListener<Any>((emit) => {
+				fromListener<WsItem<"subscribeServerConfig">>((emit) => {
 					const stopCatalog = deps.catalog.onChange(() =>
 						emit({ version: 1, type: "providerStatuses", payload: { providers: deps.catalog.providers() } }),
 					);
@@ -594,7 +607,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 		subscribeServerLifecycle: () => {
 			const environment = deps.descriptor();
 			const cwd = serverCwd(deps.bridge.config);
-			return Stream.concat(Stream.make({ version: 1, sequence: 0, type: "welcome", payload: { environment, cwd, projectName: basename(cwd) || cwd } } as Any, { version: 1, sequence: 1, type: "ready", payload: { at: new Date().toISOString(), environment } } as Any), Stream.never);
+			return Stream.concat(Stream.make<WsItem<"subscribeServerLifecycle">[]>({ version: 1, sequence: 0, type: "welcome", payload: { environment, cwd, projectName: basename(cwd) || cwd } }, { version: 1, sequence: 1, type: "ready", payload: { at: new Date().toISOString(), environment } }), Stream.never);
 		},
 		// The Connections access stream (T3's `subscribeAuthAccess`): the snapshot first (links + sessions, `current` for
 		// this socket's session), then the store's changes as incremental events at an increasing revision (the client
@@ -606,23 +619,23 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const snapshot = { version: 1 as const, revision: 1, type: "snapshot" as const, payload: accessSnapshot(deps.auth, sessionId) };
 					return Stream.concat(
 						Stream.make(snapshot),
-						fromListener<Any>((emit) => deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }))),
+						fromListener<WsItem<"subscribeAuthAccess">>((emit) => deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }))),
 					);
 				}),
 			),
-		[`orchestration.subscribeShell`]: (input: Any) =>
+		[`orchestration.subscribeShell`]: (input) =>
 			Stream.suspend(() => {
-				const initial: Any[] = [{ kind: "snapshot", snapshot: bridge.shellSnapshot() }];
+				const initial: WsItem<"orchestration.subscribeShell">[] = [{ kind: "snapshot", snapshot: bridge.shellSnapshot() }];
 				if (input.requestCompletionMarker === true) initial.push({ kind: "synchronized" });
-				return Stream.concat(Stream.fromIterable(initial), fromListener<Any>((emit) => bridge.onShell(emit)));
+				return Stream.concat(Stream.fromIterable(initial), fromListener<WsItem<"orchestration.subscribeShell">>((emit) => bridge.onShell(emit)));
 			}),
-		[`orchestration.subscribeThread`]: (input: Any) =>
+		[`orchestration.subscribeThread`]: (input) =>
 			Stream.unwrap(
 				Effect.sync(() =>
 					// A thread the host does not know fails the stream with the contract's typed not-found — never a fabricated
 					// snapshot that leaves the panel open (design.md, Invariants).
 					bridge.hasThread(input.threadId)
-						? fromLatest<Any>(
+						? fromLatest<WsItem<"orchestration.subscribeThread">>(
 								(emit, end) =>
 									// The stream ends when the thread is deleted.
 									bridge.subscribeThread(
@@ -650,16 +663,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 									),
 								(item) => item.kind === "snapshot",
 							)
-						: Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` } as Any)),
+						: Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` })),
 				),
 			),
-		[`orchestration.getThreadProjection`]: (input: Any) =>
+		[`orchestration.getThreadProjection`]: (input) =>
 
 			toPromiseEffect(
 				() => bridge.projection(input.threadId),
-				(message) => new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message } as Any),
+				(message) => new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message }),
 			).pipe(Effect.map((result) => result.projection)),
-		[`orchestration.launchThread`]: (input: Any) =>
+		[`orchestration.launchThread`]: (input) =>
 			toPromiseEffect(
 				async () => {
 					const message = input.initialMessage;
@@ -682,7 +695,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 									},
 					});
 					const { projection } = await bridge.projection(threadId);
-					return { threadId, projection, resumed: false };
+					return { threadId: ThreadId.make(threadId), projection, resumed: false };
 				},
 				// The declared failure is `OrchestrationV2ThreadLaunchError`, and its payload names the project the client
 				// asked about — the whole point of the field (design.md, Invariants).
@@ -690,25 +703,24 @@ export function makeRpcLayer(deps: RpcDeps) {
 			),
 		// T3's scheduled tasks, interval and fixed-time triggers (`scheduled-tasks.ts`); webhook triggers are refused with the
 		// contract's typed error, which the edit dialog shows as a toast.
-		"scheduledTasks.list": () => scheduled(async () => deps.scheduledTasks.list()),
 		// T3's `subscribeList`: subscribed before the snapshot, so no change falls between; then a fresh list per change.
 		"scheduledTasks.subscribe": () =>
-			fromListener<Any>((emit) => {
+			fromListener<WsItem<"scheduledTasks.subscribe">>((emit) => {
 				const stop = deps.scheduledTasks.onChange(() => emit(deps.scheduledTasks.list()));
 				emit(deps.scheduledTasks.list());
 				return stop;
 			}),
-		"scheduledTasks.upsert": (input: Any) => scheduled(async () => deps.scheduledTasks.upsert(input)),
-		"scheduledTasks.setEnabled": (input: Any) => scheduled(async () => deps.scheduledTasks.setEnabled(input)),
-		"scheduledTasks.delete": (input: Any) => scheduled(async () => deps.scheduledTasks.delete(input)),
-		"scheduledTasks.runNow": (input: Any) => scheduled(() => deps.scheduledTasks.runNow(input)),
-		"scheduledTasks.rotateWebhookToken": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
-		"scheduledTasks.listWebhookDeliveries": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
-		"scheduledTasks.getWebhookDelivery": (input: Any) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.upsert": (input) => scheduled(async () => deps.scheduledTasks.upsert(input)),
+		"scheduledTasks.setEnabled": (input) => scheduled(async () => deps.scheduledTasks.setEnabled(input)),
+		"scheduledTasks.delete": (input) => scheduled(async () => deps.scheduledTasks.delete(input)),
+		"scheduledTasks.runNow": (input) => scheduled(() => deps.scheduledTasks.runNow(input)),
+		"scheduledTasks.rotateWebhookToken": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.listWebhookDeliveries": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.getWebhookDelivery": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
 		[`orchestration.dispatchCommand`]: dispatch,
 		// T3's command-palette / sidebar thread search, answered from the host's conversations (design.md, replication
 		// rule). The client validates the query (2..200) and limit; `limit` defaults to T3's 50.
-		[`orchestration.searchThreads`]: (input: Any) =>
+		[`orchestration.searchThreads`]: (input) =>
 			toPromiseEffect(
 				() => bridge.searchThreads(input.query, input.limit ?? 50),
 				(message) => new OrchestrationSearchThreadsError({ message }),
@@ -717,22 +729,23 @@ export function makeRpcLayer(deps: RpcDeps) {
 
 	if (deps.preview !== undefined) {
 		const preview = deps.preview;
-		Object.assign(handlers, {
-			"preview.open": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(async () => preview.open(input))),
-			"preview.resize": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.resize(input))),
-			"preview.adjust": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.adjust(input))),
-			"preview.close": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.close(input))),
-			"preview.list": (input: Any) => withScope(AuthOrchestrationReadScope, () => Effect.sync(() => preview.list(input.threadId))),
+		const previewHandlers: WsHandlers = {
+			"preview.open": (input) => withScope(AuthPreviewOperateScope, () => previewCall(async () => preview.open(input))),
+			"preview.resize": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.resize(input))),
+			"preview.adjust": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.adjust(input))),
+			"preview.close": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.close(input))),
+			"preview.list": (input) => withScope(AuthOrchestrationReadScope, () => Effect.sync(() => preview.list(input.threadId))),
 			"preview.clearProfile": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.clearProfile())),
 			"preview.reportProfiles": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.reportProfiles())),
-			"preview.reportStatus": (input: Any) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.reportStatus(input))),
-			subscribePreviewEvents: () => fromListener<Any>((emit) => preview.subscribe(emit)),
-		});
+			"preview.reportStatus": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.reportStatus(input))),
+			subscribePreviewEvents: () => fromListener<WsItem<"subscribePreviewEvents">>((emit) => preview.subscribe(emit)),
+		};
+		Object.assign(handlers, previewHandlers);
 	}
 
 	const all: Record<string, (payload: Any) => Any> = {};
 	for (const [tag, rpc] of WsRpcGroup.requests as unknown as Map<string, Any>) {
-		const implemented = handlers[tag];
+		const implemented = (handlers as Record<string, ((payload: Any) => Any) | undefined>)[tag];
 		const stream = RpcSchema.isStreamSchema(rpc.successSchema);
 		if (implemented !== undefined) {
 			all[tag] = observe(tag, implemented, stream);
