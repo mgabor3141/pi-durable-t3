@@ -686,7 +686,10 @@ export class Bridge {
 		const fire = (): void => {
 			state.view = peek(transcript.transcript)?.view as ConversationView | undefined;
 			state.history = peek(transcript.transcript)?.history as EntryRecord[] | undefined;
-			state.conversationId = peek(transcript.transcript)?.conversationId;
+			// `pi.transcript` starts from a placeholder (conversation 0, which pi-durable never assigns) until the head's real
+			// view loads; a placeholder id is not a head, so writes keep waiting in `#awaitHead`.
+			const conversationId = peek(transcript.transcript)?.conversationId;
+			state.conversationId = conversationId === undefined || conversationId <= 0 ? undefined : conversationId;
 			if (models !== undefined) {
 state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [], contextWindow: model.contextWindow }));
 				const configuration = peek(models.configuration);
