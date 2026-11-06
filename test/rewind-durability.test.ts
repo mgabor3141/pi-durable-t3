@@ -6,11 +6,11 @@
 //     head came back from the state as the pre-rewind conversation, the reverted turn would silently return on restart.
 //
 // (2) THE LINEAGE SURVIVES. When the head has already moved on, the fork is added as a CHILD thread row carrying
-//     `parent: { threadId }` — the only record of where the fork came from, and what T3's projection reports as
+//     `lineage.parentThreadId` — the only record of where the fork came from, and what T3's projection reports as
 //     `parentThreadId` with `relationshipToParent: "fork"`. A row whose parent is dropped in a write is a thread with
 //     no visible origin.
 //
-// Proven by breaking the mechanisms: moving the head back to the parent (or dropping `parent` in the child-row push)
+// Proven by breaking the mechanisms: moving the head back to the parent (or dropping the lineage in the child-row push)
 // fails the matching assertion.
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -77,14 +77,14 @@ describe("a rewind is durable", () => {
 		]);
 		expect(results.filter((r) => r.status === "fulfilled"), "both rewinds answer").toHaveLength(2);
 		const rows = await threads.list();
-		const children = rows.filter((row) => row.parent?.threadId === "t");
-		expect(children.length, `exactly one child row, parented to the thread: ${JSON.stringify(rows.map((r) => [r.threadId, r.head, r.parent]))}`).toBe(1);
+		const children = rows.filter((row) => row.lineage.parentThreadId === "t");
+		expect(children.length, `exactly one child row, parented to the thread: ${JSON.stringify(rows.map((r) => [r.threadId, r.head, r.lineage]))}`).toBe(1);
 		expect(children[0]!.head, "the child IS the fork, not the parent's conversation").not.toBe(head);
 		void entry;
 
 		const up = await restart(f);
 		const afterRestart = await up.threads.list();
-		const lineage = afterRestart.filter((row) => row.parent?.threadId === "t");
+		const lineage = afterRestart.filter((row) => row.lineage.parentThreadId === "t");
 		expect(lineage.length, "the lineage is in the state, not in memory").toBe(1);
 		expect(lineage[0]!.head, "the same fork").toBe(children[0]!.head);
 		await up.harness.close(BACKGROUND_CONTEXT);

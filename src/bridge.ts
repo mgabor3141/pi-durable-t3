@@ -150,6 +150,12 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.context === undefined ? {} : { context: options.context }),
 		onWarn: (message) => log.warn(message),
 	});
+	// The threads are read once, before anything is served: a store this version cannot read stops the host here.
+	try {
+		await threads.load();
+	} catch (error) {
+		throw new Error(`pi-durable-t3: cannot read the threads in this Harness's storage (${error instanceof Error ? error.message : String(error)}). A store written by an earlier version is migrated by hand.`, { cause: error });
+	}
 
 	const catalog = new ModelCatalog(async () => (await options.models.getAvailable()).map((model) => ({
 		provider: model.provider,

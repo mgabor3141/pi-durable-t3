@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
+import type { Provenance } from "../threads.ts";
 import { writeJsonAtomic } from "./json-store.ts";
 import type { Logger } from "./logging.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./schedule.ts";
@@ -24,9 +25,9 @@ export const POLL_INTERVAL_MS = 5_000;
 
 /** The two dispatch paths a run takes (T3's `threadLaunch.launch` and `threadManagement.sendToThread(mode: "queue")`). */
 export interface ScheduledTaskDispatch {
-	launch(input: { commandId: string; messageId: string; projectId: string; title: string; text: string; modelSelection: Task["modelSelection"] }): Promise<void>;
+	launch(input: { commandId: string; messageId: string; projectId: string; title: string; text: string; modelSelection: Task["modelSelection"]; provenance: Provenance }): Promise<void>;
 	/** T3 passes no model to a bound run: it follows the thread's current selection (ScheduledTaskService). */
-	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string }): Promise<void>;
+	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string; provenance: Provenance }): Promise<void>;
 	/** T3's `ManagedProjectFolders.isScratchProject`. */
 	isScratchProject(projectId: string): boolean;
 }
@@ -175,9 +176,10 @@ export class ScheduledTasks {
 			let lastRunError: string | null = null;
 			try {
 				if (active.threadId === null) {
-					await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection });
+					// A run carries the task's provenance, as T3's `ScheduledTaskService` dispatches it.
+					await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 				} else {
-					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt });
+					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 				}
 			} catch (error) {
 				lastRunError = errorMessage(error);
@@ -366,6 +368,7 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 				modelSelection: input.modelSelection,
 				workspaceStrategy: { type: "root" },
 				initialMessage: { messageId: input.messageId, text: input.text },
+				provenance: input.provenance,
 			});
 		},
 		queue: async (input) => {
@@ -373,7 +376,7 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			await bridge.loaded();
 			if (bridge.threadProjectId(input.threadId) !== input.projectId) throw new Error(`Thread ${input.threadId} was not found in project ${input.projectId}.`);
 			await bridge.idempotent(input.commandId, async () => {
-				await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue" });
+				await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue", provenance: input.provenance });
 				return bridge.nextSequence();
 			});
 		},

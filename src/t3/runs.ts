@@ -57,6 +57,17 @@ export type UserAttachment = { type: "image" | "file"; id: string; name: string;
 /** The images a user entry carries in its `data` (`app.user` entries set them — `Threads.submit`); empty for a
  * message with none. The projection reports these as the message's attachments, so the thread shows them after a
  * restart (the record is durable; the bytes live in the bridge's attachment store). */
+/** Who sent a user-role entry, from its `data` (T3's creation fields); a person in the web app when it names no one. */
+export function authorOf(data: unknown): { createdBy: "user" | "agent" | "system"; creationSource: "web" | "mobile" | "mcp" | "provider" | "server" } {
+	const value = (typeof data === "object" && data !== null ? data : {}) as { createdBy?: unknown; creationSource?: unknown };
+	const createdBy = value.createdBy === "agent" || value.createdBy === "system" || value.createdBy === "user" ? value.createdBy : "user";
+	const creationSource =
+		value.creationSource === "mobile" || value.creationSource === "mcp" || value.creationSource === "provider" || value.creationSource === "server" || value.creationSource === "web"
+			? value.creationSource
+			: "web";
+	return { createdBy, creationSource };
+}
+
 export const attachmentsOf = (entry: EntryRecord): UserAttachment[] => {
 	const data = entry.data;
 	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return [];

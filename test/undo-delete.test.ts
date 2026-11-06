@@ -31,7 +31,7 @@ describe("the tombstone gates the undo fork", () => {
 		const fork = await threads.rewind({ threadId: "ghost", expectedHead: t.head, entryId: entry, requestId: "u1" });
 
 		const rows = await threads.list();
-		expect(rows.filter((row) => row.parent?.threadId === "ghost"), `the undo of a deleted thread adds no row: ${JSON.stringify(rows)}`).toHaveLength(0);
+		expect(rows.filter((row) => row.lineage.parentThreadId === "ghost"), `the undo of a deleted thread adds no row: ${JSON.stringify(rows)}`).toHaveLength(0);
 		expect(rows.filter((row) => row.head === fork), `the fork is not a thread row: ${JSON.stringify(rows)}`).toHaveLength(0);
 		expect(rows, "the document stays empty").toHaveLength(0);
 

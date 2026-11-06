@@ -1,5 +1,9 @@
-// The threads layer: the one document this host adds, `pi-durable-t3.threads` — named pointers ("threads") to the
-// Harness's conversations. Every rule it enforces is an invariant in docs/design.md; this file is the code, not the case.
+// The threads layer: the documents this host adds to the Harness — one record per thread (a named pointer to its head
+// conversation, shaped after T3's `OrchestrationV2AppThread`), one sidebar summary per thread, and a directory of thread
+// ids and heads. Every rule it enforces is an invariant in docs/design.md; this file is the code, not the case.
+//
+// This layer is the only writer of those documents, so it keeps them in memory: reads are synchronous, and every
+// committed change is announced to `onChange` listeners before the write returns.
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
@@ -13,10 +17,10 @@ import {
 	type ConversationRecord,
 	type Cursor,
 	defineDoc,
+	defineDocFamily,
 	type EntryId,
 	InboxDoc,
 	LiveDoc,
-	type ModelRef,
 	type Submission,
 	type SubmissionId,
 	type TaskId,
@@ -43,9 +47,25 @@ export const APP_USER_ENTRY = "app.user";
 /** Entry kinds that name a user turn, for the rewind's `not_rewindable` check; the facet owns a copy of this literal. */
 const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
 
-/** The thread this one was promoted or forked from — what T3's projection reports as `parentThreadId` with
- * `relationshipToParent: "fork"` (design.md). Only the id is kept. */
-type ThreadParent = { threadId: string };
+/** Who created a thread or a message (T3's `OrchestrationV2Actor`). */
+export type Actor = "user" | "agent" | "system";
+/** Where it came from (T3's `OrchestrationV2CreationSource`). */
+export type CreationSource = "web" | "mobile" | "mcp" | "provider" | "server";
+/** T3's creation fields: a thread's, and a user-role message's. */
+export type Provenance = { readonly createdBy: Actor; readonly creationSource: CreationSource };
+/** What a write that names no provenance gets: a person in T3's web app, as T3's own server assumes. */
+export const USER_WEB: Provenance = { createdBy: "user", creationSource: "web" };
+
+/** T3's `OrchestrationV2AppThreadLineage`. */
+export type ThreadLineage = {
+	parentThreadId: string | null;
+	relationshipToParent: "fork" | "subagent" | null;
+	rootThreadId: string;
+};
+/** T3's `OrchestrationV2LinkOrigin`: the linked environment's session whose agent started this work here. Set once. */
+export type LinkOrigin = { sessionId: string; label: string; access?: string };
+/** T3's `OrchestrationV2DelegatedFrom`: the thread in a linked environment that delegated this one. */
+export type DelegatedFrom = { environmentId: string; threadId: string; title: string };
 
 /** The sidebar's durable snapshot of a thread's latest visible message, so an unopened thread still sorts and previews
  * correctly after a restart. Updated on prompts and at run boundaries, not per token. */
@@ -56,38 +76,73 @@ export type ThreadSummary = {
 	itemCount: number;
 	visibleItemCount: number;
 };
+type StoredSummary = ThreadSummary & { revision: number };
 
-/** One sidebar entry: a named pointer to a head conversation. Stored in `pi-durable-t3.threads`. */
-export type Thread = {
+/** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
+type AppliedUndo = { requestId: string; head: number };
+/** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
+const MAX_UNDOS = 50;
+
+/**
+ * One thread, durably: T3's `OrchestrationV2AppThread` fields this host can honour, plus the head conversation the
+ * thread points at. A deleted thread keeps its record with `deletedAt` set, as T3 keeps its row: the record is the
+ * removal's tombstone, so a late prompt to its head never brings it back.
+ */
+export type ThreadRecord = {
 	threadId: string;
 	projectId: string;
 	head: number;
 	title: string;
 	createdAt: number;
-	parent?: ThreadParent;
-	/** The last committed projection summary, for shell snapshots when the transcript is not loaded. */
-	summary?: ThreadSummary;
+	createdBy: Actor;
+	creationSource: CreationSource;
+	lineage: ThreadLineage;
+	forkedFrom: { type: "run"; threadId: string; runId: string } | null;
+	linkOrigin?: LinkOrigin;
+	delegatedFrom?: DelegatedFrom;
 	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
 	settledOverride?: "settled" | "active";
 	settledAt?: number;
 	unsettledAt?: number;
+	deletedAt: number | null;
+	undos: AppliedUndo[];
+	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
+	revision: number;
 };
 
-/** The applied result of an undo, so a retried `requestId` returns the same fork instead of forking again. */
-type AppliedUndo = { requestId: string; head: number };
+/** One live thread as the bridge reads it: its record and, once it has one, its sidebar summary. */
+export type Thread = ThreadRecord & { summary?: ThreadSummary };
 
-/**
- * The document state. `removed` is the REMOVAL RECORD — one id per removal, the reason a deleted thread stays
- * deleted across restarts (design.md, state.md). The doc checkpoints on every write (state.md).
- */
-type ThreadsState = { threads: Thread[]; undos: AppliedUndo[]; removed: number[] };
-
-export const ThreadsDoc = defineDoc<ThreadsState>({
-	kind: "pi-durable-t3.threads",
+/** Every thread's record, keyed by thread id. Checkpointed on every write: one stored row per thread. */
+const ThreadRecordDoc = defineDocFamily<ThreadRecord, ThreadRecord>({
+	kind: "pi-durable-t3.thread",
 	version: 1,
 	scope: "session",
-	initial: () => ({ threads: [], undos: [], removed: [] }),
-	// Checkpoint on every write, as `pi.agent` does: every read of this session document is a current read (state.md).
+	family: true,
+	initial: (seed) => seed,
+	checkpointWhen: () => true,
+});
+
+/** Every thread's sidebar summary, keyed by thread id: the hot write (each prompt and each run boundary) touches only it. */
+const ThreadSummaryDoc = defineDocFamily<StoredSummary, StoredSummary>({
+	kind: "pi-durable-t3.thread-summary",
+	version: 1,
+	scope: "session",
+	family: true,
+	initial: (seed) => seed,
+	checkpointWhen: () => true,
+});
+
+/** The live thread ids in creation order, and every head ever (deleted threads' too) by conversation id. */
+type Directory = { threads: string[]; heads: Record<string, string>; revision: number };
+
+/** The directory: written only when a thread is created, deleted or moves its head. Version 2: a store written with the
+ * single threads document of version 1 is refused (no migration: such a store is migrated by hand). */
+export const ThreadsDoc = defineDoc<Directory>({
+	kind: "pi-durable-t3.threads",
+	version: 2,
+	scope: "session",
+	initial: () => ({ threads: [], heads: {}, revision: 0 }),
 	checkpointWhen: () => true,
 });
 
@@ -103,7 +158,17 @@ type ThreadsDeps = {
 	readonly onWarn?: (message: string, error: unknown) => void;
 };
 
-type CreateInput = { readonly threadId: string; readonly projectId: string; readonly cwd?: string; readonly title?: string };
+/** A new thread: the client's id and project, and what the record carries from the start. */
+type CreateInput = {
+	readonly threadId: string;
+	readonly projectId: string;
+	readonly cwd?: string;
+	readonly title?: string;
+	readonly provenance?: Provenance;
+	readonly lineage?: ThreadLineage;
+	readonly linkOrigin?: LinkOrigin;
+	readonly delegatedFrom?: DelegatedFrom;
+};
 type MessageInput = {
 	readonly threadId: string;
 	readonly conversationId: number;
@@ -111,6 +176,8 @@ type MessageInput = {
 	readonly message: string;
 	/** The client's id for this message, placed in the entry's `data` (state.md: no side store). */
 	readonly messageId?: string;
+	/** Who sent it: placed in the entry's `data`, so the projection reports it (absent: a person in the web app). */
+	readonly provenance?: Provenance;
 	/** Extra content blocks (an image) appended after the text block, so the model receives the image inline. */
 	readonly blocks?: readonly ContentBlock[];
 	/** The message's persisted images and files, placed in the entry's `data` (the projection shows them after a restart). */
@@ -155,7 +222,66 @@ async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> 
 	return (inbox.items?.length ?? 0) > 0;
 }
 
-/** The threads layer over a caller-provided Harness. Stateless apart from the Harness's own storage. */
+const copy = <T>(value: T): T => structuredClone(value);
+
+/** Replace a document draft's content with `value`. */
+function overwrite(draft: object, value: object): void {
+	const target = draft as Record<string, unknown>;
+	for (const key of Object.keys(target)) if (!(key in value)) delete target[key];
+	Object.assign(target, copy(value));
+}
+
+/** What one commit changed, staged inside it and applied to memory once it has committed. */
+class Writes {
+	directory: Directory | undefined;
+	readonly records = new Map<string, ThreadRecord>();
+	readonly summaries = new Map<string, StoredSummary>();
+	readonly #tx: Tx;
+	readonly #layer: Threads;
+
+	constructor(tx: Tx, layer: Threads) {
+		this.#tx = tx;
+		this.#layer = layer;
+	}
+
+	/** The directory as this commit sees it. */
+	readDirectory(): Directory {
+		return copy(this.directory ?? this.#layer.directorySnapshot());
+	}
+
+	/** A record as this commit sees it (deleted ones included), or `undefined`. */
+	record(threadId: string): ThreadRecord | undefined {
+		const value = this.records.get(threadId) ?? this.#layer.recordSnapshot(threadId);
+		return value === undefined ? undefined : copy(value);
+	}
+
+	/** The live record, or the typed not-found. */
+	live(threadId: string): ThreadRecord {
+		const record = this.record(threadId);
+		if (record === undefined || record.deletedAt !== null) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+		return record;
+	}
+
+	async putRecord(record: ThreadRecord): Promise<void> {
+		record.revision += 1;
+		overwrite(await this.#tx.doc(ThreadRecordDoc, record.threadId, record), record);
+		this.records.set(record.threadId, copy(record));
+	}
+
+	async putDirectory(directory: Directory): Promise<void> {
+		directory.revision += 1;
+		overwrite(await this.#tx.doc(ThreadsDoc), directory);
+		this.directory = copy(directory);
+	}
+
+	async putSummary(threadId: string, summary: StoredSummary): Promise<void> {
+		summary.revision += 1;
+		overwrite(await this.#tx.doc(ThreadSummaryDoc, threadId, summary), summary);
+		this.summaries.set(threadId, copy(summary));
+	}
+}
+
+/** The threads layer over a caller-provided Harness. Its only state is the Harness's documents and their memory copy. */
 export class Threads {
 	readonly #harness: Harness;
 	readonly #registry: ProjectRegistry;
@@ -164,6 +290,11 @@ export class Threads {
 	readonly #onWarn: (message: string, error: unknown) => void;
 	/** One compaction wait per thread. Repeated clicks join the running summary instead of starting another one. */
 	readonly #compacting = new Map<string, Promise<void>>();
+	#directory: Directory = { threads: [], heads: {}, revision: 0 };
+	readonly #records = new Map<string, ThreadRecord>();
+	readonly #summaries = new Map<string, StoredSummary>();
+	readonly #listeners = new Set<(threadIds: ReadonlySet<string>) => void>();
+	#loading: Promise<void> | undefined;
 
 	constructor(deps: ThreadsDeps) {
 		this.#harness = deps.harness;
@@ -182,43 +313,122 @@ export class Threads {
 		return this.#registry.list();
 	}
 
-	/** Create the threads document if it does not exist yet, so it can be watched from the first start. */
-	async ensureDocument(): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			await tx.doc(ThreadsDoc);
-		}, BACKGROUND_CONTEXT);
+	/** Load the documents into memory, once. Every read and write awaits it. */
+	load(): Promise<void> {
+		this.#loading ??= (async () => {
+			const directory = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
+			if (directory === undefined) return;
+			this.#directory = copy(directory) as Directory;
+			for (const threadId of new Set(Object.values(this.#directory.heads))) {
+				const record = await this.#harness.snapshot(ThreadRecordDoc, threadId, BACKGROUND_CONTEXT);
+				if (record !== undefined) this.#records.set(threadId, copy(record) as ThreadRecord);
+			}
+			for (const threadId of this.#directory.threads) {
+				const summary = await this.#harness.snapshot(ThreadSummaryDoc, threadId, BACKGROUND_CONTEXT);
+				if (summary !== undefined) this.#summaries.set(threadId, copy(summary) as StoredSummary);
+			}
+		})();
+		return this.#loading;
 	}
 
-	/** The threads as stored (a read of the doc). Order is creation order. */
+	/** Called after every committed change with the threads it touched, before the write that made it returns. */
+	onChange(listener: (threadIds: ReadonlySet<string>) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
+
+	/** The directory as committed (a commit's staging reads it). */
+	directorySnapshot(): Readonly<Directory> {
+		return this.#directory;
+	}
+
+	/** A record as committed, deleted ones included. */
+	recordSnapshot(threadId: string): Readonly<ThreadRecord> | undefined {
+		return this.#records.get(threadId);
+	}
+
+	/** One commit through the threads layer: `run` stages its writes; once committed they reach memory and then the change
+	 * listeners, before this returns. A newer copy in memory is never replaced by an older one. */
+	async #commit<T>(run: (tx: Tx, writes: Writes) => Promise<T>): Promise<T> {
+		await this.load();
+		let writes: Writes | undefined;
+		const result = await this.#harness.commit(async (tx) => {
+			writes = new Writes(tx, this);
+			return run(tx, writes);
+		}, BACKGROUND_CONTEXT);
+		const staged = writes!;
+		const touched = new Set<string>();
+		if (staged.directory !== undefined && staged.directory.revision > this.#directory.revision) {
+			const before = new Set(this.#directory.threads);
+			const after = new Set(staged.directory.threads);
+			for (const id of before) if (!after.has(id)) touched.add(id);
+			for (const id of after) if (!before.has(id)) touched.add(id);
+			this.#directory = staged.directory;
+		}
+		for (const [threadId, record] of staged.records) {
+			if (record.revision <= (this.#records.get(threadId)?.revision ?? 0)) continue;
+			this.#records.set(threadId, record);
+			touched.add(threadId);
+		}
+		for (const [threadId, summary] of staged.summaries) {
+			if (summary.revision <= (this.#summaries.get(threadId)?.revision ?? 0)) continue;
+			this.#summaries.set(threadId, summary);
+			touched.add(threadId);
+		}
+		if (touched.size > 0) for (const listener of this.#listeners) listener(touched);
+		return result;
+	}
+
+	/** The live threads in creation order, each with its summary: a read of memory, valid once `load()` settled. */
+	snapshot(): Thread[] {
+		const threads: Thread[] = [];
+		for (const threadId of this.#directory.threads) {
+			const record = this.#records.get(threadId);
+			if (record === undefined || record.deletedAt !== null) continue;
+			const stored = this.#summaries.get(threadId);
+			if (stored === undefined) {
+				threads.push(copy(record));
+				continue;
+			}
+			const { revision: _revision, ...summary } = stored;
+			threads.push({ ...copy(record), summary: copy(summary) });
+		}
+		return threads;
+	}
+
+	/** The live threads in creation order, each with its summary. */
 	async list(): Promise<Thread[]> {
-		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
-		return state?.threads.map((thread) => ({ ...thread })) ?? [];
+		await this.load();
+		return this.snapshot();
 	}
 
 	/** Keep the sidebar snapshot current without loading the transcript again: a prompt writes the user message, and a
 	 * loaded or finished run writes its projection. A late, older write never overwrites a newer snapshot. */
 	async remember(threadId: string, summary: Partial<ThreadSummary> & { updatedAt: number }): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
-			if (thread === undefined) return;
+		await this.#commit(async (_tx, writes) => {
+			const record = writes.record(threadId);
+			if (record === undefined || record.deletedAt !== null) return;
+			const existing = writes.summaries.get(threadId) ?? this.#summaries.get(threadId);
 			const incomingMessageAt = summary.latestVisibleMessage?.updatedAt ?? -Infinity;
-			const existingMessageAt = thread.summary?.latestVisibleMessage?.updatedAt ?? -Infinity;
-			if (thread.summary !== undefined && summary.updatedAt < thread.summary.updatedAt && incomingMessageAt <= existingMessageAt) return;
-			thread.summary = {
-				updatedAt: thread.summary === undefined ? summary.updatedAt : Math.max(thread.summary.updatedAt, summary.updatedAt),
-				latestVisibleMessage: summary.latestVisibleMessage === undefined ? (thread.summary?.latestVisibleMessage ?? null) : summary.latestVisibleMessage,
-				latestUserMessageAt: summary.latestUserMessageAt === undefined ? (thread.summary?.latestUserMessageAt ?? null) : summary.latestUserMessageAt,
-				itemCount: summary.itemCount ?? thread.summary?.itemCount ?? 0,
-				visibleItemCount: summary.visibleItemCount ?? thread.summary?.visibleItemCount ?? 0,
-			};
-		}, BACKGROUND_CONTEXT);
+			const existingMessageAt = existing?.latestVisibleMessage?.updatedAt ?? -Infinity;
+			if (existing !== undefined && summary.updatedAt < existing.updatedAt && incomingMessageAt <= existingMessageAt) return;
+			await writes.putSummary(threadId, {
+				updatedAt: existing === undefined ? summary.updatedAt : Math.max(existing.updatedAt, summary.updatedAt),
+				latestVisibleMessage: summary.latestVisibleMessage === undefined ? (existing?.latestVisibleMessage ?? null) : summary.latestVisibleMessage,
+				latestUserMessageAt: summary.latestUserMessageAt === undefined ? (existing?.latestUserMessageAt ?? null) : summary.latestUserMessageAt,
+				itemCount: summary.itemCount ?? existing?.itemCount ?? 0,
+				visibleItemCount: summary.visibleItemCount ?? existing?.visibleItemCount ?? 0,
+				revision: existing?.revision ?? 0,
+			});
+		});
 	}
 
-	/** The sidebar thread whose head is `conversationId`, if any. */
+	/** The live thread whose head is `conversationId`, if any. */
 	async threadIdForConversation(conversationId: number): Promise<string | undefined> {
-		const state = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
-		return state?.threads.find((thread) => thread.head === conversationId)?.threadId;
+		await this.load();
+		const threadId = this.#directory.heads[String(conversationId)];
+		const record = threadId === undefined ? undefined : this.#records.get(threadId);
+		return record !== undefined && record.deletedAt === null && record.head === conversationId ? threadId : undefined;
 	}
 
 	/**
@@ -302,12 +512,58 @@ export class Threads {
 		return (await this.list()).find((candidate) => candidate.threadId === threadId);
 	}
 
-	/**
-	 * A new thread pointer with a minted id; `parent` is set only for a promoted or forked thread (a plain `create`
-	 * names its own id).
-	 */
-	#newThread(head: number, projectId: string, title: string, parent?: ThreadParent): Thread {
-		return { threadId: randomUUID(), projectId, head, title, createdAt: Date.now(), ...(parent === undefined ? {} : { parent }) };
+	/** A new record; `lineage` defaults to a root thread of its own. */
+	#newRecord(input: {
+		threadId: string;
+		projectId: string;
+		head: number;
+		title: string;
+		provenance: Provenance;
+		lineage?: ThreadLineage;
+		forkedFrom?: ThreadRecord["forkedFrom"];
+		linkOrigin?: LinkOrigin;
+		delegatedFrom?: DelegatedFrom;
+	}): ThreadRecord {
+		return {
+			threadId: input.threadId,
+			projectId: input.projectId,
+			head: input.head,
+			title: input.title,
+			createdAt: Date.now(),
+			createdBy: input.provenance.createdBy,
+			creationSource: input.provenance.creationSource,
+			lineage: input.lineage ?? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId },
+			forkedFrom: input.forkedFrom ?? null,
+			...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
+			...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+			deletedAt: null,
+			undos: [],
+			revision: 0,
+		};
+	}
+
+	/** Add a new record to the directory, its head included. */
+	async #addThread(writes: Writes, record: ThreadRecord): Promise<void> {
+		const directory = writes.readDirectory();
+		directory.threads.push(record.threadId);
+		directory.heads[String(record.head)] = record.threadId;
+		await writes.putRecord(record);
+		await writes.putDirectory(directory);
+	}
+
+	/** A promoted child thread of `via`: an undo fork of a head that moved on, or a conversation written to after its
+	 * thread moved past it. It inherits its parent's provenance, title and root. */
+	#childOf(via: ThreadRecord | undefined, viaThreadId: string, head: number, projectId: string): ThreadRecord {
+		const threadId = randomUUID();
+		return this.#newRecord({
+			threadId,
+			projectId,
+			head,
+			title: via?.title ?? "",
+			provenance: via === undefined ? USER_WEB : { createdBy: via.createdBy, creationSource: via.creationSource },
+			lineage: { parentThreadId: viaThreadId, relationshipToParent: "fork", rootThreadId: via?.lineage.rootThreadId ?? viaThreadId },
+			...(via?.linkOrigin === undefined ? {} : { linkOrigin: via.linkOrigin }),
+		});
 	}
 
 	/**
@@ -340,10 +596,12 @@ export class Threads {
 			}
 		}
 		if (!cwdIsDirectory) throw hostError("unknown_project", `thread folder is not a directory: ${cwd}`);
-		return this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const existing = doc.threads.find((candidate) => candidate.threadId === input.threadId);
-			if (existing !== undefined) return { ...existing };
+		return this.#commit(async (tx, writes) => {
+			const existing = writes.record(input.threadId);
+			if (existing !== undefined) {
+				if (existing.deletedAt !== null) throw hostError("unknown_thread", `thread ${input.threadId} was deleted`);
+				return existing;
+			}
 			// The FK, re-checked inside the commit (design.md, IDs).
 			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
@@ -351,27 +609,29 @@ export class Threads {
 			// A fresh thread carries its own cwd — the project's root, or the folder claimed for it — and nothing else
 			// (design.md: the bridge decides nothing about the agent).
 			await configure(tx, conversation.id, { cwd });
-			const thread: Thread = {
+			const record = this.#newRecord({
 				threadId: input.threadId,
 				projectId: input.projectId,
 				head: conversation.id,
 				// The client names the title on create and launch (T3 creates the thread with it).
 				title: input.title ?? "",
-				createdAt: Date.now(),
-			};
-			doc.threads.push(thread);
-			return { ...thread };
-		}, BACKGROUND_CONTEXT);
+				provenance: input.provenance ?? USER_WEB,
+				...(input.lineage === undefined ? {} : { lineage: input.lineage }),
+				...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
+				...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+			});
+			await this.#addThread(writes, record);
+			return record;
+		});
 	}
 
-	/** Set a thread's title: one commit on the threads document, so a rename survives a restart. */
+	/** Set a thread's title: one commit on its record, so a rename survives a restart. */
 	async rename(threadId: string, title: string): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
-			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
-			thread.title = title;
-		}, BACKGROUND_CONTEXT);
+		await this.#commit(async (_tx, writes) => {
+			const record = writes.live(threadId);
+			record.title = title;
+			await writes.putRecord(record);
+		});
 	}
 
 	/** A prompt: submit to the named conversation (deduped by `requestId`), then promote it. `whenBusy` is steer/followUp. */
@@ -387,6 +647,11 @@ export class Threads {
 		// The entry's data carries the message id and the message's images (state.md: no side store — the entry is the record).
 		const data: Record<string, JsonValue> = {};
 		if (input.messageId !== undefined) data.messageId = input.messageId;
+		// Who sent it; the projection reports a user-role message without these as a person in the web app.
+		if (input.provenance !== undefined) {
+			data.createdBy = input.provenance.createdBy;
+			data.creationSource = input.provenance.creationSource;
+		}
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
 		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
@@ -480,19 +745,19 @@ export class Threads {
 	 * from its OWN cwd. Commits serialize on the one storage, so racing promotes add exactly one thread (design.md).
 	 */
 	async promote(viaThreadId: string, conversationId: number): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			if (doc.threads.some((candidate) => candidate.head === conversationId)) return;
-			// A tombstoned conversation stays removed: the removal record outranks the prompt (design.md, Invariants).
-			if ((doc.removed ?? []).includes(conversationId)) return;
+		await this.#commit(async (tx, writes) => {
+			const owner = writes.readDirectory().heads[String(conversationId)];
+			const record = owner === undefined ? undefined : writes.record(owner);
+			// A live thread's head needs no promote; a deleted thread's head stays removed: the tombstone outranks the
+			// prompt (design.md, Invariants).
+			if (record !== undefined && record.head === conversationId) return;
 			const projectId = await this.#projectForConversation(tx, conversationId);
 			if (projectId === undefined) {
 				this.#onWarn(`not promoting conversation ${conversationId}: its cwd matches no registered project; it stays ownerless`, undefined);
 				return;
 			}
-			const via = doc.threads.find((candidate) => candidate.threadId === viaThreadId);
-			doc.threads.push(this.#newThread(conversationId, projectId, via?.title ?? "", { threadId: viaThreadId }));
-		}, BACKGROUND_CONTEXT);
+			await this.#addThread(writes, this.#childOf(writes.record(viaThreadId), viaThreadId, conversationId, projectId));
+		});
 	}
 
 	/** The head conversation a queued-message command edits, and the thread it belongs to. */
@@ -595,41 +860,39 @@ export class Threads {
 	/** T3's `thread.settle`: a durable manual settlement, keeping the first stamp when it is already settled. */
 	async settle(threadId: string, settledAt?: number): Promise<void> {
 		const at = settledAt ?? Date.now();
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
-			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+		await this.#commit(async (_tx, writes) => {
+			const thread = writes.live(threadId);
 			const already = thread.settledOverride === "settled";
 			thread.settledOverride = "settled";
 			thread.settledAt = already ? (thread.settledAt ?? at) : at;
 			delete thread.unsettledAt;
-		}, BACKGROUND_CONTEXT);
+			await writes.putRecord(thread);
+		});
 	}
 
 	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. */
 	async unsettle(threadId: string): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
-			if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+		await this.#commit(async (_tx, writes) => {
+			const thread = writes.live(threadId);
 			const already = thread.settledOverride === "active";
 			thread.settledOverride = "active";
 			delete thread.settledAt;
 			thread.unsettledAt = already ? (thread.unsettledAt ?? Date.now()) : Date.now();
-		}, BACKGROUND_CONTEXT);
+			await writes.putRecord(thread);
+		});
 	}
 
 	/** T3's automatic un-settle on new activity: no explicit override remains, only a wake stamp. */
 	async wake(threadId: string): Promise<void> {
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const thread = doc.threads.find((candidate) => candidate.threadId === threadId);
-			if (thread === undefined || thread.settledOverride === undefined) return;
+		await this.#commit(async (_tx, writes) => {
+			const thread = writes.record(threadId);
+			if (thread === undefined || thread.deletedAt !== null || thread.settledOverride === undefined) return;
 			const wasActive = thread.settledOverride === "active";
 			delete thread.settledOverride;
 			delete thread.settledAt;
 			if (!wasActive) thread.unsettledAt = Date.now();
-		}, BACKGROUND_CONTEXT);
+			await writes.putRecord(thread);
+		});
 	}
 
 	/** T3's `/compact`: start a manual compaction and return at once.
@@ -743,28 +1006,39 @@ export class Threads {
 		// nothing before it, so baseline is a fresh conversation with the head's agent config (design.md, Invariants).
 		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
 		const headAgent = forkAt === undefined ? await head.agent(BACKGROUND_CONTEXT) : undefined;
-		return this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const applied = doc.undos.find((undo) => undo.requestId === input.requestId);
+		return this.#commit(async (tx, writes) => {
+			const thread = writes.record(input.threadId);
+			const applied = thread?.undos.find((undo) => undo.requestId === input.requestId);
 			if (applied !== undefined) return applied.head;
 			const fork =
 				forkAt === undefined
 					? await configureNewConversation(tx, headAgent!)
 					: await tx.forkConversation(expectedHead, forkAt as EntryId, { ownership: { kind: "ownerless" } });
-			const thread = doc.threads.find((candidate) => candidate.threadId === input.threadId);
-			if (thread !== undefined && thread.head === input.expectedHead) {
+			const receipt = (record: ThreadRecord): void => {
+				record.undos = [...record.undos, { requestId: input.requestId, head: fork.id }].slice(-MAX_UNDOS);
+			};
+			if (thread === undefined) {
+				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} does not exist; the fork stays ownerless`, undefined);
+				return fork.id;
+			}
+			if (thread.deletedAt !== null) {
+				// The thread was deleted: its removal won the race. The fork is a FRESH conversation, so no tombstone names
+				// it — the removal's promise is enforced at this door: the undo of a deleted thread adds no thread. The
+				// receipt is recorded, so a retried `requestId` returns this fork instead of forking again.
+				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} is removed; the fork stays ownerless`, undefined);
+				receipt(thread);
+				await writes.putRecord(thread);
+				return fork.id;
+			}
+			if (thread.head === input.expectedHead) {
 				// Move this thread's head to the fork — unless a turn is owed on it, then roll the fork back.
 				if (await owedIn(tx, expectedHead)) throw hostError("turn_running", "a turn is running");
 				thread.head = fork.id;
-				doc.undos.push({ requestId: input.requestId, head: fork.id });
-				return fork.id;
-			}
-			if (thread === undefined) {
-				// The named thread has NO row: its removal won the race. The fork is a FRESH conversation, so no tombstone
-				// names it — the removal record's promise is enforced at this door: the undo of a deleted thread adds no
-				// row. The receipt is recorded, so a retried `requestId` returns this fork instead of forking again.
-				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} is removed; the fork stays ownerless`, undefined);
-				doc.undos.push({ requestId: input.requestId, head: fork.id });
+				receipt(thread);
+				await writes.putRecord(thread);
+				const directory = writes.readDirectory();
+				directory.heads[String(fork.id)] = thread.threadId;
+				await writes.putDirectory(directory);
 				return fork.id;
 			}
 			// The head moved on: leave the thread and record the fork as a child thread, in the project the FORK's own
@@ -774,32 +1048,43 @@ export class Threads {
 				this.#onWarn(`not promoting the undo fork ${fork.id} of thread ${input.threadId}: its cwd matches no registered project; it stays ownerless`, undefined);
 				return fork.id;
 			}
-			doc.threads.push(this.#newThread(fork.id, projectId, thread.title, { threadId: input.threadId }));
-			doc.undos.push({ requestId: input.requestId, head: fork.id });
+			await this.#addThread(writes, this.#childOf(thread, input.threadId, fork.id, projectId));
+			receipt(thread);
+			await writes.putRecord(thread);
 			return fork.id;
-		}, BACKGROUND_CONTEXT);
+		});
 	}
 
 	/**
 	 * T3's `thread.fork`: a new thread whose head is a fork of `sourceThreadId`'s head at `entryId` (inclusive), so a
 	 * response can be continued in its own thread. The target id is the client's, so a retried fork returns the same row.
 	 */
-	async fork(input: { sourceThreadId: string; targetThreadId: string; entryId: number; title?: string }): Promise<Thread> {
-		return this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const existing = doc.threads.find((candidate) => candidate.threadId === input.targetThreadId);
-			if (existing !== undefined) return { ...existing };
-			const source = doc.threads.find((candidate) => candidate.threadId === input.sourceThreadId);
-			if (source === undefined) throw hostError("unknown_thread", `no such thread: ${input.sourceThreadId}`);
+	async fork(input: { sourceThreadId: string; targetThreadId: string; entryId: number; runId?: string; title?: string; provenance?: Provenance }): Promise<ThreadRecord> {
+		return this.#commit(async (tx, writes) => {
+			const existing = writes.record(input.targetThreadId);
+			if (existing !== undefined) {
+				if (existing.deletedAt !== null) throw hostError("unknown_thread", `thread ${input.targetThreadId} was deleted`);
+				return existing;
+			}
+			const source = writes.live(input.sourceThreadId);
 			const fork = await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
 			const projectId = await this.#projectForConversation(tx, fork.id);
 			if (projectId === undefined) throw hostError("unknown_project", `the fork of ${input.sourceThreadId} matches no registered project`);
-			const thread = this.#newThread(fork.id, projectId, input.title ?? source.title, { threadId: source.threadId });
-			// The client chose the target id; keep that id, not one minted by #newThread.
-			thread.threadId = input.targetThreadId;
-			doc.threads.push(thread);
-			return { ...thread };
-		}, BACKGROUND_CONTEXT);
+			// T3's `ThreadForkService`: the source's title with " fork" unless one is named, the source's root, and the run
+			// it forked from.
+			const record = this.#newRecord({
+				threadId: input.targetThreadId,
+				projectId,
+				head: fork.id,
+				title: input.title ?? `${source.title} fork`,
+				provenance: input.provenance ?? USER_WEB,
+				lineage: { parentThreadId: source.threadId, relationshipToParent: "fork", rootThreadId: source.lineage.rootThreadId },
+				forkedFrom: input.runId === undefined ? null : { type: "run", threadId: source.threadId, runId: input.runId },
+				...(source.linkOrigin === undefined ? {} : { linkOrigin: source.linkOrigin }),
+			});
+			await this.#addThread(writes, record);
+			return record;
+		});
 	}
 
 	/**
@@ -811,15 +1096,15 @@ export class Threads {
 		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 		const head = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
 		await head?.abort(BACKGROUND_CONTEXT);
-		await this.#harness.commit(async (tx) => {
-			const doc = await tx.doc(ThreadsDoc);
-			const index = doc.threads.findIndex((candidate) => candidate.threadId === threadId);
-			if (index < 0) throw hostError("unknown_thread", `no such thread: ${threadId}`);
-			doc.threads.splice(index, 1);
-			// The removal is DURABLE: the promote path and the undo fork skip tombstoned conversations.
-			const removed = (doc.removed ??= []);
-			if (!removed.includes(thread.head)) removed.push(thread.head);
-		}, BACKGROUND_CONTEXT);
+		await this.#commit(async (_tx, writes) => {
+			const record = writes.live(threadId);
+			// The removal is DURABLE: the record stays as the tombstone, so the promote path and the undo fork skip its head.
+			record.deletedAt = Date.now();
+			await writes.putRecord(record);
+			const directory = writes.readDirectory();
+			directory.threads = directory.threads.filter((id) => id !== threadId);
+			await writes.putDirectory(directory);
+		});
 		// The removal must also win the RUN: interrupt the head again after the commit, so a prompt admitted in the
 		// abort→commit window leaves no live turn on a thread the document has removed (design.md, Invariants).
 		await head?.abort(BACKGROUND_CONTEXT);

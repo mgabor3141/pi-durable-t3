@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: in progress on branch `cleanup`. Steps 1–3 done (see Plan).
+Status: in progress on branch `cleanup`. Steps 1–4 done (see Plan).
 
 ## Goal
 
@@ -138,8 +138,10 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    directory change re-projects only the rows that changed, and readiness is signalled, not polled. Moving the
    command switch from `rpc.ts` into a T3-shaped `dispatch(command, provenance)` goes with step 4, where the thread
    record gets provenance.
-4. Thread record family with provenance and lineage, summaries separate, bounded tombstones. No migration code:
-   existing instances are migrated by hand.
+4. Done: one record per thread (T3's creation fields, `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`), one summary
+   per thread, a directory of ids and heads; a deleted thread keeps its record as the tombstone; undos bounded per
+   thread. Messages carry their sender. Commands go through `dispatchCommand(bridge, command, provenance)`
+   (`t3/dispatch.ts`). A version-1 store is refused at boot.
 5. Projects, scheduled tasks and command receipts in pi-durable. No import of the old files.
 6. Incremental projector, event stream, bounded snapshot, history pages, resume. Acceptance: wire bytes for a streamed
    reply proportional to the reply, first snapshot within T3's bounds, on the benchmark's 50/200/500-turn threads.

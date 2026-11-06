@@ -17,12 +17,14 @@ Projections are rebuilt from it on every change.
 
 | What | If lost |
 |---|---|
-| The threads document: one pointer per thread to its head conversation, and its title | Empty sidebar. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
-| Removed threads, in the same document | A deleted thread could come back |
-| Applied undos, so a retried undo doesn't fork twice | A retried undo forks again |
+| One record per thread (`pi-durable-t3.thread`): its head conversation, title, T3's creation fields (`createdBy`, `creationSource`), `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`, settlement, and its last 50 applied undos | The thread. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
+| A deleted thread's record, with `deletedAt` | A deleted thread could come back: the record is the tombstone that keeps a late prompt to its head from promoting it |
+| One sidebar summary per thread (`pi-durable-t3.thread-summary`) | An unopened thread previews and sorts as new until it is opened |
+| The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
 
-The last two grow by one entry per removal or undo. The document is rewritten whole on every write, so this
-costs no extra rows.
+Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt and
+run boundary — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
+in memory: one threads layer per Harness.
 
 Each conversation's agent config (`pi.agent`: model, thinking level, `cwd`) is pi-durable's, set by the
 client's choices and the integrator's extensions.

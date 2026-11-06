@@ -22,7 +22,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isUserEntry, messageIdOf, stopReason } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
@@ -60,8 +60,13 @@ export interface ThreadMeta {
 	readonly thinkingLevel?: string;
 	/** The selected model's context window, for T3's context meter. */
 	readonly contextWindow?: number;
-	/** When this thread was promoted/forked from another, that thread's id (lineage → a "fork"). */
-	readonly parentThreadId?: string;
+	/** The thread record's creation fields, lineage and origin (`threads.ts`); a subagent's thread derives its own. */
+	readonly createdBy?: "user" | "agent" | "system";
+	readonly creationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
+	readonly lineage?: { readonly parentThreadId: string | null; readonly relationshipToParent: "fork" | "subagent" | null; readonly rootThreadId: string };
+	readonly forkedFrom?: { readonly type: "run"; readonly threadId: string; readonly runId: string } | null;
+	readonly linkOrigin?: { readonly sessionId: string; readonly label: string; readonly access?: string };
+	readonly delegatedFrom?: { readonly environmentId: string; readonly threadId: string; readonly title: string };
 	/** T3's manual settlement, durable on the thread row. */
 	readonly settledOverride?: "settled" | "active";
 	readonly settledAt?: number;
@@ -418,7 +423,7 @@ export function projectThread(
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
 			// A subagent's first message is its parent's call: T3 records it as the agent's, with the sending thread.
 			const fromParent = meta.subagentOf !== undefined && intent === "turn_start";
-			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : ({ createdBy: "user", creationSource: "web" } as const);
+			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : authorOf(entry.data);
 			const sender = fromParent ? { senderThreadId: id(meta.subagentOf!.parentThreadId) } : {};
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
@@ -717,8 +722,7 @@ export function projectThread(
 			contextHandoffId: null,
 		} as Any);
 		messages.push({
-			createdBy: "user",
-			creationSource: "web",
+			...authorOf(item.entry?.data),
 			id: id(item.messageId),
 			threadId: id(threadId),
 			runId: id(queuedRunId),
@@ -827,13 +831,21 @@ export function projectThread(
 	// A subagent's thread: provider-native, like Claude's Task children — `isProviderNativeSubagentThread` makes it read-only
 	// in the web app and hides it from the sidebar (`makeSubagentChildThread`, packages/provider-core).
 	const sub = meta.subagentOf;
-	const lineage = () => ({
-		parentThreadId: sub !== undefined ? id(sub.parentThreadId) : meta.parentThreadId === undefined ? null : id(meta.parentThreadId),
-		relationshipToParent: sub !== undefined ? "subagent" : meta.parentThreadId === undefined ? null : "fork",
-		rootThreadId: sub !== undefined ? id(sub.parentThreadId) : id(threadId),
-	});
-	const forkedFrom = () => (sub === undefined ? null : { type: "node", nodeId: id(sub.nodeId) });
-	const author = sub === undefined ? ({ createdBy: "user", creationSource: "web" } as const) : ({ createdBy: "agent", creationSource: "provider" } as const);
+	const lineage = () =>
+		sub !== undefined
+			? { parentThreadId: id(sub.parentThreadId), relationshipToParent: "subagent", rootThreadId: id(sub.parentThreadId) }
+			: {
+					parentThreadId: meta.lineage?.parentThreadId == null ? null : id(meta.lineage.parentThreadId),
+					relationshipToParent: meta.lineage?.relationshipToParent ?? null,
+					rootThreadId: id(meta.lineage?.rootThreadId ?? threadId),
+				};
+	const forkedFrom = () =>
+		sub !== undefined
+			? { type: "node", nodeId: id(sub.nodeId) }
+			: meta.forkedFrom == null
+				? null
+				: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
+	const author = sub === undefined ? { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" } : ({ createdBy: "agent", creationSource: "provider" } as const);
 	const thread: Any = {
 		...author,
 		id: id(threadId),
@@ -849,6 +861,8 @@ export function projectThread(
 		activeProviderThreadId: drafts.length === 0 || sub !== undefined ? null : id(providerThreadId),
 		lineage: lineage(),
 		forkedFrom: forkedFrom(),
+		...(meta.linkOrigin === undefined ? {} : { linkOrigin: meta.linkOrigin }),
+		...(meta.delegatedFrom === undefined ? {} : { delegatedFrom: { ...meta.delegatedFrom, environmentId: id(meta.delegatedFrom.environmentId), threadId: id(meta.delegatedFrom.threadId) } }),
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		archivedAt: null,

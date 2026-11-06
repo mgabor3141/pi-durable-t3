@@ -19,7 +19,7 @@ import type {
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
-import { type Thread, type Threads, ThreadsDoc } from "../threads.ts";
+import { type Provenance, type Thread, type Threads, USER_WEB } from "../threads.ts";
 import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, Conversation, ConversationId, Cursor, EntryId, WatchHandle } from "@earendil-works/pi-durable";
@@ -204,10 +204,7 @@ export class Bridge {
 	readonly #probedCalls = new Set<string>();
 	/** Settles once the directory and the subagents are first loaded. */
 	readonly #loaded = Promise.withResolvers<void>();
-	#directoryWatch: { stop(): Promise<unknown> } | undefined;
-	/** Directory reads, numbered: a read that finishes after a newer one has landed changes nothing. */
-	#directoryRead = 0;
-	#directoryApplied = 0;
+	#changeStop: (() => void) | undefined;
 	#directoryBooted = false;
 	#registryStop: (() => void) | undefined;
 	#closed = false;
@@ -223,9 +220,13 @@ export class Bridge {
 	}
 
 	start(): void {
-		void this.#startDirectory().catch((error: unknown) =>
-			this.#log.warn("the thread directory failed to load", { error: error instanceof Error ? error.message : String(error) }),
-		);
+		// The threads layer announces every committed change before the write returns: the directory is current after any
+		// awaited write, with no read of its own.
+		this.#changeStop = this.#store.onChange((threadIds) => this.#applyDirectory(threadIds));
+		void this.#store
+			.load()
+			.then(() => this.#applyDirectory(undefined))
+			.catch((error: unknown) => this.#log.warn("the thread directory failed to load", { error: error instanceof Error ? error.message : String(error) }));
 		// A UI edit to the registry (add/remove/rename/move) lands here: removed ids emit a removal and every current
 		// project shell is re-emitted — a client keys shells by id, so an unchanged re-emission is a no-op.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
@@ -233,44 +234,21 @@ export class Bridge {
 		this.#log.info("bridge started");
 	}
 
-	/** One watch on the threads document: every change re-reads the directory. */
-	async #startDirectory(): Promise<void> {
-		await this.#store.ensureDocument();
-		const watch = await this.#store.harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
-		if (this.#closed) {
-			await watch?.stop().catch(() => {});
-			return;
-		}
-		this.#directoryWatch = watch;
-		watch?.start(async () => this.#syncDirectory());
-		await this.#syncDirectory();
-	}
-
-	/** Read the directory and apply it, unless a newer read already landed. Writes await this, so the thread-existence
-	 * check right after a create or a delete sees the document as committed. */
-	async #syncDirectory(): Promise<void> {
-		const read = ++this.#directoryRead;
-		const threads = await this.#store.list();
-		if (read < this.#directoryApplied || this.#closed) return;
-		this.#directoryApplied = read;
-		this.#applyDirectory(threads);
-	}
-
-	/** A new directory: open threads whose head moved follow the new head; changed rows (and their subagents' threads) are
-	 * re-projected; removed rows emit their removal. The first one also discovers the subagents. */
-	#applyDirectory(threads: Thread[]): void {
-		const before = new Map(this.#directory.map((thread) => [thread.threadId, thread]));
-		this.#directory = threads;
-		const changed = new Set<string>();
-		for (const thread of threads) {
-			const previous = before.get(thread.threadId);
-			if (previous === undefined || JSON.stringify(previous) !== JSON.stringify(thread)) changed.add(thread.threadId);
+	/** The directory changed (`changed`: these threads; `undefined`: the first load). Open threads whose head moved follow the
+	 * new head; the changed threads (and their subagents' threads) are re-projected; removed ones emit their removal. The
+	 * first load also discovers the subagents. */
+	#applyDirectory(changed: ReadonlySet<string> | undefined): void {
+		if (this.#closed) return;
+		this.#directory = this.#store.snapshot();
+		const touched = new Set(changed ?? this.#directory.map((thread) => thread.threadId));
+		for (const thread of this.#directory) {
+			if (!touched.has(thread.threadId)) continue;
 			const state = this.#threads.get(thread.threadId);
 			if (state?.follower !== undefined && state.follower.head !== thread.head) void this.#follow(state, thread.head);
 		}
 		// A subagent's thread takes its title and project from its parent's row.
-		for (const ref of this.#subagents.values()) if (changed.has(ref.parentThreadId)) changed.add(ref.threadId);
-		this.#refreshShells(changed);
+		for (const ref of this.#subagents.values()) if (touched.has(ref.parentThreadId)) touched.add(ref.threadId);
+		this.#refreshShells(touched);
 		if (this.#directoryBooted) {
 			this.#dropOrphanSubagents();
 		} else {
@@ -619,7 +597,16 @@ export class Bridge {
 			model,
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
-			...(thread?.parent?.threadId === undefined ? {} : { parentThreadId: thread.parent.threadId }),
+			...(thread === undefined
+				? {}
+				: {
+						createdBy: thread.createdBy,
+						creationSource: thread.creationSource,
+						lineage: thread.lineage,
+						forkedFrom: thread.forkedFrom,
+						...(thread.linkOrigin === undefined ? {} : { linkOrigin: thread.linkOrigin }),
+						...(thread.delegatedFrom === undefined ? {} : { delegatedFrom: thread.delegatedFrom }),
+					}),
 			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
 			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
@@ -1068,7 +1055,7 @@ export class Bridge {
 	 * Scratch project a folder of its own, claimed at launch — a thread whose row already exists is a replayed create and
 	 * claims nothing, exactly T3's "only the first attempt claims one" (ManagedProjectFolders, ThreadLaunchService).
 	 */
-	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string; title?: string }): Promise<string> {
+	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string; title?: string; provenance?: Provenance }): Promise<string> {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
@@ -1083,9 +1070,8 @@ export class Bridge {
 			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
 			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);
 		}
-		await this.#store.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) });
+		await this.#store.create({ threadId: id, projectId: project.id, provenance: options.provenance ?? USER_WEB, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) });
 		// Read the document back before answering: the next thread-existence check must see the new row.
-		await this.#syncDirectory();
 		return id;
 	}
 
@@ -1103,12 +1089,16 @@ export class Bridge {
 		modelSelection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined;
 		workspaceStrategy?: { type?: string } | undefined;
 		initialMessage?: { messageId?: string; text: string; context?: OrchestrationMessageContext | undefined; attachments?: readonly AttachmentRecord[] | undefined } | undefined;
+		/** Who launched it: the thread and its first message carry it (T3's `ThreadLaunchService`). */
+		provenance?: Provenance;
 	}): Promise<string> {
 		// A Scratch launch names the folder it claims: T3 names it from the first message, else the title.
 		const launchText = input.initialMessage?.text ?? input.title;
+		const provenance = input.provenance ?? USER_WEB;
 		const threadId = await this.createThread({
 			threadId: input.threadId,
 			projectId: input.projectId,
+			provenance,
 			// T3's launch creates the thread with the launch's title.
 			...(input.title === undefined || input.title.trim() === "" ? {} : { title: input.title.trim() }),
 			// T3's launch: Scratch has no Git, so a new-worktree request there is the root, with a folder of its own.
@@ -1124,6 +1114,7 @@ export class Bridge {
 					messageId: message.messageId ?? `launch-${input.commandId}`,
 					text: message.text,
 					mode: "start",
+					provenance,
 					...(input.generateTitle === true && input.title !== undefined && input.title.trim() !== "" ? { titleSeed: input.title.trim() } : {}),
 					...(message.attachments === undefined ? {} : { attachments: message.attachments }),
 					...(message.context === undefined ? {} : { context: message.context }),
@@ -1226,6 +1217,8 @@ export class Bridge {
 		attachments?: readonly AttachmentRecord[] | undefined;
 		/** T3's `titleSeed`: honoured only on a thread with no messages yet (Orchestrator's message count 0). */
 		titleSeed?: string | undefined;
+		/** Who sent it (absent: a person in the web app). */
+		provenance?: Provenance;
 	}): Promise<void> {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
@@ -1235,8 +1228,7 @@ export class Bridge {
 			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run.
 			if (this.#summary(input.threadId)?.settledOverride !== undefined) {
 				await this.#store.wake(input.threadId);
-				await this.#syncDirectory();
-				this.#titleChanged(input.threadId);
+						this.#titleChanged(input.threadId);
 			}
 			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
 			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
@@ -1275,6 +1267,7 @@ export class Bridge {
 				requestId: input.commandId,
 				message: input.text,
 				messageId: input.messageId,
+				...(input.provenance === undefined ? {} : { provenance: input.provenance }),
 				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
 				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
 				// T3's composer context is JSON by construction: the contract decoded it from the wire.
@@ -1310,7 +1303,6 @@ export class Bridge {
 
 	async #setStoredTitle(threadId: string, title: string): Promise<void> {
 		await this.#store.rename(threadId, title);
-		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1434,7 +1426,6 @@ export class Bridge {
 		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		await this.#store.settle(threadId);
-		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1443,7 +1434,6 @@ export class Bridge {
 		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		await this.#store.unsettle(threadId);
-		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1544,17 +1534,21 @@ export class Bridge {
 	 * `latest_stable` fork). A synthetic run anchored by a compaction summary has no user turn to rewind to, but its
 	 * last kept entry is still a valid fork point. The client names the target id, so a retried command returns the
 	 * same thread. */
-	async forkThread(input: { sourceThreadId: string; targetThreadId: string; runId?: string | undefined; title?: string | undefined }): Promise<string> {
+	async forkThread(input: { sourceThreadId: string; targetThreadId: string; runId?: string | undefined; title?: string | undefined; provenance?: Provenance }): Promise<string> {
 		this.#writable(input.targetThreadId);
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
 		if (parseSubagentThreadId(input.targetThreadId) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${input.targetThreadId}`);
 		const source = await this.projection(input.sourceThreadId);
-		const entryId = input.runId === undefined
-			? source.forkRuns.at(-1)?.lastEntryId
-			: source.forkRuns.find((run) => run.runId === input.runId)?.lastEntryId;
-		if (entryId === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
-		await this.#store.fork({ sourceThreadId: input.sourceThreadId, targetThreadId: input.targetThreadId, entryId, ...(input.title === undefined ? {} : { title: input.title }) });
-		await this.#syncDirectory();
+		const run = input.runId === undefined ? source.forkRuns.at(-1) : source.forkRuns.find((candidate) => candidate.runId === input.runId);
+		if (run === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
+		await this.#store.fork({
+			sourceThreadId: input.sourceThreadId,
+			targetThreadId: input.targetThreadId,
+			entryId: run.lastEntryId,
+			runId: run.runId,
+			provenance: input.provenance ?? USER_WEB,
+			...(input.title === undefined ? {} : { title: input.title }),
+		});
 		return input.targetThreadId;
 	}
 
@@ -1562,7 +1556,6 @@ export class Bridge {
 		this.#writable(threadId);
 		this.#cancelTitle(threadId);
 		await this.#store.remove(threadId);
-		await this.#syncDirectory();
 		this.#dropOrphanSubagents();
 		const state = this.#threads.get(threadId);
 		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
@@ -1599,7 +1592,7 @@ export class Bridge {
 		this.#titleRequests.clear();
 		this.#closed = true;
 		for (const state of this.#threads.values()) this.#release(state);
-		await this.#directoryWatch?.stop().catch(() => {});
+		this.#changeStop?.();
 		this.#registryStop?.();
 	}
 }

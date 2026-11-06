@@ -20,7 +20,7 @@ it("forks a run into a new thread with a parent link, idempotently", async () =>
 
 	const forked = await threads.fork({ sourceThreadId: "source", targetThreadId: "fork", entryId: answer.id, title: "Source fork" });
 	expect(forked.threadId).toBe("fork");
-	expect(forked.parent?.threadId).toBe("source");
+	expect(forked.lineage).toEqual({ parentThreadId: "source", relationshipToParent: "fork", rootThreadId: "source" });
 	expect(forked.head, "the fork has its own head conversation").not.toBe(source.head);
 	expect((await threads.thread("source"))?.head, "the source is unchanged").toBe(source.head);
 

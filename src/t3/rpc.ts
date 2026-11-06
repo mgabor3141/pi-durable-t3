@@ -63,6 +63,8 @@ import { AssetAccessError, AssetWorkspaceResolutionError, ThreadId, PreviewInval
 const isAssetAccessError = Schema.is(AssetAccessError);
 import type { PreviewSessions } from "./preview.ts";
 import type { WsHandlers, WsItem, WsPayload } from "./ws-types.ts";
+import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
+import { unsupportedMessage } from "./unsupported.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -102,48 +104,6 @@ const fromLatest = <A>(
 			(unsubscribe) => Effect.sync(unsubscribe),
 		),
 	);
-
-/** Sidebar bookkeeping commands that may be acknowledged without host state. Everything else unknown fails. */
-const SIDEBAR_NO_OPS = new Set([
-	"thread.visit",
-	"thread.mark-unread",
-	"thread.auto-settle",
-	"thread.auto-settle.set",
-	"thread.pin",
-	"thread.unpin",
-	"thread.pin.reorder",
-	"thread.active.reorder",
-	"notification.delivery.accept",
-]);
-
-const UNSUPPORTED: Record<string, string> = {
-	"thread.merge_back": "Merging a fork back is not supported by pi-durable-t3 yet.",
-	"thread.archive": "Archiving is not supported by pi-durable-t3 yet.",
-	"orchestration.subscribeArchivedShell": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
-	"orchestration.getArchivedShellSnapshot": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
-	"thread.unarchive": "Archiving is not supported by pi-durable-t3 yet.",
-	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
-	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
-	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
-	"provider.switch": "pi is the only provider.",
-	"subagent.stop": "Stopping one subagent is not supported by pi-durable-t3: interrupt the parent's turn, which stops the subagent with it.",
-	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
-	// relaunch command and never sends these; if one arrives (a hand-built client, a future default), refuse it
-	// honestly: the bridge is not a T3 install and updates by updating itself on the host, not over the wire.
-	"server.updateServer": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
-	"server.updateServerWithProgress": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
-	"server.commitDesktopUpdate": "This server is not supervised by the T3 Code desktop app; there is no desktop update to commit.",
-};
-
-/**
- * The refusal the UI shows verbatim: "yet" claims we intend to build it, so only the planned set says so and an
- * untriaged call is refused flatly (capabilities.md keeps the same statuses).
- */
-function unsupportedMessage(type: string): string {
-	if (UNSUPPORTED[type] !== undefined) return UNSUPPORTED[type];
-	if (type.startsWith("queued-") || type === "queue.resume") return "Editing queued messages is not supported by pi-durable-t3 yet.";
-	return `${type} is not supported by pi-durable-t3.`;
-}
 
 interface RpcDeps {
 	readonly bridge: Bridge;
@@ -216,16 +176,6 @@ const readConfigEffect = (deps: RpcDeps) =>
 		try: () => readServerConfig(deps),
 		catch: (cause) => new ServerSettingsError({ settingsPath: deps.bridge.config.settings.path, operation: "read-file", cause }),
 	});
-
-/** The image and file attachments of a command (the persisted records the client sent), shaped for
- * `Bridge.sendMessage`. Unknown attachment types are dropped. */
-function attachmentRecords(attachments: unknown): { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[] | undefined {
-	if (!Array.isArray(attachments)) return undefined;
-	const records = attachments
-		.filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null && typeof a.id === "string" && (a.type === "image" || a.type === "file"))
-		.map((a) => ({ type: a.type as "image" | "file", id: a.id as string, name: String(a.name ?? (a.type === "file" ? "file" : "image")), mimeType: String(a.mimeType ?? "application/octet-stream"), sizeBytes: Number(a.sizeBytes ?? 0) }));
-	return records.length > 0 ? records : undefined;
-}
 
 const toPromiseEffect = <A, E>(run: () => Promise<A>, onError: (message: string) => E): Effect.Effect<A, E> =>
 	Effect.tryPromise({ try: run, catch: (error) => onError((error as Error).message || String(error)) });
@@ -328,112 +278,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 		log.info("stubbed RPC called", { method: tag });
 	};
 
-	const dispatch = (command: WsPayload<"orchestration.dispatchCommand">) => {
-		const fail = (message: string) =>
-			new OrchestrationV2DispatchCommandError({ commandId: command.commandId, commandType: command.type, message });
-		const run = async (): Promise<number> => {
-			switch (command.type) {
-				case "message.dispatch": {
-					await bridge.applySelection(command.threadId, command.modelSelection);
-					// With serverResolvedCommandContext the client sends start_immediately plus a deliveryIntent
-					// (steer/restart/auto); queued sends are queue_after_active. Older clients name the mode directly.
-					const modeType = command.dispatchMode?.type ?? "start_immediately";
-					const intent = command.deliveryIntent;
-					const mode =
-						modeType === "steer_active" || intent === "steer" || intent === "auto"
-							? "steer"
-							: modeType === "restart_active" || intent === "restart"
-								? "restart"
-								: modeType === "queue_after_active"
-									? "queue"
-									: "start";
-					await bridge.sendMessage({
-						threadId: command.threadId,
-						commandId: command.commandId,
-						messageId: command.messageId,
-						text: command.text,
-						mode,
-						...(typeof command.titleSeed === "string" ? { titleSeed: command.titleSeed } : {}),
-						...(attachmentRecords(command.attachments) === undefined ? {} : { attachments: attachmentRecords(command.attachments) }),
-						...(command.context === undefined ? {} : { context: command.context }),
-					});
-					break;
-				}
-				case "run.interrupt":
-				case "thread.stop":
-					await bridge.interrupt(command.threadId);
-					break;
-				case "queued-run.cancel":
-					await bridge.cancelQueued(command.threadId, command.runId);
-					break;
-				case "queued-run.edit":
-					await bridge.editQueued(command.threadId, command.runId, command.text, attachmentRecords(command.attachments));
-					break;
-				case "queued-message.promote-to-steer":
-					await bridge.promoteQueued(command.threadId, command.queuedRunId);
-					break;
-				case "queued-run.start":
-					await bridge.startQueued(command.threadId, command.runId, command.commandId);
-					break;
-				case "queue.resume":
-					await bridge.startQueued(command.threadId, undefined, command.commandId);
-					break;
-				case "thread.settle":
-					await bridge.settleThread(command.threadId);
-					break;
-				case "thread.unsettle":
-					await bridge.unsettleThread(command.threadId);
-					break;
-				case "thread.model-selection.set":
-					await bridge.applySelection(command.threadId, command.modelSelection);
-					break;
-				case "checkpoint.rollback":
-					await bridge.rollback({
-						threadId: command.threadId,
-						commandId: command.commandId,
-						checkpointId: command.checkpointId,
-						restoreFiles: command.restoreFiles === true,
-					});
-					break;
-				case "thread.delete":
-					await bridge.deleteThread(command.threadId);
-					break;
-				case "thread.metadata.update":
-					await bridge.updateThreadMetadata(command);
-					break;
-				case "thread.create":
-					await bridge.createThread({ threadId: command.threadId, projectId: command.projectId, title: command.title });
-					await bridge.applySelection(command.threadId, command.modelSelection);
-					break;
-				case "thread.fork":
-					if (command.sideChat === true) throw new CommandError("Side chats are not supported by pi-durable-t3 yet.");
-					await bridge.forkThread({
-						sourceThreadId: command.sourceThreadId,
-						targetThreadId: command.targetThreadId,
-						...(command.sourcePoint.type === "run" ? { runId: command.sourcePoint.runId } : {}),
-						...(command.title === undefined ? {} : { title: command.title }),
-					});
-					break;
-				case "thread.runtime-mode.set":
-					if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
-					if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
-					break;
-				case "thread.interaction-mode.set":
-					if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
-					if (command.interactionMode !== "default") throw new CommandError("Plan mode is not supported by pi-durable-t3.");
-					break;
-				default:
-					if (!SIDEBAR_NO_OPS.has(command.type)) throw new CommandError(unsupportedMessage(command.type));
-					// Sidebar bookkeeping (pin, visit, …) has no host state yet; accepting it changes nothing visible.
-					log.info("command accepted without effect", { type: command.type });
-			}
-			return bridge.nextSequence();
-		};
-		return toPromiseEffect(() => bridge.idempotent(command.commandId, run), fail).pipe(
+	const dispatch = (command: WsPayload<"orchestration.dispatchCommand">) =>
+		toPromiseEffect(
+			() => dispatchCommand(bridge, command, clientProvenance(command), log),
+			(message) => new OrchestrationV2DispatchCommandError({ commandId: command.commandId, commandType: command.type, message }),
+		).pipe(
 			Effect.map((sequence) => ({ sequence })),
 			Effect.tapError((error) => Effect.sync(() => log.warn("command failed", { type: command.type, error: error.message }))),
 		);
-	};
 
 	const handlers: WsHandlers = {
 		"server.probe": () => Effect.succeed({}),
@@ -684,6 +536,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 						generateTitle: input.generateTitle === true,
 						modelSelection: input.modelSelection,
 						workspaceStrategy: input.workspaceStrategy,
+						provenance: { createdBy: "user", creationSource: input.creationSource ?? "web" },
 						initialMessage:
 							message === undefined
 								? undefined

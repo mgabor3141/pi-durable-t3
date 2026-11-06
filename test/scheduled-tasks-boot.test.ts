@@ -31,7 +31,7 @@ it("a bound task dispatched right at boot finds its thread", async () => {
 	bridge.start();
 	try {
 		// The same moment facet.ts starts the scheduler: right after `bridge.start()`, before the list has loaded.
-		await scheduledTaskDispatch(bridge).queue({ threadId: "bound", projectId: "p", commandId: "scheduled-task:t:1:scheduled", messageId: "scheduled-task-message:t:1:scheduled", text: "due at boot" });
+		await scheduledTaskDispatch(bridge).queue({ threadId: "bound", projectId: "p", commandId: "scheduled-task:t:1:scheduled", messageId: "scheduled-task-message:t:1:scheduled", text: "due at boot", provenance: { createdBy: "user", creationSource: "web" } });
 		expect(bridge.threadProjectId("bound")).toBe("p");
 	} finally {
 		await bridge.close();

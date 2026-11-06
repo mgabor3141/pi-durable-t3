@@ -224,7 +224,7 @@ it("a launch stores its title; generateTitle seeds a generation; a scheduled tas
 	calls[0]!.resolve("Thing doing");
 	await until("the generated title", () => shell(bridge, seeded).title === "Thing doing");
 
-	await scheduledTaskDispatch(bridge).launch({ commandId: "s1", messageId: "sm1", projectId: "p", title: "Nightly report", text: "report", modelSelection: MODEL as never });
+	await scheduledTaskDispatch(bridge).launch({ commandId: "s1", messageId: "sm1", projectId: "p", title: "Nightly report", text: "report", modelSelection: MODEL as never, provenance: { createdBy: "user", creationSource: "web" } });
 	const scheduled = bridge.shellSnapshot().threads.find((t) => (t as unknown as { title: string }).title === "Nightly report");
 	expect(scheduled).toBeDefined();
 	await sleep(100);

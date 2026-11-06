@@ -57,10 +57,12 @@ it("a promoted conversation lands in the project that covers ITS cwd — never t
 
 it("(b) after creates, prompts, promotes and an undo whose cwd is uncovered, NO thread carries an unknown or empty projectId", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
-	const { threads, harness, model } = f;
-	const create = createNamed(threads, harness, model);
+	const { harness, model } = f;
 	const warnings: string[] = [];
+	// One threads layer per Harness: it is the only writer of its documents and keeps them in memory.
 	const layer = new Threads({ harness, registry: f.registry, onWarn: (m) => warnings.push(m) });
+	const threads = layer;
+	const create = createNamed(threads, harness, model);
 
 	// Creates and prompts in both projects.
 	const a = await create({ threadId: "a", projectId: "p" });
