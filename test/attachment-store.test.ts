@@ -164,7 +164,9 @@ describe("upload URLs", () => {
 		const minted = store.mintUpload({ name: "pic.png", mimeType: "image/png", sizeBytes: PNG_BYTES.byteLength });
 		const token = minted.relativeUrl.slice("/api/attachments/upload/".length);
 		expect(store.storeUpload(token, Buffer.from("short"))).toMatchObject({ ok: false, status: 400 });
-		expect(store.storeUpload(`${token.slice(0, -1)}A`, PNG_BYTES)).toMatchObject({ ok: false, status: 401 });
+		// Change the token's last character (to a different one: a token that already ends in "A" stays valid with "A").
+		const tampered = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+		expect(store.storeUpload(tampered, PNG_BYTES)).toMatchObject({ ok: false, status: 401 });
 		expect(store.storeUpload(token, PNG_BYTES)).toEqual({ ok: true });
 		expect(store.storeUpload(token, Buffer.alloc(PNG_BYTES.byteLength))).toMatchObject({ ok: false });
 	});
