@@ -25,14 +25,14 @@ const PROTECTED: Array<[string, string]> = [
 	["POST", "/api/auth/websocket-ticket/rpc"],
 	["POST", "/api/auth/websocket-ticket/media"],
 	["POST", "/api/auth/pairing-token"],
-	["GET", "/api/auth/pairing-links"],
 	["POST", "/api/auth/pairing-links/revoke"],
-	["GET", "/api/auth/clients"],
 	["POST", "/api/auth/clients/revoke"],
 	["POST", "/api/auth/clients/revoke-others"],
 	["GET", "/api/orchestration/shell"],
 	["GET", "/api/orchestration/threads/t"],
 	["GET", "/api/orchestration/threads/t/bounded"],
+	["GET", "/api/orchestration/threads/t/transcript"],
+	["GET", "/api/orchestration/threads/t/history?cursor=x"],
 	["GET", "/api/projects"],
 	["POST", "/api/projects/mutate"],
 ];
@@ -56,7 +56,9 @@ it("every non-public route needs a credential, and the cookie does not count wit
 	if (!(await waitListening(PORT))) throw new Error(`host did not bind ${PORT}: ${host.out()}`);
 
 	for (const [method, path] of PROTECTED) {
-		const res = await fetch(base + path, { method, ...(method === "POST" ? { body: "{}", headers: { "content-type": "application/json" } } : {}) });
+		// The orchestration protocol header every T3 client sends, so the refusal is about the credential alone.
+		const headers = { "x-t3-orchestration-protocol": "2", ...(method === "POST" ? { "content-type": "application/json" } : {}) };
+		const res = await fetch(base + path, { method, headers, ...(method === "POST" ? { body: "{}" } : {}) });
 		expect([401, 403], `${method} ${path}`).toContain(res.status);
 	}
 	expect(await upgradeStatus()).toBe(401);

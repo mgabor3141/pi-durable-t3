@@ -347,6 +347,11 @@ export class Bridge {
 		return this.#configured().map((p) => this.#projectShell(p));
 	}
 
+	/** Every project as the contract's `Project` record (`GET /api/projects`). */
+	projectRecords(): WsSuccess<"projects.mutate">[] {
+		return this.config.registry.list().map((entry) => this.#projectResult(entry, null));
+	}
+
 		/**
 	 * One project mutation, answered from the state — no receipt store (design.md, Invariants).
 	 */

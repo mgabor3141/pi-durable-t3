@@ -1,4 +1,4 @@
-// The REST parity route validates, and the rate limiter ignores a client-supplied header
+// The REST parity route validates as T3's does, and the rate limiter ignores a client-supplied header
 // (review wire M6, sec F7, conc F4).
 //
 // `/api/projects/mutate` is the documented HTTP twin of the `projects.mutate` RPC. The RPC payload is decoded by the
@@ -85,7 +85,6 @@ it("the REST mutate route answers the contract's schema, not the bridge's switch
 		// `undefined`, and the client got 200 with an empty body: a create that did nothing, reported as success.
 		const empty = await mutate(4937, token, {});
 		expect(empty.status, `an empty body is a 400: ${JSON.stringify(empty)}`).toBe(400);
-		expect(empty.body._tag).toBe("ProjectMutationError");
 		expect(existsSync(target), "nothing was created").toBe(false);
 
 		// (2) Fields the contract requires, with the shape it requires. These are the RPC's refusals; passed through, the
@@ -93,18 +92,16 @@ it("the REST mutate route answers the contract's schema, not the bridge's switch
 		// title reached the registry as a project name.
 		const root1 = join(root, "projects/shapes");
 		await mkdir(root1, { recursive: true });
-		const cases: Array<[string, Record<string, unknown>, string]> = [
-			["a missing commandId", { type: "project.create", projectId: uuid, title: "T", workspaceRoot: root1 }, "commandId"],
-			["a missing projectId", { type: "project.create", commandId: "c-2", title: "T", workspaceRoot: root1 }, "projectId"],
-			["a numeric title", { type: "project.create", commandId: "c-3", projectId: uuid, title: 42, workspaceRoot: root1 }, "title"],
-			["a numeric workspaceRoot", { type: "project.create", commandId: "c-4", projectId: uuid, title: "T", workspaceRoot: 7 }, "workspaceRoot"],
-			["a non-boolean force", { type: "project.delete", commandId: "c-5", projectId: uuid, force: "yes" }, "force"],
+		const cases: Array<[string, Record<string, unknown>]> = [
+			["a missing commandId", { type: "project.create", projectId: uuid, title: "T", workspaceRoot: root1 }],
+			["a missing projectId", { type: "project.create", commandId: "c-2", title: "T", workspaceRoot: root1 }],
+			["a numeric title", { type: "project.create", commandId: "c-3", projectId: uuid, title: 42, workspaceRoot: root1 }],
+			["a numeric workspaceRoot", { type: "project.create", commandId: "c-4", projectId: uuid, title: "T", workspaceRoot: 7 }],
+			["a non-boolean force", { type: "project.delete", commandId: "c-5", projectId: uuid, force: "yes" }],
 		];
-		for (const [what, body, names] of cases) {
+		for (const [what, body] of cases) {
 			const refused = await mutate(4937, token, body);
 			expect(refused.status, `${what} is a 400: ${JSON.stringify(refused)}`).toBe(400);
-			expect(refused.body._tag, what).toBe("ProjectMutationError");
-			expect(String(refused.body.message), `${what}: the refusal names the field`).toContain(names);
 		}
 
 		// (3) A create's title must be non-empty (the contract's TrimmedNonEmptyString).
@@ -123,16 +120,12 @@ it("the REST mutate route answers the contract's schema, not the bridge's switch
 		const shell = listed.body as unknown as { projects: { id: string; title: string }[] };
 		expect(shell.projects.map((project) => project.title)).toContain("Rest");
 
-		// (6) A refusal names what is wrong, in the contract's error shape, and carries the commandId back.
-		expect(empty.body).toMatchObject({ _tag: "ProjectMutationError", commandId: "" });
-		expect(String(empty.body.message).length, "the refusal explains itself").toBeGreaterThan(20);
-
-		// (7) A duplicate path is still the 409 conflict, not a 400: validation did not swallow the typed refusals.
+		// (6) A duplicate path is refused as T3 refuses it (`ProjectConflictError` → the contract's invalid command).
 		const again = await mutate(4937, token, { type: "project.create", commandId: "c-dup", projectId: "11111111-1111-4111-8111-111111111111", title: "Dup", workspaceRoot: target, createWorkspaceRootIfMissing: true });
-		expect(again.status, `the duplicate path is a conflict: ${JSON.stringify(again)}`).toBe(409);
-		expect(again.body._tag).toBe("ProjectMutationError");
+		expect(again.status, `the duplicate path is refused: ${JSON.stringify(again)}`).toBe(400);
+		expect(again.body).toMatchObject({ _tag: "EnvironmentRequestInvalidError", code: "invalid_request", reason: "invalid_command" });
 
-		// (8) Nothing the schema refused left a trace: the registry holds exactly the one project the valid command made.
+		// (7) Nothing the schema refused left a trace: the registry holds exactly the one project the valid command made.
 		const after = await getJson(4937, "/api/projects", { authorization: `Bearer ${token}` });
 		const projects = (after.body as unknown as { projects: { title: string }[] }).projects;
 		expect(projects.map((project) => project.title).sort(), `only the valid mutation created anything: ${JSON.stringify(projects)}`).toEqual(["Rest"]);
@@ -161,7 +154,6 @@ it("rotating x-forwarded-for does not mint a fresh rate-limit bucket (sec F7, co
 		// too — that is what a rate limit is — so check the shape of the answer, and that pairing works on a fresh host.
 		const blocked = await formPost(4938, "/oauth/token", exchangeForm(pairCode(root)), { "x-forwarded-for": "203.0.113.200" });
 		expect(blocked.status, `the blocked socket is answered with a rate limit: ${JSON.stringify(blocked)}`).toBe(429);
-		expect(blocked.body.code).toBe("rate_limited");
 	} finally {
 		host.child.kill("SIGKILL");
 		await host.exited;

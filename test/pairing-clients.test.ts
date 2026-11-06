@@ -34,12 +34,19 @@ async function start(name: string, port: number) {
 	return { host, token };
 }
 
+/** The token exchange's fixed fields (`AuthTokenExchangeRequest`): the contract refuses an exchange without them. */
+const TOKEN_EXCHANGE = {
+	grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+	subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+	requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+};
+
 /** POST a form body (the pairing exchange), with the client's own label/device fields. */
 async function formPost(port: number, path: string, form: Record<string, string>) {
 	const response = await fetch(`http://127.0.0.1:${port}${path}`, {
 		method: "POST",
 		headers: { "content-type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams(form).toString(),
+		body: new URLSearchParams({ ...TOKEN_EXCHANGE, ...form }).toString(),
 		signal: AbortSignal.timeout(8000),
 	});
 	return { status: response.status, body: (await response.json().catch(() => ({}))) as Record<string, unknown> };
@@ -47,8 +54,19 @@ async function formPost(port: number, path: string, form: Record<string, string>
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const mint = (port: number, token: string, body: unknown) => postJson(port, "/api/auth/pairing-token", body, auth(token));
-const listLinks = (port: number, token: string) => getJson(port, "/api/auth/pairing-links", auth(token));
-const listClients = (port: number, token: string) => getJson(port, "/api/auth/clients", auth(token));
+/** The Connections lists as the web app reads them: the `subscribeAuthAccess` snapshot, on a socket of the caller's. */
+async function accessSnapshot(port: number, token: string): Promise<{ pairingLinks: unknown[]; clientSessions: unknown[] }> {
+	const ws = await connectWs(port, token);
+	try {
+		const streamId = await ws.open("subscribeAuthAccess", {});
+		await until("access snapshot", Date.now() + 8000, async () => accessEvents(ws, streamId).some((e) => e.type === "snapshot"));
+		return accessEvents(ws, streamId).find((e) => e.type === "snapshot")!.payload as never;
+	} finally {
+		ws.close();
+	}
+}
+const listLinks = async (port: number, token: string) => ({ status: 200, body: (await accessSnapshot(port, token)).pairingLinks as unknown as Record<string, unknown> });
+const listClients = async (port: number, token: string) => ({ status: 200, body: (await accessSnapshot(port, token)).clientSessions as unknown as Record<string, unknown> });
 const revokeLink = (port: number, token: string, id: string) => postJson(port, "/api/auth/pairing-links/revoke", { id }, auth(token));
 const revokeClient = (port: number, token: string, sessionId: string) => postJson(port, "/api/auth/clients/revoke", { sessionId }, auth(token));
 const revokeOthers = (port: number, token: string) => postJson(port, "/api/auth/clients/revoke-others", {}, auth(token));
@@ -82,8 +100,7 @@ it("Connections over HTTP: mint a link, exchange it, list devices, scope-gate th
 	const port = 4940;
 	try {
 		// An unpaired caller is refused, and a paired one starts with no live links (the `pair` code was single-use).
-		expect((await getJson(port, "/api/auth/pairing-links")).status).toBe(401);
-		expect((await listLinks(port, token)).status).toBe(200);
+		expect((await postJson(port, "/api/auth/pairing-token", {})).status).toBe(401);
 		expect(asArray((await listLinks(port, token)).body)).toHaveLength(0);
 
 		// Mint a labelled link.
@@ -101,7 +118,14 @@ it("Connections over HTTP: mint a link, exchange it, list devices, scope-gate th
 		expect(links[0]!["permissions"]).toContain(AuthAccessWriteScope);
 
 		// Scope-gating mirrors T3: a link cannot out-grant the caller, and a grant must be non-empty and a set.
-		expect((await mint(port, token, { scopes: ["review:write"] })).status).toBe(403); // a scope the caller lacks
+		expect((await mint(port, token, { scopes: ["review:write"] })).status).toBe(400); // not a grantable scope: the contract refuses it
+		// A caller narrowed to the access scopes cannot hand out orchestration.
+		const narrowCaller = await formPost(port, "/oauth/token", { subject_token: String((await mint(port, token, { scopes: [AuthAccessReadScope, AuthAccessWriteScope] })).body["credential"]) });
+		const narrowToken = String(narrowCaller.body["access_token"]);
+		const outGranted = await mint(port, narrowToken, { scopes: [AuthOrchestrationReadScope] });
+		expect(outGranted.status).toBe(403);
+		expect(outGranted.body["requiredScope"]).toBe(AuthOrchestrationReadScope);
+		expect((await revokeOthers(port, token)).body["revokedCount"]).toBe(1);
 		expect((await mint(port, token, { scopes: [] })).status).toBe(400); // empty grant
 		expect((await mint(port, token, { scopes: [AuthOrchestrationReadScope, AuthOrchestrationReadScope] })).status).toBe(400); // a scope twice
 		// A subset of the caller's scopes is a valid, narrower link.

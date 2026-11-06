@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: in progress on branch `cleanup`. Steps 1–6 done (see Plan).
+Status: in progress on branch `cleanup`. Steps 1–6 done, step 7 under way (see Plan).
 
 ## Goal
 
@@ -169,6 +169,13 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    the contract allows.
 7. Parity tests: every item the bridge emits is encoded and decoded with the contract's schema in tests; supported
    commands are checked against T3's behaviour (ported test cases where T3 has them); the browser smoke runs in CI.
+   - Done: the HTTP surface is T3's `EnvironmentHttpApi` through `HttpApiBuilder` (`t3/http-api.ts`), with the auth
+     middleware, scope checks and error mapping of T3's handlers. That changed what clients saw: errors now carry
+     `code`/`traceId` and no invented `message`; thread and project reads need `orchestration:read` and mutations
+     their scopes; a malformed token exchange or mutation is the contract's decode 400; a duplicate project path
+     is `invalid_command` (was 409); `GET /api/auth/pairing-links` and `/api/auth/clients` are gone (T3 lists
+     through `subscribeAuthAccess`); `/transcript` is served. `test/http-api-client.test.ts` drives every
+     supported endpoint with Effect's `HttpApiClient`, the client the web app uses.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.

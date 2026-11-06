@@ -86,9 +86,7 @@ it("browser-session: exchange a credential, then ride the cookie across the guar
 	expect(state.authenticated).toBe(true);
 	expect(state.sessionMethod).toBe("browser-session-cookie");
 
-	// Connections reads (the web app's Settings → Connections) authorize on the cookie: list clients, then mint a link.
-	const clients = await fetch(`${base}/api/auth/clients`, { headers: { cookie, ...ORIGIN }, });
-	expect(clients.status).toBe(200);
+	// Connections (the web app's Settings → Connections) authorize on the cookie: mint a link.
 	const mint = await fetch(`${base}/api/auth/pairing-token`, { method: "POST", headers: { "content-type": "application/json", cookie, ...ORIGIN }, body: JSON.stringify({ label: "from the web app" }), });
 	expect(mint.status).toBe(200);
 	expect( String(((await mint.json()) as { credential: string }).credential).length, ).toBeGreaterThan(0);
@@ -121,8 +119,8 @@ it("the cookie is refused for a foreign origin (T3's CSRF guard), and a spent co
 	// A cookie presented from a foreign Origin (no Sec-Fetch-Site: same-origin) is refused: cookies must not ride cross-site.
 	const foreign = await fetch(`${base2}/api/auth/session`, { headers: { cookie, origin: "http://evil.example.com" }, });
 	expect( ((await foreign.json()) as { authenticated: boolean }).authenticated, ).toBe(false);
-	const foreignClients = await fetch(`${base2}/api/auth/clients`, { headers: { cookie, origin: "http://evil.example.com" }, });
-	expect(foreignClients.status).toBe(401);
+	const foreignMint = await fetch(`${base2}/api/auth/pairing-token`, { method: "POST", headers: { "content-type": "application/json", cookie, origin: "http://evil.example.com" }, body: "{}" });
+	expect(foreignMint.status).toBe(401);
 
 	// A spent credential cannot be exchanged again.
 	const reuse = await fetch(`${base2}/api/auth/browser-session`, { method: "POST", headers: { "content-type": "application/json", origin: base2 }, body: JSON.stringify({ credential: "not-a-real-code" }), });

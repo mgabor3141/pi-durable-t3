@@ -94,7 +94,9 @@ The code shows what each operation does. These are the rules it cannot show on i
 ## Facet
 
 The facet serves T3's HTTP routes and `/ws` (orchestration protocol 2, Effect RPC over JSON). Its handlers are typed by
-T3's RPC group (`t3/ws-types.ts`), so a contract change at a pin bump fails the build. Behind them, the bridge writes
+T3's RPC group (`t3/ws-types.ts`), and the HTTP routes are T3's `EnvironmentHttpApi` implemented with `HttpApiBuilder`
+(`t3/http-api.ts`), so a contract change at a pin bump fails the build and no body is shaped by hand. Only what T3 also
+serves outside its HttpApi stays a plain route: assets, uploads, the preview stream, `/ws` and the web app. Behind them, the bridge writes
 through the threads layer (`threads.ts`) and reads with one watch on the threads document plus one watch per open
 thread on its head conversation; a write that needs the head waits for that thread's load, never by polling.
 

@@ -7,6 +7,7 @@ export {
 	InvalidThreadHistoryCursorError,
 	isConversationHistoryItem,
 	isThreadHistoryUserTurn,
+	projectedRowEncodedBytes,
 	missingInterruptRequests,
 	olderHistoryPagePolicy,
 	selectDeferredWorkPage,
