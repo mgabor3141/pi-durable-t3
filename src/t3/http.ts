@@ -44,7 +44,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Mime from "effect/http/Mime";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
-import { WsRpcGroup } from "@t3tools/contracts";
+import { OrchestrationV2ThreadHistoryPage, type OrchestrationV2ThreadProjection, WsRpcGroup } from "@t3tools/contracts";
 import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import { listClientSessions, listPairingLinks } from "./access.ts";
 import { type AuthStore, type ClientMetadata, PairingRateLimit } from "./auth.ts";
@@ -53,8 +53,8 @@ import type { WorkspaceAssets } from "./workspace-assets.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
-import { compactThreadProjection } from "./compact.ts";
-import type { ProjectionResult } from "./projection.ts";
+import { boundedSnapshot, historyPage } from "./thread-stream.ts";
+import { InvalidThreadHistoryCursorError, projectThreadProjectionForWire } from "./t3-stream.ts";
 import { makeRpcLayer } from "./rpc.ts";
 import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
@@ -328,18 +328,18 @@ export function makeServerLayer(deps: {
 				return yield* handler(request, token);
 			});
 
-	// The two `/api/orchestration/threads/:threadId*` routes share their preamble: read the route's threadId, await its
-	// projection, and answer an unknown thread with the 404 T3 renders as a missing resource (design.md, Invariants).
-	const withProjection = (
-		render: (projection: ProjectionResult, request: HttpServerRequest.HttpServerRequest) => HttpServerResponse.HttpServerResponse,
+	// The `/api/orchestration/threads/:threadId*` routes share their preamble: read the route's threadId, bring its stream
+	// up to date, and answer an unknown thread with the 404 T3 renders as a missing resource (design.md, Invariants).
+	const withStream = (
+		render: (stream: { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection }, request: HttpServerRequest.HttpServerRequest) => HttpServerResponse.HttpServerResponse,
 	) =>
 		authorized(() =>
 			Effect.gen(function* () {
 				const request = yield* HttpServerRequest.HttpServerRequest;
 				const { threadId } = yield* HttpRouter.params;
-				const projected = yield* Effect.tryPromise(() => bridge.projection(threadId!)).pipe(Effect.option);
-				if (Option.isNone(projected)) return json({ _tag: "EnvironmentResourceNotFoundError", reason: "thread_not_found", message: "Unknown thread" }, 404);
-				return render(projected.value, request);
+				const stream = yield* Effect.tryPromise(() => bridge.streamSnapshot(threadId!)).pipe(Effect.option);
+				if (Option.isNone(stream)) return json({ _tag: "EnvironmentResourceNotFoundError", reason: "thread_not_found", message: "Unknown thread" }, 404);
+				return render(stream.value, request);
 			}),
 		);
 
@@ -539,29 +539,58 @@ export function makeServerLayer(deps: {
 			"/api/orchestration/shell",
 			authorized(() => Effect.sync(() => json(encode(OrchestrationV2ShellSnapshot, bridge.shellSnapshot())))),
 		),
+		// T3's thread snapshot routes (`apps/server/src/orchestration-v2/http.ts`): the whole projection, T3's bounded window
+		// (the web app's first load), and the history pages before it. Each answers at the stream's sequence, so a
+		// subscription that resumes after it is replayed exactly what it missed.
 		HttpRouter.add(
 			"GET",
 			"/api/orchestration/threads/:threadId",
-			withProjection((projection) =>
-				json(encode(OrchestrationV2ThreadDetailSnapshot, { snapshotSequence: bridge.nextSequence(), projection: projection.projection })),
-			),
+			withStream((stream) => json(encode(OrchestrationV2ThreadDetailSnapshot, { snapshotSequence: stream.sequence, projection: projectThreadProjectionForWire(stream.projection) }))),
 		),
 		HttpRouter.add(
 			"GET",
 			"/api/orchestration/threads/:threadId/bounded",
-			withProjection((projection, request) => {
-				const params = new URL(request.url, "http://localhost").searchParams;
-				const snapshot = params.get("compactTurnItems") === "1" ? compactThreadProjection(projection.projection) : { projection: projection.projection };
+			withStream((stream, request) => {
+				const query = new URL(request.url, "http://localhost").searchParams;
 				return json(
-					encode(OrchestrationV2ThreadBoundedSnapshot, {
-						snapshotSequence: bridge.nextSequence(),
-						projection: snapshot.projection,
-						historyCursor: null,
-						hasMoreHistory: false,
-						latestLocalTurnOrdinal: projection.runs.at(-1)?.ordinal ?? null,
-						...(snapshot.turnItemsOmitLocalVisible === true ? { turnItemsOmitLocalVisible: true as const } : {}),
-					}),
+					encode(
+						OrchestrationV2ThreadBoundedSnapshot,
+						boundedSnapshot(stream.sequence, stream.projection, {
+							deferWork: query.get("deferWork") === "1",
+							compactTurnItems: query.get("compactTurnItems") === "1",
+							dedupeBodies: query.get("dedupeBodies") === "1",
+							compactIds: query.get("compactIds") === "1",
+						}),
+					),
 				);
+			}),
+		),
+		HttpRouter.add(
+			"GET",
+			"/api/orchestration/threads/:threadId/history",
+			withStream((stream, request) => {
+				const query = new URL(request.url, "http://localhost").searchParams;
+				const cursor = query.get("cursor")?.trim() ?? "";
+				const view = query.get("view");
+				if (cursor === "" || (view !== null && view !== "conversation" && view !== "activity" && view !== "work")) {
+					return json({ _tag: "EnvironmentRequestInvalidError", code: "invalid_request", reason: "invalid_history_cursor", traceId: traceId(), message: "Invalid thread history request." }, 400);
+				}
+				try {
+					const page = historyPage({
+						projection: stream.projection,
+						snapshotSequence: stream.sequence,
+						cursor,
+						throughEntryId: query.get("throughEntryId")?.trim() || undefined,
+						view: view ?? undefined,
+						deferWork: query.get("deferWork") === "1",
+					});
+					return json(encode(OrchestrationV2ThreadHistoryPage, query.get("compactIds") === "1" ? { ...page, idTable: true as const } : page));
+				} catch (error) {
+					if (error instanceof InvalidThreadHistoryCursorError) {
+						return json({ _tag: "EnvironmentRequestInvalidError", code: "invalid_request", reason: "invalid_history_cursor", traceId: traceId(), message: error.message }, 400);
+					}
+					throw error;
+				}
 			}),
 		),
 		HttpRouter.add(

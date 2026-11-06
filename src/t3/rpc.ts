@@ -50,7 +50,7 @@ import { serverCwd } from "./config.ts";
 import { EntriesError, FileError, type WorkspaceFiles } from "./files.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
-import { compactThreadProjection } from "./compact.ts";
+import { snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "./thread-stream.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
@@ -85,25 +85,9 @@ const fromListener = <A>(
 		),
 	);
 
-/** A slow subscriber should skip stale full snapshots, not retain every one of them in an unbounded queue. */
-const fromLatest = <A>(
-	subscribe: (emit: (value: A) => void, end: () => void) => () => void,
-	isLatest: (value: A) => boolean,
-): Stream.Stream<A> =>
-	Stream.callback<A>((queue) =>
-		Effect.acquireRelease(
-			Effect.sync(() =>
-				subscribe(
-					(value) => {
-						if (isLatest(value)) Queue.flushUnsafe(queue);
-						Queue.offerUnsafe(queue, value);
-					},
-					() => Queue.endUnsafe(queue),
-				),
-			),
-			(unsubscribe) => Effect.sync(unsubscribe),
-		),
-	);
+/** Items a thread subscriber may have unread before it is sent the current projection instead (T3's
+ * `MAX_PENDING_UPDATES`). */
+const MAX_PENDING_STREAM_ITEMS = 512;
 
 interface RpcDeps {
 	readonly bridge: Bridge;
@@ -481,42 +465,59 @@ export function makeRpcLayer(deps: RpcDeps) {
 				if (input.requestCompletionMarker === true) initial.push({ kind: "synchronized" });
 				return Stream.concat(Stream.fromIterable(initial), fromListener<WsItem<"orchestration.subscribeShell">>((emit) => bridge.onShell(emit)));
 			}),
+		// T3's thread stream (`subscribeOrchestrationV2Thread`): the events after `afterSequence` when the host can replay
+		// them, else a snapshot — bounded when the client accepts one — then live events; one completion marker after the
+		// first update. A thread the host does not know fails the stream with the contract's typed not-found — never a
+		// fabricated snapshot that leaves the panel open (design.md, Invariants).
 		[`orchestration.subscribeThread`]: (input) =>
 			Stream.unwrap(
-				Effect.sync(() =>
-					// A thread the host does not know fails the stream with the contract's typed not-found — never a fabricated
-					// snapshot that leaves the panel open (design.md, Invariants).
-					bridge.hasThread(input.threadId)
-						? fromLatest<WsItem<"orchestration.subscribeThread">>(
-								(emit, end) =>
-									// The stream ends when the thread is deleted.
-									bridge.subscribeThread(
-										input.threadId,
-										({ sequence, projection }) => {
-											// A client that opts into deduped bodies is on the same T3
-											// contract and can restore compact snapshots, even if it has not
-											// set acceptCompactTurnItems yet. That race is real for the web
-											// client: its first socket snapshot can beat the bounded HTTP
-											// request that would set the flag, and a full snapshot here would
-											// then cost megabytes on every update. Older clients that send
-											// neither flag keep receiving the full projection.
-											const acceptsCompact =
-												input.acceptCompactTurnItems === true || input.acceptDedupedBodies === true;
-											const snapshot = acceptsCompact ? compactThreadProjection(projection) : { projection };
-											emit({
-												kind: "snapshot",
-												snapshotSequence: sequence,
-												projection: snapshot.projection,
-												...(snapshot.turnItemsOmitLocalVisible === true ? { turnItemsOmitLocalVisible: true as const } : {}),
-											});
-											if (input.requestCompletionMarker === true) emit({ kind: "synchronized" });
-										},
-										end,
-									),
-								(item) => item.kind === "snapshot",
-							)
-						: Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` })),
-				),
+				Effect.sync(() => {
+					if (!bridge.hasThread(input.threadId)) {
+						return Stream.fail(new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Unknown thread: ${input.threadId}` }));
+					}
+					const options: ThreadStreamOptions = {
+						bounded: input.acceptBoundedSnapshot === true,
+						deferWork: input.acceptDeferredWork === true,
+						compactTurnItems: input.acceptCompactTurnItems === true,
+						dedupeBodies: input.acceptDedupedBodies === true,
+						compactIds: input.acceptCompactIds === true,
+					};
+					const filter = subscriberFilter(options);
+					let first = true;
+					return Stream.callback<ThreadStreamItem>((queue) =>
+						Effect.acquireRelease(
+							Effect.sync(() =>
+								// The stream ends when the thread is deleted.
+								bridge.subscribeThread(
+									input.threadId,
+									input.afterSequence,
+									(update) => {
+										if (update.kind === "snapshot") {
+											// A snapshot supersedes whatever the client has not read yet.
+											Queue.flushUnsafe(queue);
+											Queue.offerUnsafe(queue, filter(snapshotItem(update.sequence, update.projection, options)));
+										} else {
+											// A client this far behind gets the current projection instead of the backlog (T3's live budget).
+											if (Queue.sizeUnsafe(queue) + update.items.length > MAX_PENDING_STREAM_ITEMS) {
+												const current = bridge.currentStream(input.threadId);
+												Queue.flushUnsafe(queue);
+												if (current !== undefined) Queue.offerUnsafe(queue, filter(snapshotItem(current.sequence, current.projection, options)));
+											} else {
+												for (const item of update.items) Queue.offerUnsafe(queue, filter(item));
+											}
+										}
+										if (first) {
+											first = false;
+											if (input.requestCompletionMarker === true) Queue.offerUnsafe(queue, { kind: "synchronized" } as ThreadStreamItem);
+										}
+									},
+									() => Queue.endUnsafe(queue),
+								),
+							),
+							(unsubscribe) => Effect.sync(unsubscribe),
+						),
+					);
+				}),
 			),
 		[`orchestration.getThreadProjection`]: (input) =>
 

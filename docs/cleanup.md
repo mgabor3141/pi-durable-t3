@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: in progress on branch `cleanup`. Steps 1–5 done (see Plan).
+Status: in progress on branch `cleanup`. Steps 1–6 done (see Plan).
 
 ## Goal
 
@@ -112,7 +112,7 @@ thread record needs `linkOrigin` and `delegatedFrom` from the start, which is on
 4. **Projects, scheduled tasks and command receipts** move into pi-durable documents, so the links between them and
    threads are checked in the commit that writes them. Receipts replace the in-memory command map for every command;
    their retention follows T3's maintenance pass (`ProjectionMaintenance.ts`, to read before step 5).
-5. **Projector**: per thread, memoized per run, so only the live run is recomputed on a change. Its output is
+5. **Projector**: per thread (per-run memoization was measured unnecessary in step 6). Its output is
    T3's projection records (run, attempt, node, message, turn item, subagent, provider turn); the difference
    between two outputs is the list of `*.updated` / `*.created` events, which is exactly T3's event vocabulary.
 6. **Stream parity**: `subscribeThread` sends a bounded snapshot window (T3's `THREAD_HISTORY_PAGE_POLICY`, including
@@ -146,8 +146,27 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    (`pi-durable-t3.scheduled-tasks`) live in the Harness; command receipts are kept on the thread they act on (the
    last 100), so a retried command is answered from state across restarts. `t3-settings.json`, `auth.json` and the
    attachment bytes stay in the state dir, as T3 keeps settings and keybindings in files.
-6. Incremental projector, event stream, bounded snapshot, history pages, resume. Acceptance: wire bytes for a streamed
-   reply proportional to the reply, first snapshot within T3's bounds, on the benchmark's 50/200/500-turn threads.
+6. Done: the thread stream (`t3/thread-stream.ts`, with T3's own paging, wire projection, body deduper and client
+   reducer vendored by `dev/setup-t3.sh` into `vendor/shared` and `vendor/t3-stream`). Changes are flushed in 50 ms
+   windows as `*.updated`/`*.created` events derived by diffing two projections; every batch is checked by applying
+   it with T3's client reducer, and a change no event can say (a record that went away) is a snapshot. The first
+   snapshot is T3's bounded one over T3's windowed read (the window's turn items and their cohort only), with
+   `historyCursor`; `/history` serves older pages. `afterSequence` resumes replay the last 128 events (T3's
+   `decideThreadResume`), else a snapshot; a subscriber more than 512 items behind gets a snapshot. Assistant items
+   keep one id from first token to commit, and turn items are numbered in the order they enter the thread, as T3's
+   `nextTurnItemOrdinal` does. `compact.ts` is gone (T3's `WireProjection` does it).
+
+   | earlier turns | bounded open | full projection | items during the reply | snapshots | bytes for the one reply | CPU |
+   |---:|---:|---:|---:|---:|---:|---:|
+   | 50 | 47 KB | 254 KB | 96 | 0 | 355 KB | 0.28 s |
+   | 200 | 47 KB | 1.0 MB | 96 | 0 | 355 KB | 0.26 s |
+   | 500 | 47 KB | 2.5 MB | 96 | 0 | 350 KB | 0.48 s |
+
+   The reply now costs the same on every thread (before: 9.8 / 38.6 / 31.2 MB). Not done, by measurement: per-run
+   memoization of the projector. Re-projecting the thread on a change is cheap once dates are shared and records are
+   compared structurally instead of as JSON, so it would add state without a visible gain. The sequence is still the
+   process's clock-floored counter, not a durable one: across a restart a resume is answered with a snapshot, which
+   the contract allows.
 7. Parity tests: every item the bridge emits is encoded and decoded with the contract's schema in tests; supported
    commands are checked against T3's behaviour (ported test cases where T3 has them); the browser smoke runs in CI.
 

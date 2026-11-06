@@ -30,6 +30,8 @@ import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
+import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
+import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-stream.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
@@ -90,12 +92,16 @@ interface ThreadState {
 	loadedView: boolean;
 	/** Replaced and settled on every load-state change (a view, a release, a removal): what waiters wait on. */
 	changed: PromiseWithResolvers<void>;
-	snapshotSequence: number;
-	listeners: Set<(snapshot: { sequence: number; projection: OrchestrationV2ThreadProjection }) => void>;
+	/** The projection the subscribers were last brought to, and its sequence; `undefined` until the first flush. */
+	stream: { sequence: number; projection: OrchestrationV2ThreadProjection } | undefined;
+	/** The events since `logFloor`, oldest first: what a resuming subscriber is replayed. */
+	log: ThreadStreamItem[];
+	logFloor: number;
+	subscribers: Set<StreamSubscriber>;
 	/** Called when the thread is gone (deleted, or unknown to the host); subscriptions end. */
 	enders: Set<() => void>;
 	gone: Error | undefined;
-	emitTimer: NodeJS.Timeout | undefined;
+	flushTimer: NodeJS.Timeout | undefined;
 	/** The watch on the head conversation while the thread is open; `undefined` once released. */
 	follower: Follower | undefined;
 	/** The head conversation id (the write target) once its view has loaded, and that view. */
@@ -151,14 +157,27 @@ async function loadHistory(conversation: Conversation, cutoff: number): Promise<
 	return items.filter((entry) => entry.kind !== "pi.compaction" && entry.id <= cutoff);
 }
 
+/** What a thread subscriber is sent: a whole projection (formatted per subscriber), or events. */
+export type StreamUpdate =
+	| { readonly kind: "snapshot"; readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection }
+	| { readonly kind: "events"; readonly items: readonly ThreadStreamItem[] };
+
+interface StreamSubscriber {
+	readonly update: (update: StreamUpdate) => void;
+	/** Set until the subscriber got its first update: the sequence it resumes after, or `null` for a snapshot. */
+	pending: { readonly afterSequence: number | null } | undefined;
+}
+
+/** T3's coalescing window for live updates (`ThreadLiveEventCoalescer`): changes within it go out as one batch. */
+const FLUSH_MS = 50;
+/** The replay T3 allows before it sends a snapshot instead (`ThreadStream.ts`). */
+const MAX_LOG_EVENTS = THREAD_RESUME_MAX_REPLAY_EVENTS;
+
 /** A live shell item: everything \`orchestration.subscribeShell\` streams after its snapshot. */
 type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind: "snapshot" } | { readonly kind: "synchronized" }>;
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const LINK_IDLE_MS = 30_000;
-const EMIT_THROTTLE_MS = 60;
-const LARGE_EMIT_THROTTLE_MS = 250;
-const LARGE_THREAD_TURN_ITEMS = 500;
 
 /** One `projects.mutate` payload, as the facet decoded it. */
 export type ProjectMutation = {
@@ -705,11 +724,13 @@ export class Bridge {
 				result: undefined,
 				loadedView: false,
 				changed: Promise.withResolvers<void>(),
-				snapshotSequence: 0,
-				listeners: new Set(),
+				stream: undefined,
+				log: [],
+				logFloor: 0,
+				subscribers: new Set(),
 				enders: new Set(),
 				gone: undefined,
-				emitTimer: undefined,
+				flushTimer: undefined,
 				follower: undefined,
 				conversationId: undefined,
 				view: undefined,
@@ -847,6 +868,10 @@ export class Bridge {
 		}
 		state.result = undefined;
 		state.history = undefined;
+		state.stream = undefined;
+		state.log = [];
+		if (state.flushTimer !== undefined) clearTimeout(state.flushTimer);
+		state.flushTimer = undefined;
 		// Keep the small `docs` for shell metadata; release the entry arrays that dominate memory.
 		if (state.view !== undefined) state.view = { ...state.view, entries: [] };
 		state.loadedView = false;
@@ -863,7 +888,7 @@ export class Bridge {
 		if (state.closeTimer !== undefined) clearTimeout(state.closeTimer);
 		this.#release(state);
 		for (const end of state.enders) end();
-		state.listeners.clear();
+		state.subscribers.clear();
 		state.enders.clear();
 		this.#log.info("thread forgotten", { threadId: state.threadId, reason: error.message });
 	}
@@ -930,19 +955,92 @@ export class Bridge {
 		if (loaded) this.#restoreAttachments([...(state.history ?? []), ...state.view.entries]);
 		if (loaded || (wasRunning && state.result.shell.status !== "running")) this.#remember(state);
 		this.#publishShell(state.threadId);
-		if (state.listeners.size === 0 || state.emitTimer !== undefined) return;
-		const throttle = (state.result.projection.turnItems.length >= LARGE_THREAD_TURN_ITEMS ? LARGE_EMIT_THROTTLE_MS : EMIT_THROTTLE_MS);
-		state.emitTimer = setTimeout(() => {
-			state.emitTimer = undefined;
-			this.#emitThread(state);
-		}, throttle);
+		if (state.subscribers.size === 0 || state.flushTimer !== undefined) return;
+		state.flushTimer = setTimeout(() => {
+			state.flushTimer = undefined;
+			this.#flush(state);
+		}, FLUSH_MS);
 	}
 
-	#emitThread(state: ThreadState): void {
-		if (state.result === undefined) return;
-		state.snapshotSequence = this.nextSequence();
-		for (const listener of state.listeners) {
-			listener({ sequence: state.snapshotSequence, projection: state.result.projection });
+	/**
+	 * Bring the stream to the current projection: the records that changed since the last flush go out as events (a
+	 * change no event can express, as a snapshot), the events are kept for a resume, and a subscriber still waiting for
+	 * its first update gets it.
+	 */
+	#flush(state: ThreadState): void {
+		if (state.flushTimer !== undefined) {
+			clearTimeout(state.flushTimer);
+			state.flushTimer = undefined;
+		}
+		const next = state.loadedView ? state.result?.projection : undefined;
+		if (next === undefined) return;
+		const live = [...state.subscribers].filter((subscriber) => subscriber.pending === undefined);
+		if (state.stream === undefined) {
+			this.#restartStream(state, next);
+		} else if (state.stream.projection !== next) {
+			const diff = diffProjection(state.stream.projection, next);
+			if ("snapshot" in diff) {
+				this.#log.info("thread stream sent a snapshot", { threadId: state.threadId, reason: diff.snapshot });
+				this.#restartStream(state, next);
+				for (const subscriber of live) subscriber.update({ kind: "snapshot", sequence: state.stream!.sequence, projection: next });
+			} else if (diff.events.length === 0) {
+				state.stream = { sequence: state.stream.sequence, projection: next };
+			} else {
+				const items = diff.events.map((event) => eventItem(this.nextSequence(), event));
+				state.log.push(...items);
+				if (state.log.length > MAX_LOG_EVENTS) {
+					const dropped = state.log.splice(0, state.log.length - MAX_LOG_EVENTS);
+					state.logFloor = (dropped.at(-1) as { sequence: number }).sequence;
+				}
+				state.stream = { sequence: (items.at(-1) as { sequence: number }).sequence, projection: next };
+				for (const subscriber of live) subscriber.update({ kind: "events", items });
+			}
+		}
+		for (const subscriber of state.subscribers) if (subscriber.pending !== undefined) this.#serve(state, subscriber);
+	}
+
+	/** Start the stream over at `projection`: a new sequence, an empty log. */
+	#restartStream(state: ThreadState, projection: OrchestrationV2ThreadProjection): void {
+		const sequence = this.nextSequence();
+		state.stream = { sequence, projection };
+		state.log = [];
+		state.logFloor = sequence;
+	}
+
+	/** A subscriber's first update: the events after the sequence it resumes from, when the log still holds them and
+	 * T3's replay bounds allow it; otherwise the current projection. */
+	#serve(state: ThreadState, subscriber: StreamSubscriber): void {
+		const stream = state.stream;
+		if (stream === undefined) return;
+		const after = subscriber.pending?.afterSequence ?? null;
+		subscriber.pending = undefined;
+		if (after !== null && after >= state.logFloor && after <= stream.sequence) {
+			const replay = state.log.filter((item) => (item as { sequence: number }).sequence > after);
+			const plan = decideThreadResume({ afterSequence: after, highWater: stream.sequence, replayEventCount: replay.length, replayEncodedBytes: JSON.stringify(replay).length });
+			if (plan.mode === "replay") {
+				subscriber.update({ kind: "events", items: replay });
+				return;
+			}
+		}
+		subscriber.update({ kind: "snapshot", sequence: stream.sequence, projection: stream.projection });
+	}
+
+	/** The stream's state as subscribers were last brought to it, without a flush (a slow subscriber's catch-up). */
+	currentStream(threadId: string): { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection } | undefined {
+		return this.#threads.get(threadId)?.stream;
+	}
+
+	/** The stream's current state for a reader that is not a subscriber (T3's HTTP snapshot routes): pending changes are
+	 * flushed first, so a subscription that resumes after the answered sequence misses nothing. */
+	async streamSnapshot(threadId: string): Promise<{ readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection }> {
+		await this.projection(threadId);
+		const release = this.acquire(threadId);
+		try {
+			const state = this.#state(threadId);
+			this.#flush(state);
+			return state.stream!;
+		} finally {
+			release();
 		}
 	}
 
@@ -984,24 +1082,22 @@ export class Bridge {
 		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
-	/** Subscribe to full projection snapshots of a thread. The first snapshot arrives once the transcript loads.
-	 * A thread the host does not know refuses synchronously (the stream carries the typed not-found); it never
-	 * emits an empty snapshot and stays open. */
-	subscribeThread(
-		threadId: string,
-		listener: (snapshot: { sequence: number; projection: OrchestrationV2ThreadProjection }) => void,
-		onEnd: () => void = () => {},
-	): () => void {
+	/**
+	 * Subscribe to a thread's stream: first the events after `afterSequence` when they can be replayed, else the current
+	 * projection; then every flush's events (or a snapshot, when no event can express a change). The first update
+	 * arrives once the transcript loads. A thread the host does not know refuses synchronously (the stream carries the
+	 * typed not-found); it never sends an empty projection.
+	 */
+	subscribeThread(threadId: string, afterSequence: number | undefined, update: (update: StreamUpdate) => void, onEnd: () => void = () => {}): () => void {
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		const release = this.acquire(threadId);
 		const state = this.#state(threadId);
-		state.listeners.add(listener);
+		const subscriber: StreamSubscriber = { update, pending: { afterSequence: afterSequence ?? null } };
+		state.subscribers.add(subscriber);
 		state.enders.add(onEnd);
-		if (state.result !== undefined) {
-			listener({ sequence: this.nextSequence(), projection: state.result.projection });
-		}
+		if (state.loadedView) this.#flush(state);
 		return () => {
-			state.listeners.delete(listener);
+			state.subscribers.delete(subscriber);
 			state.enders.delete(onEnd);
 			release();
 		};

@@ -13,7 +13,8 @@ export default defineConfig({
 	clean: true,
 	fixedExtension: false,
 	sourcemap: false,
-	// Bundle T3's contracts (vendor/contracts, symlinked as node_modules/@t3tools/contracts by setup:t3). Everything else in `dependencies` /
+	// Bundle T3's code vendored by setup:t3 (vendor/contracts, vendor/shared and vendor/t3-stream, symlinked as
+	// node_modules/@t3tools/*). Everything else in `dependencies` /
 	// `peerDependencies` stays external: `effect` must be ONE copy shared by the bridge and the contracts.
-	deps: { alwaysBundle: [/^@t3tools\/contracts/], onlyBundle: false },
+	deps: { alwaysBundle: [/^@t3tools\//], onlyBundle: false },
 });

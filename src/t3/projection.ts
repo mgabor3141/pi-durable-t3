@@ -40,7 +40,18 @@ const id = (value: string): Any => value;
 /** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
 const endOf = (message: { role?: string; timestamp?: number; durationMs?: number } | undefined, fallback: number): number =>
 	(message?.timestamp ?? fallback) + (message?.role === "assistant" ? (message.durationMs ?? 0) : 0);
-const time = (ms: number | undefined) => DateTime.makeUnsafe(ms ?? 0);
+/** A DateTime is immutable, and a thread's instants repeat on every projection: one per instant. */
+const instants = new Map<number, DateTime.Utc>();
+const time = (ms: number | undefined): DateTime.Utc => {
+	const at = ms ?? 0;
+	let instant = instants.get(at);
+	if (instant === undefined) {
+		if (instants.size >= 50_000) instants.clear();
+		instant = DateTime.makeUnsafe(at);
+		instants.set(at, instant);
+	}
+	return instant;
+};
 
 export interface ThreadMeta {
 	readonly threadId: string;
@@ -645,6 +656,9 @@ export function projectThread(
 				if (key !== undefined) liveTools.set(key, slot);
 			}
 		}
+		// An assistant message is keyed by its run and its place among the run's assistant messages, not by its entry: the
+		// message streaming now and the entry it is committed as are one item, so a client keeps updating the same record.
+		let assistantIndex = 0;
 		draft.steps.forEach((step, stepIndex) => {
 			if (isUserEntry(step)) {
 				pushUser(step, "steer");
@@ -652,15 +666,16 @@ export function projectThread(
 			}
 			const m = firstMessage(step);
 			if (m?.role !== "assistant") return;
+			const key = `${u.id}.${assistantIndex++}`;
 			// A partial interrupted by a crash is superseded by the resumed answer.
 			const superseded = m.stopReason === "aborted" && draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
 			if (superseded) return;
-			pushAssistant(String(step.id), m, m.timestamp ?? requestedAt, false, toolResults, liveTools);
+			pushAssistant(key, m, m.timestamp ?? requestedAt, false, toolResults, liveTools);
 		});
 		const partial = running ? live?.generation?.message : undefined;
 		if (partial?.role === "assistant") {
 			pushAssistant(
-				`live${u.id}-${live?.generation?.attempt ?? 0}`,
+				`${u.id}.${assistantIndex}`,
 				partial,
 				partial.timestamp ?? Date.now(),
 				true,
@@ -760,6 +775,12 @@ export function projectThread(
 			completedAt: settledAt,
 		} as Any);
 	}
+
+	// T3 numbers turn items in the order they enter the thread (`nextTurnItemOrdinal`), one ordinal per item: a client
+	// places an item by it, and a bounded window's watermark is the newest ordinal. Items are built in that order.
+	turnItems.forEach((item, index) => {
+		(item as { ordinal: number }).ordinal = index + 1;
+	});
 
 	// Runs removed by rewinds stay as rolled back; their items stay hidden (design.md, Invariants).
 	const known = new Set(runs.map((run) => run.id as string));

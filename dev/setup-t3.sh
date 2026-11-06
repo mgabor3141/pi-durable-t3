@@ -15,10 +15,12 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 . "$here/dev/t3-pin.sh"
 CACHE="$here/.t3-cache/t3code"
 DONE="$here/.t3-cache/setup-done"
-# The symlink goes first, every run: a package manager's install may have pruned it.
+# The symlinks go first, every run: a package manager's install may have pruned them.
 mkdir -p "$here/node_modules/@t3tools"
 ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
-if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/web/index.html" ]; then
+ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
+ln -sfn ../../vendor/t3-stream "$here/node_modules/@t3tools/t3-stream"
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-stream/ThreadStream.ts" ] && [ -f "$here/web/index.html" ]; then
   echo "setup:t3: already at $T3_TAG"
   exit 0
 fi
@@ -68,6 +70,41 @@ cat > "$here/vendor/contracts/tsconfig.json" <<'TS'
 }
 TS
 echo "vendored @t3tools/contracts at $PIN (+ LICENSE) into vendor/contracts"
+
+# 2b. T3's own stream code, used as-is so the bridge's thread stream is T3's: the bounded snapshot, history paging,
+# the wire projection and body dedupe (apps/server/src/orchestration-v2), the shared helpers they import
+# (packages/shared/src, as `@t3tools/shared`), and the client's event reducer (packages/client-runtime), which the
+# bridge runs over its own events to check that a client applying them arrives at the projection it would send.
+[ -d "$CACHE/packages/shared/src" ] || { echo "setup:t3: packages/shared missing in $CACHE"; exit 1; }
+rm -rf "$here/vendor/shared" "$here/vendor/t3-stream"
+mkdir -p "$here/vendor/shared" "$here/vendor/t3-stream"
+cp -r "$CACHE/packages/shared/src" "$here/vendor/shared/src"
+find "$here/vendor/shared/src" -name '*.test.ts' -delete
+cat > "$here/vendor/shared/package.json" <<'JSON'
+{ "name": "@t3tools/shared", "private": true, "type": "module", "exports": { "./*": "./src/*.ts" } }
+JSON
+cp "$here/vendor/contracts/tsconfig.json" "$here/vendor/shared/tsconfig.json"
+ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
+for file in threadHistoryPaging.ts ThreadStream.ts WireProjection.ts; do
+  [ -f "$CACHE/apps/server/src/orchestration-v2/$file" ] || { echo "setup:t3: apps/server/src/orchestration-v2/$file missing"; exit 1; }
+  cp "$CACHE/apps/server/src/orchestration-v2/$file" "$here/vendor/t3-stream/$file"
+done
+# The reducer's one import outside the closure handles pull-request link events, which this host never sends.
+reducer="$CACHE/packages/client-runtime/src/state/orchestrationV2Projection.ts"
+[ -f "$reducer" ] || { echo "setup:t3: packages/client-runtime/src/state/orchestrationV2Projection.ts missing"; exit 1; }
+grep -q '^import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";$' "$reducer" \
+  || { echo "setup:t3: the client reducer's imports changed; update dev/setup-t3.sh"; exit 1; }
+sed 's#^import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";$#import { applyThreadPullRequestLinkUpdate } from "./threadPullRequests.ts";#' "$reducer" > "$here/vendor/t3-stream/orchestrationV2Projection.ts"
+cat > "$here/vendor/t3-stream/threadPullRequests.ts" <<'TS'
+// Written by dev/setup-t3.sh: this host never sends a pull-request link event, so the reducer's handler keeps the thread.
+export const applyThreadPullRequestLinkUpdate = <T>(thread: T, _link: unknown): T => thread;
+TS
+cp "$here/vendor/contracts/tsconfig.json" "$here/vendor/t3-stream/tsconfig.json"
+cat > "$here/vendor/t3-stream/package.json" <<'JSON'
+{ "name": "@t3tools/t3-stream", "private": true, "type": "module", "exports": { "./*": "./*.ts" } }
+JSON
+ln -sfn ../../vendor/t3-stream "$here/node_modules/@t3tools/t3-stream"
+echo "vendored T3's stream code (shared, orchestration-v2 helpers, the client reducer) into vendor/"
 
 # 3. T3's own web app build (the release's CLI archive, checksum-verified): dev/fetch-web.sh, into web/.
 bash "$here/dev/fetch-web.sh" "$here/web"

@@ -54,7 +54,7 @@ it("a well-formed thread id the host has never seen is a typed not-found on the 
 			let subscribeFailure: unknown;
 			let unsub: (() => void) | undefined;
 			try {
-				unsub = bridge.subscribeThread(threadId, () => {}, () => {});
+				unsub = bridge.subscribeThread(threadId, undefined, () => {}, () => {});
 			}
 			catch (error) {
 				subscribeFailure = error;
