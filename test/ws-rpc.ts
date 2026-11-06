@@ -125,13 +125,21 @@ export async function connectWs(port: number, token: string): Promise<WsRpc> {
 		call,
 		open,
 		send,
+		// An answer or stream item that does not encode with the contract's schema ends its request with the RPC server's
+		// "Failed to encode response" defect (a protocol-level failure is a `Defect` frame). Closing a client that saw
+		// either fails the test, so every test that talks to a host checks that what it received is the contract's.
 		close: () => {
 			try {
 				ws.close();
 			} catch {}
+			const broken = frames.find(isEncodeFailure);
+			if (broken !== undefined) throw new Error(`the host sent an item that does not encode: ${JSON.stringify(broken).slice(0, 800)}`);
 		},
 	};
 }
+
+/** A frame that says the host failed to encode what it answered (see `close`). */
+export const isEncodeFailure = (frame: Frame): boolean => frame._tag === "Defect" || (frame._tag === "Exit" && JSON.stringify(frame.exit?.cause ?? null).includes("Failed to encode response"));
 
 /** The `value` of a successful `Exit`, throwing with the frame when the call failed. */
 export function exitValue(frame: Frame, what: string): unknown {
@@ -141,7 +149,7 @@ export function exitValue(frame: Frame, what: string): unknown {
 
 /** The single typed failure of a `Failure` exit (the Effect cause's first `Fail` entry). */
 export function exitError(frame: Frame, what: string): Record<string, unknown> {
-	if (frame._tag === "Defect") throw new Error(`${what}: a DEFECT reached the wire (schema-encode failure): ${JSON.stringify(frame).slice(0, 800)}`);
+	if (isEncodeFailure(frame)) throw new Error(`${what}: the answer did not encode with the contract's schema: ${JSON.stringify(frame).slice(0, 800)}`);
 	const cause = frame.exit?.cause;
 	const entries = Array.isArray(cause) ? (cause as Record<string, unknown>[]) : [];
 	const failed = entries.find((entry) => entry._tag === "Fail");
