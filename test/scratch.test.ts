@@ -14,7 +14,7 @@ import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { makeThreads } from "./threads-harness.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects, storedProjects } from "./host-process-harness.ts";
 
 const PORT = 4947;
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-scratch-"));
@@ -43,7 +43,7 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
+	await seedProjects(root, [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }]);
 	host = launch(root, PORT, {}, agentDir);
 	expect(await waitListening(PORT), host.out().slice(-2000)).toBe(true);
 
@@ -57,9 +57,9 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 		const ensured = exitValue(await ws.call("projects.ensureScratch", {}), "projects.ensureScratch") as { projectId: string };
 		expect(ensured.projectId, "the reply is the project's id (ProjectEnsureScratchResult)").toMatch(/^[0-9a-f-]{36}$/);
 		expect(await exists(scratchRoot), "the Scratch folder exists after the ensure").toBe(true);
-		const registry = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { id?: string; title?: string; path: string }[] };
-		const entry = registry.projects.find((project) => project.path === scratchRoot);
-		expect(entry, `the project is registered at the Scratch root: ${JSON.stringify(registry.projects)}`).toBeDefined();
+		const registry = storedProjects(root);
+		const entry = registry.find((project) => project.path === scratchRoot);
+		expect(entry, `the project is registered at the Scratch root: ${JSON.stringify(registry)}`).toBeDefined();
 		expect(entry!.id).toBe(ensured.projectId);
 		expect(entry!.title, "T3 titles it \"No project\"").toBe("No project");
 
@@ -79,8 +79,7 @@ it("the config advertises the Scratch root; ensureScratch finds-or-creates its p
 		const afterDelete = exitValue(await ws.call("projects.ensureScratch", {}), "the ensure after the folder was deleted") as { projectId: string };
 		expect(afterDelete.projectId).toBe(ensured.projectId);
 		expect(await exists(scratchRoot), "the folder is re-made on every call").toBe(true);
-		const registryAfter = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { path: string }[] };
-		expect(registryAfter.projects.filter((project) => project.path === scratchRoot), "one Scratch project, not one per ensure").toHaveLength(1);
+		expect(storedProjects(root).filter((project) => project.path === scratchRoot), "one Scratch project, not one per ensure").toHaveLength(1);
 
 		// 5. A thread launched there runs in a folder of its own, claimed under the Scratch root (T3's `folderForThread`,
 		//    named from the date, the first message's words, and the thread id).

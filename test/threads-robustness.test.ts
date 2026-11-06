@@ -35,7 +35,7 @@ describe("submit honesty (S3)", () => {
 
 		// A prompt to the now-untracked head, with promote broken: the submit must SUCCEED (the run is live) and warn.
 		const warnings: string[] = [];
-		const brittle = new FailingPromoteThreads({ harness, registry: testRegistry(f.projects), onWarn: (m) => warnings.push(m) });
+		const brittle = new FailingPromoteThreads({ harness, registry: await testRegistry(f.harness, f.projects), onWarn: (m) => warnings.push(m) });
 		const run = gated("still running");
 		model.respond(run.step);
 		const submission = await brittle.submit({ threadId: "t", conversationId: oldHead, requestId: "late", message: "two" }, undefined);

@@ -93,7 +93,7 @@ it("(b) after creates, prompts, promotes and an undo whose cwd is uncovered, NO 
 	// the first registered project, never written with "". And an undo naming the removed thread adds NO ghost row.
 	const entryB = await firstUserEntry(harness, b.head);
 	await threads.remove("b");
-	f.registry.remove("q");
+	await f.registry.remove("q");
 	await layer.promote("b", b.head);
 	const forked = await layer.rewind({ threadId: "b", expectedHead: b.head, entryId: entryB, requestId: "u3" });
 

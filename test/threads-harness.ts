@@ -13,6 +13,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Project } from "../src/config.ts";
 import { Threads } from "../src/threads.ts";
 import { testRegistry } from "./test-registry.ts";
+import { ProjectRegistry } from "../src/registry.ts";
 import { createScriptedModel, type ScriptedModel } from "./fake-model.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -23,7 +24,7 @@ export type ThreadsFixture = {
 	readonly model: ScriptedModel;
 	readonly root: string;
 	readonly projects: readonly Project[];
-	readonly registry: ReturnType<typeof testRegistry>;
+	readonly registry: ProjectRegistry;
 	/** The extensions installed on the Harness's tool registry (a restart installs them again). */
 	readonly extensions: readonly Extension[];
 };
@@ -63,7 +64,7 @@ export async function makeThreads(
 	});
 	// The threads layer resolves a thread's `projectId` through the registry; the test registry keeps the readable ids
 	// (`"p"`, `"one"`) so a test names its project directly.
-	const projectRegistry = testRegistry(projects);
+	const projectRegistry = await testRegistry(harness, projects);
 	const threads = new Threads({ harness, registry: projectRegistry });
 	return { threads, harness, model, root: dir, projects, registry: projectRegistry, extensions: options.extensions ?? [] };
 }
@@ -86,14 +87,16 @@ export function createNamed(threads: Threads, harness: Harness, model: ScriptedM
  * layer, which adopts nothing at open. Everything the state stores has to survive is on disk, so a test that
  * reopens is testing the durable bytes, not an in-memory cache.
  */
-export async function restart(f: ThreadsFixture): Promise<{ threads: Threads; harness: Harness }> {
+export async function restart(f: ThreadsFixture): Promise<{ threads: Threads; harness: Harness; registry: ProjectRegistry }> {
 	await f.harness.close(ctx);
 	const storage = await openNodeSqliteStorage(join(f.root, "durable.db"));
 	// The harness registry is pi-durable's TOOL registry (a fresh one — the scripted model needs no tools).
 	const registry = createRegistry();
 	for (const extension of f.extensions) registry.install(extension);
 	const harness = await Harness.open(storage, { models: f.model.models, registry }, ctx);
-	return { threads: new Threads({ harness, registry: f.registry }), harness };
+	const projects = new ProjectRegistry(harness, { baseDir: "/" });
+	await projects.load();
+	return { threads: new Threads({ harness, registry: projects }), harness, registry: projects };
 }
 
 export async function conversation(harness: Harness, id: number): Promise<Conversation> {

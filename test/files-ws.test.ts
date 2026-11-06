@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { AuthAccessReadScope, AuthFilesystemReadScope, AuthFilesystemWriteScope } from "@t3tools/contracts";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, pair, postJson, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 
 const PORT = 5141;
 let root: string;
@@ -22,7 +22,7 @@ beforeAll(async () => {
 	await mkdir(join(root, "agent"), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true });
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: project }] }), "utf8");
+	await seedProjects(root, [{ id: "p-alpha", title: "alpha", path: project }]);
 	host = launch(root, PORT, {}, join(root, "agent"));
 }, 30_000);
 

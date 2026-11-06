@@ -8,7 +8,7 @@ import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
-import { FileProjectRegistry } from "./registry.ts";
+import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
@@ -42,13 +42,9 @@ export type AttachT3Options = {
 	/** The model catalog: T3's picker list and the list `server.refreshProviders` answers (availability is the Harness's). */
 	readonly models: Models;
 	/**
-	 * The bridge's state directory, created if missing: it holds `t3-settings.json` (T3's server settings), `projects.json`
-	 * (the project registry) and `auth.json` (the pairing store). The bridge opens all three itself and writes them on
-	 * the UI's behalf; one host per directory.
-	 *
-	 * The directory PAIRS with the Harness's storage: the harness's threads point at project ids in this directory's
-	 * `projects.json`. Back up and move them together — a mismatched pair (threads, no registry) shows an empty
-	 * sidebar; nothing here repairs the combination for you.
+	 * The bridge's state directory, created if missing: it holds `t3-settings.json` (T3's server settings), `auth.json`
+	 * (the pairing store) and `attachments/`. The bridge opens them itself and writes them on the UI's behalf; one host
+	 * per directory. Threads and projects live in the Harness's own storage.
 	 */
 	readonly stateDir: string;
 	/**
@@ -142,7 +138,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	const log = options.log ?? nullLogger;
 	// The bridge owns its dir: mode 0700, it holds the pairing store. A pre-existing dir is tightened.
 	mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
-	const registry = FileProjectRegistry.open(options.stateDir);
+	const registry = new ProjectRegistry(harness, { baseDir: options.stateDir });
 	const threads = new Threads({
 		harness,
 		registry,
@@ -150,8 +146,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.context === undefined ? {} : { context: options.context }),
 		onWarn: (message) => log.warn(message),
 	});
-	// The threads are read once, before anything is served: a store this version cannot read stops the host here.
+	// The projects and threads are read once, before anything is served: a store this version cannot read stops the host here.
 	try {
+		await registry.load();
 		await threads.load();
 	} catch (error) {
 		throw new Error(`pi-durable-t3: cannot read the threads in this Harness's storage (${error instanceof Error ? error.message : String(error)}). A store written by an earlier version is migrated by hand.`, { cause: error });

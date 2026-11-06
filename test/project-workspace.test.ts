@@ -1,6 +1,5 @@
 // A project path that exists as a FILE can never be registered: `projects.mutate` create AND update naming it are
-// refused with a typed project error naming the path — no entry stored, no entry moved. The boot side of the rule is
-// the strict parser (the path itself is not stat'ed at boot; see `settings.test.ts`).
+// refused with a typed project error naming the path — no entry stored, no entry moved.
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
@@ -8,15 +7,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createModels } from "@earendil-works/pi-ai";
 import { unstartedStore } from "./threads-harness.ts";
-import { FileProjectRegistry, ProjectWorkspaceNotDirectory } from "../src/registry.ts";
+import { type ProjectRegistry, ProjectWorkspaceNotDirectory } from "../src/registry.ts";
+import { storedRegistry } from "./test-registry.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
-async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: FileProjectRegistry }> {
-	const registry = await FileProjectRegistry.open(dataDir);
+async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: ProjectRegistry }> {
+	const { registry } = await storedRegistry(dataDir);
 	const config: BridgeConfig = {
 		host: "127.0.0.1",
 		port: 0,

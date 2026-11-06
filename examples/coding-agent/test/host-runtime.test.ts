@@ -19,7 +19,6 @@ describe("host runtime (example wiring)", () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-durable-t3-runtime-"));
 		await mkdir(join(root, "projects/alpha"), { recursive: true });
 		await mkdir(join(root, "projects/beta"), { recursive: true });
-		const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]);
 
 		// The model answers the turn with a `bash pwd > pwd.txt`, then finishes — exercising a real tool in the env cwd.
 		const steps: FauxResponseStep[] = [
@@ -28,7 +27,7 @@ describe("host runtime (example wiring)", () => {
 		];
 		const model = createScriptedModel(steps);
 		const runtime = await openCodingHarness({ dataDir: root }, model.models);
-		const threads = new Threads({ harness: runtime.harness, registry });
+		const threads = new Threads({ harness: runtime.harness, registry: await testRegistry(runtime.harness, [{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]) });
 		try {
 			const thread = await threads.create({ threadId: "a", projectId: "alpha" });
 			const head = await runtime.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);

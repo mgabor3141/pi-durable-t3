@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import type { UsageDay, UsageSummary } from "@t3tools/contracts";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-usage-"));
 const agentDir = join(scratch, "agent");
@@ -32,7 +32,7 @@ it("server.getUsageSummary answers a pi bucket for a real turn; refreshUsageRate
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true });
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: projectDir }] }), "utf8");
+	await seedProjects(root, [{ id: "p-alpha", title: "alpha", path: projectDir }]);
 	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);

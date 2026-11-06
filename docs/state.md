@@ -21,6 +21,7 @@ Projections are rebuilt from it on every change.
 | A deleted thread's record, with `deletedAt` | A deleted thread could come back: the record is the tombstone that keeps a late prompt to its head from promoting it |
 | One sidebar summary per thread (`pi-durable-t3.thread-summary`) | An unopened thread previews and sorts as new until it is opened |
 | The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
+| The project registry (`pi-durable-t3.projects`): id, path, title per project. A thread's project is checked in the commit that writes the thread | Project names; threads keep their `cwd` |
 
 Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt and
 run boundary — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
@@ -31,14 +32,12 @@ client's choices and the integrator's extensions.
 
 ## The bridge, on disk
 
-The bridge owns one directory — `attachT3`'s `stateDir` — and creates it if missing. It PAIRS with pi-durable's
-storage: the Harness's threads point at project ids in this directory's `projects.json`. Back up and move
-the two together; a mismatched pair shows an empty sidebar, and nothing repairs the combination.
+The bridge owns one directory — `attachT3`'s `stateDir` — and creates it if missing. Nothing in it is pointed at by
+the Harness's storage: settings, pairings and attachment bytes.
 
 | File | What | If lost |
 |---|---|---|
 | `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
-| `projects.json` (the state dir) | The project registry: id, path, title | Project names; threads keep their `cwd` |
 | `auth.json` (the state dir) | Environment id; hashed pairing links and device sessions (bearer or browser cookie), each with its scopes and client metadata; the key that signs attachment URLs | Every device re-pairs |
 | `scheduled-tasks.json` (the state dir) | Scheduled tasks as T3 stores them: trigger, prompt, project/thread, model, run state (`nextRunAt`, last run, count) | The tasks; the threads they made stay |
 | `attachments/` (the state dir) | Image and file attachments, one file per attachment id | Past attachments stop rendering; the model's copy in pi-durable survives |

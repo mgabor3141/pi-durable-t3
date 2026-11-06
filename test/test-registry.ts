@@ -1,75 +1,38 @@
-// An in-memory `ProjectRegistry` for tests. It returns the projects it is given, ids included, so a test can
-// reference a project by a readable id (`"p"`, `"alpha"`) — the threads layer and bridge treat `projectId` as a
-// foreign key resolved through `registry.list()`, and how the id is produced (client-minted / path-derived in
-// production, given in a test) is the registry's business, not theirs. `add` honors a `clientId` verbatim (the test
-// names its id; the shape policy is the real registry's), and the path is the uniqueness key, compared normalized,
-// as in the real registry. The path-derived ids and duplicate-path refusal of the REAL registry are tested in
-// `settings.test.ts`.
-import { resolve } from "node:path";
-import type { Project } from "../src/config.ts";
-import type { ProjectRegistry } from "../src/registry.ts";
-import { ProjectConflict, ProjectNotFound } from "../src/registry.ts";
+// A real `ProjectRegistry` over a test's Harness, seeded with projects at the ids a test reads them by (`"p"`,
+// `"alpha"`): the threads layer checks a thread's project inside its commit, against the registry's stored list, so a
+// test registers its projects there like the UI does.
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai";
+import { createRegistry, Harness, MemoryStorage } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { join } from "node:path";
+import { ProjectRegistry } from "../src/registry.ts";
 
-export class TestRegistry implements ProjectRegistry {
-	#projects: Project[];
-	readonly #listeners = new Set<() => void>();
-	/** The registry file an in-memory registry claims: nothing is written, a refusal just names something. */
-	readonly path: string;
-
-	constructor(projects: readonly Project[], options: { path?: string } = {}) {
-		this.#projects = projects.map((project) => ({ ...project }));
-		this.path = options.path ?? "/test/projects.json";
+/** A registry over `harness` holding `projects` (`cwd` defaults to `/data/<id>`, `name` to the id). */
+export async function testRegistry(
+	harness: Harness,
+	projects: readonly { id: string; name?: string; cwd?: string }[],
+	options: { baseDir?: string } = {},
+): Promise<ProjectRegistry> {
+	const registry = new ProjectRegistry(harness, { baseDir: options.baseDir ?? "/" });
+	await registry.load();
+	for (const project of projects) {
+		if (registry.list().some((existing) => existing.id === project.id)) continue;
+		await registry.add(project.name ?? project.id, project.cwd ?? `/data/${project.id}`, { clientId: project.id });
 	}
-
-	list(): Project[] {
-		return this.#projects.map((project) => ({ ...project }));
-	}
-
-	subscribe(listener: () => void): () => void {
-		this.#listeners.add(listener);
-		return () => this.#listeners.delete(listener);
-	}
-
-	add(title: string | undefined, path: string, options?: { readonly clientId?: string }): Project {
-		const cwd = resolve(path);
-		if (this.#projects.some((project) => resolve(project.cwd) === cwd)) throw new ProjectConflict(cwd, this.#projects.find((project) => resolve(project.cwd) === cwd)!.id);
-		const project: Project = { id: options?.clientId ?? title ?? cwd, name: title ?? cwd, cwd };
-		this.#projects = [...this.#projects, project];
-		this.#notify();
-		return project;
-	}
-
-	resolvePath(path: string): string {
-		return resolve(path);
-	}
-
-	update(id: string, patch: { title?: string; path?: string }): Project {
-		const index = this.#projects.findIndex((project) => project.id === id);
-		if (index < 0) throw new ProjectNotFound(id);
-		const next = { ...this.#projects[index]!, ...(patch.title === undefined ? {} : { name: patch.title }), ...(patch.path === undefined ? {} : { cwd: resolve(patch.path) }) };
-		if (this.#projects.some((project, i) => i !== index && resolve(project.cwd) === resolve(next.cwd))) throw new ProjectConflict(next.cwd, this.#projects.find((project, i) => i !== index && resolve(project.cwd) === resolve(next.cwd))!.id);
-		const projects = [...this.#projects];
-		projects[index] = next;
-		this.#projects = projects;
-		this.#notify();
-		return { ...next };
-	}
-
-	remove(id: string): Project | undefined {
-		const index = this.#projects.findIndex((project) => project.id === id);
-		if (index < 0) return undefined;
-		const removed = this.#projects[index]!;
-		this.#projects = this.#projects.filter((_, i) => i !== index);
-		this.#notify();
-		return removed;
-	}
-
-	#notify(): void {
-		for (const listener of this.#listeners) listener();
-	}
+	return registry;
 }
 
-/** Shorthand: a registry over `{ id, cwd }` (cwd defaults to `/data/<id>`). */
-export function testRegistry(projects: readonly { id: string; name?: string; cwd?: string }[], options: { path?: string } = {}): TestRegistry {
-	return new TestRegistry(projects.map((project) => ({ id: project.id, name: project.name ?? project.id, cwd: project.cwd ?? `/data/${project.id}` })), options);
+/** A registry on a Harness of its own (memory storage), for a test that has no Harness: `close` when done. */
+export async function standaloneRegistry(projects: readonly { id: string; name?: string; cwd?: string }[]): Promise<ProjectRegistry> {
+	const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+	return testRegistry(harness, projects);
+}
+
+/** A registry on a Harness over `dir`/durable.db, so a test can close it and read the same storage again. */
+export async function storedRegistry(dir: string): Promise<{ registry: ProjectRegistry; harness: Harness; close: () => Promise<void> }> {
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+	const registry = new ProjectRegistry(harness, { baseDir: dir });
+	await registry.load();
+	return { registry, harness, close: () => harness.close(BACKGROUND_CONTEXT) };
 }

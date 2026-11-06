@@ -13,7 +13,7 @@ import { AgentSessionScanResult, ServerConfigStreamEvent, ServerSettingsError } 
 import { ServerSettingsStore, SETTINGS_FILE, ProviderInstanceExists } from "../src/settings.ts";
 import { ConfigError } from "../src/config.ts";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-settings-"));
 const agentDir = join(scratch, "agent");
@@ -124,7 +124,7 @@ async function makeRoot(name: string, port: number): Promise<string> {
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
+await seedProjects(root, [{ path: join(root, "projects/alpha"), title: "alpha" }]);
 	return root;
 }
 

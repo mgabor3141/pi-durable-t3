@@ -15,7 +15,7 @@ export interface FacetConfig {
 	readonly host: string;
 	readonly port: number;
 	readonly label: string;
-	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `projects.json`, `auth.json` live here. */
+	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `auth.json` and `attachments/` live here. */
 	readonly stateDir: string;
 	/** The environment T3 works in: its `cwd` is the root of every absolute path in the protocol. Required by
 	 * `attachT3`; optional here only so tests and older direct `Bridge` callers keep a local fallback. */

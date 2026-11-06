@@ -4,19 +4,19 @@
 import { describe, expect, it } from "vitest";
 import { serverCwd, type BridgeConfig } from "../src/t3/config.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
-import { testRegistry } from "./test-registry.ts";
+import { standaloneRegistry } from "./test-registry.ts";
 
 const ROOT = "/tmp/pi-durable-t3-t3-config";
 
-function bridgeConfig(projects: readonly { id: string; cwd: string }[]): BridgeConfig {
-	return { host: "127.0.0.1", port: 4903, label: "pi", stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], staticDir: undefined, settings: ServerSettingsStore.open(ROOT), registry: testRegistry(projects) };
+async function bridgeConfig(projects: readonly { id: string; cwd: string }[]): Promise<BridgeConfig> {
+	return { host: "127.0.0.1", port: 4903, label: "pi", stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], staticDir: undefined, settings: ServerSettingsStore.open(ROOT), registry: await standaloneRegistry(projects) };
 }
 
 describe("serverCwd (empty-environment fallback, B4)", () => {
-	it("the first project's path when projects exist; the bridge dir — not a throw — when there are none (B4)", () => {
-		const withProjects = bridgeConfig([{ id: "alpha", cwd: `${ROOT}/projects/alpha` }]);
+	it("the first project's path when projects exist; the bridge dir — not a throw — when there are none (B4)", async () => {
+		const withProjects = await bridgeConfig([{ id: "alpha", cwd: `${ROOT}/projects/alpha` }]);
 		expect(serverCwd(withProjects)).toBe(`${ROOT}/projects/alpha`);
-		const empty = bridgeConfig([]);
+		const empty = await bridgeConfig([]);
 		expect(empty.registry.list()).toHaveLength(0);
 		expect(serverCwd(empty)).toBe(empty.stateDir);
 	});

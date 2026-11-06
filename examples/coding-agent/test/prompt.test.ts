@@ -54,12 +54,11 @@ describe("base prompt + instructions", () => {
 			await writeFile(join(root, "notes.md"), marker);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]);
 			// A thread runs where its project lives; the project dirs exist before its first turn.
 			await mkdir(join(root, "projects/alpha"), { recursive: true });
 			await mkdir(join(root, "projects/beta"), { recursive: true });
 			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
-			const threads = new Threads({ harness: runtime.harness, registry });
+			const threads = new Threads({ harness: runtime.harness, registry: await testRegistry(runtime.harness, [{ id: "alpha", cwd: join(root, "projects/alpha") }, { id: "beta", cwd: join(root, "projects/beta") }]) });
 			try {
 				await threads.create({ threadId: "a", projectId: "alpha" });
 				await (await runtime.harness.conversation((await threads.thread("a"))!.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: model.modelRef }, BACKGROUND_CONTEXT);
@@ -96,10 +95,9 @@ describe("base prompt + instructions", () => {
 		try {
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const registry = testRegistry([{ id: "alpha", cwd: join(root, "projects/alpha") }]);
 			await mkdir(join(root, "projects/alpha"), { recursive: true });
 			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension()] });
-			const threads = new Threads({ harness: runtime.harness, registry });
+			const threads = new Threads({ harness: runtime.harness, registry: await testRegistry(runtime.harness, [{ id: "alpha", cwd: join(root, "projects/alpha") }]) });
 			try {
 				await threads.create({ threadId: "a", projectId: "alpha" });
 				await (await runtime.harness.conversation((await threads.thread("a"))!.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: model.modelRef }, BACKGROUND_CONTEXT);
@@ -126,10 +124,9 @@ describe("base prompt + instructions", () => {
 			await writeFile(join(root, "notes.md"), marker);
 			const rec = recorder();
 			const model = createScriptedModel(rec.responses);
-			const registry = testRegistry([{ id: "alpha", cwd: join(root, "p") }]);
 			await mkdir(join(root, "p"), { recursive: true });
 			const runtime = await openCodingHarness({ dataDir: root }, model.models, { extensions: [CodingExtension(join(root, "notes.md"))] });
-			const threads = new Threads({ harness: runtime.harness, registry });
+			const threads = new Threads({ harness: runtime.harness, registry: await testRegistry(runtime.harness, [{ id: "alpha", cwd: join(root, "p") }]) });
 			try {
 				const t = await threads.create({ threadId: "a", projectId: "alpha" });
 				await (await runtime.harness.conversation(t.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: model.modelRef }, BACKGROUND_CONTEXT);

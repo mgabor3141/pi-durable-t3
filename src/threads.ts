@@ -38,7 +38,7 @@ import { APP_COMPACT_ENTRY } from "./t3/runs.ts";
 import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
-import type { ProjectRegistry } from "./registry.ts";
+import { type ProjectRegistry, projectsInCommit } from "./registry.ts";
 
 /** The entry kind a client prompt is placed as, carrying the client's message id in its `data` (state.md: no side
  * store). It must not start with `pi.` — pi-durable's namespace for an input's own entry kinds. */
@@ -77,6 +77,8 @@ export type ThreadSummary = {
 	visibleItemCount: number;
 };
 type StoredSummary = ThreadSummary & { revision: number };
+/** A thread with no summary yet (revision 0: never written). */
+const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, latestUserMessageAt: null, itemCount: 0, visibleItemCount: 0, revision: 0 };
 
 /** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
 type AppliedUndo = { requestId: string; head: number };
@@ -222,7 +224,8 @@ async function owedIn(tx: Tx, conversationId: ConversationId): Promise<boolean> 
 	return (inbox.items?.length ?? 0) > 0;
 }
 
-const copy = <T>(value: T): T => structuredClone(value);
+/** A plain copy: documents are JSON, and a draft (a proxy) cannot be structured-cloned. */
+const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 /** Replace a document draft's content with `value`. */
 function overwrite(draft: object, value: object): void {
@@ -231,54 +234,79 @@ function overwrite(draft: object, value: object): void {
 	Object.assign(target, copy(value));
 }
 
-/** What one commit changed, staged inside it and applied to memory once it has committed. */
+/**
+ * One commit's view of the documents and the writes it makes. Reads go to the commit, not to memory: another threads
+ * layer on the same Harness (a test's, a tool's) cannot make a write lose its changes. Each write is staged for memory
+ * and for the change event.
+ */
 class Writes {
 	directory: Directory | undefined;
 	readonly records = new Map<string, ThreadRecord>();
 	readonly summaries = new Map<string, StoredSummary>();
 	readonly #tx: Tx;
-	readonly #layer: Threads;
 
-	constructor(tx: Tx, layer: Threads) {
+	constructor(tx: Tx) {
 		this.#tx = tx;
-		this.#layer = layer;
 	}
 
 	/** The directory as this commit sees it. */
-	readDirectory(): Directory {
-		return copy(this.directory ?? this.#layer.directorySnapshot());
+	async readDirectory(): Promise<Directory> {
+		if (this.directory === undefined) this.directory = copy((await this.#tx.doc(ThreadsDoc)) as Directory);
+		return copy(this.directory);
 	}
 
 	/** A record as this commit sees it (deleted ones included), or `undefined`. */
-	record(threadId: string): ThreadRecord | undefined {
-		const value = this.records.get(threadId) ?? this.#layer.recordSnapshot(threadId);
-		return value === undefined ? undefined : copy(value);
+	async record(threadId: string): Promise<ThreadRecord | undefined> {
+		const staged = this.records.get(threadId);
+		if (staged !== undefined) return copy(staged);
+		const directory = await this.readDirectory();
+		// A record exists once its thread entered the directory (a deleted thread keeps its head there).
+		if (!directory.threads.includes(threadId) && !Object.values(directory.heads).includes(threadId)) return undefined;
+		const stored = copy((await this.#tx.doc(ThreadRecordDoc, threadId, {} as never)) as ThreadRecord);
+		this.records.set(threadId, stored);
+		return copy(stored);
 	}
 
 	/** The live record, or the typed not-found. */
-	live(threadId: string): ThreadRecord {
-		const record = this.record(threadId);
+	async live(threadId: string): Promise<ThreadRecord> {
+		const record = await this.record(threadId);
 		if (record === undefined || record.deletedAt !== null) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 		return record;
+	}
+
+	/** A summary as this commit sees it, or `undefined` when the thread has none yet. */
+	async summary(threadId: string): Promise<StoredSummary | undefined> {
+		const staged = this.summaries.get(threadId);
+		if (staged !== undefined) return copy(staged);
+		const stored = copy((await this.#tx.doc(ThreadSummaryDoc, threadId, NO_SUMMARY)) as StoredSummary);
+		return stored.revision === 0 ? undefined : stored;
 	}
 
 	async putRecord(record: ThreadRecord): Promise<void> {
 		record.revision += 1;
 		overwrite(await this.#tx.doc(ThreadRecordDoc, record.threadId, record), record);
 		this.records.set(record.threadId, copy(record));
+		this.written.add(record.threadId);
 	}
 
 	async putDirectory(directory: Directory): Promise<void> {
 		directory.revision += 1;
 		overwrite(await this.#tx.doc(ThreadsDoc), directory);
 		this.directory = copy(directory);
+		this.directoryWritten = true;
 	}
 
 	async putSummary(threadId: string, summary: StoredSummary): Promise<void> {
 		summary.revision += 1;
 		overwrite(await this.#tx.doc(ThreadSummaryDoc, threadId, summary), summary);
 		this.summaries.set(threadId, copy(summary));
+		this.summariesWritten.add(threadId);
 	}
+
+	/** What this commit wrote (reads are staged too, but only writes reach memory). */
+	readonly written = new Set<string>();
+	readonly summariesWritten = new Set<string>();
+	directoryWritten = false;
 }
 
 /** The threads layer over a caller-provided Harness. Its only state is the Harness's documents and their memory copy. */
@@ -337,28 +365,18 @@ export class Threads {
 		return () => this.#listeners.delete(listener);
 	}
 
-	/** The directory as committed (a commit's staging reads it). */
-	directorySnapshot(): Readonly<Directory> {
-		return this.#directory;
-	}
-
-	/** A record as committed, deleted ones included. */
-	recordSnapshot(threadId: string): Readonly<ThreadRecord> | undefined {
-		return this.#records.get(threadId);
-	}
-
 	/** One commit through the threads layer: `run` stages its writes; once committed they reach memory and then the change
 	 * listeners, before this returns. A newer copy in memory is never replaced by an older one. */
 	async #commit<T>(run: (tx: Tx, writes: Writes) => Promise<T>): Promise<T> {
 		await this.load();
 		let writes: Writes | undefined;
 		const result = await this.#harness.commit(async (tx) => {
-			writes = new Writes(tx, this);
+			writes = new Writes(tx);
 			return run(tx, writes);
 		}, BACKGROUND_CONTEXT);
 		const staged = writes!;
 		const touched = new Set<string>();
-		if (staged.directory !== undefined && staged.directory.revision > this.#directory.revision) {
+		if (staged.directoryWritten && staged.directory !== undefined && staged.directory.revision > this.#directory.revision) {
 			const before = new Set(this.#directory.threads);
 			const after = new Set(staged.directory.threads);
 			for (const id of before) if (!after.has(id)) touched.add(id);
@@ -366,12 +384,12 @@ export class Threads {
 			this.#directory = staged.directory;
 		}
 		for (const [threadId, record] of staged.records) {
-			if (record.revision <= (this.#records.get(threadId)?.revision ?? 0)) continue;
+			if (!staged.written.has(threadId) || record.revision <= (this.#records.get(threadId)?.revision ?? 0)) continue;
 			this.#records.set(threadId, record);
 			touched.add(threadId);
 		}
 		for (const [threadId, summary] of staged.summaries) {
-			if (summary.revision <= (this.#summaries.get(threadId)?.revision ?? 0)) continue;
+			if (!staged.summariesWritten.has(threadId) || summary.revision <= (this.#summaries.get(threadId)?.revision ?? 0)) continue;
 			this.#summaries.set(threadId, summary);
 			touched.add(threadId);
 		}
@@ -406,9 +424,9 @@ export class Threads {
 	 * loaded or finished run writes its projection. A late, older write never overwrites a newer snapshot. */
 	async remember(threadId: string, summary: Partial<ThreadSummary> & { updatedAt: number }): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
-			const record = writes.record(threadId);
+			const record = await writes.record(threadId);
 			if (record === undefined || record.deletedAt !== null) return;
-			const existing = writes.summaries.get(threadId) ?? this.#summaries.get(threadId);
+			const existing = await writes.summary(threadId);
 			const incomingMessageAt = summary.latestVisibleMessage?.updatedAt ?? -Infinity;
 			const existingMessageAt = existing?.latestVisibleMessage?.updatedAt ?? -Infinity;
 			if (existing !== undefined && summary.updatedAt < existing.updatedAt && incomingMessageAt <= existingMessageAt) return;
@@ -544,7 +562,7 @@ export class Threads {
 
 	/** Add a new record to the directory, its head included. */
 	async #addThread(writes: Writes, record: ThreadRecord): Promise<void> {
-		const directory = writes.readDirectory();
+		const directory = await writes.readDirectory();
 		directory.threads.push(record.threadId);
 		directory.heads[String(record.head)] = record.threadId;
 		await writes.putRecord(record);
@@ -597,13 +615,13 @@ export class Threads {
 		}
 		if (!cwdIsDirectory) throw hostError("unknown_project", `thread folder is not a directory: ${cwd}`);
 		return this.#commit(async (tx, writes) => {
-			const existing = writes.record(input.threadId);
+			const existing = await writes.record(input.threadId);
 			if (existing !== undefined) {
 				if (existing.deletedAt !== null) throw hostError("unknown_thread", `thread ${input.threadId} was deleted`);
 				return existing;
 			}
 			// The FK, re-checked inside the commit (design.md, IDs).
-			const committed = this.projects.find((candidate) => candidate.id === input.projectId);
+			const committed = (await projectsInCommit(tx)).find((candidate) => candidate.id === input.projectId);
 			if (committed === undefined) throw hostError("unknown_project", `no such project: ${input.projectId}`);
 			const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
 			// A fresh thread carries its own cwd — the project's root, or the folder claimed for it — and nothing else
@@ -628,7 +646,7 @@ export class Threads {
 	/** Set a thread's title: one commit on its record, so a rename survives a restart. */
 	async rename(threadId: string, title: string): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
-			const record = writes.live(threadId);
+			const record = await writes.live(threadId);
 			record.title = title;
 			await writes.putRecord(record);
 		});
@@ -735,9 +753,10 @@ export class Threads {
 		const agent = await tx.doc(AgentDoc, conversationId as ConversationId);
 		const cwd = agent.cwd;
 		if (cwd === undefined) return undefined;
-		const exact = this.projects.find((project) => project.cwd === cwd);
+		const projects = await projectsInCommit(tx);
+		const exact = projects.find((project) => project.cwd === cwd);
 		if (exact !== undefined) return exact.id;
-		return this.projects.find((project) => cwd.startsWith(`${project.cwd}/`))?.id;
+		return projects.find((project) => cwd.startsWith(`${project.cwd}/`))?.id;
 	}
 
 	/**
@@ -746,8 +765,8 @@ export class Threads {
 	 */
 	async promote(viaThreadId: string, conversationId: number): Promise<void> {
 		await this.#commit(async (tx, writes) => {
-			const owner = writes.readDirectory().heads[String(conversationId)];
-			const record = owner === undefined ? undefined : writes.record(owner);
+			const owner = (await writes.readDirectory()).heads[String(conversationId)];
+			const record = owner === undefined ? undefined : await writes.record(owner);
 			// A live thread's head needs no promote; a deleted thread's head stays removed: the tombstone outranks the
 			// prompt (design.md, Invariants).
 			if (record !== undefined && record.head === conversationId) return;
@@ -756,7 +775,7 @@ export class Threads {
 				this.#onWarn(`not promoting conversation ${conversationId}: its cwd matches no registered project; it stays ownerless`, undefined);
 				return;
 			}
-			await this.#addThread(writes, this.#childOf(writes.record(viaThreadId), viaThreadId, conversationId, projectId));
+			await this.#addThread(writes, this.#childOf(await writes.record(viaThreadId), viaThreadId, conversationId, projectId));
 		});
 	}
 
@@ -861,7 +880,7 @@ export class Threads {
 	async settle(threadId: string, settledAt?: number): Promise<void> {
 		const at = settledAt ?? Date.now();
 		await this.#commit(async (_tx, writes) => {
-			const thread = writes.live(threadId);
+			const thread = await writes.live(threadId);
 			const already = thread.settledOverride === "settled";
 			thread.settledOverride = "settled";
 			thread.settledAt = already ? (thread.settledAt ?? at) : at;
@@ -873,7 +892,7 @@ export class Threads {
 	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. */
 	async unsettle(threadId: string): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
-			const thread = writes.live(threadId);
+			const thread = await writes.live(threadId);
 			const already = thread.settledOverride === "active";
 			thread.settledOverride = "active";
 			delete thread.settledAt;
@@ -885,7 +904,7 @@ export class Threads {
 	/** T3's automatic un-settle on new activity: no explicit override remains, only a wake stamp. */
 	async wake(threadId: string): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
-			const thread = writes.record(threadId);
+			const thread = await writes.record(threadId);
 			if (thread === undefined || thread.deletedAt !== null || thread.settledOverride === undefined) return;
 			const wasActive = thread.settledOverride === "active";
 			delete thread.settledOverride;
@@ -1007,7 +1026,7 @@ export class Threads {
 		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
 		const headAgent = forkAt === undefined ? await head.agent(BACKGROUND_CONTEXT) : undefined;
 		return this.#commit(async (tx, writes) => {
-			const thread = writes.record(input.threadId);
+			const thread = await writes.record(input.threadId);
 			const applied = thread?.undos.find((undo) => undo.requestId === input.requestId);
 			if (applied !== undefined) return applied.head;
 			const fork =
@@ -1036,7 +1055,7 @@ export class Threads {
 				thread.head = fork.id;
 				receipt(thread);
 				await writes.putRecord(thread);
-				const directory = writes.readDirectory();
+				const directory = await writes.readDirectory();
 				directory.heads[String(fork.id)] = thread.threadId;
 				await writes.putDirectory(directory);
 				return fork.id;
@@ -1061,12 +1080,12 @@ export class Threads {
 	 */
 	async fork(input: { sourceThreadId: string; targetThreadId: string; entryId: number; runId?: string; title?: string; provenance?: Provenance }): Promise<ThreadRecord> {
 		return this.#commit(async (tx, writes) => {
-			const existing = writes.record(input.targetThreadId);
+			const existing = await writes.record(input.targetThreadId);
 			if (existing !== undefined) {
 				if (existing.deletedAt !== null) throw hostError("unknown_thread", `thread ${input.targetThreadId} was deleted`);
 				return existing;
 			}
-			const source = writes.live(input.sourceThreadId);
+			const source = await writes.live(input.sourceThreadId);
 			const fork = await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
 			const projectId = await this.#projectForConversation(tx, fork.id);
 			if (projectId === undefined) throw hostError("unknown_project", `the fork of ${input.sourceThreadId} matches no registered project`);
@@ -1097,11 +1116,11 @@ export class Threads {
 		const head = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
 		await head?.abort(BACKGROUND_CONTEXT);
 		await this.#commit(async (_tx, writes) => {
-			const record = writes.live(threadId);
+			const record = await writes.live(threadId);
 			// The removal is DURABLE: the record stays as the tombstone, so the promote path and the undo fork skip its head.
 			record.deletedAt = Date.now();
 			await writes.putRecord(record);
-			const directory = writes.readDirectory();
+			const directory = await writes.readDirectory();
 			directory.threads = directory.threads.filter((id) => id !== threadId);
 			await writes.putDirectory(directory);
 		});

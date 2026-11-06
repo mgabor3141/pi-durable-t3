@@ -17,7 +17,7 @@ import { afterAll, expect, it } from "vitest";
 import { Schema } from "effect";
 import { OrchestrationV2ThreadLaunchError, OrchestrationV2ThreadLaunchResult } from "@t3tools/contracts";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-launch-"));
 const agentDir = join(scratch, "agent");
@@ -38,11 +38,7 @@ it("launchThread: an unregistered project refuses with the decodable typed error
 	await writeFile(join(projectDir, ".keep"), "real project\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-await writeFile(
-		join(t3Dir(root), "projects.json"),
-		JSON.stringify({ projects: [{ id: "p-registered-1", title: "Real", path: projectDir }] }),
-		"utf8",
-	);
+await seedProjects(root, [{ id: "p-registered-1", title: "Real", path: projectDir }]);
 	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);

@@ -1,6 +1,6 @@
 // No thread row without a registered project (review conc N1 + store N2). `Threads.create` validated the
 // projectId against the registry OUTSIDE its commit; the closure pushed the fixed id with no re-check, and
-// the project registry lives in the other store (`projects.json`, mutated synchronously), so
+// the project registry lived in another store (a file, mutated synchronously), so
 // `thread.create ∥ project.delete` lands a thread row whose `projectId` exists nowhere — fully operable
 // (prompts run, projections serve), durable across a restart, and with no project to group it under.
 // The invariant is enforced where rows are written: at COMMIT time, the project must exist in the
@@ -31,7 +31,7 @@ describe("a thread row is written only for a registered project", () => {
 		// The race, made one tick wide: the create is in flight (its pre-commit check passed) when the
 		// project registration is dropped. Pre-fix the closure pushed the stale id and the row landed.
 		const creating = f.threads.create({ threadId: "late", projectId: "p" });
-		f.registry.remove("p");
+		await f.registry.remove("p");
 		const failure = await creating.then(() => undefined, (error: unknown) => error as Error);
 		expect(failure, "the create is refused once its project is gone").toBeInstanceOf(HostError);
 		expect((failure as HostError).code).toBe("unknown_project");
@@ -41,7 +41,7 @@ describe("a thread row is written only for a registered project", () => {
 		expect(rows.filter((row) => row.projectId === "p"), `no row under the removed project: ${JSON.stringify(rows)}`).toHaveLength(0);
 
 		// A create for a project that IS registered still works (the check refuses, it does not disable).
-		f.registry.add("p", join(f.root, "p"));
+		await f.registry.add("p", join(f.root, "p"), { clientId: "p" });
 		const t = await f.threads.create({ threadId: "ok", projectId: "p" });
 		expect(t.projectId).toBe("p");
 	}, 30_000);

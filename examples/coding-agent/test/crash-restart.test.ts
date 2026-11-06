@@ -13,7 +13,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId, type EntryRecord, UserEntry } from "@earendil-works/pi-durable";
 import { attachT3 } from "../../../src/bridge.ts";
 import { Threads } from "../../../src/threads.ts";
-import { FileProjectRegistry } from "../../../src/registry.ts";
+import { ProjectRegistry } from "../../../src/registry.ts";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { nullLogger } from "../../../src/t3/logging.ts";
 import { openCodingHarness } from "../src/host-runtime.ts";
@@ -59,8 +59,9 @@ describe("crash and restart (the example wiring)", () => {
 
 			// The restart: the same wiring, the same root, and nothing submitted here.
 			const model = createScriptedModel([fauxAssistantMessage("RESUMED-REPLY")]);
-			const registry = FileProjectRegistry.open(root);
 			const runtime = await openCodingHarness({ dataDir: root }, model.models);
+			const registry = new ProjectRegistry(runtime.harness, { baseDir: root });
+			await registry.load();
 			const attach = await attachT3(runtime.harness, {
 				models: model.models,
 				stateDir: root,

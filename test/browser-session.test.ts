@@ -11,12 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { afterAll, expect, it } from "vitest";
-import {
-	type Launched,
-	launch,
-	pairCode,
-	t3Dir,
-} from "./host-process-harness.ts";
+import { type Launched, launch, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 import { waitListening } from "./ws-rpc.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-bs-"));
@@ -42,7 +37,7 @@ async function start() {
 		`listen = "127.0.0.1:${PORT}"\n`,
 		"utf8",
 	);
-	await writeFile( join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8", );
+	await seedProjects(root, []);
 	const host = launch(root, PORT, {}, agentDir);
 	launched.push(host);
 	if (!(await waitListening(PORT)))
@@ -116,7 +111,7 @@ it("the cookie is refused for a foreign origin (T3's CSRF guard), and a spent co
 		`listen = "127.0.0.1:${PORT2}"\n`,
 		"utf8",
 	);
-	await writeFile( join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8", );
+	await seedProjects(root, []);
 	const host = launch(root, PORT2, {}, agentDir);
 	launched.push(host);
 	if (!(await waitListening(PORT2)))

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, getJson, pair, waitListening, type Frame } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { makeThreads } from "./threads-harness.ts";
@@ -44,7 +44,7 @@ it("project.delete removes the project's threads, refuses an unforced delete, an
 	await writeFile(marker, "the user's file\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }] }), "utf8");
+await seedProjects(root, [{ id: "c0ffee00-1111-4111-8111-111111111111", title: "Busy", path: projectDir }]);
 	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
@@ -128,7 +128,7 @@ it("a project with no threads deletes without force (the guard is about threads,
 	await mkdir(projectDir, { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }] }), "utf8");
+await seedProjects(root, [{ id: "deadbeef-1111-4111-8111-111111111111", title: "Quiet", path: projectDir }]);
 	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	expect(await waitListening(port)).toBe(true);

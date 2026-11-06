@@ -6,6 +6,7 @@
 // Each test spawns `node --experimental-strip-types examples/coding-agent/src/host.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
 // never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
+import { seedProjects } from "./host-process-harness.ts";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -47,7 +48,7 @@ async function writeRoot(name: string, port: number): Promise<string> {
 	// hand-edit; the host creates the dir itself and starts with an empty registry).
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
 	await mkdir(join(root, "t3"), { recursive: true });
-	await writeFile(join(root, "t3", "projects.json"), JSON.stringify({ projects: [{ path: join(root, "projects/alpha"), title: "alpha" }] }), "utf8");
+	await seedProjects(root, [{ path: join(root, "projects/alpha"), title: "alpha" }]);
 	return root;
 }
 

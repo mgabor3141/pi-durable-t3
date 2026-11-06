@@ -344,13 +344,13 @@ export class Bridge {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
 				await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), mutation.createWorkspaceRootIfMissing === true);
 				// Honor the id the client minted; the registry derives from the normalized path for everything else (design.md, IDs).
-				const added = this.#createProject(mutation.title, mutation.workspaceRoot, mutation.projectId);
+				const added = await this.#createProject(mutation.title, mutation.workspaceRoot, mutation.projectId);
 				return this.#projectResult(added, null);
 			}
 			case "project.update": {
 				// A move names a new root: T3 normalizes an update's root WITHOUT creating it (`ProjectService.update`).
 				if (mutation.workspaceRoot !== undefined) await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), false);
-				const updated = this.config.registry.update(mutation.projectId, {
+				const updated = await this.config.registry.update(mutation.projectId, {
 					...(mutation.title === undefined ? {} : { title: mutation.title }),
 					...(mutation.workspaceRoot === undefined ? {} : { path: mutation.workspaceRoot }),
 				});
@@ -364,7 +364,7 @@ export class Bridge {
 				// Drop the threads FIRST (aborts each head, then removes the pointer), then the entry: files on disk are never
 				// part of this operation (design.md, Invariants).
 				for (const thread of targets) await this.deleteThread(thread.threadId);
-				this.config.registry.remove(mutation.projectId);
+				await this.config.registry.remove(mutation.projectId);
 				// Drain late arrivals: read the document (current after each awaited delete) until it shows no rows under
 				// the id. Rows landing from `registry.remove` onward are refused by the commit-time FK check, so the drain
 				// terminates (design.md, Invariants).
@@ -383,9 +383,9 @@ export class Bridge {
 	 * command whose commit landed and whose ack the client never saw, so the stored entry is the answer — the state is the
 	 * dedup record, and this survives a restart. Anything else is the registry's own conflict (design.md, Invariants).
 	 */
-	#createProject(title: string | undefined, workspaceRoot: string, clientId: string | undefined): Project {
+	async #createProject(title: string | undefined, workspaceRoot: string, clientId: string | undefined): Promise<Project> {
 		try {
-			return this.config.registry.add(title, workspaceRoot, { ...(clientId === undefined ? {} : { clientId }) });
+			return await this.config.registry.add(title, workspaceRoot, { ...(clientId === undefined ? {} : { clientId }) });
 		} catch (error) {
 			if (!(error instanceof ProjectConflict) && !(error instanceof ProjectIdConflict)) throw error;
 			const minted = clientId?.trim();

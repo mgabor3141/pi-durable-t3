@@ -64,7 +64,7 @@ import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
 	env,           // REQUIRED: the ExecutionEnv T3 reads, writes and runs in; its cwd is the path root
-	stateDir,      // the bridge's own files: t3-settings.json, projects.json, auth.json
+	stateDir,      // the bridge's own files: t3-settings.json, auth.json, attachments/
 	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
 	scratchDir,    // optional: absolute path in `env` where "No project" threads run; omit to turn it off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774

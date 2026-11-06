@@ -22,7 +22,6 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 	it("answers one short turn", async () => {
 		const target = ref!;
 		const root = await tempRoot();
-		const registry = testRegistry([{ id: "live", cwd: join(root, "p") }]);
 		await mkdir(join(root, "p"), { recursive: true });
 
 		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
@@ -30,7 +29,7 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 		expect(available.some((model) => model.provider === target.provider && model.id === target.modelId)).toBe(true);
 
 		const host = await openCodingHarness({ dataDir: root }, runtime);
-		const threads = new Threads({ harness: host.harness, registry });
+		const threads = new Threads({ harness: host.harness, registry: await testRegistry(host.harness, [{ id: "live", cwd: join(root, "p") }]) });
 		try {
 			const thread = await threads.create({ threadId: "t", projectId: "live" });
 			await (await host.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: target }, BACKGROUND_CONTEXT); // the client names the model.
@@ -49,11 +48,10 @@ describe.skipIf(ref === undefined)("live model (PI_DURABLE_T3_LIVE_MODEL)", () =
 	it("delegates to the subagent tool: the call owns a child that answered", async () => {
 		const target = ref!;
 		const root = await tempRoot();
-		const registry = testRegistry([{ id: "live", cwd: join(root, "p") }]);
 		await mkdir(join(root, "p"), { recursive: true });
 		const runtime = await ModelRuntime.create({ modelsStorePath: join(root, "models-store.json") });
 		const host = await openCodingHarness({ dataDir: root }, runtime, { extensions: [Subagent] });
-		const threads = new Threads({ harness: host.harness, registry });
+		const threads = new Threads({ harness: host.harness, registry: await testRegistry(host.harness, [{ id: "live", cwd: join(root, "p") }]) });
 		try {
 			const thread = await threads.create({ threadId: "t", projectId: "live" });
 			await (await host.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))?.configure({ model: target }, BACKGROUND_CONTEXT);

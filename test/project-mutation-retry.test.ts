@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, pair, waitListening } from "./ws-rpc.ts";
-import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
+import { launch, type Launched, pairCode, t3Dir, seedProjects, storedProjects } from "./host-process-harness.ts";
 
 const PORT_A = 4893;
 const PORT_B = 4894;
@@ -31,7 +31,7 @@ beforeAll(async () => {
 	// The registry starts with one project, so the shell is non-empty and the new one is distinguishable.
 	await mkdir(join(root, "projects", "alpha"), { recursive: true });
 	await mkdir(t3Dir(root), { recursive: true }); // the bridge dir (the host creates it; the registry is the documented hand-edit)
-await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
+await seedProjects(root, [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }]);
 	// The two hosts take turns on ONE root (the restart shape): each binds its own port, so the config is rewritten
 	// per launch.
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT_A}"\n`, "utf8");
@@ -82,9 +82,8 @@ it("a retried create answers the project it created — across a restart; a diff
 			`the retry answers the project the first create made: ${JSON.stringify(retry)}`,
 		).toEqual({ id: first.id, title: first.title, workspaceRoot: first.workspaceRoot, deletedAt: first.deletedAt });
 
-		// One entry, not two: the registry file is the state, and the retry must not have written a second one.
-		const registryFile = JSON.parse(await readFile(join(t3Dir(root), "projects.json"), "utf8")) as { projects: { path: string }[] };
-		expect(registryFile.projects.map((entry) => entry.path), "the retry stored nothing new").toEqual([
+		// One entry, not two: the registry is the state, and the retry must not have written a second one.
+		expect(storedProjects(root).map((entry) => entry.path), "the retry stored nothing new").toEqual([
 			join(root, "projects", "alpha"),
 			projectDir(),
 		]);

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening, type WsRpc } from "./ws-rpc.ts";
-import { launch, pairCode, t3Dir, type Launched } from "./host-process-harness.ts";
+import { launch, pairCode, t3Dir, type Launched, seedProjects } from "./host-process-harness.ts";
 
 const PORT = 4964;
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC";
@@ -27,7 +27,7 @@ beforeAll(async () => {
 	await writeFile(join(agentDir, "AGENTS.md"), "reply with the single word ok\n", "utf8");
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`, "utf8");
 	await mkdir(t3Dir(root), { recursive: true });
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }] }), "utf8");
+	await seedProjects(root, [{ id: "p-alpha", title: "alpha", path: join(root, "projects", "alpha") }]);
 	start();
 }, 30_000);
 

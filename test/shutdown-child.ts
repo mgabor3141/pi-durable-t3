@@ -13,7 +13,7 @@ import { defineExtension, defineTool, type ConversationId } from "@earendil-work
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { attachT3 } from "../src/bridge.ts";
 import { Threads } from "../src/threads.ts";
-import { FileProjectRegistry } from "../src/registry.ts";
+import { ProjectRegistry } from "../src/registry.ts";
 import { nullLogger } from "../src/t3/logging.ts";
 import { openCodingHarness } from "../examples/coding-agent/src/host-runtime.ts";
 import { parseConfigToml } from "../examples/coding-agent/src/config.ts";
@@ -38,14 +38,15 @@ const slowTool = defineTool({
 });
 
 const config = parseConfigToml(`listen = "127.0.0.1:${port}"\n`, root);
-// The bridge dir it owns: the instance file the host edits on the UI's behalf, a project at `<root>/p` (its id is
-// derived from that path).
-mkdirSync(config.stateDir, { recursive: true });
-writeFileSync(join(config.stateDir, "projects.json"), JSON.stringify({ projects: [{ path: join(root, "p"), title: project }] }) + "\n");
-const registry = FileProjectRegistry.open(config.stateDir);
 // Generation 1 is a `tool_use` for `slow`; nothing is queued after, so the run sits inside the tool until the signal.
 const model = createScriptedModel([fauxAssistantMessage([fauxToolCall("slow", {})], { stopReason: "toolUse" })]);
 const runtime = await openCodingHarness(config, model.models, { extensions: [defineExtension({ name: "slow", tools: [slowTool] })] });
+// The registry the host edits on the UI's behalf: a project at `<root>/p` (its id is derived from that path), stored
+// before the bridge reads it at attach.
+const registry = new ProjectRegistry(runtime.harness, { baseDir: config.stateDir });
+await registry.load();
+mkdirSync(join(root, "p"), { recursive: true });
+await registry.add(project, join(root, "p"));
 const attach = await attachT3(runtime.harness, {
 	models: model.models,
 	stateDir: config.stateDir,

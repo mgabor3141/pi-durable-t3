@@ -14,6 +14,6 @@ it("creates a thread in a project rooted at a symlink", async () => {
 	const link = join(fixture.root, "link");
 	await mkdir(real);
 	await symlink(real, link);
-	const threads = new Threads({ harness: fixture.harness, registry: testRegistry([{ id: "p", cwd: link }]), env: new NodeExecutionEnv({ cwd: "/" }) });
-	await expect(threads.create({ threadId: "t", projectId: "p" })).resolves.toMatchObject({ threadId: "t", projectId: "p" });
+	const threads = new Threads({ harness: fixture.harness, registry: await testRegistry(fixture.harness, [{ id: "linked", cwd: link }]), env: new NodeExecutionEnv({ cwd: "/" }) });
+	await expect(threads.create({ threadId: "t", projectId: "linked" })).resolves.toMatchObject({ threadId: "t", projectId: "linked" });
 });

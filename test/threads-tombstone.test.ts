@@ -30,12 +30,12 @@ describe("a removal is durable (F1)", () => {
 		for (let round = 1; round <= beats.length; round++) {
 			// A fresh project nested inside `p0`'s root (the one the delete removes), and a thread in it.
 			const project = `r${round}`;
-			f.registry.add(project, join(f.root, "p0", project));
+			await f.registry.add(project, join(f.root, "p0", project), { clientId: project });
 			const t = await create({ threadId: `t${round}`, projectId: project });
 			model.append(fauxAssistantMessage("ok"));
 			const removing = (async () => {
 				await threads.remove(`t${round}`);
-				f.registry.remove(project);
+				await f.registry.remove(project);
 			})();
 			await sleep(beats[round - 1]!);
 			const submitting = threads.submit({ threadId: `t${round}`, conversationId: t.head, requestId: `r${round}`, message: "go" }, undefined);

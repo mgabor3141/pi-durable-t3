@@ -10,7 +10,7 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
-import { type Launched, launch, pairCode, t3Dir } from "./host-process-harness.ts";
+import { type Launched, launch, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-tail-"));
@@ -58,7 +58,7 @@ async function start(name: string, port: number, serve: { port: number } | undef
 		].join("\n"),
 		"utf8",
 	);
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
+	await seedProjects(root, []);
 	const host = launch(
 		root,
 		port,
@@ -213,7 +213,7 @@ it("refuses to arm a Serve port that already maps elsewhere, and never releases 
 	const calls = join(scratch, "calls-busy.log");
 	const bin = await fakeTailscale(calls, takenStatus);
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:4966"\ntailscale_serve = true\ntailscale_serve_port = 8443\n`, "utf8");
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
+	await seedProjects(root, []);
 	const host = launch(root, 4966, { PATH: `${bin}:${process.env["PATH"]}`, TAILSCALE_CALLS: calls }, agentDir);
 	launched.push(host);
 	expect(await waitListening(4966), host.out()).toBe(true);

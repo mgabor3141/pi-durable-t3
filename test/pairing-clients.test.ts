@@ -8,7 +8,7 @@ import { AuthAccessReadScope, AuthAccessWriteScope, AuthClientSession, AuthPairi
 import * as Schema from "effect/Schema";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, getJson, pair, postJson, waitListening, type WsRpc } from "./ws-rpc.ts";
-import { launch, pairCode, t3Dir, type Launched } from "./host-process-harness.ts";
+import { launch, pairCode, t3Dir, type Launched, seedProjects } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-conn-"));
 const agentDir = join(scratch, "agent");
@@ -26,7 +26,7 @@ async function start(name: string, port: number) {
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
 	await mkdir(t3Dir(root), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }), "utf8");
+	await seedProjects(root, []);
 	const host = launch(root, port, {}, agentDir);
 	launched.push(host);
 	if (!(await waitListening(port))) throw new Error(`host did not bind ${port}: ${host.out()}`);

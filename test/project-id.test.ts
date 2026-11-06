@@ -10,11 +10,11 @@ import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
-import { testRegistry } from "./test-registry.ts";
+import { standaloneRegistry } from "./test-registry.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
-function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
+async function makeBridge(projects: readonly { id: string; path: string }[]): Promise<Bridge> {
 	const config: BridgeConfig = {
 		host: "127.0.0.1",
 		port: 0,
@@ -24,14 +24,14 @@ function makeBridge(projects: readonly { id: string; path: string }[]): Bridge {
 		tokenTtlSeconds: 60,
 		settings: ServerSettingsStore.open("/tmp/pi-durable-t3-project-id-unused"),
 		corsOrigins: [], staticDir: undefined,
-		registry: testRegistry(projects.map((project) => ({ id: project.id, cwd: project.path }))),
+		registry: await standaloneRegistry(projects.map((project) => ({ id: project.id, cwd: project.path }))),
 	};
 	// `projects()` never touches the host, so an unloaded one is enough to construct a Bridge.
 	return new Bridge(config, log, unstartedStore(), createModels());
 }
 
-it("the shell lists registered projects and nothing else — no invented id, no `(other)` project (H2)", () => {
-	const bridge = makeBridge([{ id: "alpha", path: "/data/alpha" }]);
+it("the shell lists registered projects and nothing else — no invented id, no `(other)` project (H2)", async () => {
+	const bridge = await makeBridge([{ id: "alpha", path: "/data/alpha" }]);
 	expect(bridge.projects().map((project) => project.workspaceRoot as string)).toEqual(["/data/alpha"]);
-	expect(makeBridge([]).projects()).toEqual([]);
+	expect((await makeBridge([])).projects()).toEqual([]);
 });

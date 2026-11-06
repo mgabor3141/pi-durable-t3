@@ -50,7 +50,7 @@ export async function ensureScratchProject(registry: ProjectRegistry, root: stri
 	if (existing !== undefined) return { projectId: existing.id };
 	const minted = randomUUID();
 	try {
-		registry.add(SCRATCH_TITLE, root, { clientId: minted });
+		await registry.add(SCRATCH_TITLE, root, { clientId: minted });
 	} catch (cause) {
 		if (cause instanceof ProjectConflict) return { projectId: cause.conflictingProjectId };
 		throw new ScratchProjectError(cause);

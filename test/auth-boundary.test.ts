@@ -6,7 +6,7 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
-import { launch, pairCode, t3Dir, type Launched } from "./host-process-harness.ts";
+import { launch, pairCode, t3Dir, type Launched, seedProjects } from "./host-process-harness.ts";
 import { waitListening } from "./ws-rpc.ts";
 
 const PORT = 4971;
@@ -51,7 +51,7 @@ it("every non-public route needs a credential, and the cookie does not count wit
 	const root = join(scratch, "host");
 	await mkdir(t3Dir(root), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${PORT}"\n`);
-	await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [] }));
+	await seedProjects(root, []);
 	host = launch(root, PORT, {}, join(scratch, "agent"));
 	if (!(await waitListening(PORT))) throw new Error(`host did not bind ${PORT}: ${host.out()}`);
 

@@ -52,8 +52,8 @@ them, on a contributor's `pnpm install`, in a consumer's install from git, and b
   the answer is the truth: an empty session scan, a lifecycle stream that says "ready" and nothing more.
 - **Strict files.** A file the host cannot read stops it at boot, naming the file. The host never writes a
   file it could not read back.
-- **One host per state dir.** No cross-process locking. The state dir pairs with the Harness's storage —
-  the Harness's threads point at project ids in the dir's `projects.json` — so back up and move them together.
+- **One host per state dir and per Harness.** No cross-process locking. Threads, projects and scheduled tasks live in
+  the Harness's storage, so they back up, move and restore together.
 
 ## The model
 

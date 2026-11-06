@@ -17,7 +17,7 @@ import { unstartedStore } from "./threads-harness.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { FileProjectRegistry } from "../src/registry.ts";
+import { storedRegistry } from "./test-registry.ts";
 import { createScriptedModel } from "./fake-model.ts";
 import { makeThreads } from "./threads-harness.ts";
 
@@ -29,7 +29,8 @@ describe("a project id is minted by whoever registers it", () => {
 		try {
 			const root = join(dir, "proj");
 			await mkdir(root, { recursive: true });
-			const registry = await FileProjectRegistry.open(dir);
+			const stored = await storedRegistry(dir);
+			const registry = stored.registry;
 			const config: BridgeConfig = { host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(join(dir, "settings-store")), corsOrigins: [], staticDir: undefined, registry };
 			const bridge = new Bridge(config, log, unstartedStore(), createModels());
 
@@ -44,9 +45,6 @@ describe("a project id is minted by whoever registers it", () => {
 			expect((bridge.shellSnapshot().projects as unknown as { id: string }[]).some((project) => project.id === clientProjectId)).toBe(true);
 
 			// The id is durable: a reopen (the next boot) answers the SAME id for the same folder.
-			const reopened = await FileProjectRegistry.open(dir);
-			expect(reopened.list().map((project) => project.id)).toContain(clientProjectId);
-			expect(reopened.list()[0]?.cwd).toBe(root);
 
 			// A mutation whose id is NOT the UUID shape the T3 UI happens to mint is still a valid mint: the
 			// contract's ProjectId is a branded trimmed non-empty string and T3's server commits it verbatim,
@@ -55,6 +53,13 @@ describe("a project id is minted by whoever registers it", () => {
 			await mkdir(root2, { recursive: true });
 			const derived = await bridge.mutateProject({ type: "project.create", projectId: "placeholder-not-a-uuid", commandId: "cmd-create-other", title: "other", workspaceRoot: root2, createWorkspaceRootIfMissing: true });
 			expect(derived.id).toBe("placeholder-not-a-uuid");
+
+			// The ids are durable: a reopen (the next boot) answers the SAME ids for the same folders.
+			await stored.close();
+			const reopened = await storedRegistry(dir);
+			expect(reopened.registry.list().map((project) => project.id)).toEqual([clientProjectId, "placeholder-not-a-uuid"]);
+			expect(reopened.registry.list()[0]?.cwd).toBe(root);
+			await reopened.close();
 		}
 		finally {
 			await rm(dir, { recursive: true, force: true });
