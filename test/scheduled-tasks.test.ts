@@ -1,7 +1,11 @@
 // Scheduled tasks (T3's ScheduledTaskService + Schedule.ts, replicated for interval and fixed time): the schedule math,
 // upsert idempotence, a due task dispatching exactly once, runNow while running, restart recovery, the webhook refusal
 // and the change signal. A fake clock drives every test; the poll loop is never started, `tick()` is called directly.
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -56,7 +60,9 @@ describe("schedule math (T3's Schedule.ts)", () => {
 // ---- the service ---------------------------------------------------------------------------------------------
 
 const dirs: string[] = [];
+const harnesses: Harness[] = [];
 afterEach(async () => {
+	for (const harness of harnesses.splice(0)) await harness.close(BACKGROUND_CONTEXT).catch(() => {});
 	for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -72,11 +78,14 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 		queue: options.dispatch?.queue ?? (async (input) => void calls.push({ kind: "queue", ...input })),
 		isScratchProject: options.dispatch?.isScratchProject ?? ((projectId) => projectId === "scratch"),
 	};
-	const tasks = new ScheduledTasks({ stateDir: dir, dispatch, now: () => new Date(clock.now) });
+	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+	harnesses.push(harness);
+	const tasks = new ScheduledTasks({ harness, dispatch, now: () => new Date(clock.now) });
+	await tasks.load();
 	const advance = (ms: number) => {
 		clock.now = new Date(clock.now.getTime() + ms);
 	};
-	return { dir, clock, calls, tasks, advance };
+	return { dir, clock, calls, tasks, advance, harness };
 }
 
 const input = (overrides: Partial<ScheduledTaskUpsertInput> = {}): ScheduledTaskUpsertInput =>
@@ -98,7 +107,7 @@ const input = (overrides: Partial<ScheduledTaskUpsertInput> = {}): ScheduledTask
 describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 	it("upsert: a commandId replay is the same task with its run history; a title edit keeps nextRunAt, a schedule edit moves it", async () => {
 		const { tasks, advance } = await fixture();
-		const first = tasks.upsert(input({ commandId: "cmd-1" as never })).task;
+		const first = (await tasks.upsert(input({ commandId: "cmd-1" as never }))).task;
 		expect(first.id).toBe("scheduled-task:cmd-1");
 		expect(first.nextRunAt).toBe("2026-07-01T12:01:00.000Z");
 		advance(60_000);
@@ -106,26 +115,26 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(tasks.list().tasks[0]!.runCount).toBe(1);
 
 		advance(10_000);
-		const replay = tasks.upsert(input({ commandId: "cmd-1" as never })).task;
+		const replay = (await tasks.upsert(input({ commandId: "cmd-1" as never }))).task;
 		expect(tasks.list().tasks).toHaveLength(1);
 		expect(replay.runCount, "a replayed save keeps the run state").toBe(1);
 		expect(replay.createdAt).toBe(first.createdAt);
 
 		const before = replay.nextRunAt;
 		advance(10_000);
-		const renamed = tasks.upsert(input({ id: first.id, requireExisting: true, title: "Renamed" })).task;
+		const renamed = (await tasks.upsert(input({ id: first.id, requireExisting: true, title: "Renamed" }))).task;
 		expect(renamed.title).toBe("Renamed");
 		expect(renamed.nextRunAt, "a title edit does not postpone the run").toBe(before);
 
-		const rescheduled = tasks.upsert(input({ id: first.id, requireExisting: true, schedule: { type: "interval", everyMs: 120_000 } })).task;
+		const rescheduled = (await tasks.upsert(input({ id: first.id, requireExisting: true, schedule: { type: "interval", everyMs: 120_000 } }))).task;
 		expect(rescheduled.nextRunAt).not.toBe(before);
 
-		expect(() => tasks.upsert(input({ id: "scheduled-task:gone" as never, requireExisting: true }))).toThrow("Schedule task not found.");
+		await expect(tasks.upsert(input({ id: "scheduled-task:gone" as never, requireExisting: true }))).rejects.toThrow("Schedule task not found.");
 	});
 
 	it("a due task with no thread launches a new thread exactly once, then reschedules from the dispatch", async () => {
 		const { tasks, calls, advance } = await fixture();
-		const task = tasks.upsert(input()).task;
+		const task = (await tasks.upsert(input())).task;
 		await tasks.tick();
 		expect(calls, "not yet due").toHaveLength(0);
 		advance(60_000);
@@ -153,7 +162,7 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 				},
 			},
 		});
-		tasks.upsert(input({ threadId: "t1" as never }));
+		await tasks.upsert(input({ threadId: "t1" as never }));
 		advance(60_000);
 		await tasks.tick();
 		expect(queued.map((call) => [call.kind, call.threadId])).toEqual([["queue", "t1"]]);
@@ -167,17 +176,19 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 	it("runNow while a run is in flight is refused; a paused task is not run by the poll", async () => {
 		let release!: () => void;
 		const { tasks, advance } = await fixture({ dispatch: { launch: () => new Promise<void>((resolve) => (release = resolve)) } });
-		const task = tasks.upsert(input()).task;
+		const task = (await tasks.upsert(input())).task;
 		const first = tasks.runNow({ id: task.id });
 		expect(tasks.list().tasks[0]!.lastRunStatus).toBe("running");
 		const second = await tasks.runNow({ id: task.id }).catch((error: unknown) => error);
 		expect(second).toBeInstanceOf(ScheduledTaskError);
 		expect((second as ScheduledTaskError).message).toBe("Could not run schedule task.");
 		expect(((second as ScheduledTaskError).cause as Error).message).toBe("Schedule task is already running.");
+		// The dispatch starts once the run's mark is stored.
+		while (typeof release !== "function") await new Promise((resolve) => setTimeout(resolve, 5));
 		release();
 		expect((await first).task.lastRunStatus).toBe("succeeded");
 
-		tasks.setEnabled({ id: task.id, enabled: false });
+		await tasks.setEnabled({ id: task.id, enabled: false });
 		expect(tasks.list().tasks[0]!.nextRunAt).toBeNull();
 		advance(10 * 60_000);
 		await tasks.tick();
@@ -187,7 +198,7 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 	it("a missed fixed-time run (> 10 min late) is rescheduled, not run late", async () => {
 		const { tasks, calls, clock } = await fixture();
 		clock.now = new Date(2026, 6, 1, 8, 0);
-		tasks.upsert(input({ schedule: { type: "fixed_time", timeOfDay: "09:00" } }));
+		await tasks.upsert(input({ schedule: { type: "fixed_time", timeOfDay: "09:00" } }));
 		clock.now = new Date(2026, 6, 1, 9, 5);
 		await tasks.tick();
 		expect(calls, "within the grace window it runs").toHaveLength(1);
@@ -198,28 +209,22 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 	});
 
 	it("restart: a task left running is recorded failed and rescheduled; the document round-trips", async () => {
-		const { dir, tasks } = await fixture({ dispatch: { launch: () => new Promise<void>(() => {}) } });
-		const task = tasks.upsert(input()).task;
+		const { dir, tasks, harness } = await fixture({ dispatch: { launch: () => new Promise<void>(() => {}) } });
+		const task = (await tasks.upsert(input())).task;
 		void tasks.runNow({ id: task.id });
-		const stored = JSON.parse(await readFile(tasks.path, "utf8")) as { tasks: { lastRunStatus: string }[] };
-		expect(stored.tasks[0]!.lastRunStatus).toBe("running");
+		// The run's mark is stored before its dispatch: the process dies there.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await harness.close(BACKGROUND_CONTEXT);
 
 		const reopened = (await fixture({ dir })).tasks;
 		expect(reopened.list().tasks[0]).toMatchObject({ id: task.id, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, runCount: 1, nextRunAt: "2026-07-01T12:01:00.000Z" });
-	});
-
-	it("an unreadable document stops the boot, naming the file", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-"));
-		dirs.push(dir);
-		await writeFile(join(dir, "scheduled-tasks.json"), "{ not json", "utf8");
-		await expect(fixture({ dir })).rejects.toThrow(join(dir, "scheduled-tasks.json"));
 	});
 
 	it("a webhook trigger is refused with the typed error", async () => {
 		const { tasks } = await fixture();
 		let error: unknown;
 		try {
-			tasks.upsert(input({ schedule: { type: "webhook", signature: null } as never }));
+			await tasks.upsert(input({ schedule: { type: "webhook", signature: null } as never }));
 		} catch (caught) {
 			error = caught;
 		}
@@ -230,32 +235,28 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 
 	it("a worktree workspace is refused: every run is at the project root", async () => {
 		const { tasks } = await fixture();
-		expect(() => tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).toThrow(WORKTREES_UNSUPPORTED);
+		await expect(tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).rejects.toThrow(WORKTREES_UNSUPPORTED);
 		expect(tasks.list().tasks).toHaveLength(0);
 	});
 
 	it("a worktree asked of the Scratch project is stored as the root, as T3 does", async () => {
 		const { tasks } = await fixture();
-		const { task } = tasks.upsert(input({ projectId: "scratch" as never, workspaceStrategy: { type: "worktree", baseRef: "main" } as never }));
+		const { task } = await tasks.upsert(input({ projectId: "scratch" as never, workspaceStrategy: { type: "worktree", baseRef: "main" } as never }));
 		expect(task.workspaceStrategy).toEqual({ type: "root" });
 	});
 
 	it("a mode pi does not have is refused, like the thread commands", async () => {
 		const { tasks } = await fixture();
-		expect(() => tasks.upsert(input({ runtimeMode: "approval-required" }))).toThrow(FULL_ACCESS_ONLY);
-		expect(() => tasks.upsert(input({ interactionMode: "plan" }))).toThrow(NO_PLAN_MODE);
+		await expect(tasks.upsert(input({ runtimeMode: "approval-required" }))).rejects.toThrow(FULL_ACCESS_ONLY);
+		await expect(tasks.upsert(input({ interactionMode: "plan" }))).rejects.toThrow(NO_PLAN_MODE);
 		expect(tasks.list().tasks).toHaveLength(0);
 	});
 
-	it("a delete whose save fails keeps the task, in memory as on disk", async () => {
-		const { dir, tasks } = await fixture();
-		const task = tasks.upsert(input()).task;
-		await chmod(dir, 0o555);
-		try {
-			expect(() => tasks.delete({ id: task.id })).toThrow("Could not delete schedule task.");
-		} finally {
-			await chmod(dir, 0o755);
-		}
+	it("a delete whose commit fails keeps the task: memory follows the store", async () => {
+		const { tasks, harness } = await fixture();
+		const task = (await tasks.upsert(input())).task;
+		await harness.close(BACKGROUND_CONTEXT);
+		await expect(tasks.delete({ id: task.id })).rejects.toThrow("Could not delete schedule task.");
 		expect(tasks.list().tasks.map((t) => t.id)).toEqual([task.id]);
 	});
 
@@ -263,16 +264,16 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		const { tasks, advance } = await fixture();
 		let changes = 0;
 		const stop = tasks.onChange(() => changes++);
-		const task = tasks.upsert(input()).task;
+		const task = (await tasks.upsert(input())).task;
 		expect(changes).toBe(1);
-		tasks.setEnabled({ id: task.id, enabled: false });
-		tasks.setEnabled({ id: task.id, enabled: false });
+		await tasks.setEnabled({ id: task.id, enabled: false });
+		await tasks.setEnabled({ id: task.id, enabled: false });
 		expect(changes, "an unchanged toggle is a no-op").toBe(2);
-		tasks.setEnabled({ id: task.id, enabled: true });
+		await tasks.setEnabled({ id: task.id, enabled: true });
 		advance(60_000);
 		await tasks.tick();
 		expect(changes, "running, then the result").toBe(5);
-		tasks.delete({ id: task.id });
+		await tasks.delete({ id: task.id });
 		expect(changes).toBe(6);
 		expect(tasks.list().tasks).toHaveLength(0);
 		stop();

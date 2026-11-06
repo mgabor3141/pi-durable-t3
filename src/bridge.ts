@@ -190,8 +190,14 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	};
 	const tailscale = makeTailscaleCli();
 	const facet = startFacet({ threads, models: options.models, catalog, log, config, tailscale });
-	// Resolve only once LISTENING: a bind failure (a port in use) rejects here, after the listener's own error.
-	await facet.ready;
+	// Resolve only once LISTENING and loaded: a bind failure (a port in use) or unreadable tasks reject here, after the
+	// facet is closed again.
+	try {
+		await facet.ready;
+	} catch (error) {
+		await facet.close().catch(() => {});
+		throw error;
+	}
 	// Tailscale Serve, armed only once the listener is up. A failure is a warning, never a dead host (T3's rule for
 	// this path). Safety check first — a deliberate, safer-than-T3 deviation: only a free port, or one already pointed
 	// at this host's own loopback port (a stale mapping of ours), is armed. A mapping this host did not create is

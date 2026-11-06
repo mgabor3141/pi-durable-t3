@@ -22,6 +22,7 @@ Projections are rebuilt from it on every change.
 | One sidebar summary per thread (`pi-durable-t3.thread-summary`) | An unopened thread previews and sorts as new until it is opened |
 | The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
 | The project registry (`pi-durable-t3.projects`): id, path, title per project. A thread's project is checked in the commit that writes the thread | Project names; threads keep their `cwd` |
+| Scheduled tasks (`pi-durable-t3.scheduled-tasks`), as T3's schema encodes them: trigger, prompt, project/thread, model, provenance, run state (`nextRunAt`, last run, count). Read strictly at boot: a task this version cannot decode stops the host | The tasks; the threads they made stay |
 
 Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt and
 run boundary — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
@@ -39,11 +40,10 @@ the Harness's storage: settings, pairings and attachment bytes.
 |---|---|---|
 | `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
 | `auth.json` (the state dir) | Environment id; hashed pairing links and device sessions (bearer or browser cookie), each with its scopes and client metadata; the key that signs attachment URLs | Every device re-pairs |
-| `scheduled-tasks.json` (the state dir) | Scheduled tasks as T3 stores them: trigger, prompt, project/thread, model, run state (`nextRunAt`, last run, count) | The tasks; the threads they made stay |
 | `attachments/` (the state dir) | Image and file attachments, one file per attachment id | Past attachments stop rendering; the model's copy in pi-durable survives |
 | The scratch dir (`scratchDir`, if set) | "No project" threads: one folder per thread | Nothing the bridge needs; threads keep their recorded `cwd` |
 
-The JSON files are written atomically, mode 0600, and so are attachments. `scheduled-tasks.json` is read strictly: one the host cannot read stops it at boot, naming the file. The scratch dir is agent work
+The JSON files are written atomically, mode 0600, and so are attachments. The scratch dir is agent work
 output, not bridge state. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.

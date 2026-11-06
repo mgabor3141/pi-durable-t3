@@ -49,17 +49,15 @@ export function startFacet(deps: {
 
 	const bridge = new Bridge(config, log, deps.threads, deps.models, attachments);
 	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);
-	// Opened at boot (a scheduled-tasks.json the host cannot read stops it here), polled while the facet runs.
-	const scheduledTasks = new ScheduledTasks({ stateDir: config.stateDir, dispatch: scheduledTaskDispatch(bridge), log });
+	// Read before the host is ready (tasks the host cannot read stop it), polled while the facet runs.
+	const scheduledTasks = new ScheduledTasks({ harness: deps.threads.harness, dispatch: scheduledTaskDispatch(bridge), log });
 	bridge.start();
 	scheduledTasks.start();
 	// T3 deletes the tasks bound to a deleted thread (the thread deletion's `scheduled-tasks.cleanup` effect).
 	bridge.onThreadDeleted((threadId) => {
-		try {
-			scheduledTasks.deleteForThread(threadId);
-		} catch (error) {
-			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) });
-		}
+		void scheduledTasks.deleteForThread(threadId).catch((error: unknown) =>
+			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) }),
+		);
 		void preview?.closeThread(threadId).catch((error: unknown) =>
 			log.warn("could not close the preview tabs of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) }),
 		);
@@ -95,7 +93,8 @@ export function startFacet(deps: {
 	});
 
 	return {
-		ready,
+		// Ready once listening and once the scheduled tasks are read: a host that cannot read its tasks does not start.
+		ready: Promise.all([ready, scheduledTasks.load()]).then(([port]) => port),
 		closed,
 		...(preview === undefined ? {} : { preview }),
 		setTitle: async (threadId, title) => {

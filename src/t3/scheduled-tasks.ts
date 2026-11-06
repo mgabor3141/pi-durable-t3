@@ -1,15 +1,16 @@
 // T3's scheduled tasks (apps/server/src/scheduledTasks/ScheduledTaskService.ts + scheduling/Scheduler.ts), replicated
-// for the interval and fixed-time triggers. Webhook triggers are refused (capabilities.md). The tasks live in one JSON
-// document in the state dir (`scheduled-tasks.json`); a run is a dispatch — a new thread with the prompt as its first
-// message, or the prompt queued on the task's thread — never the turn's completion.
+// for the interval and fixed-time triggers. Webhook triggers are refused (capabilities.md). The tasks live in one
+// document in the Harness's storage (`pi-durable-t3.scheduled-tasks`), beside the threads they bind to, as T3 keeps them
+// in its database; a run is a dispatch — a new thread with the prompt as its first message, or the prompt queued on
+// the task's thread — never the turn's completion.
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord";
+import { defineDoc, type Harness } from "@earendil-works/pi-durable";
 import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
 import type { Provenance } from "../threads.ts";
-import { writeJsonAtomic } from "./json-store.ts";
 import type { Logger } from "./logging.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./schedule.ts";
 
@@ -36,6 +37,16 @@ export interface ScheduledTaskDispatch {
 export const SCHEDULED_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
 
 const decodeTask = Schema.decodeUnknownSync(ScheduledTask);
+const encodeTask = Schema.encodeSync(ScheduledTask);
+
+/** Every task, encoded with T3's schema. One document: a host has few tasks. */
+const ScheduledTasksDoc = defineDoc<{ tasks: JsonValue[] }>({
+	kind: "pi-durable-t3.scheduled-tasks",
+	version: 1,
+	scope: "session",
+	initial: () => ({ tasks: [] }),
+	checkpointWhen: () => true,
+});
 
 function taskError(message: string, taskId?: string, cause?: unknown): ScheduledTaskError {
 	return new ScheduledTaskError({
@@ -56,7 +67,7 @@ function nextRunAt(task: Pick<Task, "enabled" | "schedule">, from: Date): string
 }
 
 export class ScheduledTasks {
-	readonly path: string;
+	readonly #harness: Harness;
 	readonly #tasks = new Map<string, Task>();
 	readonly #listeners = new Set<() => void>();
 	readonly #activeRuns = new Set<string>();
@@ -65,40 +76,39 @@ export class ScheduledTasks {
 	readonly #log: Logger | undefined;
 	#timer: ReturnType<typeof setInterval> | undefined;
 	#tick: Promise<void> | undefined;
+	#loading: Promise<void> | undefined;
+	/** Set once loaded, so a call after that runs to its first write without yielding. */
+	#ready = false;
 
-	/** Opens the document strictly: a file that does not parse or decode stops the host, naming it (design.md). A task
-	 * left `running` by a crash is recorded failed and rescheduled (T3's startup recovery). */
-	constructor(options: { stateDir: string; dispatch: ScheduledTaskDispatch; now?: () => Date; log?: Logger }) {
-		this.path = join(options.stateDir, "scheduled-tasks.json");
+	constructor(options: { harness: Harness; dispatch: ScheduledTaskDispatch; now?: () => Date; log?: Logger }) {
+		this.#harness = options.harness;
 		this.#dispatch = options.dispatch;
 		this.#now = options.now ?? (() => new Date());
 		this.#log = options.log;
-		let raw: string | undefined;
-		try {
-			raw = readFileSync(this.path, "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`Cannot read ${this.path}: ${errorMessage(error)}`);
-		}
-		if (raw !== undefined) {
-			try {
-				const document = JSON.parse(raw) as { tasks?: unknown };
-				if (!Array.isArray(document.tasks)) throw new Error("expected { tasks: [...] }");
-				for (const entry of document.tasks) {
-					const task = decodeTask(entry);
-					this.#tasks.set(task.id, task);
+	}
+
+	/** Read the tasks, once, strictly: a task this version cannot decode stops the host (design.md). A task left
+	 * `running` by a crash is recorded failed and rescheduled (T3's startup recovery). */
+	load(): Promise<void> {
+		this.#loading ??= (async () => {
+			const stored = await this.#harness.snapshot(ScheduledTasksDoc, BACKGROUND_CONTEXT);
+			for (const entry of stored?.tasks ?? []) {
+				let task: Task;
+				try {
+					task = decodeTask(entry);
+				} catch (error) {
+					throw new Error(`Cannot read the scheduled tasks: ${errorMessage(error)}`, { cause: error });
 				}
-			} catch (error) {
-				throw new Error(`Cannot read ${this.path}: ${errorMessage(error)}`);
+				this.#tasks.set(task.id, task);
 			}
-		}
-		const now = this.#now();
-		let recovered = false;
-		for (const task of this.#tasks.values()) {
-			if (task.lastRunStatus !== "running") continue;
-			this.#tasks.set(task.id, { ...task, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, nextRunAt: nextRunAt(task, now), updatedAt: now.toISOString(), runCount: task.runCount + 1 });
-			recovered = true;
-		}
-		if (recovered) this.#save();
+			const now = this.#now();
+			for (const task of [...this.#tasks.values()]) {
+				if (task.lastRunStatus !== "running") continue;
+				await this.#write({ ...task, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, nextRunAt: nextRunAt(task, now), updatedAt: now.toISOString(), runCount: task.runCount + 1 });
+			}
+			this.#ready = true;
+		})();
+		return this.#loading;
 	}
 
 	// ---- the poll loop ----------------------------------------------------------------------------------------
@@ -130,13 +140,14 @@ export class ScheduledTasks {
 	}
 
 	async #runDueTasks(): Promise<void> {
+		if (!this.#ready) await this.load();
 		const now = this.#now();
 		const due = [...this.#tasks.values()]
 			.filter((task) => task.enabled && task.nextRunAt !== null && task.lastRunStatus !== "running" && Date.parse(task.nextRunAt) <= now.getTime())
 			.sort((a, b) => Date.parse(a.nextRunAt!) - Date.parse(b.nextRunAt!) || a.id.localeCompare(b.id));
 		for (const task of due) {
 			try {
-				if (isMissedFixedTimeRun(task.schedule, new Date(task.nextRunAt!), now)) this.#rescheduleMissedRun(task, now);
+				if (isMissedFixedTimeRun(task.schedule, new Date(task.nextRunAt!), now)) await this.#rescheduleMissedRun(task, now);
 				else await this.#runTask(task, "scheduled");
 			} catch (error) {
 				this.#log?.warn("scheduled task run failed", { taskId: task.id, error: errorMessage(error) });
@@ -144,10 +155,10 @@ export class ScheduledTasks {
 		}
 	}
 
-	#rescheduleMissedRun(task: Task, now: Date): void {
+	async #rescheduleMissedRun(task: Task, now: Date): Promise<void> {
 		const next = nextRunAt(task, now);
 		this.#log?.info("skipping missed scheduled task run", { taskId: task.id, missedRunAt: task.nextRunAt, rescheduledTo: next });
-		this.#write({ ...task, nextRunAt: next, updatedAt: now.toISOString() });
+		await this.#write({ ...task, nextRunAt: next, updatedAt: now.toISOString() });
 	}
 
 	async #runTask(task: Task, trigger: "scheduled" | "manual"): Promise<Task> {
@@ -168,7 +179,7 @@ export class ScheduledTasks {
 			}
 			if (trigger === "scheduled" && (!active.enabled || active.nextRunAt === null || Date.parse(active.nextRunAt) > startedAt.getTime())) return active;
 
-			this.#write({ ...active, updatedAt: startedAtIso, lastRunAt: startedAtIso, lastRunStatus: "running", lastRunError: null });
+			await this.#write({ ...active, updatedAt: startedAtIso, lastRunAt: startedAtIso, lastRunStatus: "running", lastRunError: null });
 
 			const fireKey = `${active.id}:${startedAt.getTime()}:${trigger}`;
 			const commandId = `scheduled-task:${fireKey}`;
@@ -198,7 +209,7 @@ export class ScheduledTasks {
 				runCount: source.runCount + 1,
 			};
 			// Only the row this run marked: a task deleted (and recreated) mid-run is not stamped.
-			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) this.#write(completed);
+			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) await this.#write(completed);
 			return completed;
 		} catch (error) {
 			// Anything failing after the mark leaves the task `running`, which the poll skips forever: record the attempt.
@@ -206,7 +217,7 @@ export class ScheduledTasks {
 			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) {
 				try {
 					const now = this.#now();
-					this.#write({ ...current, lastRunStatus: "failed", lastRunError: errorMessage(error), nextRunAt: nextRunAt(current, now), updatedAt: now.toISOString(), runCount: current.runCount + 1 });
+					await this.#write({ ...current, lastRunStatus: "failed", lastRunError: errorMessage(error), nextRunAt: nextRunAt(current, now), updatedAt: now.toISOString(), runCount: current.runCount + 1 });
 				} catch (releaseError) {
 					this.#log?.warn("could not release a stuck scheduled task run", { taskId: task.id, error: errorMessage(releaseError) });
 				}
@@ -229,7 +240,8 @@ export class ScheduledTasks {
 		return () => this.#listeners.delete(listener);
 	}
 
-	upsert(input: ScheduledTaskUpsertInput): { task: Task } {
+	async upsert(input: ScheduledTaskUpsertInput): Promise<{ task: Task }> {
+		if (!this.#ready) await this.load();
 		if (input.schedule.type === "webhook") throw taskError(WEBHOOKS_UNSUPPORTED, input.id);
 		// T3 stores a Scratch project's worktree request as the root (ScheduledTaskService.upsert). Any other worktree
 		// request is refused: every run here is at the project root, so it would silently run somewhere else.
@@ -269,50 +281,37 @@ export class ScheduledTasks {
 			lastRunError: existing?.lastRunError ?? null,
 			runCount: existing?.runCount ?? 0,
 		};
-		this.#write(task);
+		await this.#write(task);
 		return { task };
 	}
 
-	setEnabled(input: { id: string; enabled: boolean }): { task: Task } {
+	async setEnabled(input: { id: string; enabled: boolean }): Promise<{ task: Task }> {
+		if (!this.#ready) await this.load();
 		const existing = this.#load(input.id);
 		if (existing.enabled === input.enabled) return { task: existing };
 		const now = this.#now();
 		const task = { ...existing, enabled: input.enabled, nextRunAt: nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now), updatedAt: now.toISOString() };
-		this.#write(task);
+		await this.#write(task);
 		return { task };
 	}
 
 	/** T3's `ScheduledTaskService.deleteForThread` (run by a thread deletion's `scheduled-tasks.cleanup` effect): the
 	 * tasks bound to the deleted thread go with it, rather than failing on every run. */
-	deleteForThread(threadId: string): void {
+	async deleteForThread(threadId: string): Promise<void> {
+		if (!this.#ready) await this.load();
 		const removed = [...this.#tasks.values()].filter((task) => task.threadId === threadId);
 		if (removed.length === 0) return;
-		for (const task of removed) this.#tasks.delete(task.id);
-		try {
-			this.#save();
-		} catch (error) {
-			for (const task of removed) this.#tasks.set(task.id, task);
-			throw taskError("Could not delete thread's schedule tasks.", undefined, error);
-		}
-		this.#notify();
+		await this.#remove(removed.map((task) => task.id), "Could not delete thread's schedule tasks.");
 	}
 
-	delete(input: { id: ScheduledTaskId }): { id: ScheduledTaskId } {
-		const previous = this.#tasks.get(input.id);
-		if (previous === undefined) return { id: input.id };
-		this.#tasks.delete(input.id);
-		try {
-			this.#save();
-		} catch (error) {
-			// Memory follows the file: a task still on disk would come back, and fire, after a restart.
-			this.#tasks.set(input.id, previous);
-			throw taskError("Could not delete schedule task.", input.id, error);
-		}
-		this.#notify();
+	async delete(input: { id: ScheduledTaskId }): Promise<{ id: ScheduledTaskId }> {
+		if (!this.#ready) await this.load();
+		if (this.#tasks.has(input.id)) await this.#remove([input.id], "Could not delete schedule task.");
 		return { id: input.id };
 	}
 
 	async runNow(input: { id: string }): Promise<{ task: Task }> {
+		if (!this.#ready) await this.load();
 		const task = this.#load(input.id);
 		try {
 			return { task: await this.#runTask(task, "manual") };
@@ -327,22 +326,48 @@ export class ScheduledTasks {
 		return task;
 	}
 
-	/** Memory follows the file: a failed write leaves the previous task in place. */
-	#write(task: Task): void {
+	/** Store one task. Memory changes first, so a read right after the call sees it; a commit that fails puts the
+	 * previous task back (memory follows the store) and is refused with the typed error. */
+	async #write(task: Task): Promise<void> {
 		const previous = this.#tasks.get(task.id);
 		this.#tasks.set(task.id, task);
+		this.#notify();
+		const encoded = encodeTask(task) as unknown as JsonValue;
 		try {
-			this.#save();
+			await this.#harness.commit(async (tx) => {
+				const doc = await tx.doc(ScheduledTasksDoc);
+				const index = doc.tasks.findIndex((entry) => (entry as { id?: unknown }).id === task.id);
+				if (index < 0) doc.tasks.push(encoded);
+				else doc.tasks[index] = encoded;
+			}, BACKGROUND_CONTEXT);
 		} catch (error) {
-			if (previous === undefined) this.#tasks.delete(task.id);
-			else this.#tasks.set(task.id, previous);
+			if (this.#tasks.get(task.id) === task) {
+				if (previous === undefined) this.#tasks.delete(task.id);
+				else this.#tasks.set(task.id, previous);
+				this.#notify();
+			}
 			throw taskError("Could not save schedule task.", task.id, error);
 		}
-		this.#notify();
 	}
 
-	#save(): void {
-		writeJsonAtomic(this.path, { tasks: [...this.#tasks.values()] });
+	/** Drop tasks, the same way: memory first, put back if the commit fails. */
+	async #remove(ids: readonly string[], refusal: string): Promise<void> {
+		const removed = ids.flatMap((id) => {
+			const task = this.#tasks.get(id);
+			return task === undefined ? [] : [task];
+		});
+		for (const task of removed) this.#tasks.delete(task.id);
+		this.#notify();
+		try {
+			await this.#harness.commit(async (tx) => {
+				const doc = await tx.doc(ScheduledTasksDoc);
+				doc.tasks = doc.tasks.filter((entry) => !ids.includes((entry as { id?: string }).id ?? ""));
+			}, BACKGROUND_CONTEXT);
+		} catch (error) {
+			for (const task of removed) if (!this.#tasks.has(task.id)) this.#tasks.set(task.id, task);
+			this.#notify();
+			throw taskError(refusal, ids.length === 1 ? ids[0] : undefined, error);
+		}
 	}
 
 	#notify(): void {
