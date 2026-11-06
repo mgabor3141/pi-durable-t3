@@ -133,10 +133,9 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
 2. Typed RPC boundary. No behaviour change; makes the rest safe to move.
 3. Extract ThreadService from `Bridge` and `Threads`; the WS adapter calls it. Remove the chord objects layer.
    Readiness without polling. No wire change.
-4. Thread record family with provenance and lineage, summaries separate, bounded tombstones; migration from the v1
-   threads document on first open (one commit, idempotent, tested against a v1 store).
-5. Projects, scheduled tasks and command receipts in pi-durable; one-time import of `projects.json` and
-   `scheduled-tasks.json` (renamed `*.imported` afterwards, so a rollback can find them).
+4. Thread record family with provenance and lineage, summaries separate, bounded tombstones. No migration code:
+   existing instances are migrated by hand.
+5. Projects, scheduled tasks and command receipts in pi-durable. No import of the old files.
 6. Incremental projector, event stream, bounded snapshot, history pages, resume. Acceptance: wire bytes for a streamed
    reply proportional to the reply, first snapshot within T3's bounds, on the benchmark's 50/200/500-turn threads.
 7. Parity tests: every item the bridge emits is encoded and decoded with the contract's schema in tests; supported
@@ -147,8 +146,6 @@ server retried; the restart drain treats a tool task whose owned work is all pau
 
 ## Decisions
 
-1. Remove the chord objects layer (recommended), or keep it as the internal boundary under ThreadService.
-2. Migration policy: migrate in place with the old documents kept read-only for one release (recommended), or a
-   one-way migration.
-3. The order above puts the typed boundary before the extraction. The alternative is extraction first, which is
-   faster but moves untyped code twice.
+1. Chord objects layer: open (see the discussion in the review thread).
+2. Migration: none. There are no users; existing instances are migrated by hand, and no migration code is kept.
+3. Order: typed boundary first (step 2), then the extraction.
