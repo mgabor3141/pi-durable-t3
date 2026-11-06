@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: proposal, for review before any code moves. Branch `cleanup`.
+Status: in progress on branch `cleanup`. Steps 1–3 done (see Plan).
 
 ## Goal
 
@@ -130,9 +130,14 @@ thread record needs `linkOrigin` and `delegatedFrom` from the start, which is on
 Each step is a reviewable commit or PR with the suite green and the benchmark rerun.
 
 1. Done: CI green (`26de333`), benchmark.
-2. Typed RPC boundary. No behaviour change; makes the rest safe to move.
-3. Extract ThreadService from `Bridge` and `Threads`; the WS adapter calls it. Remove the chord objects layer.
-   Readiness without polling. No wire change.
+2. Done (`abc23b3`): typed RPC boundary. It found two handlers for methods the pinned contract does not have
+   (`server.getSettings`, `scheduledTasks.list`), config reads failing with an undeclared error, and asset errors
+   outside the contract. The auth HTTP routes still parse bodies by hand; they move to the contract's schemas with
+   the auth work.
+3. Done (`a7e950a`): the chord objects layer is removed; one directory watch, one head watch per open thread, a
+   directory change re-projects only the rows that changed, and readiness is signalled, not polled. Moving the
+   command switch from `rpc.ts` into a T3-shaped `dispatch(command, provenance)` goes with step 4, where the thread
+   record gets provenance.
 4. Thread record family with provenance and lineage, summaries separate, bounded tombstones. No migration code:
    existing instances are migrated by hand.
 5. Projects, scheduled tasks and command receipts in pi-durable. No import of the old files.
@@ -146,6 +151,6 @@ server retried; the restart drain treats a tool task whose owned work is all pau
 
 ## Decisions
 
-1. Chord objects layer: open (see the discussion in the review thread).
+1. Chord objects layer: removed.
 2. Migration: none. There are no users; existing instances are migrated by hand, and no migration code is kept.
 3. Order: typed boundary first (step 2), then the extraction.
