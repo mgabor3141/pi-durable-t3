@@ -33,7 +33,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
-import { ProviderInstanceExists } from "../settings.ts";
+import { ProviderInstanceExists, SettingsReadError } from "../settings.ts";
 import { accessChangeEvent, accessSnapshot } from "./access.ts";
 import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
@@ -276,7 +276,9 @@ export function makeRpcLayer(deps: RpcDeps) {
 								providerInstanceId: error.instanceId,
 								cause: error,
 							})
-						: new ServerSettingsError({
+						: error instanceof SettingsReadError
+							? new ServerSettingsError({ settingsPath: deps.bridge.config.settings.path, operation: "read-file", cause: error.cause })
+							: new ServerSettingsError({
 								settingsPath: deps.bridge.config.settings.path,
 								operation: "write-file",
 								providerInstanceId: PROVIDER_INSTANCE_ID,

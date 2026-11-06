@@ -179,6 +179,10 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    - Done: `/ws` runs behind T3's own per-method authorization (`auth/RpcAuthorization.ts`, vendored into
      `vendor/t3-server` with the stream code). Before, only the file calls were checked; a token narrowed to
      `orchestration:read` could dispatch commands. Every method, unsupported ones included, now needs its scope.
+   - Done: the test client fails any test whose host answered something that does not encode with the contract
+     (the RPC server's "Failed to encode response" defect), so every host-process test checks the wire.
+   - Done: T3's settings-file cases are ported (`test/settings-file.test.ts`); a save now merges into the file on
+     disk (a hand edit is kept, an unparseable file refused and left alone) and writes through a symlink.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.

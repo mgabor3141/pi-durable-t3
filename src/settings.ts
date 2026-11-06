@@ -144,6 +144,13 @@ export class ProviderInstanceExists extends Error {
 	}
 }
 
+/** The settings file changed under the store and cannot be read: T3's `read-file` refusal. */
+export class SettingsReadError extends Error {
+	constructor(cause: unknown) {
+		super(`The settings file cannot be read: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+	}
+}
+
 /** The live `ServerSettings` document: the sparse file read at start, kept in memory, every mutation validated,
  * persisted, and announced. Missing is the defaults; unparseable is a fatal `ConfigError` naming the file (state.md). */
 export class ServerSettingsStore {
@@ -156,7 +163,12 @@ export class ServerSettingsStore {
 	#settings: ServerSettings;
 	readonly #listeners = new Set<() => void>();
 
-	private constructor(file: string, raw: Record<string, unknown>) {
+	/** The file's text when it was last read or written: an update re-reads the file, and a different text is an edit
+	 * made outside this store, which becomes the merge base (T3 merges into what is on disk, not into its cache). */
+	#text: string | undefined;
+
+	private constructor(file: string, raw: Record<string, unknown>, text: string | undefined) {
+		this.#text = text;
 		this.#file = file;
 		this.#raw = raw;
 		this.#full = decodeSettings(raw);
@@ -169,7 +181,7 @@ export class ServerSettingsStore {
 		try {
 			text = readFileSync(file, "utf8");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return new ServerSettingsStore(file, {});
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return new ServerSettingsStore(file, {}, undefined);
 			throw error;
 		}
 		let raw: unknown;
@@ -179,7 +191,7 @@ export class ServerSettingsStore {
 			fail(file, (error as Error).message);
 		}
 		if (!isPlainObject(raw)) fail(file, "the settings file must contain a JSON object");
-		return new ServerSettingsStore(file, raw); // the constructor's decode validates; a refusal names the file.
+		return new ServerSettingsStore(file, raw, text); // the constructor's decode validates; a refusal names the file.
 	}
 
 	get path(): string {
@@ -194,6 +206,7 @@ export class ServerSettingsStore {
 	 * (they read the current lists, not the file): both preference keys are stripped from the merge and committed from
 	 * the fold. */
 	update(patch: ServerSettingsPatch): ServerSettings {
+		this.#reload();
 		const patchForMerge: Record<string, unknown> = { ...patch };
 		for (const key of MODEL_PREF_KEYS) delete patchForMerge[key];
 		const merged = deepMerge(this.#full, patchForMerge);
@@ -204,6 +217,7 @@ export class ServerSettingsStore {
 	/** `providerInstanceMutation` + patch against one snapshot (T3's `updateProviderInstance`): a `create` for an id
 	 * the document has is refused, `upsert`/`create` set, `delete` removes. */
 	updateProviderInstance(mutation: ProviderInstanceMutation, patch: ServerSettingsPatch = {}): ServerSettings {
+		this.#reload();
 		const instances: Record<string, unknown> = isPlainObject(this.#full.providerInstances) ? { ...this.#full.providerInstances } : {};
 		if (mutation.operation === "create" && instances[mutation.instanceId] !== undefined) throw new ProviderInstanceExists(mutation.instanceId);
 		if (mutation.operation === "upsert" || mutation.operation === "create") instances[mutation.instanceId] = mutation.instance;
@@ -216,6 +230,35 @@ export class ServerSettingsStore {
 		return () => this.#listeners.delete(listener);
 	}
 
+	/** Take up an edit made to the file since this store last read or wrote it. A file that no longer parses is refused
+	 * with `SettingsReadError` and left as it is: writing the merge over it would throw the edit away. */
+	#reload(): void {
+		let text: string | undefined;
+		try {
+			text = readFileSync(this.#file, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new SettingsReadError(error);
+		}
+		if (text === this.#text) return;
+		let raw: unknown;
+		try {
+			raw = text === undefined || text.trim() === "" ? {} : JSON.parse(text);
+		} catch (error) {
+			throw new SettingsReadError(error);
+		}
+		if (!isPlainObject(raw)) throw new SettingsReadError(new Error("the settings file must contain a JSON object"));
+		let full: Record<string, unknown>;
+		try {
+			full = decodeSettings(raw);
+		} catch (error) {
+			throw new SettingsReadError(error);
+		}
+		this.#text = text;
+		this.#raw = raw;
+		this.#full = full;
+		this.#settings = withProviderFacts(full, raw);
+	}
+
 	#commit(merged: Record<string, unknown>, clientWroteInstances: boolean): ServerSettings {
 		const sparse = persisted(merged, clientWroteInstances);
 		let full: Record<string, unknown>;
@@ -225,6 +268,8 @@ export class ServerSettingsStore {
 			fail(this.#file, (error as Error).message);
 		}
 		writeJsonAtomic(this.#file, sparse);
+		this.#text = `${JSON.stringify(sparse, null, 2)}
+`;
 		this.#raw = sparse;
 		this.#full = full;
 		this.#settings = withProviderFacts(full, sparse);

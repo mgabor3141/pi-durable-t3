@@ -43,8 +43,10 @@ the Harness's storage: settings, pairings and attachment bytes.
 | `attachments/` (the state dir) | Image and file attachments, one file per attachment id | Past attachments stop rendering; the model's copy in pi-durable survives |
 | The scratch dir (`scratchDir`, if set) | "No project" threads: one folder per thread | Nothing the bridge needs; threads keep their recorded `cwd` |
 
-The JSON files are written atomically, mode 0600, and so are attachments. The scratch dir is agent work
-output, not bridge state. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
+The JSON files are written atomically, mode 0600, and so are attachments; a symlinked file is written through its
+link, which stays. The scratch dir is agent work output, not bridge state. Like T3, a settings save merges into the
+file as it is on disk, so a hand edit made while the host runs is kept, and a file that no longer parses is refused
+(`read-file`) and left alone. Unlike T3, the file is not watched: clients see a hand edit at the next save or restart. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.
 
