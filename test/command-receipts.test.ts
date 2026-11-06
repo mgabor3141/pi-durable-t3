@@ -8,7 +8,7 @@ import { expect, it, onTestFinished } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import { type DispatchCommand, dispatchCommand } from "../src/t3/dispatch.ts";
+import { clientProvenance, type DispatchCommand, dispatchCommand } from "../src/t3/dispatch.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import type { ProjectRegistry } from "../src/registry.ts";
 import type { Threads } from "../src/threads.ts";
@@ -62,4 +62,30 @@ it("a refused command keeps no receipt, and duplicates in flight run once", asyn
 	]);
 	expect(a, "the duplicate joined the first").toBe(b);
 	expect((await f.threads.list()).find((thread) => thread.threadId === "missing")?.receipts.filter((receipt) => receipt.commandId === "c-twice")).toHaveLength(1);
+}, 30_000);
+
+// T3's "stamps authoritative provenance on commands that create threads or messages" (ThreadManagementService.test.ts),
+// through the /ws path: a client names its surface but is always the user, and cannot claim a linked environment's
+// origin or a parent there — only the server stamps those.
+it("a client's thread.create is the user's, and cannot claim a link origin or a delegating parent", async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const bridge = await boot(f.threads, f.registry, f.model.models);
+	const forged = command({
+		type: "thread.create",
+		commandId: "c-forged",
+		threadId: "t-forged",
+		projectId: "p",
+		title: "T",
+		modelSelection: { instanceId: "pi", model: "faux/faux-1" },
+		createdBy: "agent",
+		creationSource: "mcp",
+		linkOrigin: { sessionId: "forged", label: "Somewhere else" },
+		delegatedFrom: { environmentId: "environment:elsewhere", threadId: "thread:elsewhere", title: "Somewhere else" },
+		createdAt: new Date().toISOString(),
+	});
+	await dispatchCommand(bridge, forged, clientProvenance(forged), log);
+	const record = (await f.threads.list()).find((thread) => thread.threadId === "t-forged")!;
+	expect({ createdBy: record.createdBy, creationSource: record.creationSource }).toEqual({ createdBy: "user", creationSource: "mcp" });
+	expect(record.linkOrigin).toBeUndefined();
+	expect(record.delegatedFrom).toBeUndefined();
 }, 30_000);

@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: in progress on branch `cleanup`. Steps 1–6 done, step 7 under way (see Plan).
+Status: steps 1–7 done on branch `cleanup` (see Plan); the claw fixes below are next.
 
 ## Goal
 
@@ -167,8 +167,9 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    compared structurally instead of as JSON, so it would add state without a visible gain. The sequence is still the
    process's clock-floored counter, not a durable one: across a restart a resume is answered with a snapshot, which
    the contract allows.
-7. Parity tests: every item the bridge emits is encoded and decoded with the contract's schema in tests; supported
-   commands are checked against T3's behaviour (ported test cases where T3 has them); the browser smoke runs in CI.
+7. Done: parity tests. Every item the bridge emits is encoded and decoded with the contract's schema in tests;
+   supported commands are checked against T3's behaviour (ported test cases where T3 has them). The browser smoke is
+   in CI (`ci.yml`) but cannot run on the authoring machine (no Chromium), so it is still unverified there.
    - Done: the HTTP surface is T3's `EnvironmentHttpApi` through `HttpApiBuilder` (`t3/http-api.ts`), with the auth
      middleware, scope checks and error mapping of T3's handlers. That changed what clients saw: errors now carry
      `code`/`traceId` and no invented `message`; thread and project reads need `orchestration:read` and mutations
@@ -183,6 +184,9 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
      (the RPC server's "Failed to encode response" defect), so every host-process test checks the wire.
    - Done: T3's settings-file cases are ported (`test/settings-file.test.ts`); a save now merges into the file on
      disk (a hand edit is kept, an unparseable file refused and left alone) and writes through a symlink.
+   - Done: T3's provenance case is pinned (`test/command-receipts.test.ts`): over `/ws` a creator is always the user,
+     the surface is the client's, and `linkOrigin`/`delegatedFrom` cannot be claimed. Most other T3 command tests
+     exercise provider sessions, delegated tasks or pull requests, which this host does not have.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.
