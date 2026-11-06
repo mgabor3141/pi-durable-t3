@@ -17,7 +17,7 @@ const RUNS = [
 
 describe("undoTarget", () => {
 	it("cp2 keeps runs 1–2 → fork at run 3's user entry", () => {
-		expect(undoTarget(RUNS, "cp20")).toEqual({ entryId: 30, keepOrdinal: 2 });
+		expect(undoTarget(RUNS, "cp20")).toEqual({ entryId: 30 });
 	});
 	it("the edges: nothing to revert (the last checkpoint keeps every run; an empty thread at baseline), and an unknown checkpoint is unknown", () => {
 		expect(undoTarget(RUNS, "cp30")).toEqual({ nothing: true });

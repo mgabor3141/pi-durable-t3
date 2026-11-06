@@ -83,7 +83,8 @@ The code shows what each operation does. These are the rules it cannot show on i
   answers with it.
 - **Undo forks just before the reverted message.** The thread's head moves to the fork; the old conversation
   keeps every entry. The reverted runs stay in the projection marked rolled back; without that, T3 reads the
-  thread as busy.
+  thread as busy. Nothing about them is stored but the undo itself (the head it moved to and the head it left): they
+  are the left heads' runs the current head no longer has, read back from those conversations.
 - **Undo of a head that already moved on adds a child thread** instead of failing.
 - **A delete wins.** Deleting a thread aborts its run, and the removal is recorded in the threads document.
   Promotion and undo skip removed threads, so a deleted thread stays deleted across restarts.

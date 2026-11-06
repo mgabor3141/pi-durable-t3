@@ -17,7 +17,7 @@ Projections are rebuilt from it on every change.
 
 | What | If lost |
 |---|---|
-| One record per thread (`pi-durable-t3.thread`): its head conversation, title, T3's creation fields (`createdBy`, `creationSource`), `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`, settlement, its last 50 applied undos, and its last 100 command receipts (T3's: a retried `commandId` gets the answer the command first got, across restarts) | The thread. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
+| One record per thread (`pi-durable-t3.thread`): its head conversation, title, T3's creation fields (`createdBy`, `creationSource`), `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`, settlement, its last 50 applied undos (each the head it moved to and the head it left, from which the rolled-back runs are read), the last rollback's outcome, and its last 100 command receipts (T3's: a retried `commandId` gets the answer the command first got, across restarts) | The thread. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
 | A deleted thread's record, with `deletedAt` | A deleted thread could come back: the record is the tombstone that keeps a late prompt to its head from promoting it |
 | One sidebar summary per thread (`pi-durable-t3.thread-summary`) | An unopened thread previews and sorts as new until it is opened |
 | The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
@@ -60,7 +60,7 @@ releases it on a graceful stop, so a SIGKILLed host leaves a mapping pointing at
 ## In memory
 
 All of it is safe to lose:
-- Per-thread view caches and the undo overlay.
+- Per-thread view caches, including the rolled-back runs read from the heads the thread's undos left.
 - Per open thread, the stream: the projection its subscribers were last brought to, its sequence, and the last 128
   events (what a resuming subscriber is replayed). The sequence is a clock-floored counter of this process, so after a
   restart every resume is answered with a snapshot.

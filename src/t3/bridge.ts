@@ -34,7 +34,7 @@ import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-strea
 import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
-import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
+import { BASELINE_CHECKPOINT_ID, type RolledBackRun, rolledBackRuns, undoneHeads, undoTarget } from "./undo.ts";
 
 export class CommandError extends Error {}
 
@@ -84,9 +84,8 @@ interface ThreadState {
 	readonly threadId: string;
 	refs: number;
 	closeTimer: NodeJS.Timeout | undefined;
+	/** The runs the head's undos rolled back, derived from the undone heads when the head is followed (`#rolledBack`). */
 	rolledBack: RolledBackRun[];
-	rollbackRequestId: string | undefined;
-	rollbackFailure: { requestId: string; message: string } | null | undefined;
 	result: ProjectionResult | undefined;
 	/** The head's real view has been projected once since the thread was opened. */
 	loadedView: boolean;
@@ -631,6 +630,7 @@ export class Bridge {
 			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
 			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
+			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
 			subagents: new Map([...this.#subagents.values()].filter((ref) => ref.parentThreadId === threadId).map((ref) => [ref.taskId, ref])),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			titleRegeneration: this.#titleRequests.has(threadId)
@@ -644,8 +644,6 @@ export class Bridge {
 		if (state?.result !== undefined) return state.result.shell;
 		return projectThread(this.#meta(threadId, this.#summary(threadId), state), undefined, {
 			rolledBack: state?.rolledBack ?? [],
-			rollbackRequestId: state?.rollbackRequestId,
-			rollbackFailure: state?.rollbackFailure,
 		}).shell;
 	}
 
@@ -724,8 +722,6 @@ export class Bridge {
 				refs: 0,
 				closeTimer: undefined,
 				rolledBack: [],
-				rollbackRequestId: undefined,
-				rollbackFailure: undefined,
 				result: undefined,
 				loadedView: false,
 				changed: Promise.withResolvers<void>(),
@@ -813,6 +809,9 @@ export class Bridge {
 		try {
 			const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
 			if (!current()) return;
+			const rolledBack = await this.#rolledBack(state, head);
+			if (!current()) return;
+			state.rolledBack = rolledBack;
 			if (conversation === undefined) {
 				await this.#setView(state, head, EMPTY_VIEW, undefined, current);
 				return;
@@ -830,6 +829,24 @@ export class Bridge {
 		} catch (error) {
 			this.#log.warn("could not follow a thread's head", { threadId: state.threadId, head, error: error instanceof Error ? error.message : String(error) });
 		}
+	}
+
+	/**
+	 * The runs `head`'s undos rolled back: every run of the heads they left (`undoneHeads`) as it was there, marked rolled
+	 * back. The projection drops the ones `head` still has, so the undo record is all that is stored (design.md, Invariants).
+	 */
+	async #rolledBack(state: ThreadState, head: number): Promise<RolledBackRun[]> {
+		const chain = undoneHeads(this.#summary(state.threadId)?.undos ?? [], head);
+		const runs = new Map<string, RolledBackRun>();
+		for (const from of chain.reverse()) {
+			const conversation = await this.#store.harness.conversation(from as ConversationId, BACKGROUND_CONTEXT).catch(() => undefined);
+			if (conversation === undefined) continue;
+			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
+			const view = { conversation: {}, entries, docs: {} } as unknown as ConversationView;
+			const { projection } = projectThread(this.#meta(state.threadId, this.#summary(state.threadId), undefined), view, { rolledBack: [] });
+			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
+		}
+		return [...runs.values()];
 	}
 
 	/** One view of the head: the history above its compaction cut (loaded once per cut), its configuration (re-read only
@@ -954,7 +971,7 @@ export class Bridge {
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
 			state.view,
-			{ rolledBack: state.rolledBack, rollbackRequestId: state.rollbackRequestId, rollbackFailure: state.rollbackFailure, history: state.history },
+			{ rolledBack: state.rolledBack, history: state.history },
 		);
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
 		if (loaded) this.#restoreAttachments([...(state.history ?? []), ...state.view.entries]);
@@ -1599,41 +1616,30 @@ export class Bridge {
 		}
 	}
 
+	/**
+	 * T3's `checkpoint.rollback`: fork the head before the reverted turn and move the thread there. The outcome is kept on
+	 * the thread record, and the reverted runs are read back from the head it left (`#rolledBack`).
+	 */
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
 		const state = this.#state(input.threadId);
-		const fail = (message: string) => {
-			state.rollbackFailure = { requestId: input.commandId, message };
-			this.#recompute(state);
-		};
-		try {
-			const { projection, runs } = await this.projection(input.threadId);
-			state.rollbackRequestId = input.commandId;
-			state.rollbackFailure = null;
-			if (input.restoreFiles) {
-				return fail("pi-durable-t3 does not restore files; use “Revert and keep changes”.");
-			}
-			if (runs.some((run) => run.status === "running")) return fail("Interrupt the current turn before reverting.");
-
-			// Map the checkpoint to the user entry to fork at (see `undoTarget`); rewind forks there, keeping runs 1..N.
+		const failure = await (async (): Promise<string | null> => {
+			if (input.restoreFiles) return "pi-durable-t3 does not restore files; use “Revert and keep changes”.";
+			const { runs } = await this.projection(input.threadId);
+			if (runs.some((run) => run.status === "running")) return "Interrupt the current turn before reverting.";
+			// Map the checkpoint to the user entry to fork at (see `undoTarget`); rewind forks just before it.
 			const target = undoTarget(runs, input.checkpointId);
-			if ("unknown" in target) return fail(`Unknown checkpoint ${input.checkpointId}.`);
-			if ("nothing" in target) return fail("Nothing to revert.");
-
+			if ("unknown" in target) return `Unknown checkpoint ${input.checkpointId}.`;
+			if ("nothing" in target) return "Nothing to revert.";
 			const expectedHead = await this.#awaitHead(state);
-
-			const rolled = rolledBackRuns(projection, target.keepOrdinal);
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
 			await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
-			state.rolledBack = [
-				...state.rolledBack.filter((r) => !rolled.some((x) => x.run.id === r.run.id)),
-				...rolled,
-			].slice(-MAX_ROLLED_BACK_RUNS);
-			this.#recompute(state);
-			this.#log.info("rewound thread", { threadId: input.threadId, keepOrdinal: target.keepOrdinal, rolledBack: rolled.length });
-		} catch (error) {
-			fail((error as Error).message || "Rewind failed.");
+			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
+			return null;
+		})().catch((error: unknown) => (error as Error).message || "Rewind failed.");
+		try {
+			await this.#store.recordRollback(input.threadId, input.commandId, failure);
 		} finally {
 			release();
 		}

@@ -90,6 +90,8 @@ export interface ThreadMeta {
 	/** Set on a subagent's own thread: pi owns it as Claude owns its Task children (provider-native, so it cannot take
 	 * user messages). `parentThreadId` is the thread whose call created it; `nodeId` that call's node. */
 	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string };
+	/** The last rollback asked of the thread and its failure, from the thread record. */
+	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -102,8 +104,6 @@ interface ThreadMemory {
 	/** Transcript before the active context's cut, for display only. Compaction keeps these entries on disk but drops
 	 * them from the model context; without them the thread appears to start at the divider. They are never rewound. */
 	readonly history?: readonly EntryRecord[];
-	readonly rollbackRequestId?: string | undefined;
-	readonly rollbackFailure?: { requestId: string; message: string } | null | undefined;
 }
 
 interface ProjectedRun {
@@ -892,8 +892,12 @@ export function projectThread(
 		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
 		lastVisitedAt: null,
 		deletedAt: null,
-		...(memory.rollbackRequestId === undefined ? {} : { rollbackRequestId: id(memory.rollbackRequestId) }),
-		...(memory.rollbackFailure === undefined ? {} : { rollbackFailure: memory.rollbackFailure }),
+		...(meta.rollback === undefined
+			? {}
+			: {
+					rollbackRequestId: id(meta.rollback.requestId),
+					rollbackFailure: meta.rollback.failure === null ? null : { requestId: id(meta.rollback.requestId), message: meta.rollback.failure },
+				}),
 	};
 
 	const projection: OrchestrationV2ThreadProjection = {

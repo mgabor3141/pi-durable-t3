@@ -81,7 +81,9 @@ type StoredSummary = ThreadSummary & { revision: number };
 const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, latestUserMessageAt: null, itemCount: 0, visibleItemCount: 0, revision: 0 };
 
 /** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
-type AppliedUndo = { requestId: string; head: number };
+/** An undo this thread applied: the head it moved to and the head it left. The runs the left head has and the new one
+ * does not are the undo's rolled-back runs (`undoneHeads`): nothing about them is stored but this pair. */
+export type AppliedUndo = { requestId: string; head: number; from: number };
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
 
@@ -114,6 +116,8 @@ export type ThreadRecord = {
 	unsettledAt?: number;
 	deletedAt: number | null;
 	undos: AppliedUndo[];
+	/** The last rollback asked of this thread, and why it failed (`null`: it did not), as T3 keeps it on the thread. */
+	rollback?: { requestId: string; failure: string | null };
 	/** The last commands this thread accepted (T3's receipts), newest last. */
 	receipts: Receipt[];
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
@@ -901,6 +905,16 @@ export class Threads {
 	}
 
 	/** T3's `thread.settle`: a durable manual settlement, keeping the first stamp when it is already settled. */
+	/** Keep the outcome of a rollback on the thread (T3's `rollbackRequestId` / `rollbackFailure`). */
+	async recordRollback(threadId: string, requestId: string, failure: string | null): Promise<void> {
+		await this.#commit(async (_tx, writes) => {
+			const record = await writes.record(threadId);
+			if (record === undefined || record.deletedAt !== null) return;
+			record.rollback = { requestId, failure };
+			await writes.putRecord(record);
+		});
+	}
+
 	async settle(threadId: string, settledAt?: number): Promise<void> {
 		const at = settledAt ?? Date.now();
 		await this.#commit(async (_tx, writes) => {
@@ -1058,7 +1072,7 @@ export class Threads {
 					? await configureNewConversation(tx, headAgent!)
 					: await tx.forkConversation(expectedHead, forkAt as EntryId, { ownership: { kind: "ownerless" } });
 			const receipt = (record: ThreadRecord): void => {
-				record.undos = [...record.undos, { requestId: input.requestId, head: fork.id }].slice(-MAX_UNDOS);
+				record.undos = [...record.undos, { requestId: input.requestId, head: fork.id, from: input.expectedHead }].slice(-MAX_UNDOS);
 			};
 			if (thread === undefined) {
 				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} does not exist; the fork stays ownerless`, undefined);

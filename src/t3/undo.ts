@@ -27,10 +27,10 @@ export interface RolledBackRun {
 	readonly checkpointScopes: readonly OrchestrationV2CheckpointScope[];
 }
 
-/** Snapshot the runs after `keepOrdinal` as rolled back, for the rewind confirmation. */
-export function rolledBackRuns(projection: OrchestrationV2ThreadProjection, keepOrdinal: number): RolledBackRun[] {
+/** A projection's runs, with every row that references them, marked rolled back. */
+export function rolledBackRuns(projection: OrchestrationV2ThreadProjection): RolledBackRun[] {
 	return projection.runs
-		.filter((run) => run.status !== "rolled_back" && run.ordinal > keepOrdinal)
+		.filter((run) => run.status !== "rolled_back")
 		.map((run) => ({
 			run: { ...run, status: "rolled_back" as const, checkpointId: null },
 			items: projection.turnItems.filter((item) => item.runId === run.id),
@@ -44,26 +44,36 @@ export function rolledBackRuns(projection: OrchestrationV2ThreadProjection, keep
 		}));
 }
 
-/** At most this many rolled-back runs are kept per thread (oldest dropped). */
-export const MAX_ROLLED_BACK_RUNS = 200;
+/**
+ * The heads a thread's undos left behind on the way to `head`, newest first: `head` came from one, which came from
+ * another, back to the first undo the record still holds. Their runs that `head` no longer has are its rolled-back runs.
+ */
+export function undoneHeads(undos: readonly { readonly head: number; readonly from: number }[], head: number): number[] {
+	const chain: number[] = [];
+	for (let current = head; ; ) {
+		const undo = undos.findLast((candidate) => candidate.head === current);
+		if (undo === undefined || undo.from === head || chain.includes(undo.from)) return chain;
+		chain.push(undo.from);
+		current = undo.from;
+	}
+}
 
 /**
- * Map a T3 rollback to the pi rewind target: `entryId` is the **user turn being reverted**, `keepOrdinal` the runs the
- * checkpoint retains (for the rolled-back overlay). Baseline reverts the first run's user entry; `cp<userEntryId>`
+ * Map a T3 rollback to the pi rewind target: `entryId` is the **user turn being reverted**. Baseline reverts the first run's user entry; `cp<userEntryId>`
  * (run N) reverts run N+1's user entry, and a checkpoint that already keeps every run has nothing to revert.
  */
 export function undoTarget(
 	runs: readonly { ordinal: number; userEntryId: number }[],
 	checkpointId: string,
-): { entryId: number; keepOrdinal: number } | { nothing: true } | { unknown: true } {
+): { entryId: number } | { nothing: true } | { unknown: true } {
 	if (checkpointId === BASELINE_CHECKPOINT_ID) {
 		const first = runs[0];
 		if (first === undefined) return { nothing: true };
-		return { entryId: first.userEntryId, keepOrdinal: 0 };
+		return { entryId: first.userEntryId };
 	}
 	const index = runs.findIndex((run) => `cp${run.userEntryId}` === checkpointId);
 	if (index < 0) return { unknown: true };
 	const next = runs[index + 1];
 	if (next === undefined) return { nothing: true };
-	return { entryId: next.userEntryId, keepOrdinal: runs[index]!.ordinal };
+	return { entryId: next.userEntryId };
 }
