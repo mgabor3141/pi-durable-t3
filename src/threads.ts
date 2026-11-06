@@ -87,11 +87,11 @@ export type AppliedUndo = { requestId: string; head: number; from: number };
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
 
-/** A command this thread accepted, and the sequence it was answered with: a retried `commandId` gets the same answer
+/** A command the host accepted, and the sequence it was answered with: a retried `commandId` gets the same answer
  * (T3's command receipts). */
 type Receipt = { commandId: string; sequence: number };
-/** Receipts kept per thread. */
-const MAX_RECEIPTS = 100;
+/** Receipts kept: a retry arrives within seconds or minutes, not after a thousand more commands. */
+const MAX_RECEIPTS = 1000;
 
 /**
  * One thread, durably: T3's `OrchestrationV2AppThread` fields this host can honour, plus the head conversation the
@@ -118,8 +118,6 @@ export type ThreadRecord = {
 	undos: AppliedUndo[];
 	/** The last rollback asked of this thread, and why it failed (`null`: it did not), as T3 keeps it on the thread. */
 	rollback?: { requestId: string; failure: string | null };
-	/** The last commands this thread accepted (T3's receipts), newest last. */
-	receipts: Receipt[];
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;
 };
@@ -149,6 +147,15 @@ const ThreadSummaryDoc = defineDocFamily<StoredSummary, StoredSummary>({
 
 /** The live thread ids in creation order, and every head ever (deleted threads' too) by conversation id. */
 type Directory = { threads: string[]; heads: Record<string, string>; revision: number };
+
+/** The last commands the host accepted, newest last: one store for every command, as T3 keeps one. */
+const ReceiptsDoc = defineDoc<{ receipts: Receipt[] }>({
+	kind: "pi-durable-t3.command-receipts",
+	version: 1,
+	scope: "session",
+	initial: () => ({ receipts: [] }),
+	checkpointWhen: () => true,
+});
 
 /** The directory: written only when a thread is created, deleted or moves its head. Version 2: a store written with the
  * single threads document of version 1 is refused (no migration: such a store is migrated by hand). */
@@ -333,6 +340,7 @@ export class Threads {
 	#directory: Directory = { threads: [], heads: {}, revision: 0 };
 	readonly #records = new Map<string, ThreadRecord>();
 	readonly #summaries = new Map<string, StoredSummary>();
+	readonly #receipts = new Map<string, number>();
 	readonly #listeners = new Set<(threadIds: ReadonlySet<string>) => void>();
 	#loading: Promise<void> | undefined;
 
@@ -356,6 +364,8 @@ export class Threads {
 	/** Load the documents into memory, once. Every read and write awaits it. */
 	load(): Promise<void> {
 		this.#loading ??= (async () => {
+			const receipts = await this.#harness.snapshot(ReceiptsDoc, BACKGROUND_CONTEXT);
+			for (const receipt of receipts?.receipts ?? []) this.#receipts.set(receipt.commandId, receipt.sequence);
 			const directory = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
 			if (directory === undefined) return;
 			this.#directory = copy(directory) as Directory;
@@ -453,19 +463,25 @@ export class Threads {
 		});
 	}
 
-	/** The answer a thread gave a command it accepted, if it still keeps that receipt (a deleted thread keeps its own). */
-	receipt(threadId: string, commandId: string): number | undefined {
-		return this.#records.get(threadId)?.receipts.find((receipt) => receipt.commandId === commandId)?.sequence;
+	/** The answer the host gave a command it accepted, while it keeps that receipt. */
+	async receipt(commandId: string): Promise<number | undefined> {
+		await this.load();
+		return this.#receipts.get(commandId);
 	}
 
-	/** Keep the receipt of a command the thread accepted. A thread that does not exist keeps none. */
-	async recordReceipt(threadId: string, commandId: string, sequence: number): Promise<void> {
-		await this.#commit(async (_tx, writes) => {
-			const record = await writes.record(threadId);
-			if (record === undefined || record.receipts.some((receipt) => receipt.commandId === commandId)) return;
-			record.receipts = [...record.receipts, { commandId, sequence }].slice(-MAX_RECEIPTS);
-			await writes.putRecord(record);
-		});
+	/** Keep the receipt of an accepted command. */
+	async recordReceipt(commandId: string, sequence: number): Promise<void> {
+		await this.load();
+		const kept = await this.#harness.commit(async (tx) => {
+			const doc = await tx.doc(ReceiptsDoc);
+			const receipts = copy(doc.receipts);
+			if (receipts.some((receipt) => receipt.commandId === commandId)) return receipts;
+			const next = [...receipts, { commandId, sequence }].slice(-MAX_RECEIPTS);
+			overwrite(doc, { receipts: next });
+			return next;
+		}, BACKGROUND_CONTEXT);
+		this.#receipts.clear();
+		for (const receipt of kept) this.#receipts.set(receipt.commandId, receipt.sequence);
 	}
 
 	/** The live thread whose head is `conversationId`, if any. */
@@ -583,7 +599,6 @@ export class Threads {
 			...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			deletedAt: null,
 			undos: [],
-			receipts: [],
 			revision: 0,
 		};
 	}

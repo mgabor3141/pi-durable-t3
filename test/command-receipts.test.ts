@@ -1,4 +1,4 @@
-// Command receipts (T3's `CommandReceiptStore`, kept on the thread): a dispatched command the thread accepted answers a
+// Command receipts (T3's `CommandReceiptStore`, one store for the host): a dispatched command the host accepted answers a
 // retry with the same sequence — after a lost ack, and after a restart — instead of running again; a refused command
 // keeps no receipt; a duplicate in flight joins the first.
 import { mkdtemp, rm } from "node:fs/promises";
@@ -61,7 +61,7 @@ it("a refused command keeps no receipt, and duplicates in flight run once", asyn
 		dispatchCommand(bridge, command({ type: "thread.unsettle", commandId: "c-twice", threadId: "missing" }), USER, log),
 	]);
 	expect(a, "the duplicate joined the first").toBe(b);
-	expect((await f.threads.list()).find((thread) => thread.threadId === "missing")?.receipts.filter((receipt) => receipt.commandId === "c-twice")).toHaveLength(1);
+	expect(await f.threads.receipt("c-twice"), "one receipt, with the answer both got").toBe(a);
 }, 30_000);
 
 // T3's "stamps authoritative provenance on commands that create threads or messages" (ThreadManagementService.test.ts),

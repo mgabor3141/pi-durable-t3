@@ -1127,29 +1127,23 @@ export class Bridge {
 
 	// ---- commands ---------------------------------------------------------------------------------------------
 
-	/** Run a command once per commandId: retries of the same command return the first result. */
-	/** Run a command once while it is in flight: a duplicate that arrives meanwhile joins it. */
-	idempotent(commandId: string, run: () => Promise<number>): Promise<number> {
-		const existing = this.#commandResults.get(commandId);
-		if (existing !== undefined) return existing;
-		const result = run().finally(() => this.#commandResults.delete(commandId));
-		this.#commandResults.set(commandId, result);
-		return result;
-	}
-
 	/**
-	 * Run a command once, durably: a retry after it was accepted — after a lost ack, a reconnect, a restart — gets the
-	 * answer the thread kept for it (T3's command receipts), and a duplicate in flight joins the first. A refused
+	 * Run a command once per `commandId` (T3's command receipts): a retry after it was accepted — a lost ack, a
+	 * reconnect, a restart — gets the answer kept for it, and a duplicate that arrives while it runs joins it. A refused
 	 * command keeps no receipt, so its retry runs again.
 	 */
-	receipted(threadId: string | undefined, commandId: string, run: () => Promise<number>): Promise<number> {
-		return this.idempotent(commandId, async () => {
-			const kept = threadId === undefined ? undefined : this.#store.receipt(threadId, commandId);
+	receipted(commandId: string, run: () => Promise<number>): Promise<number> {
+		const running = this.#commandResults.get(commandId);
+		if (running !== undefined) return running;
+		const result = (async () => {
+			const kept = await this.#store.receipt(commandId);
 			if (kept !== undefined) return kept;
 			const sequence = await run();
-			if (threadId !== undefined) await this.#store.recordReceipt(threadId, commandId, sequence);
+			await this.#store.recordReceipt(commandId, sequence);
 			return sequence;
-		});
+		})().finally(() => this.#commandResults.delete(commandId));
+		this.#commandResults.set(commandId, result);
+		return result;
 	}
 
 	/**
@@ -1233,19 +1227,17 @@ export class Bridge {
 		await this.applySelection(threadId, input.modelSelection);
 		const message = input.initialMessage;
 		if (message !== undefined && message.text.trim().length > 0) {
-			await this.idempotent(input.commandId, async () => {
-				await this.sendMessage({
-					threadId,
-					commandId: input.commandId,
-					messageId: message.messageId ?? `launch-${input.commandId}`,
-					text: message.text,
-					mode: "start",
-					provenance,
-					...(input.generateTitle === true && input.title !== undefined && input.title.trim() !== "" ? { titleSeed: input.title.trim() } : {}),
-					...(message.attachments === undefined ? {} : { attachments: message.attachments }),
-					...(message.context === undefined ? {} : { context: message.context }),
-				});
-				return this.nextSequence();
+			// The launch's commandId is the message's request id: pi-durable sends a retried launch's message once.
+			await this.sendMessage({
+				threadId,
+				commandId: input.commandId,
+				messageId: message.messageId ?? `launch-${input.commandId}`,
+				text: message.text,
+				mode: "start",
+				provenance,
+				...(input.generateTitle === true && input.title !== undefined && input.title.trim() !== "" ? { titleSeed: input.title.trim() } : {}),
+				...(message.attachments === undefined ? {} : { attachments: message.attachments }),
+				...(message.context === undefined ? {} : { context: message.context }),
 			});
 		}
 		return threadId;

@@ -143,8 +143,8 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    thread. Messages carry their sender. Commands go through `dispatchCommand(bridge, command, provenance)`
    (`t3/dispatch.ts`). A version-1 store is refused at boot.
 5. Done: projects (`pi-durable-t3.projects`, the thread's project checked in the thread's commit) and scheduled tasks
-   (`pi-durable-t3.scheduled-tasks`) live in the Harness; command receipts are kept on the thread they act on (the
-   last 100), so a retried command is answered from state across restarts. `t3-settings.json`, `auth.json` and the
+   (`pi-durable-t3.scheduled-tasks`) live in the Harness; command receipts too (one store since the simplification
+   below), so a retried command is answered from state across restarts. `t3-settings.json`, `auth.json` and the
    attachment bytes stay in the state dir, as T3 keeps settings and keybindings in files.
 6. Done: the thread stream (`t3/thread-stream.ts`, with T3's own paging, wire projection, body deduper and client
    reducer vendored by `dev/setup-t3.sh` into `vendor/shared` and `vendor/t3-server`). Changes are flushed in 50 ms
@@ -187,6 +187,19 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    - Done: T3's provenance case is pinned (`test/command-receipts.test.ts`): over `/ws` a creator is always the user,
      the surface is the client's, and `linkOrigin`/`delegatedFrom` cannot be claimed. Most other T3 command tests
      exercise provider sessions, delegated tasks or pull requests, which this host does not have.
+
+## Simplification (after step 7)
+
+Each removes a mechanism, not just lines:
+
+1. Done: rolled-back runs are derived from the undo record (the head an undo left), not snapshotted into memory. They
+   used to vanish on restart; the projection now reads only stored state.
+2. Done: one receipt store for every command (`pi-durable-t3.command-receipts`, as T3's `CommandReceiptStore`) with
+   the in-flight join inside it, replacing per-thread receipts, their routing and the public `idempotent`. A launch's
+   or a scheduled task's message needs no wrapper: its command id is pi-durable's request id.
+3. Next: one `ThreadView` per open thread (watch → projection → stream → subscribers, alive while held) out of
+   `Bridge`, which keeps command routing and the shell.
+4. With the subagent work: subagent threads as records created at spawn, replacing discovery by scanning.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.

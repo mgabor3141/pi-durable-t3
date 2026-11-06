@@ -400,10 +400,8 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			// T3's sendToThread refuses a thread that is gone or belongs to another project; at boot, once the list is in.
 			await bridge.loaded();
 			if (bridge.threadProjectId(input.threadId) !== input.projectId) throw new Error(`Thread ${input.threadId} was not found in project ${input.projectId}.`);
-			await bridge.idempotent(input.commandId, async () => {
-				await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue", provenance: input.provenance });
-				return bridge.nextSequence();
-			});
+			// The commandId is the message's request id: pi-durable queues a retried run's message once.
+			await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue", provenance: input.provenance });
 		},
 		isScratchProject: (projectId) => bridge.isScratchProject(projectId),
 	};
