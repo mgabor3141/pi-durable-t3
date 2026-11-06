@@ -11,7 +11,7 @@ import { expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge, type StreamUpdate } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { applyOrchestrationV2ProjectionEvent } from "../src/t3/t3-stream.ts";
+import { applyOrchestrationV2ProjectionEvent } from "../src/t3/t3-server.ts";
 import { boundedSnapshot, historyPage, snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "../src/t3/thread-stream.ts";
 import { createNamed, makeThreads } from "./threads-harness.ts";
 

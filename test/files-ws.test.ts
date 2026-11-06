@@ -4,7 +4,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthAccessReadScope, AuthFilesystemReadScope, AuthFilesystemWriteScope } from "@t3tools/contracts";
+import { AuthAccessReadScope, AuthFilesystemReadScope, AuthFilesystemWriteScope, AuthOrchestrationOperateScope, AuthOrchestrationReadScope, AuthTerminalOperateScope } from "@t3tools/contracts";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, pair, postJson, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
@@ -102,5 +102,21 @@ it("splits read from write by the session's scopes, as T3's RPC authorization do
 		expect(exitError(await ws3.call("projects.listEntries", { cwd: project, directoryPath: "" }), "list as nobody")).toMatchObject({ _tag: "EnvironmentAuthorizationError" });
 	} finally {
 		ws3.close();
+	}
+}, 60_000);
+
+it("every method is gated by T3's scope table, before the handler or the refusal of an unsupported call", async () => {
+	const full = await pair(PORT, pairCode(root));
+	const reader = await narrowToken(full, [AuthOrchestrationReadScope]);
+	const ws = await connectWs(PORT, reader);
+	try {
+		exitValue(await ws.call("server.probe", {}), "probe as reader");
+		const dispatch = { type: "thread.create", commandId: "c-scope", threadId: "t-scope", projectId: "p-alpha", title: "x", modelSelection: { instanceId: "pi", model: "default" }, runtimeMode: "full-access", interactionMode: "default", branch: null, worktreePath: null, createdBy: "user", creationSource: "web" };
+		expect(exitError(await ws.call("orchestration.dispatchCommand", dispatch), "dispatch as reader")).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: AuthOrchestrationOperateScope });
+		expect(exitError(await ws.call("subscribeAuthAccess", {}), "access stream as reader")).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: AuthAccessReadScope });
+		// A method this host refuses anyway is still answered by the scope check first, as T3 answers it.
+		expect(exitError(await ws.call("terminal.open", { threadId: "t", terminalId: "x", cwd: project }), "terminal as reader")).toMatchObject({ _tag: "EnvironmentAuthorizationError", requiredPermission: AuthTerminalOperateScope });
+	} finally {
+		ws.close();
 	}
 }, 60_000);

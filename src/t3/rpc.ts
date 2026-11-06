@@ -1,15 +1,8 @@
-// T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup). The minimal viable surface is implemented; every other method
-// gets a stub: streams stay open and silent, and unary calls answer with a benign value or a clear failure.
+// T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup), behind T3's per-method scope check. Every method this host does
+// not implement is refused with a message the UI shows (`unsupported.ts`), streams included, and logged.
 import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
-	AuthFilesystemReadScope,
-	AuthPreviewOperateScope,
-	AuthOrchestrationOperateScope,
-	AuthOrchestrationReadScope,
-	AuthFilesystemWriteScope,
-	authScopeRequiredResponse,
-	EnvironmentAuthorizationError,
 	ProjectListEntriesError,
 	ProjectReadFileError,
 	ProjectSearchContentsError,
@@ -25,7 +18,6 @@ import {
 	OrchestrationV2GetThreadProjectionError,
 	OrchestrationV2ThreadLaunchError,
 	ProjectMutationError,
-	RpcScopeAuthorization,
 	type ServerConfig,
 	ScheduledTaskError,
 	ServerSettingsError,
@@ -51,6 +43,7 @@ import { EntriesError, FileError, type WorkspaceFiles } from "./files.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "./thread-stream.ts";
+import { RpcAuthorization } from "./t3-server.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
@@ -169,21 +162,6 @@ const scheduled = <A>(run: () => Promise<A>) =>
 	Effect.tryPromise({
 		try: run,
 		catch: (error) => (error instanceof ScheduledTaskError ? error : new ScheduledTaskError({ message: (error as Error).message || String(error) })),
-	});
-
-/**
- * T3's per-method scope gate, for the file calls (`auth/RpcAuthorization.ts`: read/list/search need
- * `filesystem:read`, write needs `filesystem:write`). The scopes are the session's own, read from the socket's session
- * (`CurrentAuthSession`); a grant without the scope is refused with the contract's `EnvironmentAuthorizationError`, the
- * error T3's middleware raises — the client shows it as a missing permission.
- */
-const withScope = <A, E>(scope: AuthEnvironmentScope, run: () => Effect.Effect<A, E>) =>
-	Effect.gen(function* () {
-		const { scopes } = yield* CurrentAuthSession;
-		if (!scopes.includes(scope)) {
-			return yield* Effect.fail(new EnvironmentAuthorizationError({ message: `The authenticated token is missing required scope: ${scope}.`, ...authScopeRequiredResponse(scope) }));
-		}
-		return yield* run();
 	});
 
 /** A file-call refusal as the contract's typed error: T3's `projectEntriesFailureContext` / `projectFileFailureContext`. */
@@ -349,25 +327,15 @@ export function makeRpcLayer(deps: RpcDeps) {
 		// T3's file panel and quick-open (`files.ts`, replicated from `apps/server/src/workspace`). The `cwd` must be a root this
 		// host knows; every failure is the contract's own typed error.
 		"projects.listEntries": (input) =>
-			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.list(input), catch: (error) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(error) }) }),
-			),
+			Effect.tryPromise({ try: () => deps.files.list(input), catch: (error) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(error) }) }),
 		"projects.searchEntries": (input) =>
-			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.searchEntries(input), catch: (error) => new ProjectSearchEntriesError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
-			),
+			Effect.tryPromise({ try: () => deps.files.searchEntries(input), catch: (error) => new ProjectSearchEntriesError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
 		"projects.searchContents": (input) =>
-			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.searchContents(input), catch: (error) => new ProjectSearchContentsError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
-			),
+			Effect.tryPromise({ try: () => deps.files.searchContents(input), catch: (error) => new ProjectSearchContentsError({ cwd: input.cwd, queryLength: input.query.length, limit: input.limit, ...entriesFailure(error) }) }),
 		"projects.readFile": (input) =>
-			withScope(AuthFilesystemReadScope, () =>
-				Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
-			),
+			Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 		"projects.writeFile": (input) =>
-			withScope(AuthFilesystemWriteScope, () =>
-				Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
-			),
+			Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 		"server.reportClientActivity": () => Effect.void,
 		// T3's usage view. `server.getUsageSummary` is answered from what pi-durable records per turn (tokens, cost,
 		// model) — replicated bucketing from T3, provider-reported cost, fields pi has no value for omitted (see
@@ -384,9 +352,9 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}),
 		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
 		"attachments.createUploadUrl": (input) =>
-			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => deps.attachments.mintUpload(input))),
+			Effect.sync(() => deps.attachments.mintUpload(input)),
 		"attachments.delete": (input) =>
-			withScope(AuthOrchestrationOperateScope, () => Effect.sync(() => deps.attachments.deleteUpload(input.attachmentId))),
+			Effect.sync(() => deps.attachments.deleteUpload(input.attachmentId)),
 		// Image attachments, the data-URL path (capabilities.md): the client sends the bytes inline, this host stores
 		// them under the bridge's dir and answers a persisted record; display is served by `assets.createUrl` + the
 		// `/api/assets/*` HTTP route (signature-authed, no bearer — like T3). The upload-URL path (`attachments.*`) is
@@ -584,14 +552,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 	if (deps.preview !== undefined) {
 		const preview = deps.preview;
 		const previewHandlers: WsHandlers = {
-			"preview.open": (input) => withScope(AuthPreviewOperateScope, () => previewCall(async () => preview.open(input))),
-			"preview.resize": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.resize(input))),
-			"preview.adjust": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.adjust(input))),
-			"preview.close": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.close(input))),
-			"preview.list": (input) => withScope(AuthOrchestrationReadScope, () => Effect.sync(() => preview.list(input.threadId))),
-			"preview.clearProfile": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.clearProfile())),
-			"preview.reportProfiles": () => withScope(AuthPreviewOperateScope, () => Effect.sync(() => preview.reportProfiles())),
-			"preview.reportStatus": (input) => withScope(AuthPreviewOperateScope, () => previewCall(() => preview.reportStatus(input))),
+			"preview.open": (input) => previewCall(async () => preview.open(input)),
+			"preview.resize": (input) => previewCall(() => preview.resize(input)),
+			"preview.adjust": (input) => previewCall(() => preview.adjust(input)),
+			"preview.close": (input) => previewCall(() => preview.close(input)),
+			"preview.list": (input) => Effect.sync(() => preview.list(input.threadId)),
+			"preview.clearProfile": () => Effect.sync(() => preview.clearProfile()),
+			"preview.reportProfiles": () => Effect.sync(() => preview.reportProfiles()),
+			"preview.reportStatus": (input) => previewCall(() => preview.reportStatus(input)),
 			subscribePreviewEvents: () => fromListener<WsItem<"subscribePreviewEvents">>((emit) => preview.subscribe(emit)),
 		};
 		Object.assign(handlers, previewHandlers);
@@ -617,8 +585,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 	}
 
 	const handlersLayer = (WsRpcGroup as Any).toLayer(all) as Layer.Layer<never>;
-	// Per-method authorization is not a middleware here: a standard grant holds every scope, and the one split a
-	// narrowed grant can express — the file calls — is checked in their handlers (`withScope`).
-	const authorization = Layer.succeed(RpcScopeAuthorization)((effect: Any) => effect) as Layer.Layer<never>;
+	// T3's per-method authorization (`auth/RpcAuthorization.ts`, vendored): every call needs its scope, checked against the
+	// socket's session before the handler runs, and refused with the contract's `EnvironmentAuthorizationError`.
+	const authorization = Layer.unwrap(Effect.map(CurrentAuthSession, ({ scopes }) => RpcAuthorization.layer(scopes as AuthEnvironmentScope[]))) as unknown as Layer.Layer<never>;
 	return Layer.merge(handlersLayer, authorization);
 }

@@ -46,7 +46,7 @@ import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import type { AuthStore, ClientMetadata, PairingRateLimit, StoredToken } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
-import { InvalidThreadHistoryCursorError, decodeThreadHistoryCursor, projectThreadProjectionForWire, projectedRowEncodedBytes } from "./t3-stream.ts";
+import { InvalidThreadHistoryCursorError, decodeThreadHistoryCursor, projectThreadProjectionForWire, projectedRowEncodedBytes } from "./t3-server.ts";
 import { boundedSnapshot, historyPage } from "./thread-stream.ts";
 
 export interface HttpApiDeps {

@@ -32,7 +32,7 @@ import {
 	THREAD_HISTORY_PAGE_POLICY,
 	THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
 	THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
-} from "./t3-stream.ts";
+} from "./t3-server.ts";
 import type { WsItem } from "./ws-types.ts";
 
 export type ThreadStreamItem = WsItem<"orchestration.subscribeThread">;

@@ -147,7 +147,7 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    last 100), so a retried command is answered from state across restarts. `t3-settings.json`, `auth.json` and the
    attachment bytes stay in the state dir, as T3 keeps settings and keybindings in files.
 6. Done: the thread stream (`t3/thread-stream.ts`, with T3's own paging, wire projection, body deduper and client
-   reducer vendored by `dev/setup-t3.sh` into `vendor/shared` and `vendor/t3-stream`). Changes are flushed in 50 ms
+   reducer vendored by `dev/setup-t3.sh` into `vendor/shared` and `vendor/t3-server`). Changes are flushed in 50 ms
    windows as `*.updated`/`*.created` events derived by diffing two projections; every batch is checked by applying
    it with T3's client reducer, and a change no event can say (a record that went away) is a snapshot. The first
    snapshot is T3's bounded one over T3's windowed read (the window's turn items and their cohort only), with
@@ -176,6 +176,9 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
      is `invalid_command` (was 409); `GET /api/auth/pairing-links` and `/api/auth/clients` are gone (T3 lists
      through `subscribeAuthAccess`); `/transcript` is served. `test/http-api-client.test.ts` drives every
      supported endpoint with Effect's `HttpApiClient`, the client the web app uses.
+   - Done: `/ws` runs behind T3's own per-method authorization (`auth/RpcAuthorization.ts`, vendored into
+     `vendor/t3-server` with the stream code). Before, only the file calls were checked; a token narrowed to
+     `orchestration:read` could dispatch commands. Every method, unsupported ones included, now needs its scope.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.

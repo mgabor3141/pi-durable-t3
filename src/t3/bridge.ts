@@ -31,7 +31,7 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
-import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-stream.ts";
+import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, MAX_ROLLED_BACK_RUNS, type RolledBackRun, rolledBackRuns, undoTarget } from "./undo.ts";
