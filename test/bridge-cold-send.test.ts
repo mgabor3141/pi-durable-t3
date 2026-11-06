@@ -7,11 +7,9 @@ import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { createHost } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { type ConversationId } from "@earendil-works/pi-durable";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
 import type { Logger } from "../src/t3/logging.ts";
@@ -24,15 +22,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 it("sends the first message on a cold thread with no prior warming (S2)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-bridge-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
-	await host.ready();
 	fixture.model.respond(fauxAssistantMessage("pong"));
 
 	const bridge = new Bridge(
 		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		log,
-		host,
+		fixture.threads, fixture.model.models,
 	);
 	bridge.start();
 	try {
@@ -53,7 +48,6 @@ it("sends the first message on a cold thread with no prior warming (S2)", async 
 		}
 	} finally {
 		await bridge.close();
-		await host.close();
 		await rm(scratch, { recursive: true, force: true });
 	}
 }, 30_000);

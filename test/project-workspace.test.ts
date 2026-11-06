@@ -1,13 +1,13 @@
 // A project path that exists as a FILE can never be registered: `projects.mutate` create AND update naming it are
 // refused with a typed project error naming the path — no entry stored, no entry moved. The boot side of the rule is
 // the strict parser (the path itself is not stat'ed at boot; see `settings.test.ts`).
-import { HOST_PRINCIPAL } from "../src/objects.ts";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createHost } from "@earendil-works/chord";
+import { createModels } from "@earendil-works/pi-ai";
+import { unstartedStore } from "./threads-harness.ts";
 import { FileProjectRegistry, ProjectWorkspaceNotDirectory } from "../src/registry.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
@@ -29,7 +29,7 @@ async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: 
 		registry,
 	};
 	// create/update/delete never touch the host, so an unloaded one is enough to construct a Bridge.
-	return { bridge: new Bridge(config, log, createHost({ name: "server", self: HOST_PRINCIPAL })), registry };
+	return { bridge: new Bridge(config, log, unstartedStore(), createModels()), registry };
 }
 
 describe("a registered path that is a file (H1)", () => {

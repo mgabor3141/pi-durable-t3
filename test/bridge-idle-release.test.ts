@@ -5,9 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { createHost } from "@earendil-works/chord";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
@@ -34,13 +32,10 @@ it("an idle thread's objects are disposed, and a reopen rebuilds them with the w
 	}) as typeof conversation;
 
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-idle-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
-	await host.ready();
 	const bridge = new Bridge(
 		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		log,
-		host,
+		fixture.threads, fixture.model.models,
 	);
 	bridge.start();
 	const texts = async () => (await bridge.projection("t")).projection.messages.map((message) => message.text);
@@ -65,7 +60,6 @@ it("an idle thread's objects are disposed, and a reopen rebuilds them with the w
 		expect(await texts()).toEqual(["one", "pong one", "two", "pong two"]);
 	} finally {
 		await bridge.close();
-		await host.close();
 		await rm(scratch, { recursive: true, force: true });
 	}
 }, 60_000);

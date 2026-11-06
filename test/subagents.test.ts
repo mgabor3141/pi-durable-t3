@@ -5,13 +5,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHost } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
 import { Subagent } from "../examples/coding-agent/src/subagent.ts";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import type { Threads } from "../src/threads.ts";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -30,19 +28,16 @@ const delegate = (): FauxResponseStep => async () =>
 
 async function boot(fixture: ThreadsFixture, threads: Threads = fixture.threads): Promise<Bridge> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-subagents-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(threads, fixture.model.models)]);
-	await host.ready();
 	const bridge = new Bridge(
 		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		log,
-		host,
+		threads,
+		fixture.model.models,
 	);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {
 		await bridge.close();
-		await host.close();
 		await rm(scratch, { recursive: true, force: true });
 	});
 	return bridge;

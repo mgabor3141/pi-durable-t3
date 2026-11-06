@@ -4,13 +4,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHost } from "@earendil-works/chord";
 import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { HOST_PRINCIPAL } from "./objects.ts";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
-import { createServerFacet } from "./objects.ts";
 import { FileProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
@@ -138,7 +135,7 @@ export function mintPairingCode(stateDir: string): { readonly code: string } {
 }
 
 /** Attach T3 to `harness`: opens the bridge's dir (registry, settings, pairing store), builds the threads layer and
- * the objects facet, and starts the T3 facet. Resolves once the facet is LISTENING; rejects with the bind error
+ * starts the T3 facet. Resolves once the facet is LISTENING; rejects with the bind error
  * (e.g. `EADDRINUSE`) if it cannot. `harness.resume()` is the caller's, after this resolves (crash resume:
  * capabilities.md). */
 export async function attachT3(harness: Harness, options: AttachT3Options): Promise<T3Attachment> {
@@ -153,12 +150,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.context === undefined ? {} : { context: options.context }),
 		onWarn: (message) => log.warn(message),
 	});
-
-	// chord 1.3 makes the app supply the principal of the host's own code; this host has no other principals, so it is
-	// the `{ host: true }` chord 1.2 built in (`hostPrincipal`).
-	const server = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await server.load([createServerFacet(threads, options.models)]);
-	await server.ready();
 
 	const catalog = new ModelCatalog(async () => (await options.models.getAvailable()).map((model) => ({
 		provider: model.provider,
@@ -195,15 +186,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
 	};
 	const tailscale = makeTailscaleCli();
-	const facet = startFacet({ host: server, catalog, log, config, tailscale });
-	// Resolve only once LISTENING: a bind failure (a port in use) rejects here, after the listener's own error —
-	// release the objects host, then hand the error to the caller.
-	try {
-		await facet.ready;
-	} catch (error) {
-		await server.close();
-		throw error;
-	}
+	const facet = startFacet({ threads, models: options.models, catalog, log, config, tailscale });
+	// Resolve only once LISTENING: a bind failure (a port in use) rejects here, after the listener's own error.
+	await facet.ready;
 	// Tailscale Serve, armed only once the listener is up. A failure is a warning, never a dead host (T3's rule for
 	// this path). Safety check first — a deliberate, safer-than-T3 deviation: only a free port, or one already pointed
 	// at this host's own loopback port (a stale mapping of ours), is armed. A mapping this host did not create is
@@ -264,7 +249,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 				}
 			}
 			await facet.close();
-			await server.close();
 		},
 	};
 }

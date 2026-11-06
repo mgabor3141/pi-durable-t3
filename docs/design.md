@@ -93,15 +93,10 @@ The code shows what each operation does. These are the rules it cannot show on i
 
 ## Facet
 
-The facet serves T3's HTTP routes and `/ws` (orchestration protocol 2, Effect RPC over JSON), and talks to
-the threads layer through chord objects that any pi client could also call:
-
-| Object | Methods |
-|---|---|
-| `pi.threads` | `create`, `remove`, `rename`, `settle`, `unsettle`, `search` |
-| `pi.transcript` | (state: the head's conversation view) |
-| `pi.controller` | `prompt`, `steer`, `followUp`, `abort`, `rewind`, `cancelQueued`, `editQueued`, `promoteQueued`, `startQueued`, `compact` |
-| `pi.models` | `select`, `selectThinking` |
+The facet serves T3's HTTP routes and `/ws` (orchestration protocol 2, Effect RPC over JSON). Its handlers are typed by
+T3's RPC group (`t3/ws-types.ts`), so a contract change at a pin bump fails the build. Behind them, the bridge writes
+through the threads layer (`threads.ts`) and reads with one watch on the threads document plus one watch per open
+thread on its head conversation; a write that needs the head waits for that thread's load, never by polling.
 
 Rate limiting keys on the socket address, never on a client-supplied header.
 

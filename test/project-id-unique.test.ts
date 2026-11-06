@@ -22,11 +22,10 @@ import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
-import { createHost } from "@earendil-works/chord";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
+import { createModels } from "@earendil-works/pi-ai";
 import { Bridge } from "../src/t3/bridge.ts";
 import { FileProjectRegistry, parseProjectsJson, PROJECTS_FILE, ProjectIdConflict, ProjectIdInvalid } from "../src/registry.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, unstartedStore } from "./threads-harness.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { getJson, pair, waitListening } from "./ws-rpc.ts";
@@ -86,7 +85,7 @@ it("(a) add honoring an id that is already registered is refused with the typed 
 
 	// Over the wire shape the facet maps to: the mutation rejects, naming the id (the facet turns the
 	// rejection into the contract's `ProjectMutationError`; the REST route answers 409 for the same class).
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry }, log, createHost({ name: "server", self: HOST_PRINCIPAL }));
+	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry }, log, unstartedStore(), createModels());
 	const wireFailure = await bridge.mutateProject({ type: "project.create", projectId: U, commandId: "cmd-id-dupe", title: "Four", workspaceRoot: join(dir, "four"), createWorkspaceRootIfMissing: true }).then(() => undefined, (error: unknown) => error as Error);
 	expect(wireFailure, "the wire mutation is refused with the typed error").toBeInstanceOf(ProjectIdConflict);
 	expect(registry.list().map((p) => p.id), "and the registry still holds one entry under the id").toEqual([U]);
@@ -136,16 +135,12 @@ it("(a2) any id valid under the contract's ProjectId schema is honored — the h
 	// The wire shape: the mutation answers the client's id and the shell carries it — this is what
 	// `useProject` / `handleNewThread` look the project up by.
 	const f = await makeThreads({ projects: [] });
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(f.threads, f.model.models)]);
-	await host.ready();
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry }, log, host);
+	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry }, log, f.threads, f.model.models);
 	bridge.start();
 	const created = await bridge.mutateProject({ type: "project.create", projectId: "sso:project-7", commandId: "cmd-plain-id", title: "plain", workspaceRoot: join(dir, "sso"), createWorkspaceRootIfMissing: true });
 	expect(created.id, "the mutation answers the id the client navigated to").toBe("sso:project-7");
 	expect(bridge.projects().map((project) => project.id as string), "the shell carries it").toContain("sso:project-7");
 	await bridge.close();
-	await host.close();
 }, 30_000);
 
 it("(c) a projects.json with a hand-written duplicate project id: the host REFUSES to start, naming the file (strict boot)", async () => {

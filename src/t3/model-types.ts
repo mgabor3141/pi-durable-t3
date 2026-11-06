@@ -1,5 +1,5 @@
 // The plain-data mirrors of pi-durable's view shapes that the facet reads — no service or transport API lives here;
-// writes go through the chord objects in `../objects.ts`. The `provider/model` slug helpers live here too: a leaf both
+// writes go through the threads layer in `../threads.ts`. The `provider/model` slug helpers live here too: a leaf both
 // sides may import keeps that shared code off a facet→host edge.
 
 /** A `{ provider, modelId }` reference (pi-durable `ModelRef`). */

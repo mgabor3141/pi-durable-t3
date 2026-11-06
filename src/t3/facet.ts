@@ -1,11 +1,11 @@
-// Boot the T3 facet beside the host's objects: the auth store, model catalog and bridge, then the Effect HTTP/`/ws`
-// server. The bridge is a local client of the chord objects — no socket, no separate process.
+// Boot the T3 facet: the auth store, model catalog and bridge (over the threads layer), then the Effect HTTP/`/ws` server.
 import { createServer } from "node:http";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import type { Host } from "@earendil-works/chord";
+import type { Models } from "@earendil-works/pi-ai";
+import type { Threads } from "../threads.ts";
 import { AuthStore } from "./auth.ts";
 import { AttachmentStore } from "./attachment-store.ts";
 import { Bridge } from "./bridge.ts";
@@ -35,18 +35,19 @@ type FacetHandle = {
 };
 
 export function startFacet(deps: {
-	host: Host;
+	threads: Threads;
+	models: Models;
 	catalog: ModelCatalog;
 	log: Logger;
 	config: BridgeConfig;
 	tailscale: TailscaleCli;
 }): FacetHandle {
-	const { host, catalog, log, config } = deps;
+	const { catalog, log, config } = deps;
 	const auth = new AuthStore(config.stateDir, { tokenTtlSeconds: config.tokenTtlSeconds });
 	// The image-attachment store lives under the bridge's dir and signs its URLs with the auth store's durable key.
 	const attachments = new AttachmentStore(join(config.stateDir, "attachments"), auth);
 
-	const bridge = new Bridge(config, log, host, attachments);
+	const bridge = new Bridge(config, log, deps.threads, deps.models, attachments);
 	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);
 	// Opened at boot (a scheduled-tasks.json the host cannot read stops it here), polled while the facet runs.
 	const scheduledTasks = new ScheduledTasks({ stateDir: config.stateDir, dispatch: scheduledTaskDispatch(bridge), log });

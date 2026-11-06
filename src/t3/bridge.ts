@@ -1,5 +1,6 @@
-// The T3 view over the host's threads: a local client of the chord objects (`pi.threads`, `pi.transcript`,
-// `pi.models`, `pi.controller`). It holds the per-thread projection memory (rolled-back runs) and the sequence counter.
+// The T3 view over the host's threads: the threads layer (`../threads.ts`) for every write, one watch on the threads
+// document for the directory, and one watch per open thread on its head conversation. It holds the per-thread projection
+// memory (rolled-back runs) and the sequence counter.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename } from "node:path";
@@ -7,7 +8,6 @@ import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DateTime } from "effect";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { type Ctx, type Host, isChordError, type Readable, type Ref } from "@earendil-works/chord";
 import type {
 	OrchestrationMessageContext,
 	OrchestrationProjectShell,
@@ -16,14 +16,15 @@ import type {
 	OrchestrationV2ThreadProjection,
 	OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
-import { PiController, PiModels, PiThreads, PiTranscript } from "../objects.ts";
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
-import type { Thread } from "../threads.ts";
+import { type Thread, type Threads, ThreadsDoc } from "../threads.ts";
 import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
-import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
+import type { AgentChange, Conversation, ConversationId, Cursor, EntryId, WatchHandle } from "@earendil-works/pi-durable";
+import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { JsonValue } from "@earendil-works/chord";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
@@ -85,24 +86,69 @@ interface ThreadState {
 	rollbackRequestId: string | undefined;
 	rollbackFailure: { requestId: string; message: string } | null | undefined;
 	result: ProjectionResult | undefined;
-	/** The real transcript (not `pi.transcript`'s empty placeholder) has been projected once. */
+	/** The head's real view has been projected once since the thread was opened. */
 	loadedView: boolean;
+	/** Replaced and settled on every load-state change (a view, a release, a removal): what waiters wait on. */
+	changed: PromiseWithResolvers<void>;
 	snapshotSequence: number;
 	listeners: Set<(snapshot: { sequence: number; projection: OrchestrationV2ThreadProjection }) => void>;
 	/** Called when the thread is gone (deleted, or unknown to the host); subscriptions end. */
 	enders: Set<() => void>;
 	gone: Error | undefined;
 	emitTimer: NodeJS.Timeout | undefined;
-	/** Unsubscribes for this thread's object handles, while it is open. */
-	stops: (() => void)[];
-	/** The head conversation id (the write target) and its assembled view, from `pi.transcript` / `pi.models`. */
+	/** The watch on the head conversation while the thread is open; `undefined` once released. */
+	follower: Follower | undefined;
+	/** The head conversation id (the write target) once its view has loaded, and that view. */
 	conversationId: number | undefined;
 	view: ConversationView | undefined;
-	/** Display-only transcript above the active context's compaction cut, from `pi.transcript`. */
+	/** Display-only transcript above the active context's compaction cut. */
 	history: EntryRecord[] | undefined;
 	configuration: { model: ModelRef | null; thinkingLevel: string } | undefined;
 	/** The catalog entries, each with its input modalities, so the send path knows which models accept images. */
 	catalog: { provider: string; modelId: string; input: string[]; contextWindow: number }[];
+}
+
+/** An open thread's watch on its head conversation. A head switch (undo, fork promotion) restarts it on the new head. */
+interface Follower {
+	head: number | undefined;
+	watch: WatchHandle<ConversationView> | undefined;
+	/** Bumped on every head switch, so a callback of a superseded watch changes nothing. */
+	generation: number;
+	/** Bumped on every view, so a slow history load cannot overwrite a newer view. */
+	viewSeq: number;
+	/** The compaction cut the cached history was loaded for (`-1`: none). */
+	historyCutoff: number;
+	history: EntryRecord[];
+	/** The head's `pi.agent` document as last read; its configuration is re-read only when it changes. */
+	agentKey: string | undefined;
+	closed: boolean;
+}
+
+/** The view of a head conversation that does not exist: no entries, no docs. */
+const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as ConversationView;
+
+const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** The entry before the active context's first kept entry, when the view starts at a compaction; else `-1`. */
+function compactionCutoff(view: ConversationView): number {
+	const head = view.entries[0];
+	if (head?.kind !== "pi.compaction") return -1;
+	const firstKept = view.entries[1];
+	return (firstKept?.id ?? head.id) - 1;
+}
+
+/** The entries above a compaction cut, for display only: compaction keeps them durably but drops them from the view. */
+async function loadHistory(conversation: Conversation, cutoff: number): Promise<EntryRecord[]> {
+	if (cutoff <= 0) return [];
+	const items: EntryRecord[] = [];
+	let cursor: Cursor | undefined;
+	do {
+		const page = await conversation.entries({ order: "ascending", maxEntryId: cutoff as EntryId }, 500, cursor, BACKGROUND_CONTEXT);
+		items.push(...(page.items as unknown as EntryRecord[]));
+		cursor = page.next;
+	} while (cursor !== undefined);
+	// Compaction markers are rendered as cards by the projection; an older summary here would be a stray bubble.
+	return items.filter((entry) => entry.kind !== "pi.compaction" && entry.id <= cutoff);
 }
 
 /** A live shell item: everything \`orchestration.subscribeShell\` streams after its snapshot. */
@@ -130,20 +176,10 @@ export type ProjectMutation = {
 export const DEDUP_ENTRY_LIMIT = 2_000;
 
 
-/** A reference's state member, or `undefined` before its first hydration (chord 1.3 throws `not_ready` there; 1.2 read
- * `undefined`). A listener added meanwhile gets the snapshot once it is readable. */
-function peek<T>(member: Readable<T>): T | undefined {
-	try {
-		return member.value;
-	} catch (error) {
-		if (isChordError(error, "not_ready")) return undefined;
-		throw error;
-	}
-}
-
 export class Bridge {
 	readonly config: BridgeConfig;
-	readonly #host: Host;
+	readonly #store: Threads;
+	readonly #models: Models;
 	readonly #log: Logger;
 	readonly #attachments: AttachmentStore | undefined;
 	readonly #threads = new Map<string, ThreadState>();
@@ -166,55 +202,82 @@ export class Bridge {
 	/** The calls (`taskId:conversationId`) a sync was already run for, so an unowned `conversationId` in some tool's
 	 * details costs one scan, not one per streamed update. */
 	readonly #probedCalls = new Set<string>();
-	/** Settles at the directory's first load (`pi.threads` publishes revision 1+): `ready()` waits for the objects, not
-	 * their loads, so a thread lookup right after `start()` can still see an empty list. */
+	/** Settles once the directory and the subagents are first loaded. */
 	readonly #loaded = Promise.withResolvers<void>();
-	/** The `pi.threads` handle, so a create/remove can refresh the directory synchronously: the thread-existence check
-	 * must never race the subscription that mirrors the document. */
-	#threadsHandle: Ref<typeof PiThreads> | undefined;
-	#directoryStop: (() => void) | undefined;
+	#directoryWatch: { stop(): Promise<unknown> } | undefined;
+	/** Directory reads, numbered: a read that finishes after a newer one has landed changes nothing. */
+	#directoryRead = 0;
+	#directoryApplied = 0;
+	#directoryBooted = false;
 	#registryStop: (() => void) | undefined;
-	/** One boot scan of rows written before summaries existed; later boots reuse the stored snapshot. */
-	#summariesPrimed = false;
+	#closed = false;
 	#sequence = 0;
 	#startedAt = new Date().toISOString();
 
-	constructor(config: BridgeConfig, log: Logger, host: Host, attachments?: AttachmentStore) {
+	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: AttachmentStore) {
 		this.config = config;
 		this.#log = log;
-		this.#host = host;
+		this.#store = store;
+		this.#models = models;
 		this.#attachments = attachments;
 	}
 
 	start(): void {
-		const handle = this.#host.hold(PiThreads, {});
-		this.#threadsHandle = handle;
-		const publish = (): void => {
-			const value = peek(handle.threads);
-			this.#directory = (value?.threads ?? []).map((thread) => ({ ...thread }));
-			this.#refreshShells();
-			// The first load settles once the subagents are known too: a client may open a child thread straight away.
-			// Boot is the one full scan; afterwards a thread is scanned when its own view names an unseen child.
-			if ((value?.revision ?? 0) > 0) {
-				if (this.#subagentsBooted) {
-					this.#dropOrphanSubagents();
-				} else {
-					this.#subagentsBooted = true;
-					void this.#syncSubagents().finally(() => this.#loaded.resolve());
-				}
-				if (!this.#summariesPrimed) {
-					this.#summariesPrimed = true;
-					void this.#primeSummaries();
-				}
-			}
-		};
-		this.#directoryStop = handle.threads.subscribe(publish);
-		publish();
+		void this.#startDirectory().catch((error: unknown) =>
+			this.#log.warn("the thread directory failed to load", { error: error instanceof Error ? error.message : String(error) }),
+		);
 		// A UI edit to the registry (add/remove/rename/move) lands here: removed ids emit a removal and every current
 		// project shell is re-emitted — a client keys shells by id, so an unchanged re-emission is a no-op.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
 		this.#registryStop = this.config.registry.subscribe(() => this.#onRegistryChange());
-		this.#log.info("bridge started (over the objects)");
+		this.#log.info("bridge started");
+	}
+
+	/** One watch on the threads document: every change re-reads the directory. */
+	async #startDirectory(): Promise<void> {
+		await this.#store.ensureDocument();
+		const watch = await this.#store.harness.watchDoc(ThreadsDoc, BACKGROUND_CONTEXT);
+		if (this.#closed) {
+			await watch?.stop().catch(() => {});
+			return;
+		}
+		this.#directoryWatch = watch;
+		watch?.start(async () => this.#syncDirectory());
+		await this.#syncDirectory();
+	}
+
+	/** Read the directory and apply it, unless a newer read already landed. Writes await this, so the thread-existence
+	 * check right after a create or a delete sees the document as committed. */
+	async #syncDirectory(): Promise<void> {
+		const read = ++this.#directoryRead;
+		const threads = await this.#store.list();
+		if (read < this.#directoryApplied || this.#closed) return;
+		this.#directoryApplied = read;
+		this.#applyDirectory(threads);
+	}
+
+	/** A new directory: open threads whose head moved follow the new head; changed rows (and their subagents' threads) are
+	 * re-projected; removed rows emit their removal. The first one also discovers the subagents. */
+	#applyDirectory(threads: Thread[]): void {
+		const before = new Map(this.#directory.map((thread) => [thread.threadId, thread]));
+		this.#directory = threads;
+		const changed = new Set<string>();
+		for (const thread of threads) {
+			const previous = before.get(thread.threadId);
+			if (previous === undefined || JSON.stringify(previous) !== JSON.stringify(thread)) changed.add(thread.threadId);
+			const state = this.#threads.get(thread.threadId);
+			if (state?.follower !== undefined && state.follower.head !== thread.head) void this.#follow(state, thread.head);
+		}
+		// A subagent's thread takes its title and project from its parent's row.
+		for (const ref of this.#subagents.values()) if (changed.has(ref.parentThreadId)) changed.add(ref.threadId);
+		this.#refreshShells(changed);
+		if (this.#directoryBooted) {
+			this.#dropOrphanSubagents();
+		} else {
+			this.#directoryBooted = true;
+			// A client may open a child thread straight away: the first load settles once the subagents are known too.
+			void this.#syncSubagents().finally(() => this.#loaded.resolve());
+		}
 	}
 
 	#onRegistryChange(): void {
@@ -324,12 +387,11 @@ export class Bridge {
 				// part of this operation (design.md, Invariants).
 				for (const thread of targets) await this.deleteThread(thread.threadId);
 				this.config.registry.remove(mutation.projectId);
-				// Drain late arrivals: read the CELL (authoritative after each awaited delete) until it shows no rows under
+				// Drain late arrivals: read the document (current after each awaited delete) until it shows no rows under
 				// the id. Rows landing from `registry.remove` onward are refused by the commit-time FK check, so the drain
 				// terminates (design.md, Invariants).
 				for (;;) {
-					if (this.#threadsHandle === undefined) break;
-					const late = (peek(this.#threadsHandle.threads)?.threads ?? []).filter((thread) => thread.projectId === mutation.projectId);
+					const late = (await this.#store.list()).filter((thread) => thread.projectId === mutation.projectId);
 					if (late.length === 0) break;
 					for (const entry of late) await this.deleteThread(entry.threadId);
 				}
@@ -449,7 +511,7 @@ export class Bridge {
 				const refs: SubagentRef[] = [];
 				let failed = false;
 				for (const target of scanned) {
-					const found = await this.#host.root(async (c) => (await c.get(PiThreads, {})).subagents({ ...(target === undefined ? {} : { threadId: target }) }, c)).catch((error: unknown) => {
+					const found = await this.#store.subagents(target).catch((error: unknown) => {
 						this.#log.warn("subagent discovery failed", { error: String(error) });
 						return undefined;
 					});
@@ -458,7 +520,7 @@ export class Bridge {
 						// Forget the batch's probes so the next update scans again.
 						if (target !== undefined) for (const probe of [...this.#probedCalls]) if (probe.startsWith(`${target}:`)) this.#probedCalls.delete(probe);
 					}
-					else refs.push(...(found as SubagentRef[]));
+					else refs.push(...found);
 				}
 				if (failed) continue;
 				// A scan replaces what it covers: everything, or the scanned threads' children.
@@ -615,10 +677,13 @@ export class Bridge {
 		for (const listener of this.#shellListeners) listener(item);
 	}
 
-	#refreshShells(): void {
+	/** Re-project and re-publish the threads in `only` (all of them without it), and emit the removal of every thread that
+	 * is gone. */
+	#refreshShells(only?: ReadonlySet<string>): void {
 		const seen = new Set<string>();
 		for (const threadId of [...this.#directory.map((thread) => thread.threadId), ...this.#subagents.keys()]) {
 			seen.add(threadId);
+			if (only !== undefined && !only.has(threadId)) continue;
 			const state = this.#threads.get(threadId);
 			if (state !== undefined) this.#recompute(state);
 			this.#publishShell(threadId);
@@ -655,12 +720,13 @@ export class Bridge {
 				rollbackFailure: undefined,
 				result: undefined,
 				loadedView: false,
+				changed: Promise.withResolvers<void>(),
 				snapshotSequence: 0,
 				listeners: new Set(),
 				enders: new Set(),
 				gone: undefined,
 				emitTimer: undefined,
-				stops: [],
+				follower: undefined,
 				conversationId: undefined,
 				view: undefined,
 				history: undefined,
@@ -672,48 +738,137 @@ export class Bridge {
 		return state;
 	}
 
-	/** Attach this thread's object handles; keep its assembled snapshot current and recompute on any change. */
+	/** Settle the waiters of a thread's load state and arm a fresh signal. */
+	#signal(state: ThreadState): void {
+		const previous = state.changed;
+		state.changed = Promise.withResolvers<void>();
+		previous.resolve();
+	}
+
+	/** Wait until `read` answers, the thread is gone, `signal` aborts, or the time is up. Every new view and every
+	 * load-state change wakes it; nothing polls. */
+	async #waitFor<T>(state: ThreadState, read: () => T | undefined, timeoutMs: number, onTimeout: () => Error, signal?: AbortSignal): Promise<T> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${state.threadId}`);
+			if (signal?.aborted === true) throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+			const value = read();
+			if (value !== undefined) return value;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw onTimeout();
+			let timer: NodeJS.Timeout | undefined;
+			let onAbort: (() => void) | undefined;
+			await Promise.race([
+				state.changed.promise,
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, remaining);
+					onAbort = resolve;
+					signal?.addEventListener("abort", onAbort, { once: true });
+				}),
+			]);
+			clearTimeout(timer);
+			if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+		}
+	}
+
+	/** Open a thread: follow its head conversation (a subagent's thread: its child conversation, fixed by the id). */
 	#open(state: ThreadState): void {
 		if (state.closeTimer !== undefined) {
 			clearTimeout(state.closeTimer);
 			state.closeTimer = undefined;
 		}
-		if (state.stops.length > 0) return;
-		const key = { threadId: state.threadId };
-		const transcript = this.#host.hold(PiTranscript, key);
+		if (state.follower !== undefined) return;
+		state.follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, historyCutoff: -1, history: [], agentKey: undefined, closed: false };
 		// A subagent's thread has no model controls: it reads its conversation and nothing else.
-		const models = this.isSubagentThread(state.threadId) ? undefined : this.#host.hold(PiModels, key);
-		const fire = (): void => {
-			state.view = peek(transcript.transcript)?.view as ConversationView | undefined;
-			state.history = peek(transcript.transcript)?.history as EntryRecord[] | undefined;
-			// `pi.transcript` starts from a placeholder (conversation 0, which pi-durable never assigns) until the head's real
-			// view loads; a placeholder id is not a head, so writes keep waiting in `#awaitHead`.
-			const conversationId = peek(transcript.transcript)?.conversationId;
-			state.conversationId = conversationId === undefined || conversationId <= 0 ? undefined : conversationId;
-			if (models !== undefined) {
-state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.provider, modelId: model.modelId, input: model.input ?? [], contextWindow: model.contextWindow }));
-				const configuration = peek(models.configuration);
-				if (configuration !== undefined) state.configuration = { model: configuration.model ?? null, thinkingLevel: configuration.thinkingLevel };
-			}
-			this.#recompute(state);
-		};
-		state.stops.push(transcript.transcript.subscribe(fire));
-		if (models !== undefined) state.stops.push(models.catalog.subscribe(fire), models.configuration.subscribe(fire));
-		// Released at the idle release: the next open holds them again (their state is durable and re-read on activation).
-		state.stops.push(() => transcript.release());
-		if (models !== undefined) state.stops.push(() => models.release());
-		fire();
+		state.catalog = this.isSubagentThread(state.threadId)
+			? []
+			: this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow }));
+		const head = parseSubagentThreadId(state.threadId)?.conversationId ?? this.#summary(state.threadId)?.head;
+		if (head !== undefined) void this.#follow(state, head);
 	}
 
-	/** Detach and release a thread's references (idle release); its result and transcript are dropped and re-read on the
-	 * next open. Keeping `view.entries` and `history` here retains every opened transcript for the life of the process. */
+	/** Point an open thread at `head`: watch that conversation, and project each of its views. */
+	async #follow(state: ThreadState, head: number): Promise<void> {
+		const follower = state.follower;
+		if (follower === undefined || follower.closed || follower.head === head) return;
+		follower.head = head;
+		const generation = ++follower.generation;
+		const previous = follower.watch;
+		follower.watch = undefined;
+		follower.historyCutoff = -1;
+		follower.history = [];
+		follower.agentKey = undefined;
+		await previous?.stop().catch(() => {});
+		const current = (): boolean => state.follower === follower && !follower.closed && follower.generation === generation;
+		try {
+			const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+			if (!current()) return;
+			if (conversation === undefined) {
+				await this.#setView(state, head, EMPTY_VIEW, undefined, current);
+				return;
+			}
+			const watch = (await conversation.watch(BACKGROUND_CONTEXT)) as unknown as WatchHandle<ConversationView>;
+			if (!current()) {
+				await watch.stop().catch(() => {});
+				return;
+			}
+			follower.watch = watch;
+			watch.start(async (view) => {
+				if (current()) await this.#setView(state, head, view, conversation, current);
+			});
+			await this.#setView(state, head, watch.value, conversation, current);
+		} catch (error) {
+			this.#log.warn("could not follow a thread's head", { threadId: state.threadId, head, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	/** One view of the head: the history above its compaction cut (loaded once per cut), its configuration (re-read only
+	 * when its `pi.agent` document changes), then the projection. A newer view started meanwhile wins. */
+	async #setView(state: ThreadState, head: number, view: ConversationView, conversation: Conversation | undefined, current: () => boolean): Promise<void> {
+		const follower = state.follower!;
+		const seq = ++follower.viewSeq;
+		const latest = (): boolean => current() && follower.viewSeq === seq;
+		const cutoff = compactionCutoff(view);
+		if (cutoff !== follower.historyCutoff) {
+			const history = conversation === undefined ? [] : await loadHistory(conversation, cutoff).catch(() => []);
+			if (!latest()) return;
+			follower.history = history;
+			follower.historyCutoff = cutoff;
+		}
+		const agentKey = JSON.stringify(view.docs["pi.agent"] ?? null);
+		if (!this.isSubagentThread(state.threadId) && agentKey !== follower.agentKey) {
+			const agent = conversation === undefined ? undefined : await conversation.agent(BACKGROUND_CONTEXT).catch(() => undefined);
+			if (!latest()) return;
+			follower.agentKey = agentKey;
+			state.configuration = {
+				model: agent?.model === undefined ? null : { provider: agent.model.provider, modelId: agent.model.modelId },
+				thinkingLevel: agent?.thinkingLevel ?? "off",
+			};
+		}
+		state.view = view;
+		state.history = follower.history;
+		state.conversationId = head;
+		this.#recompute(state);
+		this.#signal(state);
+	}
+
+	/** Stop following a thread (idle release); its result and transcript are dropped and re-read on the next open.
+	 * Keeping `view.entries` and `history` here retains every opened transcript for the life of the process. */
 	#release(state: ThreadState): void {
-		for (const stop of state.stops.splice(0)) stop();
+		const follower = state.follower;
+		state.follower = undefined;
+		if (follower !== undefined) {
+			follower.closed = true;
+			void follower.watch?.stop().catch(() => {});
+		}
 		state.result = undefined;
 		state.history = undefined;
 		// Keep the small `docs` for shell metadata; release the entry arrays that dominate memory.
 		if (state.view !== undefined) state.view = { ...state.view, entries: [] };
 		state.loadedView = false;
+		// The head may move while released: a write after the next open waits for the head it then loads.
+		state.conversationId = undefined;
+		this.#signal(state);
 	}
 
 	/** Drop a thread that no longer exists: end its subscriptions. */
@@ -749,38 +904,18 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		};
 	}
 
-	/** Fill the sidebar snapshot for rows from before summaries existed. Sequential, so a boot does not load every
-	 * transcript at once; each load writes its summary and the shell follows the directory. */
-	async #primeSummaries(): Promise<void> {
-		for (const thread of this.#directory.filter((candidate) => candidate.summary === undefined || candidate.summary.itemCount === 0)) {
-			try {
-				await this.projection(thread.threadId);
-			} catch (error) {
-				this.#log.warn("sidebar summary backfill failed", { threadId: thread.threadId, error: error instanceof Error ? error.message : String(error) });
-			}
-		}
-	}
-
 	#remember(state: ThreadState): void {
 		const shell = state.result?.shell;
 		if (shell === undefined) return;
 		const latest = shell.latestVisibleMessage;
-		void this.#host
-			.root(async (context) =>
-				(await context.get(PiThreads, {})).remember(
-					{
-						threadId: state.threadId,
-						summary: {
-							updatedAt: DateTime.toEpochMillis(shell.updatedAt),
-							latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
-							latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
-							itemCount: shell.itemCount,
-							visibleItemCount: shell.visibleItemCount,
-						},
-					},
-					context,
-				),
-			)
+		void this.#store
+			.remember(state.threadId, {
+				updatedAt: DateTime.toEpochMillis(shell.updatedAt),
+				latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
+				latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
+				itemCount: shell.itemCount,
+				visibleItemCount: shell.visibleItemCount,
+			})
 			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: state.threadId, error: error instanceof Error ? error.message : String(error) }));
 	}
 
@@ -799,8 +934,8 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			});
 			if (stale.length > 0) void this.#syncSubagents(state.threadId);
 		}
-		// The first projection is `pi.transcript`'s empty placeholder; only the real view counts as loaded.
-		const loaded = (state.conversationId ?? 0) > 0 && !state.loadedView;
+		// Only a projection of the head's real view counts as loaded.
+		const loaded = state.conversationId !== undefined && !state.loadedView;
 		if (loaded) state.loadedView = true;
 		state.result = projectThread(
 			this.#meta(state.threadId, this.#summary(state.threadId), state),
@@ -834,13 +969,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		const release = this.acquire(threadId);
 		try {
 			const state = this.#state(threadId);
-			const deadline = Date.now() + timeoutMs;
-			while (state.result === undefined || !state.loadedView) {
-				if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${threadId}`);
-				if (Date.now() > deadline) throw new CommandError(`Timed out loading thread ${threadId}`);
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
-			return state.result;
+			return await this.#waitFor(state, () => (state.loadedView ? state.result : undefined), timeoutMs, () => new CommandError(`Timed out loading thread ${threadId}`));
 		} finally {
 			release();
 		}
@@ -911,24 +1040,27 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	}
 
 	/**
-	 * Wait until the thread's head conversation is loaded and return its id: a freshly created thread's transcript cell
-	 * resolves a few awaits after `acquire`, and its initial value is the empty view, so every write path awaits the real
-	 * head first — no cold message loss, and no reliance on an earlier call having warmed the transcript (design.md).
+	 * Wait until the thread's head conversation is loaded and return its id: a freshly created or just reopened thread
+	 * follows its head a few awaits after `acquire`, so every write path awaits the real head first — no cold message
+	 * loss, and no reliance on an earlier call having warmed the transcript (design.md).
 	 */
-	async #awaitHead(state: ThreadState, timeoutMs = 15_000): Promise<number> {
-		const deadline = Date.now() + timeoutMs;
-		for (;;) {
-			const id = state.conversationId;
-			if (id !== undefined) return id;
-			if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${state.threadId}`);
-			if (Date.now() > deadline) throw new CommandError(`The thread ${state.threadId} is still loading; send again in a moment.`);
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
+	#awaitHead(state: ThreadState, timeoutMs = 15_000): Promise<number> {
+		return this.#waitFor(state, () => state.conversationId, timeoutMs, () => new CommandError(`The thread ${state.threadId} is still loading; send again in a moment.`));
 	}
 
-	/** Run a `pi.controller` / `pi.models` call for a thread under the host root. */
-	#call<T>(threadId: string, fn: (controller: Ref<typeof PiController>, models: Ref<typeof PiModels>, c: Ctx) => Promise<T>): Promise<T> {
-		return this.#host.root(async (c) => fn(await c.get(PiController, { threadId }), await c.get(PiModels, { threadId }), c));
+	/** Configure the thread's head (a model or thinking-level choice), then re-read its configuration. */
+	async #configureHead(state: ThreadState, change: AgentChange): Promise<void> {
+		const head = await this.#awaitHead(state);
+		const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw new CommandError(`No head for thread ${state.threadId}`);
+		await conversation.configure(change, BACKGROUND_CONTEXT);
+		const agent = await conversation.agent(BACKGROUND_CONTEXT);
+		state.configuration = {
+			model: agent.model === undefined ? null : { provider: agent.model.provider, modelId: agent.model.modelId },
+			thinkingLevel: agent.thinkingLevel,
+		};
+		if (state.follower !== undefined) state.follower.agentKey = undefined;
+		this.#recompute(state);
 	}
 
 	/**
@@ -940,7 +1072,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
-		// A derived subagent id names a child conversation (`PiTranscript`), never a thread of the threads document.
+		// A derived subagent id names a child conversation, never a thread of the threads document.
 		if (parseSubagentThreadId(id) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${id}`);
 		this.#writable(id);
 		if (this.#summary(id) !== undefined) return id;
@@ -951,10 +1083,9 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
 			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);
 		}
-		// A call's reference is released when the call settles (`c.get`); `host.get` would hold one per call, forever.
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) }, c));
-		// Read the document back synchronously: the thread-existence check must not race the subscription mirror.
-		this.#syncDirectory();
+		await this.#store.create({ threadId: id, projectId: project.id, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) });
+		// Read the document back before answering: the next thread-existence check must see the new row.
+		await this.#syncDirectory();
 		return id;
 	}
 
@@ -1020,10 +1151,17 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			const thinkingChanged = thinking !== undefined && current?.thinkingLevel !== thinking;
 			if (!modelChanged && !thinkingChanged) return;
 			// The model first: an unknown one is refused, and the level is applied to the thread the model landed on.
-			await this.#call(threadId, async (_controller, models, c) => {
-				if (modelChanged) await models.select({ provider: model.provider, modelId: model.modelId }, c);
-				if (thinkingChanged) await models.selectThinking({ level: thinking }, c);
-			});
+			const state = this.#state(threadId);
+			if (modelChanged) {
+				if (!state.catalog.some((entry) => entry.provider === model.provider && entry.modelId === model.modelId)) {
+					throw new CommandError(`Not in the catalog: ${model.provider}/${model.modelId}`);
+				}
+				await this.#configureHead(state, { model: { provider: model.provider, modelId: model.modelId } });
+			}
+			if (thinkingChanged) {
+				if (!THINKING_LEVELS.includes(thinking)) throw new CommandError(`Unknown thinking level: ${thinking}`);
+				await this.#configureHead(state, { thinkingLevel: thinking as ModelThinkingLevel });
+			}
 		} finally {
 			release();
 		}
@@ -1096,15 +1234,15 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			const head = await this.#awaitHead(state);
 			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run.
 			if (this.#summary(input.threadId)?.settledOverride !== undefined) {
-				await this.#host.root(async (c) => (await c.get(PiThreads, {})).wake({ threadId: input.threadId }, c));
-				this.#syncDirectory();
+				await this.#store.wake(input.threadId);
+				await this.#syncDirectory();
 				this.#titleChanged(input.threadId);
 			}
 			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
 			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
 			if (compact !== null) {
 				const guidance = compact[1]?.trim();
-				await this.#call(input.threadId, (controller, _models, c) => controller.compact({ ...(guidance === undefined || guidance === "" ? {} : { guidance }), messageId: input.messageId }, c));
+				await this.#store.compact(input.threadId, guidance === undefined || guidance === "" ? undefined : guidance, input.messageId);
 				return;
 			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
@@ -1132,22 +1270,24 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			const filePrompt = await this.#filePrompt(attachments);
 			const promptBlocks = filePrompt === undefined ? blocks : [{ type: "text" as const, text: filePrompt, hidden: true }, ...(blocks ?? [])];
 			const request = {
+				threadId: input.threadId,
 				conversationId: head,
 				requestId: input.commandId,
 				message: input.text,
 				messageId: input.messageId,
 				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
 				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
-				...(context === undefined ? {} : { context }),
+				// T3's composer context is JSON by construction: the contract decoded it from the wire.
+				...(context === undefined ? {} : { context: context as unknown as JsonValue }),
 			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
-			// become a follow-up. Each maps to one `pi.controller` write, keyed by the commandId for wire idempotency.
-			await this.#call(input.threadId, async (controller, _models, c) => {
-				if (input.mode === "restart" && busy) await controller.abort({ conversationId: head }, c);
-				if (input.mode === "steer") await controller.steer(request, c);
-				else if ((busy || compacting) && input.mode !== "restart") await controller.followUp(request, c);
-				else await controller.prompt(request, c);
-			}).catch((error: unknown) => {
+			// become a follow-up. Each is one submission, keyed by the commandId for wire idempotency.
+			await (async () => {
+				if (input.mode === "restart" && busy) await this.#store.abort({ threadId: input.threadId, conversationId: head });
+				if (input.mode === "steer") await this.#store.submit(request, "steer");
+				else if ((busy || compacting) && input.mode !== "restart") await this.#store.submit(request, "followUp");
+				else await this.#store.submit(request, undefined);
+			})().catch((error: unknown) => {
 				if (seeded) {
 					void this.#completeTitle(input.threadId, input.commandId, undefined);
 					// T3 stores the seed and the message in one command: a message that did not land leaves no seed title.
@@ -1169,8 +1309,8 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	}
 
 	async #setStoredTitle(threadId: string, title: string): Promise<void> {
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).rename({ threadId, title }, c));
-		this.#syncDirectory();
+		await this.#store.rename(threadId, title);
+		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1246,15 +1386,11 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	/** The entry a request names: the first message's committed entry (waited for, not its reply), or the head's latest. */
 	async #titleEntry(state: ThreadState, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, signal: AbortSignal): Promise<EntryId | undefined> {
 		if (kind.reason === "regenerate") return state.view?.entries.at(-1)?.id as EntryId | undefined;
-		const deadline = Date.now() + 60_000;
-		while (!signal.aborted && state.gone === undefined && Date.now() < deadline) {
-			const entry = state.view?.entries.find(
+		const find = (): EntryId | undefined =>
+			state.view?.entries.find(
 				(candidate) => USER_ENTRY_KINDS.has(candidate.kind) && (candidate.data as { messageId?: unknown } | undefined)?.messageId === kind.messageId,
-			);
-			if (entry !== undefined) return entry.id as EntryId;
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-		return undefined;
+			)?.id as EntryId | undefined;
+		return this.#waitFor(state, find, 60_000, () => new Error("timed out"), signal).catch(() => undefined);
 	}
 
 	/** A user rename (T3's `thread.metadata.update` with `title`, or `T3Attachment.setTitle`): durable, and it cancels a
@@ -1297,8 +1433,8 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	async settleThread(threadId: string): Promise<void> {
 		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).settle({ threadId }, c));
-		this.#syncDirectory();
+		await this.#store.settle(threadId);
+		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1306,8 +1442,8 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	async unsettleThread(threadId: string): Promise<void> {
 		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).unsettle({ threadId }, c));
-		this.#syncDirectory();
+		await this.#store.unsettle(threadId);
+		await this.#syncDirectory();
 		this.#titleChanged(threadId);
 	}
 
@@ -1318,7 +1454,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			const state = this.#state(threadId);
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.
 			const head = await this.#awaitHead(state);
-			await this.#call(threadId, (controller, _models, c) => controller.abort({ conversationId: head }, c));
+			await this.#store.abort({ threadId, conversationId: head });
 		} finally {
 			release();
 		}
@@ -1328,7 +1464,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
-			await this.#call(threadId, (controller, _models, c) => controller.cancelQueued({ runId }, c));
+			await this.#store.cancelQueued(threadId, runId);
 		} finally {
 			release();
 		}
@@ -1338,7 +1474,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
-			await this.#call(threadId, (controller, _models, c) => controller.editQueued({ runId, text, ...(attachments === undefined ? {} : { attachments: [...attachments] }) }, c));
+			await this.#store.editQueued(threadId, runId, text, attachments === undefined ? undefined : [...attachments]);
 		} finally {
 			release();
 		}
@@ -1348,7 +1484,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
-			await this.#call(threadId, (controller, _models, c) => controller.promoteQueued({ runId }, c));
+			await this.#store.promoteQueued(threadId, runId);
 		} finally {
 			release();
 		}
@@ -1358,7 +1494,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
-			await this.#call(threadId, (controller, _models, c) => controller.startQueued({ ...(runId === undefined ? {} : { runId }), requestId }, c));
+			await this.#store.startQueued(threadId, runId, requestId);
 		} finally {
 			release();
 		}
@@ -1390,9 +1526,7 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 
 			const rolled = rolledBackRuns(projection, target.keepOrdinal);
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
-			await this.#call(input.threadId, (controller, _models, c) =>
-				controller.rewind({ expectedHead, entryId: target.entryId, requestId: input.commandId }, c),
-			);
+			await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
 			state.rolledBack = [
 				...state.rolledBack.filter((r) => !rolled.some((x) => x.run.id === r.run.id)),
 				...rolled,
@@ -1419,16 +1553,16 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 			? source.forkRuns.at(-1)?.lastEntryId
 			: source.forkRuns.find((run) => run.runId === input.runId)?.lastEntryId;
 		if (entryId === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).fork({ sourceThreadId: input.sourceThreadId, targetThreadId: input.targetThreadId, entryId, ...(input.title === undefined ? {} : { title: input.title }) }, c));
-		this.#syncDirectory();
+		await this.#store.fork({ sourceThreadId: input.sourceThreadId, targetThreadId: input.targetThreadId, entryId, ...(input.title === undefined ? {} : { title: input.title }) });
+		await this.#syncDirectory();
 		return input.targetThreadId;
 	}
 
 	async deleteThread(threadId: string): Promise<void> {
 		this.#writable(threadId);
 		this.#cancelTitle(threadId);
-		await this.#host.root(async (c) => (await c.get(PiThreads, {})).remove({ threadId }, c));
-		this.#syncDirectory();
+		await this.#store.remove(threadId);
+		await this.#syncDirectory();
 		this.#dropOrphanSubagents();
 		const state = this.#threads.get(threadId);
 		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
@@ -1442,12 +1576,12 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 	}
 
 	/**
-	 * T3's `orchestration.searchThreads`, answered from the host's threads (`pi.threads.search`, whose scan lives in the
+	 * T3's `orchestration.searchThreads`, answered from the host's threads (`Threads.search`, whose scan lives in the
 	 * threads layer). The result is T3's shape: message timestamps cross the wire as ISO, the same conversion the projection
 	 * makes; the matching, ranking and ordering are T3's (`t3/thread-search.ts`).
 	 */
 	async searchThreads(query: string, limit: number): Promise<OrchestrationSearchThreadsResult> {
-		const matches = await this.#host.root(async (c) => (await c.get(PiThreads, {})).search({ query, limit }, c));
+		const matches = await this.#store.search(query, limit);
 		return {
 			matches: matches.map((match) => ({
 				threadId: match.threadId,
@@ -1459,21 +1593,13 @@ state.catalog = (peek(models.catalog) ?? []).map((model) => ({ provider: model.p
 		} as unknown as OrchestrationSearchThreadsResult;
 	}
 
-	/** Refresh the directory mirror from the `pi.threads` handle (its cell value is authoritative after an awaited
-	 * mutation), so a just-created thread is never "unknown" to the next read and a just-deleted one is never known. */
-	#syncDirectory(): void {
-		const handle = this.#threadsHandle;
-		if (handle === undefined) return;
-		this.#directory = (peek(handle.threads)?.threads ?? []).map((thread) => ({ ...thread }));
-	}
-
 	async close(): Promise<void> {
 		// Shutdown cancels the title work it started: the hook's model call stops, and nothing lands on a closed host.
 		for (const pending of this.#titleRequests.values()) pending.controller.abort();
 		this.#titleRequests.clear();
+		this.#closed = true;
 		for (const state of this.#threads.values()) this.#release(state);
-		this.#directoryStop?.();
-		this.#threadsHandle?.release();
+		await this.#directoryWatch?.stop().catch(() => {});
 		this.#registryStop?.();
 	}
 }

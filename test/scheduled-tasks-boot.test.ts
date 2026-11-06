@@ -5,8 +5,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { createHost } from "@earendil-works/chord";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
@@ -25,13 +23,10 @@ it("a bound task dispatched right at boot finds its thread", async () => {
 		return list();
 	};
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-boot-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
-	await host.ready();
 	const bridge = new Bridge(
 		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
 		log,
-		host,
+		fixture.threads, fixture.model.models,
 	);
 	bridge.start();
 	try {
@@ -40,7 +35,6 @@ it("a bound task dispatched right at boot finds its thread", async () => {
 		expect(bridge.threadProjectId("bound")).toBe("p");
 	} finally {
 		await bridge.close();
-		await host.close();
 		await rm(scratch, { recursive: true, force: true });
 	}
 }, 30_000);

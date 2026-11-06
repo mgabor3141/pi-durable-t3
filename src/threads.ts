@@ -173,13 +173,20 @@ export class Threads {
 		this.#onWarn = deps.onWarn ?? (() => {});
 	}
 
-	/** The integrator's Harness; the objects layer reads/watches conversation views through it. */
+	/** The integrator's Harness; the bridge reads and watches conversation views through it. */
 	get harness(): Harness {
 		return this.#harness;
 	}
 
 	get projects(): readonly Project[] {
 		return this.#registry.list();
+	}
+
+	/** Create the threads document if it does not exist yet, so it can be watched from the first start. */
+	async ensureDocument(): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			await tx.doc(ThreadsDoc);
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/** The threads as stored (a read of the doc). Order is creation order. */

@@ -2,13 +2,11 @@
 // This guards the call site in `Bridge.createThread`: with a recording environment, a host `mkdir` fallback is visible.
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { createHost } from "@earendil-works/chord";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Context } from "@earendil-works/chord/context";
 import type { Result, FileError } from "@earendil-works/pi-durable/env";
 import { Bridge } from "../src/t3/bridge.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { makeThreads } from "./threads-harness.ts";
 
 it("claims a Scratch thread folder through the bridge's execution environment", async () => {
@@ -21,9 +19,6 @@ it("claims a Scratch thread folder through the bridge's execution environment", 
 		return createDir(path, options, context);
 	};
 	const scratchRoot = join(fixture.root, "scratch");
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
-	await host.ready();
 	const bridge = new Bridge(
 		{
 			host: "127.0.0.1",
@@ -39,7 +34,7 @@ it("claims a Scratch thread folder through the bridge's execution environment", 
 			registry: fixture.registry,
 		},
 		{ info: () => {}, warn: () => {} },
-		host,
+		fixture.threads, fixture.model.models,
 	);
 	bridge.start();
 	try {
@@ -48,6 +43,5 @@ it("claims a Scratch thread folder through the bridge's execution environment", 
 		expect(created.some((path) => path.startsWith(`${scratchRoot}/`)), `folders created: ${JSON.stringify(created)}`).toBe(true);
 	} finally {
 		await bridge.close();
-		await host.close();
 	}
 });

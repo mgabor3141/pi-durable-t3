@@ -155,3 +155,8 @@ function textOf(content: unknown): string | undefined {
 	const block = content.find((candidate) => (candidate as { type?: string }).type === "text") as { text?: string } | undefined;
 	return block?.text;
 }
+
+/** The threads store of a Bridge that is never started: a project call does not touch threads, and any other use fails. */
+export function unstartedStore(): Threads {
+	return new Proxy({}, { get: (_target, name) => { throw new Error("this test's bridge has no threads store (read " + String(name) + ")"); } }) as Threads;
+}

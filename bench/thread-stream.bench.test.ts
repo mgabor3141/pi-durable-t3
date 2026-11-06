@@ -4,10 +4,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHost } from "@earendil-works/chord";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { it } from "vitest";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { compactThreadProjection } from "../src/t3/compact.ts";
@@ -24,10 +22,7 @@ it(`thread stream baseline: ${TURNS} turns, then one streamed reply`, { timeout:
 	const fixture = await makeThreads({ projects: [{ id: "p" }], responses: prior, tokensPerSecond: 1_000 });
 	await createNamed(fixture.threads, fixture.harness, fixture.model)({ threadId: "t", projectId: "p", title: "Bench" });
 	const scratch = await mkdtemp(join(tmpdir(), "bench-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(fixture.threads, fixture.model.models)]);
-	await host.ready();
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry }, log, host);
+	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry }, log, fixture.threads, fixture.model.models);
 	bridge.start();
 	await bridge.loaded();
 
@@ -84,6 +79,5 @@ it(`thread stream baseline: ${TURNS} turns, then one streamed reply`, { timeout:
 	}, null, 2));
 
 	await bridge.close();
-	await host.close();
 	await rm(scratch, { recursive: true, force: true });
 });

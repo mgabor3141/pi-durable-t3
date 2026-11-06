@@ -15,8 +15,6 @@ import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, getJson, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir } from "./host-process-harness.ts";
-import { createHost } from "@earendil-works/chord";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { makeThreads } from "./threads-harness.ts";
@@ -155,13 +153,10 @@ await writeFile(join(t3Dir(root), "projects.json"), JSON.stringify({ projects: [
 it("a thread.create racing the forced delete leaves no row under the removed project (one-pass sweep + FK)", async () => {
 	for (let round = 0; round < 10; round++) {
 		const f = await makeThreads({ projects: [{ id: "racy" }] });
-		const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-		await host.load([createServerFacet(f.threads, f.model.models)]);
-		await host.ready();
 		const bridge = new Bridge(
 			{ host: "127.0.0.1", port: 0, label: "t", stateDir: f.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], staticDir: undefined, registry: f.registry },
 			{ info: () => {}, warn: () => {} },
-			host,
+			f.threads, f.model.models,
 		);
 		bridge.start();
 		const existing = await bridge.createThread({ projectId: "racy" });

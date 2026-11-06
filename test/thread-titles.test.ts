@@ -6,10 +6,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
-import { createHost, type Host } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { createServerFacet, HOST_PRINCIPAL } from "../src/objects.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import type { Threads } from "../src/threads.ts";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -42,11 +40,8 @@ function manualHook() {
 	return { hook, calls };
 }
 
-async function start(fixture: ThreadsFixture, threads: Threads, titleThread?: TitleThread): Promise<{ bridge: Bridge; host: Host }> {
+async function start(fixture: ThreadsFixture, threads: Threads, titleThread?: TitleThread): Promise<{ bridge: Bridge }> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-titles-"));
-	const host = createHost({ name: "server", self: HOST_PRINCIPAL });
-	await host.load([createServerFacet(threads, fixture.model.models)]);
-	await host.ready();
 	const bridge = new Bridge(
 		{
 			host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60,
@@ -54,16 +49,16 @@ async function start(fixture: ThreadsFixture, threads: Threads, titleThread?: Ti
 			...(titleThread === undefined ? {} : { titleThread }),
 		},
 		log,
-		host,
+		threads,
+		fixture.model.models,
 	);
 	bridge.start();
 	await bridge.loaded().catch(() => {});
 	onTestFinished(async () => {
 		await bridge.close();
-		await host.close();
 		await rm(scratch, { recursive: true, force: true });
 	});
-	return { bridge, host };
+	return { bridge };
 }
 
 const MODEL = { model: "faux/faux-1" };
@@ -202,7 +197,6 @@ it("a restart keeps the title and shows no generation in progress", async () => 
 	await until("the hook call", () => calls.length === 1);
 	expect(shell(first.bridge, threadId).titleRegeneration).not.toBeNull();
 	await first.bridge.close();
-	await first.host.close();
 
 	const reopened = await restart(fixture);
 	onTestFinished(async () => void (await reopened.harness.close(ctx).catch(() => {})));
