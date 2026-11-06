@@ -42,9 +42,16 @@ export function clientProvenance(command: DispatchCommand): Provenance {
 	return { createdBy: "user", creationSource: source ?? "web" };
 }
 
-/** Apply one command once per `commandId` and answer the sequence the client orders its stream by. */
+/** The thread a command's receipt is kept on: the one it acts on, or the one it creates. */
+function receiptThread(command: DispatchCommand): string | undefined {
+	if (command.type === "thread.fork") return command.targetThreadId;
+	return "threadId" in command && typeof command.threadId === "string" ? command.threadId : undefined;
+}
+
+/** Apply one command once per `commandId` — durably, through the thread's receipts — and answer the sequence the client
+ * orders its stream by. */
 export function dispatchCommand(bridge: Bridge, command: DispatchCommand, provenance: Provenance, log: Logger): Promise<number> {
-	return bridge.idempotent(command.commandId, async () => {
+	return bridge.receipted(receiptThread(command), command.commandId, async () => {
 		switch (command.type) {
 			case "message.dispatch": {
 				await bridge.applySelection(command.threadId, command.modelSelection);

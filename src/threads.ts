@@ -85,6 +85,12 @@ type AppliedUndo = { requestId: string; head: number };
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
 
+/** A command this thread accepted, and the sequence it was answered with: a retried `commandId` gets the same answer
+ * (T3's command receipts). */
+type Receipt = { commandId: string; sequence: number };
+/** Receipts kept per thread. */
+const MAX_RECEIPTS = 100;
+
 /**
  * One thread, durably: T3's `OrchestrationV2AppThread` fields this host can honour, plus the head conversation the
  * thread points at. A deleted thread keeps its record with `deletedAt` set, as T3 keeps its row: the record is the
@@ -108,6 +114,8 @@ export type ThreadRecord = {
 	unsettledAt?: number;
 	deletedAt: number | null;
 	undos: AppliedUndo[];
+	/** The last commands this thread accepted (T3's receipts), newest last. */
+	receipts: Receipt[];
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;
 };
@@ -441,6 +449,21 @@ export class Threads {
 		});
 	}
 
+	/** The answer a thread gave a command it accepted, if it still keeps that receipt (a deleted thread keeps its own). */
+	receipt(threadId: string, commandId: string): number | undefined {
+		return this.#records.get(threadId)?.receipts.find((receipt) => receipt.commandId === commandId)?.sequence;
+	}
+
+	/** Keep the receipt of a command the thread accepted. A thread that does not exist keeps none. */
+	async recordReceipt(threadId: string, commandId: string, sequence: number): Promise<void> {
+		await this.#commit(async (_tx, writes) => {
+			const record = await writes.record(threadId);
+			if (record === undefined || record.receipts.some((receipt) => receipt.commandId === commandId)) return;
+			record.receipts = [...record.receipts, { commandId, sequence }].slice(-MAX_RECEIPTS);
+			await writes.putRecord(record);
+		});
+	}
+
 	/** The live thread whose head is `conversationId`, if any. */
 	async threadIdForConversation(conversationId: number): Promise<string | undefined> {
 		await this.load();
@@ -556,6 +579,7 @@ export class Threads {
 			...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			deletedAt: null,
 			undos: [],
+			receipts: [],
 			revision: 0,
 		};
 	}

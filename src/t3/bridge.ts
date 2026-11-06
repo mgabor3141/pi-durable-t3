@@ -171,9 +171,6 @@ export type ProjectMutation = {
 	readonly force?: boolean;
 };
 
-/** How many client-chosen command ids the bridge remembers for dispatch idempotency: the only memory a client-chosen
- * id can make the host spend (state.md). Past it the oldest entry is dropped, and an old retry is a fresh request. */
-export const DEDUP_ENTRY_LIMIT = 2_000;
 
 
 export class Bridge {
@@ -1013,17 +1010,28 @@ export class Bridge {
 	// ---- commands ---------------------------------------------------------------------------------------------
 
 	/** Run a command once per commandId: retries of the same command return the first result. */
+	/** Run a command once while it is in flight: a duplicate that arrives meanwhile joins it. */
 	idempotent(commandId: string, run: () => Promise<number>): Promise<number> {
 		const existing = this.#commandResults.get(commandId);
 		if (existing !== undefined) return existing;
-		const result = run();
+		const result = run().finally(() => this.#commandResults.delete(commandId));
 		this.#commandResults.set(commandId, result);
-		result.catch(() => this.#commandResults.delete(commandId));
-		while (this.#commandResults.size > DEDUP_ENTRY_LIMIT) {
-			const oldest = this.#commandResults.keys().next().value;
-			if (oldest !== undefined) this.#commandResults.delete(oldest);
-		}
 		return result;
+	}
+
+	/**
+	 * Run a command once, durably: a retry after it was accepted — after a lost ack, a reconnect, a restart — gets the
+	 * answer the thread kept for it (T3's command receipts), and a duplicate in flight joins the first. A refused
+	 * command keeps no receipt, so its retry runs again.
+	 */
+	receipted(threadId: string | undefined, commandId: string, run: () => Promise<number>): Promise<number> {
+		return this.idempotent(commandId, async () => {
+			const kept = threadId === undefined ? undefined : this.#store.receipt(threadId, commandId);
+			if (kept !== undefined) return kept;
+			const sequence = await run();
+			if (threadId !== undefined) await this.#store.recordReceipt(threadId, commandId, sequence);
+			return sequence;
+		});
 	}
 
 	/**

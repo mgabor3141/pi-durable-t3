@@ -1,6 +1,6 @@
 # Cleanup: state and wire
 
-Status: in progress on branch `cleanup`. Steps 1–4 done (see Plan).
+Status: in progress on branch `cleanup`. Steps 1–5 done (see Plan).
 
 ## Goal
 
@@ -142,7 +142,10 @@ Each step is a reviewable commit or PR with the suite green and the benchmark re
    per thread, a directory of ids and heads; a deleted thread keeps its record as the tombstone; undos bounded per
    thread. Messages carry their sender. Commands go through `dispatchCommand(bridge, command, provenance)`
    (`t3/dispatch.ts`). A version-1 store is refused at boot.
-5. Projects, scheduled tasks and command receipts in pi-durable. No import of the old files.
+5. Done: projects (`pi-durable-t3.projects`, the thread's project checked in the thread's commit) and scheduled tasks
+   (`pi-durable-t3.scheduled-tasks`) live in the Harness; command receipts are kept on the thread they act on (the
+   last 100), so a retried command is answered from state across restarts. `t3-settings.json`, `auth.json` and the
+   attachment bytes stay in the state dir, as T3 keeps settings and keybindings in files.
 6. Incremental projector, event stream, bounded snapshot, history pages, resume. Acceptance: wire bytes for a streamed
    reply proportional to the reply, first snapshot within T3's bounds, on the benchmark's 50/200/500-turn threads.
 7. Parity tests: every item the bridge emits is encoded and decoded with the contract's schema in tests; supported
