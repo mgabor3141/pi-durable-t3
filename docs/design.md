@@ -98,8 +98,9 @@ The facet serves T3's HTTP routes and `/ws` (orchestration protocol 2, Effect RP
 T3's RPC group (`t3/ws-types.ts`) and run behind T3's own per-method scope check (`RpcAuthorization`, vendored), and the HTTP routes are T3's `EnvironmentHttpApi` implemented with `HttpApiBuilder`
 (`t3/http-api.ts`), so a contract change at a pin bump fails the build and no body is shaped by hand. Only what T3 also
 serves outside its HttpApi stays a plain route: assets, uploads, the preview stream, `/ws` and the web app. Behind them, the bridge writes
-through the threads layer (`threads.ts`) and reads with one watch on the threads document plus one watch per open
-thread on its head conversation; a write that needs the head waits for that thread's load, never by polling.
+through the threads layer (`threads.ts`) and reads with one watch on the threads document plus, per open thread, a
+`ThreadView` (`t3/thread-view.ts`) that watches its head conversation, projects each view and streams the changes; a
+write that needs the head waits for that thread's load, never by polling.
 
 Rate limiting keys on the socket address, never on a client-supplied header.
 

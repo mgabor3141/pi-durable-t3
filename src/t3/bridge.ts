@@ -1,6 +1,5 @@
-// The T3 view over the host's threads: the threads layer (`../threads.ts`) for every write, one watch on the threads
-// document for the directory, and one watch per open thread on its head conversation. It holds the per-thread projection
-// memory (rolled-back runs) and the sequence counter.
+// The T3 view over the host's threads: the threads layer (`../threads.ts`) for every write, the directory and the shell,
+// and one `ThreadView` per open thread (`thread-view.ts`: its head watch, projection and stream). Commands land here.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { basename } from "node:path";
@@ -22,7 +21,7 @@ import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_
 import { type Provenance, type Thread, type Threads, USER_WEB } from "../threads.ts";
 import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
-import type { AgentChange, Conversation, ConversationId, Cursor, EntryId, WatchHandle } from "@earendil-works/pi-durable";
+import type { AgentChange, ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord";
 import type { Logger } from "./logging.ts";
@@ -30,13 +29,14 @@ import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
-import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
-import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
-import { BASELINE_CHECKPOINT_ID, type RolledBackRun, rolledBackRuns, undoneHeads, undoTarget } from "./undo.ts";
+import { undoTarget } from "./undo.ts";
 
-export class CommandError extends Error {}
+import { CommandError } from "./errors.ts";
+import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
+
+export { CommandError, type StreamUpdate };
 
 /** Where file attachments are copied so the workspace tools can read them by path. */
 export const ATTACHMENT_WORKSPACE_DIR = "/home/agent/attachments";
@@ -80,103 +80,13 @@ export function selectImageBlocks(
 	return blocks.length === 0 ? undefined : blocks;
 }
 
-interface ThreadState {
-	readonly threadId: string;
-	refs: number;
-	closeTimer: NodeJS.Timeout | undefined;
-	/** The runs the head's undos rolled back, derived from the undone heads when the head is followed (`#rolledBack`). */
-	rolledBack: RolledBackRun[];
-	result: ProjectionResult | undefined;
-	/** The head's real view has been projected once since the thread was opened. */
-	loadedView: boolean;
-	/** Replaced and settled on every load-state change (a view, a release, a removal): what waiters wait on. */
-	changed: PromiseWithResolvers<void>;
-	/** The projection the subscribers were last brought to, and its sequence; `undefined` until the first flush. */
-	stream: { sequence: number; projection: OrchestrationV2ThreadProjection } | undefined;
-	/** The events since `logFloor`, oldest first: what a resuming subscriber is replayed. */
-	log: ThreadStreamItem[];
-	logFloor: number;
-	subscribers: Set<StreamSubscriber>;
-	/** Called when the thread is gone (deleted, or unknown to the host); subscriptions end. */
-	enders: Set<() => void>;
-	gone: Error | undefined;
-	flushTimer: NodeJS.Timeout | undefined;
-	/** The watch on the head conversation while the thread is open; `undefined` once released. */
-	follower: Follower | undefined;
-	/** The head conversation id (the write target) once its view has loaded, and that view. */
-	conversationId: number | undefined;
-	view: ConversationView | undefined;
-	/** Display-only transcript above the active context's compaction cut. */
-	history: EntryRecord[] | undefined;
-	configuration: { model: ModelRef | null; thinkingLevel: string } | undefined;
-	/** The catalog entries, each with its input modalities, so the send path knows which models accept images. */
-	catalog: { provider: string; modelId: string; input: string[]; contextWindow: number }[];
-}
-
-/** An open thread's watch on its head conversation. A head switch (undo, fork promotion) restarts it on the new head. */
-interface Follower {
-	head: number | undefined;
-	watch: WatchHandle<ConversationView> | undefined;
-	/** Bumped on every head switch, so a callback of a superseded watch changes nothing. */
-	generation: number;
-	/** Bumped on every view, so a slow history load cannot overwrite a newer view. */
-	viewSeq: number;
-	/** The compaction cut the cached history was loaded for (`-1`: none). */
-	historyCutoff: number;
-	history: EntryRecord[];
-	/** The head's `pi.agent` document as last read; its configuration is re-read only when it changes. */
-	agentKey: string | undefined;
-	closed: boolean;
-}
-
-/** The view of a head conversation that does not exist: no entries, no docs. */
-const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as ConversationView;
 
 const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-/** The entry before the active context's first kept entry, when the view starts at a compaction; else `-1`. */
-function compactionCutoff(view: ConversationView): number {
-	const head = view.entries[0];
-	if (head?.kind !== "pi.compaction") return -1;
-	const firstKept = view.entries[1];
-	return (firstKept?.id ?? head.id) - 1;
-}
-
-/** The entries above a compaction cut, for display only: compaction keeps them durably but drops them from the view. */
-async function loadHistory(conversation: Conversation, cutoff: number): Promise<EntryRecord[]> {
-	if (cutoff <= 0) return [];
-	const items: EntryRecord[] = [];
-	let cursor: Cursor | undefined;
-	do {
-		const page = await conversation.entries({ order: "ascending", maxEntryId: cutoff as EntryId }, 500, cursor, BACKGROUND_CONTEXT);
-		items.push(...(page.items as unknown as EntryRecord[]));
-		cursor = page.next;
-	} while (cursor !== undefined);
-	// Compaction markers are rendered as cards by the projection; an older summary here would be a stray bubble.
-	return items.filter((entry) => entry.kind !== "pi.compaction" && entry.id <= cutoff);
-}
-
-/** What a thread subscriber is sent: a whole projection (formatted per subscriber), or events. */
-export type StreamUpdate =
-	| { readonly kind: "snapshot"; readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection }
-	| { readonly kind: "events"; readonly items: readonly ThreadStreamItem[] };
-
-interface StreamSubscriber {
-	readonly update: (update: StreamUpdate) => void;
-	/** Set until the subscriber got its first update: the sequence it resumes after, or `null` for a snapshot. */
-	pending: { readonly afterSequence: number | null } | undefined;
-}
-
-/** T3's coalescing window for live updates (`ThreadLiveEventCoalescer`): changes within it go out as one batch. */
-const FLUSH_MS = 50;
-/** The replay T3 allows before it sends a snapshot instead (`ThreadStream.ts`). */
-const MAX_LOG_EVENTS = THREAD_RESUME_MAX_REPLAY_EVENTS;
 
 /** A live shell item: everything \`orchestration.subscribeShell\` streams after its snapshot. */
 type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind: "snapshot" } | { readonly kind: "synchronized" }>;
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const LINK_IDLE_MS = 30_000;
 
 /** One `projects.mutate` payload, as the facet decoded it. */
 export type ProjectMutation = {
@@ -197,7 +107,8 @@ export class Bridge {
 	readonly #models: Models;
 	readonly #log: Logger;
 	readonly #attachments: AttachmentStore | undefined;
-	readonly #threads = new Map<string, ThreadState>();
+	readonly #views = new Map<string, ThreadView>();
+	readonly #viewHost: ThreadViewHost;
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
 	readonly #deletedListeners = new Set<(threadId: string) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
@@ -211,7 +122,6 @@ export class Bridge {
 	 * with the directory and whenever an open thread shows a call that names a child not yet discovered. Nothing is stored. */
 	#subagents = new Map<string, SubagentRef>();
 	#subagentSync: Promise<void> | undefined;
-	#subagentsBooted = false;
 	/** Threads whose subagents need a scan once the running one ends (`undefined` in the set: all of them). */
 	readonly #subagentScan = new Set<string | undefined>();
 	/** The calls (`taskId:conversationId`) a sync was already run for, so an unowned `conversationId` in some tool's
@@ -232,6 +142,20 @@ export class Bridge {
 		this.#store = store;
 		this.#models = models;
 		this.#attachments = attachments;
+		const bridge = this;
+		this.#viewHost = {
+			get harness() {
+				return store.harness;
+			},
+			log,
+			head: (threadId) => parseSubagentThreadId(threadId)?.conversationId ?? this.#summary(threadId)?.head,
+			undos: (threadId) => this.#summary(threadId)?.undos ?? [],
+			isSubagent: (threadId) => this.isSubagentThread(threadId),
+			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow })),
+			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
+			nextSequence: () => bridge.nextSequence(),
+			projected: (view, change) => this.#projected(view, change),
+		};
 	}
 
 	start(): void {
@@ -258,8 +182,7 @@ export class Bridge {
 		const touched = new Set(changed ?? this.#directory.map((thread) => thread.threadId));
 		for (const thread of this.#directory) {
 			if (!touched.has(thread.threadId)) continue;
-			const state = this.#threads.get(thread.threadId);
-			if (state?.follower !== undefined && state.follower.head !== thread.head) void this.#follow(state, thread.head);
+			this.#views.get(thread.threadId)?.moved(thread.head);
 		}
 		// A subagent's thread takes its title and project from its parent's row.
 		for (const ref of this.#subagents.values()) if (touched.has(ref.parentThreadId)) touched.add(ref.threadId);
@@ -573,7 +496,7 @@ export class Bridge {
 
 	/** A subagent thread's meta: its parent's project, the title T3 gives a provider-native child, the child conversation's
 	 * own agent. */
-	#subagentMeta(ref: SubagentRef, state: ThreadState | undefined): ThreadMeta {
+	#subagentMeta(ref: SubagentRef, state: ThreadView | undefined): ThreadMeta {
 		const parent = this.#summary(ref.parentThreadId);
 		const project = parent === undefined ? undefined : this.#configured().find((candidate) => candidate.id === parent.projectId);
 		const agent = state?.view?.docs["pi.agent"];
@@ -593,7 +516,7 @@ export class Bridge {
 		};
 	}
 
-	#meta(threadId: string, thread: Thread | undefined, state: ThreadState | undefined): ThreadMeta {
+	#meta(threadId: string, thread: Thread | undefined, state: ThreadView | undefined): ThreadMeta {
 		const subagent = this.#subagents.get(threadId);
 		if (subagent !== undefined) return this.#subagentMeta(subagent, state);
 		// The FK is the only lookup: an unregistered `projectId` is reported as it is, with NO invented project, and no row
@@ -640,11 +563,9 @@ export class Bridge {
 	}
 
 	#shellFor(threadId: string): OrchestrationV2ThreadShell {
-		const state = this.#threads.get(threadId);
-		if (state?.result !== undefined) return state.result.shell;
-		return projectThread(this.#meta(threadId, this.#summary(threadId), state), undefined, {
-			rolledBack: state?.rolledBack ?? [],
-		}).shell;
+		const view = this.#views.get(threadId);
+		if (view?.result !== undefined) return view.result.shell;
+		return projectThread(this.#meta(threadId, this.#summary(threadId), view), undefined, { rolledBack: view?.rolledBack ?? [] }).shell;
 	}
 
 	/**
@@ -654,7 +575,7 @@ export class Bridge {
 	workspaceRoots(): string[] {
 		const roots = new Set(this.#configured().map((project) => project.path));
 		for (const thread of this.#directory) {
-			const meta = this.#meta(thread.threadId, this.#summary(thread.threadId), this.#threads.get(thread.threadId));
+			const meta = this.#meta(thread.threadId, this.#summary(thread.threadId), this.#views.get(thread.threadId));
 			if (meta.projectPath !== undefined && meta.cwd.startsWith(`${meta.projectPath}/`)) roots.add(meta.cwd);
 		}
 		return [...roots];
@@ -690,15 +611,13 @@ export class Bridge {
 		for (const threadId of [...this.#directory.map((thread) => thread.threadId), ...this.#subagents.keys()]) {
 			seen.add(threadId);
 			if (only !== undefined && !only.has(threadId)) continue;
-			const state = this.#threads.get(threadId);
-			if (state !== undefined) this.#recompute(state);
+			this.#views.get(threadId)?.recompute();
 			this.#publishShell(threadId);
 		}
 		for (const threadId of [...this.#shells.keys()]) {
 			if (seen.has(threadId)) continue;
 			this.#shells.delete(threadId);
-			const state = this.#threads.get(threadId);
-			if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was removed`));
+			this.#forget(threadId, new CommandError(`Thread ${threadId} was removed`));
 			this.#emitShell({ kind: "thread.removed", sequence: this.nextSequence(), location: "active", threadId: ThreadId.make(threadId) });
 		}
 	}
@@ -714,342 +633,69 @@ export class Bridge {
 
 	// ---- threads ----------------------------------------------------------------------------------------------
 
-	#state(threadId: string): ThreadState {
-		let state = this.#threads.get(threadId);
-		if (state === undefined) {
-			state = {
-				threadId,
-				refs: 0,
-				closeTimer: undefined,
-				rolledBack: [],
-				result: undefined,
-				loadedView: false,
-				changed: Promise.withResolvers<void>(),
-				stream: undefined,
-				log: [],
-				logFloor: 0,
-				subscribers: new Set(),
-				enders: new Set(),
-				gone: undefined,
-				flushTimer: undefined,
-				follower: undefined,
-				conversationId: undefined,
-				view: undefined,
-				history: undefined,
-				configuration: undefined,
-				catalog: [],
-			};
-			this.#threads.set(threadId, state);
-		}
-		return state;
-	}
-
-	/** Settle the waiters of a thread's load state and arm a fresh signal. */
-	#signal(state: ThreadState): void {
-		const previous = state.changed;
-		state.changed = Promise.withResolvers<void>();
-		previous.resolve();
-	}
-
-	/** Wait until `read` answers, the thread is gone, `signal` aborts, or the time is up. Every new view and every
-	 * load-state change wakes it; nothing polls. */
-	async #waitFor<T>(state: ThreadState, read: () => T | undefined, timeoutMs: number, onTimeout: () => Error, signal?: AbortSignal): Promise<T> {
-		const deadline = Date.now() + timeoutMs;
-		for (;;) {
-			if (state.gone !== undefined) throw new CommandError(`Unknown thread: ${state.threadId}`);
-			if (signal?.aborted === true) throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
-			const value = read();
-			if (value !== undefined) return value;
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) throw onTimeout();
-			let timer: NodeJS.Timeout | undefined;
-			let onAbort: (() => void) | undefined;
-			await Promise.race([
-				state.changed.promise,
-				new Promise<void>((resolve) => {
-					timer = setTimeout(resolve, remaining);
-					onAbort = resolve;
-					signal?.addEventListener("abort", onAbort, { once: true });
-				}),
-			]);
-			clearTimeout(timer);
-			if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
-		}
-	}
-
-	/** Open a thread: follow its head conversation (a subagent's thread: its child conversation, fixed by the id). */
-	#open(state: ThreadState): void {
-		if (state.closeTimer !== undefined) {
-			clearTimeout(state.closeTimer);
-			state.closeTimer = undefined;
-		}
-		if (state.follower !== undefined) return;
-		state.follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, historyCutoff: -1, history: [], agentKey: undefined, closed: false };
-		// A subagent's thread has no model controls: it reads its conversation and nothing else.
-		state.catalog = this.isSubagentThread(state.threadId)
-			? []
-			: this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow }));
-		const head = parseSubagentThreadId(state.threadId)?.conversationId ?? this.#summary(state.threadId)?.head;
-		if (head !== undefined) void this.#follow(state, head);
-	}
-
-	/** Point an open thread at `head`: watch that conversation, and project each of its views. */
-	async #follow(state: ThreadState, head: number): Promise<void> {
-		const follower = state.follower;
-		if (follower === undefined || follower.closed || follower.head === head) return;
-		follower.head = head;
-		const generation = ++follower.generation;
-		const previous = follower.watch;
-		follower.watch = undefined;
-		follower.historyCutoff = -1;
-		follower.history = [];
-		follower.agentKey = undefined;
-		await previous?.stop().catch(() => {});
-		const current = (): boolean => state.follower === follower && !follower.closed && follower.generation === generation;
-		try {
-			const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
-			if (!current()) return;
-			const rolledBack = await this.#rolledBack(state, head);
-			if (!current()) return;
-			state.rolledBack = rolledBack;
-			if (conversation === undefined) {
-				await this.#setView(state, head, EMPTY_VIEW, undefined, current);
-				return;
-			}
-			const watch = (await conversation.watch(BACKGROUND_CONTEXT)) as unknown as WatchHandle<ConversationView>;
-			if (!current()) {
-				await watch.stop().catch(() => {});
-				return;
-			}
-			follower.watch = watch;
-			watch.start(async (view) => {
-				if (current()) await this.#setView(state, head, view, conversation, current);
-			});
-			await this.#setView(state, head, watch.value, conversation, current);
-		} catch (error) {
-			this.#log.warn("could not follow a thread's head", { threadId: state.threadId, head, error: error instanceof Error ? error.message : String(error) });
-		}
-	}
-
-	/**
-	 * The runs `head`'s undos rolled back: every run of the heads they left (`undoneHeads`) as it was there, marked rolled
-	 * back. The projection drops the ones `head` still has, so the undo record is all that is stored (design.md, Invariants).
-	 */
-	async #rolledBack(state: ThreadState, head: number): Promise<RolledBackRun[]> {
-		const chain = undoneHeads(this.#summary(state.threadId)?.undos ?? [], head);
-		const runs = new Map<string, RolledBackRun>();
-		for (const from of chain.reverse()) {
-			const conversation = await this.#store.harness.conversation(from as ConversationId, BACKGROUND_CONTEXT).catch(() => undefined);
-			if (conversation === undefined) continue;
-			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
-			const view = { conversation: {}, entries, docs: {} } as unknown as ConversationView;
-			const { projection } = projectThread(this.#meta(state.threadId, this.#summary(state.threadId), undefined), view, { rolledBack: [] });
-			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
-		}
-		return [...runs.values()];
-	}
-
-	/** One view of the head: the history above its compaction cut (loaded once per cut), its configuration (re-read only
-	 * when its `pi.agent` document changes), then the projection. A newer view started meanwhile wins. */
-	async #setView(state: ThreadState, head: number, view: ConversationView, conversation: Conversation | undefined, current: () => boolean): Promise<void> {
-		const follower = state.follower!;
-		const seq = ++follower.viewSeq;
-		const latest = (): boolean => current() && follower.viewSeq === seq;
-		const cutoff = compactionCutoff(view);
-		if (cutoff !== follower.historyCutoff) {
-			const history = conversation === undefined ? [] : await loadHistory(conversation, cutoff).catch(() => []);
-			if (!latest()) return;
-			follower.history = history;
-			follower.historyCutoff = cutoff;
-		}
-		const agentKey = JSON.stringify(view.docs["pi.agent"] ?? null);
-		if (!this.isSubagentThread(state.threadId) && agentKey !== follower.agentKey) {
-			const agent = conversation === undefined ? undefined : await conversation.agent(BACKGROUND_CONTEXT).catch(() => undefined);
-			if (!latest()) return;
-			follower.agentKey = agentKey;
-			state.configuration = {
-				model: agent?.model === undefined ? null : { provider: agent.model.provider, modelId: agent.model.modelId },
-				thinkingLevel: agent?.thinkingLevel ?? "off",
-			};
-		}
-		state.view = view;
-		state.history = follower.history;
-		state.conversationId = head;
-		this.#recompute(state);
-		this.#signal(state);
-	}
-
-	/** Stop following a thread (idle release); its result and transcript are dropped and re-read on the next open.
-	 * Keeping `view.entries` and `history` here retains every opened transcript for the life of the process. */
-	#release(state: ThreadState): void {
-		const follower = state.follower;
-		state.follower = undefined;
-		if (follower !== undefined) {
-			follower.closed = true;
-			void follower.watch?.stop().catch(() => {});
-		}
-		state.result = undefined;
-		state.history = undefined;
-		state.stream = undefined;
-		state.log = [];
-		if (state.flushTimer !== undefined) clearTimeout(state.flushTimer);
-		state.flushTimer = undefined;
-		// Keep the small `docs` for shell metadata; release the entry arrays that dominate memory.
-		if (state.view !== undefined) state.view = { ...state.view, entries: [] };
-		state.loadedView = false;
-		// The head may move while released: a write after the next open waits for the head it then loads.
-		state.conversationId = undefined;
-		this.#signal(state);
-	}
-
-	/** Drop a thread that no longer exists: end its subscriptions. */
-	#forget(state: ThreadState, error: Error): void {
-		if (this.#threads.get(state.threadId) !== state) return;
-		this.#threads.delete(state.threadId);
-		state.gone = error;
-		if (state.closeTimer !== undefined) clearTimeout(state.closeTimer);
-		this.#release(state);
-		for (const end of state.enders) end();
-		state.subscribers.clear();
-		state.enders.clear();
-		this.#log.info("thread forgotten", { threadId: state.threadId, reason: error.message });
-	}
-
-	/** Keep a thread's handles attached while `hold` runs or a subscriber exists. */
-	acquire(threadId: string): () => void {
+	/** The view of a thread, opened or not. */
+	#viewOf(threadId: string): ThreadView {
 		if (!SESSION_ID.test(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		const state = this.#state(threadId);
-		state.refs++;
-		this.#open(state);
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			state.refs--;
-			if (state.refs > 0) return;
-			state.closeTimer = setTimeout(() => {
-				if (state.refs > 0) return;
-				this.#release(state);
-			}, LINK_IDLE_MS);
-			state.closeTimer.unref();
-		};
+		let view = this.#views.get(threadId);
+		if (view === undefined) {
+			view = new ThreadView(threadId, this.#viewHost);
+			this.#views.set(threadId, view);
+		}
+		return view;
 	}
 
-	#remember(state: ThreadState): void {
-		const shell = state.result?.shell;
+	/** A thread that no longer exists: its view ends its subscriptions. */
+	#forget(threadId: string, error: Error): void {
+		const view = this.#views.get(threadId);
+		if (view === undefined) return;
+		this.#views.delete(threadId);
+		view.forget(error);
+	}
+
+	/** Keep a thread open while `hold` runs or a subscriber exists. */
+	acquire(threadId: string): () => void {
+		return this.#viewOf(threadId).hold();
+	}
+
+	/** After each projection of an open thread: the shell, and on load or at a run's end the sidebar summary. */
+	#projected(view: ThreadView, change: { readonly loaded: boolean; readonly settled: boolean }): void {
+		const threadView = view.view;
+		// A call that names a child this thread's discovery has not seen (a subagent made just now): scan this thread alone,
+		// once per call. (A subagent's own thread names no children: a subagent of a subagent is not discovered.)
+		if (threadView !== undefined && !this.#subagents.has(view.threadId)) {
+			const stale = this.#namedChildren(threadView).filter((call) => {
+				const seen = [...this.#subagents.values()].some((other) => other.parentThreadId === view.threadId && other.taskId === call.taskId && other.conversationId === call.conversationId);
+				const probe = `${view.threadId}:${call.key}`;
+				if (seen || this.#probedCalls.has(probe)) return false;
+				this.#probedCalls.add(probe);
+				return true;
+			});
+			if (stale.length > 0) void this.#syncSubagents(view.threadId);
+		}
+		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
+		if (change.loaded) this.#restoreAttachments(view.transcript);
+		if (change.loaded || change.settled) this.#remember(view);
+		this.#publishShell(view.threadId);
+	}
+
+	#remember(view: ThreadView): void {
+		const shell = view.result?.shell;
 		if (shell === undefined) return;
 		const latest = shell.latestVisibleMessage;
 		void this.#store
-			.remember(state.threadId, {
+			.remember(view.threadId, {
 				updatedAt: DateTime.toEpochMillis(shell.updatedAt),
 				latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
 				latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
 				itemCount: shell.itemCount,
 				visibleItemCount: shell.visibleItemCount,
 			})
-			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: state.threadId, error: error instanceof Error ? error.message : String(error) }));
-	}
-
-	#recompute(state: ThreadState): void {
-		if (state.view === undefined) return;
-		const wasRunning = state.result?.shell.status === "running";
-		// A call that names a child this thread's discovery has not seen (a subagent made just now): scan this thread alone,
-		// once per call. (A subagent's own thread names no children: a subagent of a subagent is not discovered.)
-		if (!this.#subagents.has(state.threadId)) {
-			const stale = this.#namedChildren(state.view).filter((call) => {
-				const seen = [...this.#subagents.values()].some((other) => other.parentThreadId === state.threadId && other.taskId === call.taskId && other.conversationId === call.conversationId);
-				const probe = `${state.threadId}:${call.key}`;
-				if (seen || this.#probedCalls.has(probe)) return false;
-				this.#probedCalls.add(probe);
-				return true;
-			});
-			if (stale.length > 0) void this.#syncSubagents(state.threadId);
-		}
-		// Only a projection of the head's real view counts as loaded.
-		const loaded = state.conversationId !== undefined && !state.loadedView;
-		if (loaded) state.loadedView = true;
-		state.result = projectThread(
-			this.#meta(state.threadId, this.#summary(state.threadId), state),
-			state.view,
-			{ rolledBack: state.rolledBack, history: state.history },
-		);
-		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
-		if (loaded) this.#restoreAttachments([...(state.history ?? []), ...state.view.entries]);
-		if (loaded || (wasRunning && state.result.shell.status !== "running")) this.#remember(state);
-		this.#publishShell(state.threadId);
-		if (state.subscribers.size === 0 || state.flushTimer !== undefined) return;
-		state.flushTimer = setTimeout(() => {
-			state.flushTimer = undefined;
-			this.#flush(state);
-		}, FLUSH_MS);
-	}
-
-	/**
-	 * Bring the stream to the current projection: the records that changed since the last flush go out as events (a
-	 * change no event can express, as a snapshot), the events are kept for a resume, and a subscriber still waiting for
-	 * its first update gets it.
-	 */
-	#flush(state: ThreadState): void {
-		if (state.flushTimer !== undefined) {
-			clearTimeout(state.flushTimer);
-			state.flushTimer = undefined;
-		}
-		const next = state.loadedView ? state.result?.projection : undefined;
-		if (next === undefined) return;
-		const live = [...state.subscribers].filter((subscriber) => subscriber.pending === undefined);
-		if (state.stream === undefined) {
-			this.#restartStream(state, next);
-		} else if (state.stream.projection !== next) {
-			const diff = diffProjection(state.stream.projection, next);
-			if ("snapshot" in diff) {
-				this.#log.info("thread stream sent a snapshot", { threadId: state.threadId, reason: diff.snapshot });
-				this.#restartStream(state, next);
-				for (const subscriber of live) subscriber.update({ kind: "snapshot", sequence: state.stream!.sequence, projection: next });
-			} else if (diff.events.length === 0) {
-				state.stream = { sequence: state.stream.sequence, projection: next };
-			} else {
-				const items = diff.events.map((event) => eventItem(this.nextSequence(), event));
-				state.log.push(...items);
-				if (state.log.length > MAX_LOG_EVENTS) {
-					const dropped = state.log.splice(0, state.log.length - MAX_LOG_EVENTS);
-					state.logFloor = (dropped.at(-1) as { sequence: number }).sequence;
-				}
-				state.stream = { sequence: (items.at(-1) as { sequence: number }).sequence, projection: next };
-				for (const subscriber of live) subscriber.update({ kind: "events", items });
-			}
-		}
-		for (const subscriber of state.subscribers) if (subscriber.pending !== undefined) this.#serve(state, subscriber);
-	}
-
-	/** Start the stream over at `projection`: a new sequence, an empty log. */
-	#restartStream(state: ThreadState, projection: OrchestrationV2ThreadProjection): void {
-		const sequence = this.nextSequence();
-		state.stream = { sequence, projection };
-		state.log = [];
-		state.logFloor = sequence;
-	}
-
-	/** A subscriber's first update: the events after the sequence it resumes from, when the log still holds them and
-	 * T3's replay bounds allow it; otherwise the current projection. */
-	#serve(state: ThreadState, subscriber: StreamSubscriber): void {
-		const stream = state.stream;
-		if (stream === undefined) return;
-		const after = subscriber.pending?.afterSequence ?? null;
-		subscriber.pending = undefined;
-		if (after !== null && after >= state.logFloor && after <= stream.sequence) {
-			const replay = state.log.filter((item) => (item as { sequence: number }).sequence > after);
-			const plan = decideThreadResume({ afterSequence: after, highWater: stream.sequence, replayEventCount: replay.length, replayEncodedBytes: JSON.stringify(replay).length });
-			if (plan.mode === "replay") {
-				subscriber.update({ kind: "events", items: replay });
-				return;
-			}
-		}
-		subscriber.update({ kind: "snapshot", sequence: stream.sequence, projection: stream.projection });
+			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: view.threadId, error: error instanceof Error ? error.message : String(error) }));
 	}
 
 	/** The stream's state as subscribers were last brought to it, without a flush (a slow subscriber's catch-up). */
 	currentStream(threadId: string): { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection } | undefined {
-		return this.#threads.get(threadId)?.stream;
+		return this.#views.get(threadId)?.stream;
 	}
 
 	/** The stream's current state for a reader that is not a subscriber (T3's HTTP snapshot routes): pending changes are
@@ -1058,9 +704,7 @@ export class Bridge {
 		await this.projection(threadId);
 		const release = this.acquire(threadId);
 		try {
-			const state = this.#state(threadId);
-			this.#flush(state);
-			return state.stream!;
+			return this.#viewOf(threadId).flush()!;
 		} finally {
 			release();
 		}
@@ -1072,8 +716,7 @@ export class Bridge {
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		const release = this.acquire(threadId);
 		try {
-			const state = this.#state(threadId);
-			return await this.#waitFor(state, () => (state.loadedView ? state.result : undefined), timeoutMs, () => new CommandError(`Timed out loading thread ${threadId}`));
+			return await this.#viewOf(threadId).projection(timeoutMs);
 		} finally {
 			release();
 		}
@@ -1081,9 +724,8 @@ export class Bridge {
 
 	/**
 	 * Every conversation on this host, as the usage view reads it: the head view of each thread in the directory, with
-	 * its entries and the conversation id that names them. Used by `server.getUsageSummary` (see `usage.ts`). Each head
-	 * is loaded through the same acquire path as a projection, so a thread the host cannot open is skipped rather than
-	 * guessed at; a thread with no usage contributes no records.
+	 * its entries and the conversation id that names them. Used by `server.getUsageSummary` (see `usage.ts`). A thread
+	 * the host cannot open is skipped rather than guessed at; a thread with no usage contributes no records.
 	 */
 	async usageConversations(timeoutMs = 30_000): Promise<{ readonly conversationId: number; readonly entries: EntryRecord[] }[]> {
 		const threadIds = this.#directory.map((thread) => thread.threadId);
@@ -1094,35 +736,21 @@ export class Bridge {
 				} catch {
 					return undefined;
 				}
-				const state = this.#threads.get(threadId);
-				const view = state?.view;
-				const conversationId = state?.conversationId;
-				if (view === undefined || conversationId === undefined) return undefined;
-				return { conversationId, entries: view.entries };
+				const view = this.#views.get(threadId);
+				const entries = view?.view?.entries;
+				const conversationId = view?.conversationId;
+				if (entries === undefined || conversationId === undefined) return undefined;
+				return { conversationId, entries };
 			}),
 		);
 		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
-	/**
-	 * Subscribe to a thread's stream: first the events after `afterSequence` when they can be replayed, else the current
-	 * projection; then every flush's events (or a snapshot, when no event can express a change). The first update
-	 * arrives once the transcript loads. A thread the host does not know refuses synchronously (the stream carries the
-	 * typed not-found); it never sends an empty projection.
-	 */
+	/** Subscribe to a thread's stream (`ThreadView.subscribe`). A thread the host does not know refuses synchronously (the
+	 * stream carries the typed not-found); it never sends an empty projection. */
 	subscribeThread(threadId: string, afterSequence: number | undefined, update: (update: StreamUpdate) => void, onEnd: () => void = () => {}): () => void {
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		const release = this.acquire(threadId);
-		const state = this.#state(threadId);
-		const subscriber: StreamSubscriber = { update, pending: { afterSequence: afterSequence ?? null } };
-		state.subscribers.add(subscriber);
-		state.enders.add(onEnd);
-		if (state.loadedView) this.#flush(state);
-		return () => {
-			state.subscribers.delete(subscriber);
-			state.enders.delete(onEnd);
-			release();
-		};
+		return this.#viewOf(threadId).subscribe(afterSequence, update, onEnd);
 	}
 
 	// ---- commands ---------------------------------------------------------------------------------------------
@@ -1146,28 +774,17 @@ export class Bridge {
 		return result;
 	}
 
-	/**
-	 * Wait until the thread's head conversation is loaded and return its id: a freshly created or just reopened thread
-	 * follows its head a few awaits after `acquire`, so every write path awaits the real head first — no cold message
-	 * loss, and no reliance on an earlier call having warmed the transcript (design.md).
-	 */
-	#awaitHead(state: ThreadState, timeoutMs = 15_000): Promise<number> {
-		return this.#waitFor(state, () => state.conversationId, timeoutMs, () => new CommandError(`The thread ${state.threadId} is still loading; send again in a moment.`));
-	}
-
 	/** Configure the thread's head (a model or thinking-level choice), then re-read its configuration. */
-	async #configureHead(state: ThreadState, change: AgentChange): Promise<void> {
-		const head = await this.#awaitHead(state);
+	async #configureHead(state: ThreadView, change: AgentChange): Promise<void> {
+		const head = await state.head();
 		const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw new CommandError(`No head for thread ${state.threadId}`);
 		await conversation.configure(change, BACKGROUND_CONTEXT);
 		const agent = await conversation.agent(BACKGROUND_CONTEXT);
-		state.configuration = {
+		state.configured({
 			model: agent.model === undefined ? null : { provider: agent.model.provider, modelId: agent.model.modelId },
 			thinkingLevel: agent.thinkingLevel,
-		};
-		if (state.follower !== undefined) state.follower.agentKey = undefined;
-		this.#recompute(state);
+		});
 	}
 
 	/**
@@ -1255,12 +872,12 @@ export class Bridge {
 		const thinking = thinkingOf(selection?.options);
 		const release = this.acquire(threadId);
 		try {
-			const current = this.#state(threadId).configuration;
+			const current = this.#viewOf(threadId).configuration;
 			const modelChanged = current?.model?.provider !== model.provider || current?.model?.modelId !== model.modelId;
 			const thinkingChanged = thinking !== undefined && current?.thinkingLevel !== thinking;
 			if (!modelChanged && !thinkingChanged) return;
 			// The model first: an unknown one is refused, and the level is applied to the thread the model landed on.
-			const state = this.#state(threadId);
+			const state = this.#viewOf(threadId);
 			if (modelChanged) {
 				if (!state.catalog.some((entry) => entry.provider === model.provider && entry.modelId === model.modelId)) {
 					throw new CommandError(`Not in the catalog: ${model.provider}/${model.modelId}`);
@@ -1297,7 +914,7 @@ export class Bridge {
 	}
 
 	/** The image content blocks for a prompt, gated on the head's model (see `selectImageBlocks`). */
-	#imageBlocks(state: ThreadState, attachments: readonly AttachmentRecord[] | undefined): ContentBlock[] | undefined {
+	#imageBlocks(state: ThreadView, attachments: readonly AttachmentRecord[] | undefined): ContentBlock[] | undefined {
 		if (this.#attachments === undefined) return undefined;
 		const model = state.configuration?.model ?? state.view?.docs["pi.agent"]?.model ?? null;
 		return selectImageBlocks(state.catalog, model, attachments, (id) => this.#attachments!.readForModel(id));
@@ -1341,8 +958,8 @@ export class Bridge {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
 		try {
-			const state = this.#state(input.threadId);
-			const head = await this.#awaitHead(state);
+			const state = this.#viewOf(input.threadId);
+			const head = await state.head();
 			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run.
 			if (this.#summary(input.threadId)?.settledOverride !== undefined) {
 				await this.#store.wake(input.threadId);
@@ -1415,7 +1032,7 @@ export class Bridge {
 	// ---- titles (T3's Orchestrator `titleRegeneration` + ThreadTitleRegenerationService) ------------------------
 
 	/** Does the thread's head carry a message yet (T3's `getMessageCount(threadId) > 0`)? */
-	#hasMessages(state: ThreadState): boolean {
+	#hasMessages(state: ThreadView): boolean {
 		return (state.result?.projection.messages.length ?? 0) > 0 || (state.view?.entries ?? []).some((entry) => USER_ENTRY_KINDS.has(entry.kind));
 	}
 
@@ -1426,8 +1043,7 @@ export class Bridge {
 
 	/** Re-publish a thread after a title or `titleRegeneration` change. */
 	#titleChanged(threadId: string): void {
-		const state = this.#threads.get(threadId);
-		if (state !== undefined) this.#recompute(state);
+		this.#views.get(threadId)?.recompute();
 		this.#publishShell(threadId);
 	}
 
@@ -1473,8 +1089,8 @@ export class Bridge {
 			const release = this.acquire(threadId);
 			let previousTitle: string | undefined;
 			try {
-				const state = this.#state(threadId);
-				const conversationId = (await this.#awaitHead(state)) as ConversationId;
+				const state = this.#viewOf(threadId);
+				const conversationId = (await state.head()) as ConversationId;
 				const at = await this.#titleEntry(state, kind, signal);
 				if (at === undefined || signal.aborted) return void (await this.#completeTitle(threadId, requestId, undefined));
 				const request: TitleThreadRequest =
@@ -1494,13 +1110,13 @@ export class Bridge {
 	}
 
 	/** The entry a request names: the first message's committed entry (waited for, not its reply), or the head's latest. */
-	async #titleEntry(state: ThreadState, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, signal: AbortSignal): Promise<EntryId | undefined> {
+	async #titleEntry(state: ThreadView, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, signal: AbortSignal): Promise<EntryId | undefined> {
 		if (kind.reason === "regenerate") return state.view?.entries.at(-1)?.id as EntryId | undefined;
 		const find = (): EntryId | undefined =>
 			state.view?.entries.find(
 				(candidate) => USER_ENTRY_KINDS.has(candidate.kind) && (candidate.data as { messageId?: unknown } | undefined)?.messageId === kind.messageId,
 			)?.id as EntryId | undefined;
-		return this.#waitFor(state, find, 60_000, () => new Error("timed out"), signal).catch(() => undefined);
+		return state.waitFor(find, 60_000, () => new Error("timed out"), signal).catch(() => undefined);
 	}
 
 	/** A user rename (T3's `thread.metadata.update` with `title`, or `T3Attachment.setTitle`): durable, and it cancels a
@@ -1559,9 +1175,9 @@ export class Bridge {
 		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
-			const state = this.#state(threadId);
+			const state = this.#viewOf(threadId);
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.
-			const head = await this.#awaitHead(state);
+			const head = await state.head();
 			await this.#store.abort({ threadId, conversationId: head });
 		} finally {
 			release();
@@ -1615,7 +1231,7 @@ export class Bridge {
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
-		const state = this.#state(input.threadId);
+		const state = this.#viewOf(input.threadId);
 		const failure = await (async (): Promise<string | null> => {
 			if (input.restoreFiles) return "pi-durable-t3 does not restore files; use “Revert and keep changes”.";
 			const { runs } = await this.projection(input.threadId);
@@ -1624,7 +1240,7 @@ export class Bridge {
 			const target = undoTarget(runs, input.checkpointId);
 			if ("unknown" in target) return `Unknown checkpoint ${input.checkpointId}.`;
 			if ("nothing" in target) return "Nothing to revert.";
-			const expectedHead = await this.#awaitHead(state);
+			const expectedHead = await state.head();
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
 			await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
 			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
@@ -1664,8 +1280,7 @@ export class Bridge {
 		this.#cancelTitle(threadId);
 		await this.#store.remove(threadId);
 		this.#dropOrphanSubagents();
-		const state = this.#threads.get(threadId);
-		if (state !== undefined) this.#forget(state, new CommandError(`Thread ${threadId} was deleted`));
+		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
 		for (const listener of this.#deletedListeners) listener(threadId);
 	}
 
@@ -1698,7 +1313,7 @@ export class Bridge {
 		for (const pending of this.#titleRequests.values()) pending.controller.abort();
 		this.#titleRequests.clear();
 		this.#closed = true;
-		for (const state of this.#threads.values()) this.#release(state);
+		for (const view of this.#views.values()) view.release();
 		this.#changeStop?.();
 		this.#registryStop?.();
 	}

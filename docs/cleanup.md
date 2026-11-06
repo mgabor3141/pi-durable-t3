@@ -197,8 +197,9 @@ Each removes a mechanism, not just lines:
 2. Done: one receipt store for every command (`pi-durable-t3.command-receipts`, as T3's `CommandReceiptStore`) with
    the in-flight join inside it, replacing per-thread receipts, their routing and the public `idempotent`. A launch's
    or a scheduled task's message needs no wrapper: its command id is pi-durable's request id.
-3. Next: one `ThreadView` per open thread (watch → projection → stream → subscribers, alive while held) out of
-   `Bridge`, which keeps command routing and the shell.
+3. Done: one `ThreadView` per open thread (`t3/thread-view.ts`: head watch → projection → stream → subscribers),
+   alive while held; a subscriber is a hold, so one lifetime mechanism instead of a ref count beside a subscriber set.
+   `Bridge` keeps the directory, the shell and command routing (1,707 → 1,320 lines). Bench unchanged.
 4. With the subagent work: subagent threads as records created at spawn, replacing discovery by scanning.
 
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
