@@ -202,6 +202,15 @@ Each removes a mechanism, not just lines:
    `Bridge` keeps the directory, the shell and command routing (1,707 → 1,320 lines). Bench unchanged.
 4. With the subagent work: subagent threads as records created at spawn, replacing discovery by scanning.
 
+## Checked against the real web app
+
+T3's web app (v0.1.6), driven by hand in a browser against a host with the offline model: pairing, prompt and reply,
+reload, "Edit from here" (the prompt returns to the composer), a second undo after a new turn, fork from a response,
+rename, settle, a 16-turn thread (bounded first load, then "Load earlier turns"), Settings → Sharing & access (clients,
+a read-only pairing link), Projects, Scheduled tasks, Providers, Threads, General. It found three faults, fixed in
+`514d3cd`: a rollback sent as a snapshot left the web app's revert waiting (the bounded window omits rolled-back runs),
+`/api/observability/v1/traces` was not served, and the smoke scripts still seeded `projects.json`.
+
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.
 
