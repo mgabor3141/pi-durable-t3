@@ -27,6 +27,7 @@ import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
+import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 
 type LiveToolSlot = NonNullable<LiveDoc["tools"]>[number];
 
@@ -606,6 +607,25 @@ export function projectThread(
 						childThreadId: id(ref.threadId),
 						prompt,
 						result: subagentResult,
+					} as Any);
+					continue;
+				}
+				// T3's secret card: the call is the request (`secret-requests.ts`). Its outcome is in the result's details; a
+				// call still running waits for the user, and one that ended without a result was stopped.
+				if (block.name === REQUEST_SECRET_TOOL) {
+					const outcome = (resultMessage?.role === "toolResult" ? (resultMessage.details as { secretRequest?: { status?: string } } | undefined) : undefined)?.secretRequest?.status;
+					const secretStatus = itemStatus === "running" ? "pending" : outcome === "saved" || outcome === "declined" ? outcome : "cancelled";
+					const label = typeof block.arguments["label"] === "string" && block.arguments["label"].trim() !== "" ? block.arguments["label"].trim() : "Secret";
+					turnItems.push({
+						...common,
+						title: label,
+						type: "secret_request",
+						label,
+						reason: typeof block.arguments["reason"] === "string" ? block.arguments["reason"] : "",
+						...(typeof block.arguments["placeholder"] === "string" ? { placeholder: block.arguments["placeholder"] } : {}),
+						// T3's `file` delivery, for its note: the agent's commands can read the value, as they can here.
+						delivery: "file",
+						secretStatus,
 					} as Any);
 					continue;
 				}

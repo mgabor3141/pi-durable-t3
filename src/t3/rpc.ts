@@ -3,6 +3,7 @@
 import { basename } from "node:path";
 import {
 	AssetAttachmentNotFoundError,
+	SecretRequestError,
 	ProjectListEntriesError,
 	ProjectReadFileError,
 	ProjectSearchContentsError,
@@ -58,6 +59,7 @@ import type { PreviewSessions } from "./preview.ts";
 import type { WsHandlers, WsItem, WsPayload } from "./ws-types.ts";
 import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
 import { unsupportedMessage } from "./unsupported.ts";
+import type { SecretRequests } from "./secret-requests.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -94,6 +96,7 @@ interface RpcDeps {
 	readonly scheduledTasks: ScheduledTasks;
 	readonly tailscale: TailscaleCli;
 	readonly preview: PreviewSessions | undefined;
+	readonly secretRequests: SecretRequests;
 	readonly log: Logger;
 }
 
@@ -339,6 +342,12 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"projects.writeFile": (input) =>
 			Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 		"server.reportClientActivity": () => Effect.void,
+		// T3's secret card: the user's answer to a `request_secret` call, saved into the asking tool's store (`secret-requests.ts`).
+		"secrets.answerRequest": (input) =>
+			Effect.tryPromise({
+				try: () => deps.secretRequests.answer(input),
+				catch: (error) => (error instanceof SecretRequestError ? error : new SecretRequestError({ reason: "store_failed", cause: error })),
+			}),
 		// T3's usage view. `server.getUsageSummary` is answered from what pi-durable records per turn (tokens, cost,
 		// model) — replicated bucketing from T3, provider-reported cost, fields pi has no value for omitted (see
 		// `usage.ts`). An invalid window is T3's typed `UsageReadError` (the client shows it); a scan that throws while

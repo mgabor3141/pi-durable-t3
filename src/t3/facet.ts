@@ -19,6 +19,7 @@ import { WorkspaceAssets } from "./workspace-assets.ts";
 import type { ModelCatalog } from "./models.ts";
 import { ScheduledTasks, scheduledTaskDispatch } from "./scheduled-tasks.ts";
 import { ThreadOps } from "./thread-ops.ts";
+import { SecretRequests, type SecretSink } from "./secret-requests.ts";
 import { threadToolsExtension } from "./thread-tools.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
@@ -33,6 +34,8 @@ type FacetHandle = {
 	close(): Promise<void>;
 	/** A user rename of a thread (`T3Attachment.setTitle`). */
 	setTitle(threadId: string, title: string): Promise<void>;
+	/** The `request_secret` tool, saving into `sink` (`T3Attachment.secretRequests`). */
+	secretRequests(sink: SecretSink): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/** The preview browser, when configured. */
@@ -81,9 +84,10 @@ export function startFacet(deps: {
 		httpServer.once("error", (error) => reject(error));
 	});
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
+	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId));
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, tailscale: deps.tailscale, files, preview })) as Effect.Effect<never>);
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, tailscale: deps.tailscale, files, preview, secretRequests })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
@@ -106,6 +110,7 @@ export function startFacet(deps: {
 			await bridge.loaded();
 			await bridge.renameThread(threadId, title);
 		},
+		secretRequests: (sink) => secretRequests.extension(sink),
 		threadTools: (options) => threadToolsExtension(bridge, new ThreadOps(bridge, auth.environmentId, log), options),
 		close: async () => {
 			closing = true;

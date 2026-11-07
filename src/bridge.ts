@@ -8,6 +8,8 @@ import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Extension, Harness } from "@earendil-works/pi-durable";
+import type { SecretSink } from "./t3/secret-requests.ts";
+export type { SecretSink } from "./t3/secret-requests.ts";
 import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
@@ -121,6 +123,11 @@ export type T3Attachment = {
 	 * and scripts.
 	 */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
+	/**
+	 * T3's `request_secret` as a model-facing tool: the thread shows T3's secret card, and the value the user enters goes
+	 * to `sink` under the name the agent chose — never into the conversation. This host keeps no secrets itself.
+	 */
+	secretRequests(sink: SecretSink): Extension;
 	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
@@ -240,6 +247,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		closed: facet.closed,
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
 		threadTools: (toolOptions) => facet.threadTools(toolOptions),
+		secretRequests: (sink) => facet.secretRequests(sink),
 		...(facet.preview === undefined
 			? {}
 			: {

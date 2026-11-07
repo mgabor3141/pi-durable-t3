@@ -40,6 +40,7 @@ import type { Logger } from "./logging.ts";
 import { makeRpcLayer } from "./rpc.ts";
 import { makeHttpApiLayer } from "./http-api.ts";
 import { makeMcpLayer } from "./mcp.ts";
+import type { SecretRequests } from "./secret-requests.ts";
 import { ThreadOps } from "./thread-ops.ts";
 import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
@@ -201,10 +202,11 @@ export function makeServerLayer(deps: {
 	tailscale: TailscaleCli;
 	files: WorkspaceFiles;
 	preview: PreviewSessions | undefined;
+	secretRequests: SecretRequests;
 }) {
 	const { bridge, auth, log, httpServer, attachments, assets, preview } = deps;
 	const descriptor = makeDescriptor(bridge, auth, preview);
-	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview });
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview, secretRequests: deps.secretRequests });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
