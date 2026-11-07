@@ -1,8 +1,8 @@
-// T3's thread tools (`OrchestratorMcpService`: `t3_thread_list`, `t3_thread_read`, `t3_thread_send`, `t3_thread_wait`,
-// `t3_thread_interrupt`, `create_threads`, `t3_thread_update`), on this host's threads. Inputs and results are the
-// contract's (`orchestratorMcp.ts`); a refusal is its `OrchestratorMcpFailure`. The caller is the thread the call comes
-// from, when it comes from one (MCP's `_meta`, or an agent's own conversation): it names what "this thread" and "this
-// project" mean, and it is recorded as the sender of what it writes.
+// T3's orchestrator tools on this host (`OrchestratorMcpService`), behind `/mcp`: the thread tools (`t3_thread_list`,
+// `t3_thread_read`, `t3_thread_send`, `t3_thread_wait`, `t3_thread_interrupt`, `t3_thread_update`, and `create_threads`,
+// which a client outside a thread is refused, as in T3) and the scheduled-task tools, which agents inside the host also
+// call (`thread-tools.ts`), as their own thread. Inputs and results are the contract's (`orchestratorMcp.ts`); a refusal
+// is its `OrchestratorMcpFailure`.
 import { createHash, randomUUID } from "node:crypto";
 import {
 	OrchestratorMcpFailure,
@@ -90,13 +90,6 @@ const latestActiveRun = (projection: Pick<OrchestrationV2ThreadProjection, "runs
 /** An id for one operation of one request, stable across a retry with the same `clientRequestId` (T3's `stableCommandId`). */
 const stableId = (...parts: readonly (string | number | undefined)[]) =>
 	createHash("sha256").update(parts.map((part) => String(part ?? "")).join("\0")).digest("base64url").slice(0, 24);
-
-/** T3's `threadTitle` for a created thread: the title, else the prompt, clipped to 80; else "<parent> thread <n>". */
-function createdThreadTitle(input: { parentTitle: string; title: string | undefined; prompt: string | undefined; index: number }): string {
-	const detail = input.title?.trim() || input.prompt?.trim();
-	if (!detail) return `${input.parentTitle} thread ${input.index + 1}`;
-	return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
-}
 
 /** T3's `turnItemText`: what a timeline item says, as text. */
 function turnItemText(item: OrchestrationV2TurnItem): string | null {
@@ -223,10 +216,9 @@ export class ThreadOps {
 		} as OrchestratorMcpThreadListItem;
 	}
 
-	/** `t3_thread_list`: threads newest first, in the caller's project (or the one named, or all). */
+	/** `t3_thread_list`: threads newest first, in the project named (or all). */
 	list(caller: Caller, input: OrchestratorMcpThreadListInput): OrchestratorMcpThreadListResult {
-		const parent = this.#caller(caller);
-		const projectId = input.allProjects === true ? null : (input.projectId ?? parent?.projectId ?? fail("target_required", "Name a projectId, or pass allProjects: true, outside a thread."));
+		const projectId = input.allProjects === true ? null : (input.projectId ?? fail("target_required", "Name a projectId, or pass allProjects: true, outside a thread."));
 		const statuses = input.statuses === undefined || input.statuses.length === 0 ? null : new Set<string>(input.statuses);
 		const titleContains = input.titleContains?.toLocaleLowerCase();
 		const threads = this.#bridge
@@ -242,7 +234,7 @@ export class ThreadOps {
 		const page = threads.slice(cursor, cursor + (input.limit ?? DEFAULT_THREAD_LIST_LIMIT));
 		return {
 			projectId: projectId as never,
-			currentThreadId: (parent?.id ?? null) as never,
+			currentThreadId: null,
 			threads: page.map((shell) => this.#listItem(caller, shell)),
 			nextCursor: cursor + page.length < threads.length ? cursor + page.length : null,
 			total: threads.length,
@@ -251,7 +243,6 @@ export class ThreadOps {
 
 	/** `t3_thread_read`: a page of the thread's timeline (`messages`: messages and plans; `activity`: every item). */
 	async read(caller: Caller, input: OrchestratorMcpThreadReadInput): Promise<OrchestratorMcpThreadReadResult> {
-		this.#caller(caller);
 		const projection = await this.#projection(input.threadId);
 		const shell = this.#shell(input.threadId)!;
 		const view = input.view ?? "messages";
@@ -357,7 +348,6 @@ export class ThreadOps {
 	 */
 	async send(caller: Caller, input: OrchestratorMcpThreadSendInput): Promise<OrchestratorMcpThreadSendResult> {
 		this.#mayWrite(caller, input.threadId);
-		const parent = this.#caller(caller);
 		const before = await this.#projection(input.threadId);
 		const mode = input.mode ?? "auto";
 		const running = before.runs.find((run) => run.status === "running");
@@ -372,7 +362,7 @@ export class ThreadOps {
 				messageId,
 				text: input.message,
 				mode: mode === "auto" ? (running === undefined ? "start" : "steer") : mode === "queue" ? (running === undefined ? "start" : "queue") : mode,
-				provenance: { createdBy: "agent", creationSource: "mcp", ...(parent === undefined ? {} : { senderThreadId: parent.id }) },
+				provenance: { createdBy: "agent", creationSource: "mcp" },
 			});
 		} catch (error) {
 			fail(error instanceof CommandError ? "thread_not_sendable" : "orchestration_error", `Unable to send to thread ${input.threadId}: ${(error as Error).message}`);
@@ -403,7 +393,6 @@ export class ThreadOps {
 
 	/** `t3_thread_wait`: until the thread's run (latest, or the one named) ends, or the time is up. Idle: at once. */
 	async wait(caller: Caller, input: OrchestratorMcpThreadWaitInput): Promise<OrchestratorMcpThreadWaitResult> {
-		this.#caller(caller);
 		const projection = await this.#projection(input.threadId);
 		const selected = input.runId === undefined ? latestRun(projection) : projection.runs.find((run) => run.id === input.runId);
 		if (input.runId !== undefined && selected === undefined) fail("run_not_found", `Run ${input.runId} was not found on thread ${input.threadId}.`);
@@ -424,7 +413,6 @@ export class ThreadOps {
 	/** `t3_thread_interrupt`: interrupt the thread's running turn (or the run named, if it is the running one). */
 	async interrupt(caller: Caller, input: OrchestratorMcpThreadInterruptInput): Promise<OrchestratorMcpThreadInterruptResult> {
 		this.#mayWrite(caller, input.threadId);
-		this.#caller(caller);
 		const projection = await this.#projection(input.threadId);
 		const named = input.runId === undefined ? undefined : projection.runs.find((run) => run.id === input.runId);
 		if (input.runId !== undefined && named === undefined) fail("run_not_found", `Run ${input.runId} was not found on thread ${input.threadId}.`);
@@ -443,11 +431,10 @@ export class ThreadOps {
 		return { threadId: input.threadId, runId: active!.id, status: "interrupt_requested" } as OrchestratorMcpThreadInterruptResult;
 	}
 
-	/** `t3_thread_update`: rename a thread, or regenerate its title (this thread when none is named). */
+	/** `t3_thread_update`: rename a thread, or regenerate its title. */
 	async update(caller: Caller, input: ThreadMetadataMcpUpdateInput): Promise<ThreadMetadataMcpUpdateResult> {
 		this.#mayWrite(caller, input.threadId);
-		const parent = this.#caller(caller);
-		const threadId = input.threadId ?? parent?.id ?? fail("target_required", "Name a threadId outside a thread.");
+		const threadId = input.threadId ?? fail("target_required", "Name a threadId outside a thread.");
 		if (!this.#bridge.hasThread(threadId)) fail("thread_not_found", `Thread ${threadId} was not found.`);
 		const commandId = `mcp-${stableId(namespaceOf(caller), input.clientRequestId ?? randomUUID(), "thread-update", input.action)}`;
 		const command = { type: "thread.metadata.update", commandId, threadId, ...(input.action === "rename" ? { title: input.title } : { regenerateTitle: true }) };
@@ -470,54 +457,11 @@ export class ThreadOps {
 		} as ThreadMetadataMcpUpdateResult;
 	}
 
-	/**
-	 * `create_threads`: new top-level threads in the caller's project, each started with its prompt when it has one. Only a
-	 * thread with a running turn may create threads (T3: the creating run is their origin). A retry with the same
-	 * `clientRequestId` returns the same threads.
-	 */
-	async create(caller: Caller, input: OrchestratorMcpCreateThreadsInput): Promise<OrchestratorMcpCreateThreadsResult> {
+	/** `create_threads` acts as the calling thread (T3's `actsAsCaller`: the new threads' origin is its run), so a client
+	 * outside a thread is refused, as T3 refuses it. Agents inside the host start threads with `thread_prompt`. */
+	create(caller: Caller, _input: OrchestratorMcpCreateThreadsInput): OrchestratorMcpCreateThreadsResult {
 		this.#mayWrite(caller, undefined);
-		// T3's `actsAsCaller`: the new threads' origin is the calling thread's run, so a client outside a thread cannot.
-		if (caller.threadId === undefined) {
-			fail("thread_credential_required", "create_threads acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.");
-		}
-		const parent = this.#caller(caller) ?? fail("parent_not_active", "Thread creation requires a calling thread.");
-		const parentProjection = await this.#projection(parent.id);
-		if (latestActiveRun(parentProjection) === undefined) fail("parent_not_active", "Thread creation requires an active run in the calling thread.");
-		const key = input.clientRequestId ?? randomUUID();
-		const created: OrchestratorMcpCreateThreadsResult["threads"][number][] = [];
-		for (const [index, request] of input.threads.entries()) {
-			if (request.target?.environmentId !== undefined) fail("invalid_request", "Linked environments are not supported by this host.");
-			const threadId = `mcp-${stableId(namespaceOf(caller), key, "create-thread", index)}`;
-			const model = request.target?.model ?? parent.modelSelection.model;
-			const title = createdThreadTitle({ parentTitle: parent.title, title: request.title, prompt: request.prompt, index });
-			try {
-				await this.#bridge.launchThread({
-					commandId: `mcp-${stableId(namespaceOf(caller), key, "create-thread-command", index)}`,
-					threadId,
-					projectId: parent.projectId,
-					title,
-					modelSelection: { model },
-					...(request.prompt === undefined ? {} : { initialMessage: { messageId: `mcp-${stableId(namespaceOf(caller), key, "create-thread-message", index)}`, text: request.prompt } }),
-					provenance: { createdBy: "agent", creationSource: "mcp", senderThreadId: parent.id },
-				});
-			} catch (error) {
-				fail(error instanceof CommandError ? "invalid_request" : "orchestration_error", `Unable to create thread ${index + 1}: ${(error as Error).message}`);
-			}
-			const shell = this.#shell(threadId)!;
-			created.push({
-				threadId: threadId as never,
-				link: this.#link(caller, threadId),
-				runId: shell.latestRunId,
-				status: (shell.activityRunStatus ?? shell.status) as never,
-				title: shell.title,
-				createdBy: shell.createdBy,
-				creationSource: shell.creationSource,
-				providerInstanceId: shell.modelSelection.instanceId,
-				model: shell.modelSelection.model,
-			} as OrchestratorMcpCreateThreadsResult["threads"][number]);
-		}
-		return { threads: created } as OrchestratorMcpCreateThreadsResult;
+		return fail("thread_credential_required", "create_threads acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.");
 	}
 
 	// ---- scheduled tasks (T3's `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task`) -------------------
