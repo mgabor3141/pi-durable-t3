@@ -275,6 +275,6 @@ it("hands the title hook T3's text-generation model (when it names one of this h
 	await send(bridge, threadId, 1, "Seed");
 	await until("the hook call", () => calls.length === 1);
 	expect(calls[0]!.request.model).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
-	expect(calls[0]!.request.instructions, "T3's title instructions, trimmed").toBe("Use sentence case.");
+	expect(calls[0]!.request.guidance, "T3's title guidance, trimmed").toBe("Use sentence case.");
 	calls[0]!.resolve(undefined);
 }, 30_000);

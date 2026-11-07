@@ -16,9 +16,9 @@ export type TitleThreadRequest = {
 	/** T3's text-generation model (Settings), when it names one of this host's models: generate with it. Absent: the
 	 * setting is unset or names a model this host does not have, and the thread's own model is the one to use. */
 	readonly model?: TextGenerationModel;
-	/** T3's title instructions (Settings, `threadTitleInstructions`), when set: the user's own guidance for titles, to add
-	 * to the title prompt as T3 does (after the conversation, under "Additional instructions"). At most 20,000 chars. */
-	readonly instructions?: string;
+	/** The user's own guidance for titles (T3's Settings, `threadTitleInstructions`), when set: for the title request, after
+	 * the conversation, where T3 adds it. At most 20,000 characters. */
+	readonly guidance?: string;
 };
 
 /** A model for text generation (titles, summaries), from T3's `textGenerationModelSelection` setting. */
