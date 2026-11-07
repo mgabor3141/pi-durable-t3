@@ -2,6 +2,7 @@
 // entry to fork at, and the rolled-back overlay. The entry arithmetic belongs to the threads layer, and undo never
 // rewrites history — it moves the head to a fork (design.md, Invariants).
 import type {
+	OrchestrationV2Checkpoint,
 	OrchestrationV2CheckpointScope,
 	OrchestrationV2ConversationMessage,
 	OrchestrationV2ExecutionNode,
@@ -25,6 +26,9 @@ export interface RolledBackRun {
 	readonly attempts: readonly OrchestrationV2RunAttempt[];
 	readonly providerTurns: readonly OrchestrationV2ProviderTurn[];
 	readonly checkpointScopes: readonly OrchestrationV2CheckpointScope[];
+	/** The run's checkpoints, `stale`: T3 keeps a reverted run's checkpoints and marks them so (`CheckpointRollbackService`),
+	 * so a rollback reaches a client as record updates, never as a record that went away. */
+	readonly checkpoints: readonly OrchestrationV2Checkpoint[];
 }
 
 /** A projection's runs, with every row that references them, marked rolled back. */
@@ -32,7 +36,7 @@ export function rolledBackRuns(projection: OrchestrationV2ThreadProjection): Rol
 	return projection.runs
 		.filter((run) => run.status !== "rolled_back")
 		.map((run) => ({
-			run: { ...run, status: "rolled_back" as const, checkpointId: null },
+			run: { ...run, status: "rolled_back" as const },
 			items: projection.turnItems.filter((item) => item.runId === run.id),
 			messages: projection.messages.filter((message) => message.runId === run.id),
 			nodes: projection.nodes
@@ -41,6 +45,7 @@ export function rolledBackRuns(projection: OrchestrationV2ThreadProjection): Rol
 			attempts: projection.attempts.filter((attempt) => attempt.runId === run.id),
 			providerTurns: projection.providerTurns.filter((turn) => turn.runAttemptId === run.activeAttemptId),
 			checkpointScopes: projection.checkpointScopes.filter((scope) => scope.runId === run.id),
+			checkpoints: projection.checkpoints.filter((checkpoint) => checkpoint.runId === run.id).map((checkpoint) => ({ ...checkpoint, status: "stale" as const })),
 		}));
 }
 

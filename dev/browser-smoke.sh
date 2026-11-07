@@ -39,17 +39,9 @@ cat > "$root/config.toml" <<TOML
 listen = "127.0.0.1:$FACET_PORT"
 TOML
 # The host serves the web app from its own origin (web/), so there is no web origin to trust in CORS:
-# the desktop app (t3code://app) is allowed by default; the served SPA is same-origin. The project registry lives in
-# the bridge dir (the data dir's t3/), NOT config.toml. `t3-settings.json` (T3's server settings) is absent: the host
-# answers the contract's defaults, with the pi provider instance enabled.
-cat > "$root/t3/projects.json" <<JSON
-{
-  "projects": [
-    { "path": "$root/projects/alpha", "title": "alpha" },
-    { "path": "$root/projects/beta", "title": "beta" }
-  ]
-}
-JSON
+# the desktop app (t3code://app) is allowed by default; the served SPA is same-origin. Projects live in the Harness and
+# are added once the host runs, through T3's own `/api/projects/mutate`. `t3-settings.json` (T3's server settings) is
+# absent: the host answers the contract's defaults, with the pi provider instance enabled.
 
 # A single-use pairing code, minted the way a user adds a device (the host's `pair` command against the state dir).
 mint_code() {
@@ -73,6 +65,21 @@ start_host() {
 
 # Start the host (offline reply model) and wait until it is listening.
 start_host || { echo "facet did not start:"; cat "$root/host.log"; exit 1; }
+
+# Register the projects as a T3 client does: pair, then `project.create` over the HTTP API.
+BEARER="$(curl -fsS -X POST "http://127.0.0.1:$FACET_PORT/oauth/token" \
+  --data-urlencode grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  --data-urlencode "subject_token=$(mint_code)" \
+  --data-urlencode subject_token_type=urn:t3:params:oauth:token-type:environment-bootstrap \
+  --data-urlencode requested_token_type=urn:ietf:params:oauth:token-type:access_token \
+  | node -e 'process.stdin.on("data",(d)=>process.stdout.write(JSON.parse(d).access_token))')"
+add_project() {
+  curl -fsS -X POST "http://127.0.0.1:$FACET_PORT/api/projects/mutate" -H "authorization: Bearer $BEARER" \
+    -H "content-type: application/json" \
+    -d "{\"type\":\"project.create\",\"commandId\":\"smoke-$2\",\"projectId\":\"$(node -p 'crypto.randomUUID()')\",\"title\":\"$2\",\"workspaceRoot\":\"$1\"}" >/dev/null
+}
+add_project "$root/projects/alpha" alpha
+add_project "$root/projects/beta" beta
 
 # The web app is served from the facet origin; the smoke opens it there (WEB == the facet).
 FACET="http://127.0.0.1:$FACET_PORT"
@@ -123,7 +130,7 @@ if [ "$status" -eq 0 ]; then
 fi
 
 # Smoke 3: the project-management flow — add a project from the directory picker, create a thread in it, remove it, and
-# confirm the files on disk are untouched. The target directory is NOT in projects.json (the picker adds it), and it
+# confirm the files on disk are untouched. The target directory is not a registered project (the picker adds it), and it
 # holds a marker file that must survive the removal.
 if [ "$status" -eq 0 ]; then
   mkdir -p "$root/projects/newproj"

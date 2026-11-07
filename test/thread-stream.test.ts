@@ -166,3 +166,42 @@ it("the bounded snapshot stays small on a long thread, and its history pages wal
 	}
 	expect(seen, "the pages and the window are the whole timeline, once each, in order").toEqual(stream.projection.visibleTurnItems.map((row) => row.sourceItemId as string));
 });
+
+// T3's web app restores the reverted prompt once its own projection shows what T3's server streams on a rollback:
+// the reverted run `rolled_back` and the provider thread's `lastRunOrdinal` at the kept turn
+// (`waitForRevertedMessage`). Its first-load snapshot is a bounded window that leaves rolled-back runs out, so the
+// rollback must arrive as events — a snapshot would drop the very run it waits for, and the composer would hang.
+it("a rollback streams as events, and leaves the client where the web app's revert waits for it", { timeout: 60_000 }, async () => {
+	const { f, bridge, reasons, idle, send } = await open();
+	const watcher = client(bridge);
+	f.model.respond(fauxAssistantMessage("one"));
+	await send(1, "first");
+	await idle();
+	f.model.respond(fauxAssistantMessage("two"));
+	await send(2, "second");
+	await idle();
+	await sleep(150);
+	const [first, second] = (await bridge.projection("t")).projection.runs;
+	const before = watcher.updates.length;
+	await bridge.rollback({ threadId: "t", commandId: "undo", checkpointId: first!.checkpointId!, restoreFiles: false });
+	await sleep(300);
+	expect(reasons, "no snapshot").toEqual([]);
+	expect(watcher.updates.slice(before).every((update) => update.kind === "events")).toBe(true);
+	const seen = watcher.current()!;
+	expect(seen.runs.find((run) => run.id === second!.id)?.status).toBe("rolled_back");
+	expect(seen.providerThreads.find((thread) => thread.id === seen.thread.activeProviderThreadId)?.lastRunOrdinal).toBe(first!.ordinal);
+	expect(seen.checkpoints.filter((checkpoint) => checkpoint.runId === second!.id).every((checkpoint) => checkpoint.status === "stale")).toBe(true);
+	expect(seen.thread.rollbackRequestId).toBe("undo");
+
+	// A new turn after the undo, then an undo of it: still events, with the first undo's run in place.
+	f.model.respond(fauxAssistantMessage("three"));
+	await send(3, "third");
+	await idle();
+	await sleep(150);
+	const third = (await bridge.projection("t")).projection.runs.find((run) => run.status === "completed" && run.id !== first!.id)!;
+	await bridge.rollback({ threadId: "t", commandId: "undo-2", checkpointId: first!.checkpointId!, restoreFiles: false });
+	await sleep(300);
+	expect(reasons, "no snapshot").toEqual([]);
+	const again = watcher.current()!;
+	expect(Object.fromEntries(again.runs.map((run) => [run.id, run.status]))).toEqual({ [first!.id]: "completed", [second!.id]: "rolled_back", [third.id]: "rolled_back" });
+});

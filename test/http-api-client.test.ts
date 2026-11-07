@@ -128,4 +128,9 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 		expect((await fetch(`http://127.0.0.1:${PORT}${path}`, { headers: bearer })).status, path).toBe(404);
 	}
 	expect(host.out(), "the unsupported calls are logged").toContain("unsupported HTTP endpoint");
+
+	// The web app's trace upload: authenticated, then dropped (T3 with no OTLP endpoint configured).
+	const traces = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${PORT}/api/observability/v1/traces`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: "{}" });
+	expect((await traces({})).status).toBe(401);
+	expect((await traces(bearer)).status).toBe(204);
 }, 60_000);

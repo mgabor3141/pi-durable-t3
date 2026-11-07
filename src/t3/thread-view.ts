@@ -333,7 +333,7 @@ export class ThreadView {
 			if (conversation === undefined) continue;
 			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
 			const view = { conversation: {}, entries, docs: {} } as unknown as ConversationView;
-			const { projection } = projectThread(this.#host.meta(this.threadId, undefined), view, { rolledBack: [] });
+			const { projection } = projectThread(this.#host.meta(this.threadId, this), view, { rolledBack: [] });
 			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
 		}
 		return [...runs.values()];

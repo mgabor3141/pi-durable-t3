@@ -793,6 +793,7 @@ export function projectThread(
 		attempts.push(...rolled.attempts);
 		providerTurns.push(...rolled.providerTurns);
 		checkpointScopes.push(...rolled.checkpointScopes);
+		checkpoints.push(...rolled.checkpoints);
 	}
 
 	const rolledBackIds = new Set(runs.filter((run) => run.status === "rolled_back").map((run) => run.id as string));

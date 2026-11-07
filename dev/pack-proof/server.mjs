@@ -4,7 +4,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 const [dir, port] = [process.argv[2], Number(process.argv[3])];
@@ -17,12 +17,26 @@ models.setProvider(faux.provider);
 const storage = await openNodeSqliteStorage(join(dir, "durable.db"));
 const harness = await Harness.open(storage, { models, registry: createRegistry(), env: () => { throw new Error("no tools"); } }, BACKGROUND_CONTEXT);
 const stateDir = join(dir, "t3");
-// One registered project (the registry is the bridge's `projects.json`; T3 shows its first-run wizard without any).
 mkdirSync(join(dir, "alpha"), { recursive: true });
-mkdirSync(stateDir, { recursive: true });
-writeFileSync(join(stateDir, "projects.json"), JSON.stringify({ projects: [{ path: join(dir, "alpha"), title: "alpha" }] }));
 const t3 = await attachT3(harness, { models, stateDir, scratchDir: join(dir, "scratch"), listen: { host: "127.0.0.1", port } });
 await harness.resume();
+// One project (T3 shows its first-run wizard without any), added as a T3 client adds it: pair, then `project.create`.
+const base = `http://127.0.0.1:${port}`;
+const { access_token } = await (await fetch(`${base}/oauth/token`, {
+	method: "POST",
+	body: new URLSearchParams({
+		grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+		subject_token: mintPairingCode(stateDir).code,
+		subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+		requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+	}),
+})).json();
+const created = await fetch(`${base}/api/projects/mutate`, {
+	method: "POST",
+	headers: { authorization: `Bearer ${access_token}`, "content-type": "application/json" },
+	body: JSON.stringify({ type: "project.create", commandId: "pack-proof-alpha", projectId: crypto.randomUUID(), title: "alpha", workspaceRoot: join(dir, "alpha") }),
+});
+if (!created.ok) throw new Error(`adding the project failed: ${created.status} ${await created.text()}`);
 console.log(`READY http://127.0.0.1:${port}/pair#token=${mintPairingCode(stateDir).code}`);
 process.on("SIGTERM", () => void t3.close().then(() => process.exit(0)));
 await t3.closed;

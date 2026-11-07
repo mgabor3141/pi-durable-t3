@@ -9,7 +9,10 @@ import { Readable } from "node:stream";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import {
 	type ExecutionEnvironmentDescriptor,
+	AuthOrchestrationOperateScope,
+	authScopeRequiredResponse,
 	EnvironmentAuthInvalidError,
+	EnvironmentScopeRequiredError,
 	EnvironmentId,
 	type ServerConfig,
 	PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -264,6 +267,30 @@ export function makeServerLayer(deps: {
 	});
 
 	const routes = Layer.mergeAll(
+		// The web app sends its traces here (T3's `layerOtlpTracesProxyRoute`). This host exports no traces, which is T3's
+		// answer with no OTLP endpoint configured: the caller must hold `orchestration:operate`, and the batch is dropped.
+		HttpRouter.add(
+			"POST",
+			"/api/observability/v1/traces",
+			Effect.gen(function* () {
+				const request = yield* HttpServerRequest.HttpServerRequest;
+				const session = resolveSession(request);
+				if (session === undefined) {
+					const presented = request.headers.authorization !== undefined || request.cookies[SESSION_COOKIE_NAME] !== undefined;
+					return yield* HttpServerResponse.schemaJson(EnvironmentAuthInvalidError)(
+						new EnvironmentAuthInvalidError({ code: "auth_invalid", reason: presented ? "invalid_credential" : "missing_credential", traceId: randomUUID() }),
+						{ status: 401 },
+					).pipe(Effect.orDie);
+				}
+				if (!session.scopes.includes(AuthOrchestrationOperateScope)) {
+					return yield* HttpServerResponse.schemaJson(EnvironmentScopeRequiredError)(
+						new EnvironmentScopeRequiredError({ code: "insufficient_scope", ...authScopeRequiredResponse(AuthOrchestrationOperateScope), traceId: randomUUID() }),
+						{ status: 403 },
+					).pipe(Effect.orDie);
+				}
+				return HttpServerResponse.empty({ status: 204 });
+			}),
+		),
 		// The asset route (T3's `layerAssetRoute`): serve a signed attachment URL's bytes. The signature in the URL is
 		// the credential — no bearer — so a browser `<img>` (which sends no auth header) loads it. Resolve verifies
 		// signature + expiry, and that the file exists; anything else is the 404 T3 answers for a missing asset.

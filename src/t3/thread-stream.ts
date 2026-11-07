@@ -125,11 +125,15 @@ export function diffProjection(previous: Projection, next: Projection): { readon
 		}
 	}
 	for (const key of CREATE_ONLY) {
-		const before = previous[key as keyof Projection] as readonly { readonly id: unknown }[];
+		const before = new Map((previous[key as keyof Projection] as readonly { readonly id: unknown }[]).map((entity) => [entity.id, entity]));
 		const after = next[key as keyof Projection] as readonly { readonly id: unknown }[];
-		if (after.length < before.length) return { snapshot: `a ${key} record went away` };
-		for (let index = 0; index < before.length; index++) if (!same(before[index], after[index])) return { snapshot: `a ${key} record changed` };
-		for (const entity of after.slice(before.length)) push("checkpoint-scope.created", entity);
+		const kept = new Set(after.map((entity) => entity.id));
+		for (const id of before.keys()) if (!kept.has(id)) return { snapshot: `a ${key} record went away` };
+		for (const entity of after) {
+			const was = before.get(entity.id);
+			if (was === undefined) push("checkpoint-scope.created", entity);
+			else if (was !== entity && !same(was, entity)) return { snapshot: `a ${key} record changed` };
+		}
 	}
 	// The visible timeline is derived: the check below decides whether the events reproduce it.
 	if (events.length === 0 && !same(previous.visibleTurnItems.map(rowKey), next.visibleTurnItems.map(rowKey))) return { snapshot: "the visible rows moved" };
@@ -147,11 +151,18 @@ function reproduces(previous: Projection, events: readonly UnsequencedEvent[], n
 	for (const event of events) projection = applyOrchestrationV2ProjectionEvent(projection, { ...event, id: EventId.make("check") } as DomainEvent);
 	if (projection === null) return "the reducer dropped the thread";
 	if (!same(projection.thread, next.thread)) return "the thread differs";
+	// Records by id: the reducer upserts in place and appends what is new, so its arrays need not be in the order a
+	// snapshot lists them (T3's own client is in the same position after its server's events). The rendered order is
+	// the visible timeline, compared row by row below.
 	for (const [key] of [...UPSERTS, ["checkpointScopes"]] as const) {
-		const got = projection[key] as readonly unknown[];
-		const want = next[key] as readonly unknown[];
-		if (got.length !== want.length) return `${key}: ${got.length} records, not ${want.length}`;
-		for (let index = 0; index < got.length; index++) if (got[index] !== want[index] && !same(got[index], want[index])) return `${key}[${index}] differs (order)`;
+		const got = new Map((projection[key] as readonly { readonly id: unknown }[]).map((entity) => [entity.id, entity]));
+		const want = next[key] as readonly { readonly id: unknown }[];
+		if (got.size !== want.length) return `${key}: ${got.size} records, not ${want.length}`;
+		for (const entity of want) {
+			const held = got.get(entity.id);
+			if (held === undefined) return `${key}: ${String(entity.id)} is missing`;
+			if (held !== entity && !same(held, entity)) return `${key}: ${String(entity.id)} differs`;
+		}
 	}
 	if (projection.visibleTurnItems.length !== next.visibleTurnItems.length) return `visibleTurnItems: ${projection.visibleTurnItems.length} rows, not ${next.visibleTurnItems.length}`;
 	for (let index = 0; index < next.visibleTurnItems.length; index++) {
