@@ -45,13 +45,13 @@ Change the three imports of `../../../src/bridge.ts` (in `host.ts`, `config.ts`,
 `@mgabor3141/pi-durable-t3`, and run it with `node --experimental-strip-types src/host.ts` (add `pair` for a link).
 The web app needs no setup: it comes with the package.
 
-## Subagents
+## Threads that drive threads
 
-The agent has a `subagent` tool (`src/subagent.ts`, installed in `src/host.ts`): pi-durable's foreground subagent
-pattern. A call creates a child conversation owned by the call's task, runs `prompt` there on a copy of the parent's
-agent without the tool (no recursion), and returns the child's answer. Stopping the parent stops the child. T3 shows the
-call as a subagent card with a read-only child thread. The bridge keys on pi's convention (the call's `details` carry the
-`conversationId` of a conversation its task owns), not on this tool's name.
+The agent has the bridge's thread tools (`T3Attachment.threadTools`, installed in `src/host.ts` once the bridge is
+attached): `thread_prompt` starts a child thread or follows up on any thread, and waits for its report or gets it later
+as its next turn; `thread_wait`, `thread_read`, `thread_search`, `thread_list` and `thread_cancel` go with it, and T3's
+scheduled-task tools too. T3 shows a child as a subagent card in the run that started it, and the child as a full thread
+under its parent.
 
 ## Config
 

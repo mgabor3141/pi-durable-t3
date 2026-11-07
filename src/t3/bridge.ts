@@ -31,7 +31,6 @@ import { type ConversationView, type ContentBlock, type EntryRecord, type ModelR
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
-import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
@@ -119,16 +118,7 @@ export class Bridge {
 	/** T3's `thread.titleRegeneration`, per thread: the one current title request. In memory only (state.md). */
 	readonly #titleRequests = new Map<string, { requestId: string; startedAt: number; controller: AbortController }>();
 	#directory: Thread[] = [];
-	/** The subagents of the threads (`t3/subagents.ts`), by their child thread's id: discovered from ownership, refreshed
-	 * with the directory and whenever an open thread shows a call that names a child not yet discovered. Nothing is stored. */
-	#subagents = new Map<string, SubagentRef>();
-	#subagentSync: Promise<void> | undefined;
-	/** Threads whose subagents need a scan once the running one ends (`undefined` in the set: all of them). */
-	readonly #subagentScan = new Set<string | undefined>();
-	/** The calls (`taskId:conversationId`) a sync was already run for, so an unowned `conversationId` in some tool's
-	 * details costs one scan, not one per streamed update. */
-	readonly #probedCalls = new Set<string>();
-	/** Settles once the directory and the subagents are first loaded. */
+	/** Settles once the directory is first loaded. */
 	readonly #loaded = Promise.withResolvers<void>();
 	#changeStop: (() => void) | undefined;
 	#directoryBooted = false;
@@ -149,9 +139,8 @@ export class Bridge {
 				return store.harness;
 			},
 			log,
-			head: (threadId) => parseSubagentThreadId(threadId)?.conversationId ?? this.#summary(threadId)?.head,
+			head: (threadId) => this.#summary(threadId)?.head,
 			undos: (threadId) => this.#summary(threadId)?.undos ?? [],
-			isSubagent: (threadId) => this.isSubagentThread(threadId),
 			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow })),
 			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
 			nextSequence: () => bridge.nextSequence(),
@@ -175,8 +164,7 @@ export class Bridge {
 	}
 
 	/** The directory changed (`changed`: these threads; `undefined`: the first load). Open threads whose head moved follow the
-	 * new head; the changed threads (and their subagents' threads) are re-projected; removed ones emit their removal. The
-	 * first load also discovers the subagents. */
+	 * new head; the changed threads are re-projected; removed ones emit their removal. */
 	#applyDirectory(changed: ReadonlySet<string> | undefined): void {
 		if (this.#closed) return;
 		this.#directory = this.#store.snapshot();
@@ -185,15 +173,10 @@ export class Bridge {
 			if (!touched.has(thread.threadId)) continue;
 			this.#views.get(thread.threadId)?.moved(thread.head);
 		}
-		// A subagent's thread takes its title and project from its parent's row.
-		for (const ref of this.#subagents.values()) if (touched.has(ref.parentThreadId)) touched.add(ref.threadId);
 		this.#refreshShells(touched);
-		if (this.#directoryBooted) {
-			this.#dropOrphanSubagents();
-		} else {
+		if (!this.#directoryBooted) {
 			this.#directoryBooted = true;
-			// A client may open a child thread straight away: the first load settles once the subagents are known too.
-			void this.#syncSubagents().finally(() => this.#loaded.resolve());
+			this.#loaded.resolve();
 		}
 	}
 
@@ -403,89 +386,11 @@ export class Bridge {
 	}
 
 	/** Does this host know the thread? A thread absent from the threads document is the typed not-found on every path
-	 * (design.md, Invariants): REST 404, WS the contract's typed error. A subagent's thread is known while its parent's
-	 * conversation owns the call that made it. */
+	 * (design.md, Invariants): REST 404, WS the contract's typed error. */
 	hasThread(threadId: string): boolean {
-		return this.#summary(threadId) !== undefined || this.#subagents.has(threadId);
+		return this.#summary(threadId) !== undefined;
 	}
 
-	/** Is this a subagent's thread? pi owns it, as Claude owns its Task children: it takes no commands. */
-	isSubagentThread(threadId: string): boolean {
-		return this.#subagents.has(threadId);
-	}
-
-	/** Refuse a command that writes to a subagent's thread. */
-	#writable(threadId: string): void {
-		if (this.#subagents.has(threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it, and it takes no messages or changes.");
-	}
-
-	/** Rediscover the subagents (single-flight: a request that arrives during a sync runs one more after it). A change
-	 * re-projects what shows them: the shells, and every open parent's cards. */
-	#syncSubagents(only?: string): Promise<void> {
-		this.#subagentScan.add(only);
-		if (this.#subagentSync !== undefined) return this.#subagentSync;
-		const run = async (): Promise<void> => {
-			while (this.#subagentScan.size > 0) {
-				const targets = [...this.#subagentScan];
-				this.#subagentScan.clear();
-				const full = targets.includes(undefined);
-				const scanned: (string | undefined)[] = full ? [undefined] : targets;
-				const refs: SubagentRef[] = [];
-				let failed = false;
-				for (const target of scanned) {
-					const found = await this.#store.subagents(target).catch((error: unknown) => {
-						this.#log.warn("subagent discovery failed", { error: String(error) });
-						return undefined;
-					});
-					if (found === undefined) {
-						failed = true;
-						// Forget the batch's probes so the next update scans again.
-						if (target !== undefined) for (const probe of [...this.#probedCalls]) if (probe.startsWith(`${target}:`)) this.#probedCalls.delete(probe);
-					}
-					else refs.push(...found);
-				}
-				if (failed) continue;
-				// A scan replaces what it covers: everything, or the scanned threads' children.
-				const kept = full ? [] : [...this.#subagents.values()].filter((ref) => !scanned.includes(ref.parentThreadId));
-				const next = new Map([...kept, ...refs].map((ref) => [ref.threadId, ref]));
-				const same = next.size === this.#subagents.size && [...next].every(([key, ref]) => JSON.stringify(this.#subagents.get(key)) === JSON.stringify(ref));
-				if (same) continue;
-				this.#subagents = next;
-				this.#refreshShells();
-			}
-		};
-		this.#subagentSync = run().finally(() => {
-			this.#subagentSync = undefined;
-		});
-		return this.#subagentSync;
-	}
-
-	/** A deleted thread's children go with it, at once (their conversations stay in the store). */
-	#dropOrphanSubagents(): void {
-		const live = new Set(this.#directory.map((thread) => thread.threadId));
-		const next = new Map([...this.#subagents].filter(([, ref]) => live.has(ref.parentThreadId)));
-		if (next.size === this.#subagents.size) return;
-		this.#subagents = next;
-		this.#refreshShells();
-	}
-
-	/** The calls an open thread's view shows that name a child conversation (live details, then result entries), as
-	 * `taskId:conversationId` keys. */
-	#namedChildren(view: ConversationView): { key: string; taskId: number; conversationId: number }[] {
-		const found: { key: string; taskId: number; conversationId: number }[] = [];
-		for (const slot of view.docs["pi.live"]?.tools ?? []) {
-			const childId = detailsConversationId(slot.details);
-			if (slot.taskId !== undefined && childId !== undefined) found.push({ key: `${slot.taskId}:${childId}`, taskId: slot.taskId, conversationId: childId });
-		}
-		for (const entry of view.entries) {
-			const message = entry.model?.[0];
-			const childId = message?.role === "toolResult" ? detailsConversationId(message.details) : undefined;
-			if (entry.byTaskId !== undefined && childId !== undefined) found.push({ key: `${entry.byTaskId}:${childId}`, taskId: entry.byTaskId, conversationId: childId });
-		}
-		return found;
-	}
-
-	/** The project a known thread belongs to. */
 	/** Resolves once the thread list has loaded. */
 	loaded(): Promise<void> {
 		return this.#loaded.promise;
@@ -495,31 +400,7 @@ export class Bridge {
 		return this.#summary(threadId)?.projectId;
 	}
 
-	/** A subagent thread's meta: its parent's project, the title T3 gives a provider-native child, the child conversation's
-	 * own agent. */
-	#subagentMeta(ref: SubagentRef, state: ThreadView | undefined): ThreadMeta {
-		const parent = this.#summary(ref.parentThreadId);
-		const project = parent === undefined ? undefined : this.#configured().find((candidate) => candidate.id === parent.projectId);
-		const agent = state?.view?.docs["pi.agent"];
-		const ordinal = [...this.#subagents.values()].filter((other) => other.parentThreadId === ref.parentThreadId).findIndex((other) => other.threadId === ref.threadId) + 1;
-		return {
-			threadId: ref.threadId,
-			projectId: project?.id ?? parent?.projectId ?? "",
-			title: subagentThreadTitle({ parentTitle: parent?.title || "New thread", title: ref.title, prompt: ref.prompt, ordinal }),
-			cwd: agent?.cwd ?? project?.path ?? "",
-			...(project === undefined ? {} : { projectPath: project.path }),
-			createdAt: ref.startedAt,
-			updatedAt: ref.startedAt,
-			model: agent?.model ?? null,
-			...(agent?.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
-			subagentOf: { parentThreadId: ref.parentThreadId, nodeId: subagentNodeId(ref.taskId) },
-			running: state?.view?.docs["pi.live"]?.run !== undefined,
-		};
-	}
-
 	#meta(threadId: string, thread: Thread | undefined, state: ThreadView | undefined): ThreadMeta {
-		const subagent = this.#subagents.get(threadId);
-		if (subagent !== undefined) return this.#subagentMeta(subagent, state);
 		// The FK is the only lookup: an unregistered `projectId` is reported as it is, with NO invented project, and no row
 		// exists without a registered project (design.md, IDs), so this resolves.
 		const project = thread === undefined ? undefined : this.#configured().find((candidate) => candidate.id === thread.projectId);
@@ -555,7 +436,6 @@ export class Bridge {
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
 			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
-			subagents: new Map([...this.#subagents.values()].filter((ref) => ref.parentThreadId === threadId).map((ref) => [ref.taskId, ref])),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			titleRegeneration: this.#titleRequests.has(threadId)
@@ -584,9 +464,7 @@ export class Bridge {
 	}
 
 	shellSnapshot(): OrchestrationV2ShellSnapshot {
-		// A subagent's shell travels with the rest: the web app finds a thread's lineage, and the child thread itself,
-		// among the shells it holds (and hides it from the sidebar by its lineage).
-		const threads = [...this.#directory.map((thread) => thread.threadId), ...this.#subagents.keys()].map((threadId) => this.#shellFor(threadId));
+		const threads = this.#directory.map((thread) => this.#shellFor(thread.threadId));
 		for (const shell of threads) this.#shells.set(shell.id as string, shell);
 		return {
 			schemaVersion: 1,
@@ -610,7 +488,7 @@ export class Bridge {
 	 * is gone. */
 	#refreshShells(only?: ReadonlySet<string>): void {
 		const seen = new Set<string>();
-		for (const threadId of [...this.#directory.map((thread) => thread.threadId), ...this.#subagents.keys()]) {
+		for (const threadId of this.#directory.map((thread) => thread.threadId)) {
 			seen.add(threadId);
 			if (only !== undefined && !only.has(threadId)) continue;
 			this.#views.get(threadId)?.recompute();
@@ -739,19 +617,6 @@ export class Bridge {
 
 	/** After each projection of an open thread: the shell, and on load or at a run's end the sidebar summary. */
 	#projected(view: ThreadView, change: { readonly loaded: boolean; readonly settled: boolean }): void {
-		const threadView = view.view;
-		// A call that names a child this thread's discovery has not seen (a subagent made just now): scan this thread alone,
-		// once per call. (A subagent's own thread names no children: a subagent of a subagent is not discovered.)
-		if (threadView !== undefined && !this.#subagents.has(view.threadId)) {
-			const stale = this.#namedChildren(threadView).filter((call) => {
-				const seen = [...this.#subagents.values()].some((other) => other.parentThreadId === view.threadId && other.taskId === call.taskId && other.conversationId === call.conversationId);
-				const probe = `${view.threadId}:${call.key}`;
-				if (seen || this.#probedCalls.has(probe)) return false;
-				this.#probedCalls.add(probe);
-				return true;
-			});
-			if (stale.length > 0) void this.#syncSubagents(view.threadId);
-		}
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
 		if (change.loaded) this.#restoreAttachments(view.transcript);
 		if (change.loaded || change.settled) this.#remember(view);
@@ -827,11 +692,9 @@ export class Bridge {
 		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
-	/** The thread a conversation is shown as: the live thread whose head it is, or the subagent thread of a child. */
-	async threadIdForConversation(conversationId: number): Promise<string | undefined> {
-		const head = await this.#store.threadIdForConversation(conversationId);
-		if (head !== undefined) return head;
-		return [...this.#subagents.values()].find((ref) => ref.conversationId === conversationId)?.threadId;
+	/** The thread a conversation is shown as: the live thread whose head it is. */
+	threadIdForConversation(conversationId: number): Promise<string | undefined> {
+		return this.#store.threadIdForConversation(conversationId);
 	}
 
 	/** A thread's shell: its sidebar row, current whether or not the thread is open. */
@@ -924,9 +787,6 @@ export class Bridge {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
-		// A derived subagent id names a child conversation, never a thread of the threads document.
-		if (parseSubagentThreadId(id) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${id}`);
-		this.#writable(id);
 		if (this.#summary(id) !== undefined) return id;
 		const scratchRoot = this.config.scratchDir;
 		let cwd: string | undefined;
@@ -1003,7 +863,6 @@ export class Bridge {
 	async applySelection(threadId: string, selection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined): Promise<void> {
 		const model = selection?.model === undefined ? undefined : splitSlug(selection.model);
 		if (model === undefined) return;
-		this.#writable(threadId);
 		const thinking = thinkingOf(selection?.options);
 		const release = this.acquire(threadId);
 		try {
@@ -1092,7 +951,6 @@ export class Bridge {
 		/** Add it without starting a turn (`mode: "notify"`): the next turn sees it. */
 		note?: boolean;
 	}): Promise<void> {
-		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
 		try {
 			const state = this.#viewOf(input.threadId);
@@ -1280,7 +1138,6 @@ export class Bridge {
 	/** A user rename (T3's `thread.metadata.update` with `title`, or `T3Attachment.setTitle`): durable, and it cancels a
 	 * pending generation (`titleRegeneration: null`). */
 	async renameThread(threadId: string, title: string): Promise<void> {
-		this.#writable(threadId);
 		const trimmed = title.trim();
 		if (trimmed === "") throw new CommandError("Thread title cannot be empty.");
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
@@ -1291,7 +1148,6 @@ export class Bridge {
 	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
 	 * no `titleThread` hook), `false` clears it. Fields this host has no backend for are refused. */
 	async updateThreadMetadata(command: { commandId: string; threadId: string; title?: string; regenerateTitle?: boolean } & Record<string, unknown>): Promise<void> {
-		this.#writable(command.threadId);
 		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty", "limitRecovery"].filter((field) => command[field] !== undefined);
 		if (refused.length > 0) {
 			throw new CommandError(
@@ -1315,7 +1171,6 @@ export class Bridge {
 
 	/** T3's `thread.settle`: a durable sidebar settlement, reflected in the shell immediately. */
 	async settleThread(threadId: string): Promise<void> {
-		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		await this.#store.settle(threadId);
 		this.#titleChanged(threadId);
@@ -1323,14 +1178,12 @@ export class Bridge {
 
 	/** T3's `thread.unsettle`: put the thread back in the active section, durably. */
 	async unsettleThread(threadId: string): Promise<void> {
-		this.#writable(threadId);
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		await this.#store.unsettle(threadId);
 		this.#titleChanged(threadId);
 	}
 
 	async interrupt(threadId: string): Promise<void> {
-		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
 			const state = this.#viewOf(threadId);
@@ -1343,7 +1196,6 @@ export class Bridge {
 	}
 
 	async cancelQueued(threadId: string, runId: string): Promise<void> {
-		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
 			await this.#store.cancelQueued(threadId, runId);
@@ -1353,7 +1205,6 @@ export class Bridge {
 	}
 
 	async editQueued(threadId: string, runId: string, text: string, attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[]): Promise<void> {
-		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
 			await this.#store.editQueued(threadId, runId, text, attachments === undefined ? undefined : [...attachments]);
@@ -1363,7 +1214,6 @@ export class Bridge {
 	}
 
 	async promoteQueued(threadId: string, runId: string): Promise<void> {
-		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
 			await this.#store.promoteQueued(threadId, runId);
@@ -1373,7 +1223,6 @@ export class Bridge {
 	}
 
 	async startQueued(threadId: string, runId: string | undefined, requestId: string): Promise<void> {
-		this.#writable(threadId);
 		const release = this.acquire(threadId);
 		try {
 			await this.#store.startQueued(threadId, runId, requestId);
@@ -1387,7 +1236,6 @@ export class Bridge {
 	 * the thread record, and the reverted runs are read back from the head it left (`#rolledBack`).
 	 */
 	async rollback(input: { threadId: string; commandId: string; checkpointId: string; restoreFiles: boolean }) {
-		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
 		const state = this.#viewOf(input.threadId);
 		const failure = await (async (): Promise<string | null> => {
@@ -1424,9 +1272,7 @@ export class Bridge {
 		/** A child that starts with its parent's history (`thread_prompt` with `fork`). */
 		child?: { readonly spawn: Spawn; readonly nodeId: string };
 	}): Promise<string> {
-		this.#writable(input.targetThreadId);
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
-		if (parseSubagentThreadId(input.targetThreadId) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${input.targetThreadId}`);
 		const source = await this.projection(input.sourceThreadId);
 		const run = input.runId === undefined ? source.forkRuns.at(-1) : source.forkRuns.find((candidate) => candidate.runId === input.runId);
 		if (run === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
@@ -1443,10 +1289,8 @@ export class Bridge {
 	}
 
 	async deleteThread(threadId: string): Promise<void> {
-		this.#writable(threadId);
 		this.#cancelTitle(threadId);
 		await this.#store.remove(threadId);
-		this.#dropOrphanSubagents();
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
 		for (const listener of this.#deletedListeners) listener(threadId);
 	}

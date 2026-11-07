@@ -6,7 +6,7 @@
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
-import { createRegistry, type EnvTarget, type Extension, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, type EnvTarget, type Extension, Harness, type Registry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -14,6 +14,8 @@ import type { Storage } from "@earendil-works/pi-durable";
 
 export type CodingHarness = {
 	readonly harness: Harness;
+	/** The tool registry, for extensions that exist only once the bridge is attached (its thread tools). */
+	readonly registry: Registry;
 	/** Close to release the storage file. */
 	close(): Promise<void>;
 };
@@ -44,6 +46,7 @@ export async function openCodingHarness(
 
 	return {
 		harness,
+		registry,
 		close: async () => {
 			await harness.close(BACKGROUND_CONTEXT).catch(() => {});
 			await storage.close(BACKGROUND_CONTEXT);

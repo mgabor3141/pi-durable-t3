@@ -127,8 +127,8 @@ unconditionally). An armed port is released on shutdown.
 ## What works
 
 Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), sidebar settlement, interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), subagents (a pi tool whose call owns a child
-conversation shows as T3's subagent card with a read-only child thread; the example agent has one),
+crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
+nests under its parent as a full thread; the example agent has them),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
 (`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
 and the tailnet name in the link `pair` prints). T3's file panel works through the execution environment: browse, open, edit and save in any folder the agent can see (writes stay on a project root; the agent may edit the same file, last write wins), with quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
@@ -154,9 +154,6 @@ Known limitations:
 - Settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads`,
   `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
 - Search has no index: each query reads every thread.
-- Subagents: a child thread is read-only and cannot be stopped on its own (interrupt the parent, which stops it). Undoing past
-  the call hides its card but leaves the child thread reachable, and a child's tokens are not in the Usage page. A fork that keeps the call lists the child under both threads, a subagent of a
-  subagent is not discovered, and a failed subagent's reason is only the tool's error text.
 - Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
   (T3's form defaults to one; pick "Use the project checkout").
 - Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the

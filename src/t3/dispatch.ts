@@ -132,11 +132,9 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				});
 				break;
 			case "thread.runtime-mode.set":
-				if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
 				if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
 				break;
 			case "thread.interaction-mode.set":
-				if (bridge.isSubagentThread(command.threadId)) throw new CommandError("This is a subagent's thread: the agent that started it owns it.");
 				if (command.interactionMode !== "default") throw new CommandError("Plan mode is not supported by pi-durable-t3.");
 				break;
 			default:

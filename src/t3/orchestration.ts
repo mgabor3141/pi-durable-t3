@@ -13,7 +13,7 @@ import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import { childCardNodeId } from "./projection.ts";
 import { exchanges, isActiveRun, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
-import { subagentThreadTitle } from "./subagents.ts";
+import { subagentThreadTitle } from "./child-title.ts";
 
 /** A refusal the tool returns to the agent as its error (no stack, no retry advice beyond the message). */
 export class ThreadToolError extends Error {}

@@ -25,7 +25,6 @@ import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
-import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 
@@ -107,12 +106,6 @@ export interface ThreadMeta {
 	readonly unsettledAt?: number;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
-	/** The subagents this thread's tool calls own, by the owning call's task (`subagents.ts`): a call whose details name
-	 * one of these children is shown as a subagent. */
-	readonly subagents?: ReadonlyMap<number, SubagentRef>;
-	/** Set on a subagent's own thread: pi owns it as Claude owns its Task children (provider-native, so it cannot take
-	 * user messages). `parentThreadId` is the thread whose call created it; `nodeId` that call's node. */
-	readonly subagentOf?: { readonly parentThreadId: string; readonly nodeId: string };
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
@@ -455,12 +448,9 @@ export function projectThread(
 			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
 			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
-			// A subagent's first message is its parent's call: T3 records it as the agent's, with the sending thread.
-			const fromParent = meta.subagentOf !== undefined && intent === "turn_start";
-			const { senderThreadId, ...written } = authorOf(entry.data);
-			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : written;
-			// The thread a message came from: a subagent's parent, or the thread that sent it (`t3_thread_send`).
-			const sender = fromParent ? { senderThreadId: id(meta.subagentOf!.parentThreadId) } : senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
+			// The thread a message came from (`thread_prompt`, a child's report): recorded on the entry with its author.
+			const { senderThreadId, ...author } = authorOf(entry.data);
+			const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
 				...author,
@@ -553,85 +543,6 @@ export function projectThread(
 							: "interrupted";
 				const resultAt = resultMessage?.timestamp ?? at;
 				const common = base(`ti-t${block.id}`, resultAt, itemStatus, result !== undefined);
-				// A subagent: the call's details name a child conversation that the call's own task owns (`subagents.ts`).
-				const callTaskId = result?.byTaskId ?? liveSlot?.taskId;
-				const childId = detailsConversationId(resultMessage?.role === "toolResult" ? resultMessage.details : liveSlot?.details);
-				const ref = callTaskId === undefined || childId === undefined ? undefined : meta.subagents?.get(callTaskId);
-				if (ref !== undefined && ref.conversationId === childId) {
-					const subagentStatus: OrchestrationV2Subagent["status"] =
-						itemStatus === "interrupted" ? (aborted ? "cancelled" : "interrupted") : (itemStatus as OrchestrationV2Subagent["status"]);
-					// The card runs from its task's start to the call's result (the parent message's stamp is when its stream began,
-					// long before the call ran).
-					const nodeAt = time(resultAt);
-					const startAt = time(ref.startedAt);
-					const nativeTaskRef = { driver: id(PROVIDER_DRIVER), nativeId: String(ref.taskId), strength: "strong" } as const;
-					const subagentNode = subagentNodeId(ref.taskId);
-					const prompt = typeof block.arguments["prompt"] === "string" ? block.arguments["prompt"] : "";
-					const label = typeof block.arguments["description"] === "string" && block.arguments["description"].trim() !== "" ? block.arguments["description"] : null;
-					const settledSubagent = result !== undefined;
-					// Claude's cancelled/interrupted subagent carries no result; a failed one carries the tool's error text, which in
-					// pi is wrapped in a `<harness>` block.
-					const subagentResult =
-						!settledSubagent || subagentStatus === "cancelled" || subagentStatus === "interrupted"
-							? null
-							: (output ?? "").replace(/^\s*<harness>\s*([\s\S]*?)\s*<\/harness>\s*$/, "$1");
-					nodes.push({
-						id: id(subagentNode),
-						threadId: id(threadId),
-						runId: id(runId),
-						parentNodeId: id(nodeId),
-						rootNodeId: id(nodeId),
-						kind: "subagent",
-						status: subagentStatus as OrchestrationV2ExecutionNode["status"],
-						countsForRun: false,
-						providerThreadId: id(providerThreadId),
-						providerTurnId: id(turnId),
-						nativeItemRef: nativeTaskRef,
-						runtimeRequestId: null,
-						checkpointScopeId: null,
-						startedAt: startAt,
-						completedAt: settledSubagent ? nodeAt : null,
-					} as Any);
-					subagents.push({
-						id: id(subagentNode),
-						threadId: id(threadId),
-						runId: id(runId),
-						parentNodeId: id(nodeId),
-						origin: "provider_native",
-						createdBy: "agent",
-						driver: id(PROVIDER_DRIVER),
-						providerInstanceId: id(PROVIDER_INSTANCE_ID),
-						providerThreadId: id(providerThreadId),
-						childThreadId: id(ref.threadId),
-						nativeTaskRef,
-						prompt,
-						title: label,
-						model: null,
-						status: subagentStatus,
-						result: subagentResult,
-						startedAt: startAt,
-						completedAt: settledSubagent ? nodeAt : null,
-						updatedAt: nodeAt,
-					} as Any);
-					turnItems.push({
-						...common,
-						startedAt: startAt,
-						completedAt: settledSubagent ? nodeAt : null,
-						nodeId: id(subagentNode),
-						nativeItemRef: nativeTaskRef,
-						status: subagentStatus,
-						title: label,
-						type: "subagent",
-						subagentId: id(subagentNode),
-						origin: "provider_native",
-						driver: id(PROVIDER_DRIVER),
-						providerInstanceId: id(PROVIDER_INSTANCE_ID),
-						childThreadId: id(ref.threadId),
-						prompt,
-						result: subagentResult,
-					} as Any);
-					continue;
-				}
 				// T3's secret card: the call is the request (`secret-requests.ts`). Its outcome is in the result's details; a
 				// call still running waits for the user, and one that ended without a result was stopped.
 				if (block.name === REQUEST_SECRET_TOOL) {
@@ -858,31 +769,6 @@ export function projectThread(
 		} as Any);
 	});
 
-	// A subagent's thread carries the root node T3's provider-native children have (`runId: null`): the web app reads the
-	// child's status bar ("Running 3s", "Done") from it (`deriveProviderSubagentStatus`).
-	if (meta.subagentOf !== undefined) {
-		const last = runs.at(-1);
-		const rootStatus = (busy ? "running" : (last?.status ?? "pending")) as OrchestrationV2ExecutionNode["status"];
-		const settledAt = busy || last === undefined ? null : last.completedAt;
-		nodes.push({
-			id: id(`n-sub-root`),
-			threadId: id(threadId),
-			runId: null,
-			parentNodeId: null,
-			rootNodeId: id(`n-sub-root`),
-			kind: "root_turn",
-			status: rootStatus,
-			countsForRun: false,
-			providerThreadId: null,
-			providerTurnId: null,
-			nativeItemRef: null,
-			runtimeRequestId: null,
-			checkpointScopeId: null,
-			startedAt: time(meta.createdAt),
-			completedAt: settledAt,
-		} as Any);
-	}
-
 	// T3 numbers turn items in the order they enter the thread (`nextTurnItemOrdinal`), one ordinal per item: a client
 	// places an item by it, and a bounded window's watermark is the newest ordinal. Items are built in that order.
 	turnItems.forEach((item, index) => {
@@ -917,7 +803,7 @@ export function projectThread(
 	const updatedAt = time(lastActivity);
 	// One provider session with honest capabilities, so clients hide what pi cannot do instead of offering it and failing.
 	const providerSessionId = `ps-${threadId}`;
-	const providerSessions: OrchestrationV2ProviderSession[] = meta.subagentOf !== undefined ? [] : [
+	const providerSessions: OrchestrationV2ProviderSession[] = [
 		{
 			id: id(providerSessionId),
 			driver: id(PROVIDER_DRIVER),
@@ -931,9 +817,8 @@ export function projectThread(
 			lastError: null,
 		},
 	];
-	// A subagent's thread has no provider session or thread, like Claude's provider-native children (so "Disconnect agent session" is not offered).
 	// Like T3, a thread gets its provider thread with its first run: until then it has none, and no active one.
-	const providerThreads: OrchestrationV2ProviderThread[] = drafts.length === 0 || meta.subagentOf !== undefined ? [] : [
+	const providerThreads: OrchestrationV2ProviderThread[] = drafts.length === 0 ? [] : [
 		{
 			id: id(providerThreadId),
 			driver: id(PROVIDER_DRIVER),
@@ -957,26 +842,18 @@ export function projectThread(
 		},
 	];
 
-	// A subagent's thread: provider-native, like Claude's Task children — `isProviderNativeSubagentThread` makes it read-only
-	// in the web app and hides it from the sidebar (`makeSubagentChildThread`, packages/provider-core).
-	const sub = meta.subagentOf;
-	const lineage = () =>
-		sub !== undefined
-			? { parentThreadId: id(sub.parentThreadId), relationshipToParent: "subagent", rootThreadId: id(sub.parentThreadId) }
-			: {
-					parentThreadId: meta.lineage?.parentThreadId == null ? null : id(meta.lineage.parentThreadId),
-					relationshipToParent: meta.lineage?.relationshipToParent ?? null,
-					rootThreadId: id(meta.lineage?.rootThreadId ?? threadId),
-				};
+	const lineage = () => ({
+		parentThreadId: meta.lineage?.parentThreadId == null ? null : id(meta.lineage.parentThreadId),
+		relationshipToParent: meta.lineage?.relationshipToParent ?? null,
+		rootThreadId: id(meta.lineage?.rootThreadId ?? threadId),
+	});
 	const forkedFrom = () =>
-		sub !== undefined
-			? { type: "node", nodeId: id(sub.nodeId) }
-			: meta.forkedFrom == null
-				? null
-				: meta.forkedFrom.type === "node"
-					? { type: "node", nodeId: id(meta.forkedFrom.nodeId) }
-					: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
-	const author = sub === undefined ? { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" } : ({ createdBy: "agent", creationSource: "provider" } as const);
+		meta.forkedFrom == null
+			? null
+			: meta.forkedFrom.type === "node"
+				? { type: "node", nodeId: id(meta.forkedFrom.nodeId) }
+				: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
+	const author = { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" };
 	const thread: Any = {
 		...author,
 		id: id(threadId),
@@ -989,7 +866,7 @@ export function projectThread(
 		interactionMode: "default",
 		branch: null,
 		worktreePath,
-		activeProviderThreadId: drafts.length === 0 || sub !== undefined ? null : id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		lineage: lineage(),
 		forkedFrom: forkedFrom(),
 		...(meta.linkOrigin === undefined ? {} : { linkOrigin: meta.linkOrigin }),
@@ -1050,7 +927,7 @@ export function projectThread(
 		worktreePath,
 		lineage: thread.lineage,
 		forkedFrom: thread.forkedFrom,
-		activeProviderThreadId: drafts.length === 0 || sub !== undefined ? null : id(providerThreadId),
+		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		latestRunId: latestRun?.id ?? null,
 		latestRunRequestedAt: latestRun?.requestedAt ?? null,
 		latestRunStartedAt: latestRun?.startedAt ?? null,

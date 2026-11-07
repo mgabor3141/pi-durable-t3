@@ -10,7 +10,7 @@ const UNSUPPORTED: Record<string, string> = {
 	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
-	"subagent.stop": "Stopping one subagent is not supported by pi-durable-t3: interrupt the parent's turn, which stops the subagent with it.",
+	"subagent.stop": "Stopping one subagent card is not supported by pi-durable-t3: a child is a thread of its own, so stop that thread.",
 	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
 	// relaunch command and never sends these; if one arrives (a hand-built client, a future default), refuse it
 	// honestly: the bridge is not a T3 install and updates by updating itself on the host, not over the wire.

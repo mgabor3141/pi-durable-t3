@@ -65,9 +65,6 @@ All of it is safe to lose:
 - Per open thread, the stream: the projection its subscribers were last brought to, its sequence, and the last 128
   events (what a resuming subscriber is replayed). The sequence is a clock-floored counter of this process, so after a
   restart every resume is answered with a snapshot.
-- The subagent list: rediscovered from conversation ownership (a child thread's id is derived from its parent thread and
-  child conversation), so nothing about subagents is stored. The full scan runs at boot; afterwards one thread is scanned when its view names
-  a child not yet discovered (a failed scan is retried on the next update), and a deleted thread's children are dropped at once.
 - The thread list.
 - The commands in flight, so a duplicate that arrives meanwhile joins the first.
 - The pending title request per thread (T3's `titleRegeneration`): after a restart no thread shows one, and a reply

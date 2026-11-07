@@ -206,6 +206,8 @@ Each removes a mechanism, not just lines:
    writer) or a T3 call in the tool. Both cost more than the scan. T3 has two kinds of child too: provider-native
    subagents, derived from the provider (as the scan derives them), and delegated tasks, which are app threads.
    Delegated tasks (`delegate_task`) will be thread records from the start, created through the threads layer.
+   Later superseded: children became threads with a parent link (the thread tools), and the scan, which served only
+   pi-durable's tool-owned-conversation convention, was removed with the example's `subagent` tool.
 
 ## Checked against the real web app
 

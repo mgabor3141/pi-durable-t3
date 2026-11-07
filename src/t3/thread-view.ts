@@ -32,12 +32,10 @@ export type Configuration = { model: ModelRef | null; thinkingLevel: string };
 export interface ThreadViewHost {
 	readonly harness: Harness;
 	readonly log: Logger;
-	/** The conversation the thread shows now (its head; a subagent's child conversation), if it has one. */
+	/** The conversation the thread shows now (its head), if it has one. */
 	head(threadId: string): number | undefined;
 	/** The thread's applied undos, from its record. */
 	undos(threadId: string): readonly AppliedUndo[];
-	/** A subagent's thread reads its conversation and nothing else: no model controls. */
-	isSubagent(threadId: string): boolean;
 	catalog(): CatalogEntry[];
 	/** The thread's metadata, from its record and (when given) this view. */
 	meta(threadId: string, view: ThreadView | undefined): ThreadMeta;
@@ -227,7 +225,7 @@ export class ThreadView {
 		}
 		if (this.#follower !== undefined) return;
 		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, historyCutoff: -1, history: [], agentKey: undefined, closed: false };
-		this.#catalog = this.#host.isSubagent(this.threadId) ? [] : this.#host.catalog();
+		this.#catalog = this.#host.catalog();
 		const head = this.#host.head(this.threadId);
 		if (head !== undefined) void this.#follow(head);
 	}
@@ -354,7 +352,7 @@ export class ThreadView {
 			follower.historyCutoff = cutoff;
 		}
 		const agentKey = JSON.stringify(view.docs["pi.agent"] ?? null);
-		if (!this.#host.isSubagent(this.threadId) && agentKey !== follower.agentKey) {
+		if (agentKey !== follower.agentKey) {
 			const agent = conversation === undefined ? undefined : await conversation.agent(BACKGROUND_CONTEXT).catch(() => undefined);
 			if (!latest()) return;
 			follower.agentKey = agentKey;
