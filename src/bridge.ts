@@ -10,12 +10,14 @@ import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
 import type { Extension, Harness } from "@earendil-works/pi-durable";
 import type { SecretSink } from "./t3/secret-requests.ts";
 export type { SecretSink } from "./t3/secret-requests.ts";
+export type { HostRoute } from "./t3/config.ts";
 import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
+import type { HostRoute } from "./t3/config.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
@@ -24,7 +26,8 @@ import { startFacet } from "./t3/facet.ts";
 import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandError } from "./t3/tailscale.ts";
 
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
-export { ConfigError } from "./config.ts";
+import { ConfigError } from "./config.ts";
+export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 
@@ -93,6 +96,8 @@ export type AttachT3Options = {
 	readonly titleThread?: TitleThread;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
+	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
+	readonly routes?: readonly HostRoute[];
 	/**
 	 * Optional per-call observation for debugging the T3 wire: `onSuccess` for a request handler that succeeds or a
 	 * stream that opens, `onFailure` for a failing request, and `onStubbed` for a method this host does not implement.
@@ -181,6 +186,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	const listen = options.listen ?? DEFAULT_LISTEN;
 	const webApp = options.webApp ?? bundledWebApp();
 	if (webApp === undefined) log.warn("no web app to serve (`web/` is missing; in a checkout, run `pnpm setup:t3`)");
+	for (const route of options.routes ?? []) {
+		if (!/^\/host\/[A-Za-z0-9._~\/-]+$/.test(route.path)) throw new ConfigError(`a host route's path must be a plain path under /host/, not ${JSON.stringify(route.path)}`);
+	}
 	const config: BridgeConfig = {
 		registry,
 		settings: ServerSettingsStore.open(options.stateDir),
@@ -201,6 +209,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 				: { port: options.tailscaleServe.port ?? DEFAULT_TAILSCALE_SERVE_PORT },
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
+		...(options.routes === undefined ? {} : { routes: options.routes }),
 	};
 	const tailscale = makeTailscaleCli();
 	const facet = startFacet({ threads, models: options.models, catalog, log, config, tailscale });

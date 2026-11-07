@@ -35,6 +35,7 @@ export interface FacetConfig {
 	readonly titleThread?: TitleThread;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
+	readonly routes?: readonly HostRoute[];
 	/** Optional per-call RPC observation for debugging the wire. Absent: nothing is called. */
 	readonly rpcLog?: RpcLog;
 }
@@ -52,3 +53,14 @@ export interface BridgeConfig extends FacetConfig {
 export function serverCwd(config: BridgeConfig): string {
 	return config.registry.list()[0]?.cwd ?? config.stateDir;
 }
+
+/**
+ * An HTTP route the integrator adds to the host's listener, in web-standard terms. It is public: anyone who can reach
+ * the host can call it, so it authenticates its own callers (an OAuth callback checks its `state`). Its path is under
+ * `/host/`, which T3 never uses: the router refuses two routes on one path, and a clash would stop the server.
+ */
+export type HostRoute = {
+	readonly method: "GET" | "POST";
+	readonly path: `/host/${string}`;
+	handle(request: Request): Promise<Response>;
+};

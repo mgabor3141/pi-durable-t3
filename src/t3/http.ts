@@ -412,6 +412,24 @@ export function makeServerLayer(deps: {
 				return connection;
 			}),
 		),
+		// The integrator's own routes (`HostRoute`): web-standard handlers, public, checked by themselves.
+		...(bridge.config.routes ?? []).map((route) =>
+			HttpRouter.add(
+				route.method,
+				route.path,
+				Effect.gen(function* () {
+					const request = yield* HttpServerRequest.HttpServerRequest;
+					const web = yield* HttpServerRequest.toWeb(request).pipe(Effect.orDie);
+					const response = yield* Effect.promise(() =>
+						route.handle(web).catch((error: unknown) => {
+							log.warn("host route failed", { path: route.path, error: error instanceof Error ? error.message : String(error) });
+							return new Response("Internal error", { status: 500 });
+						}),
+					);
+					return HttpServerResponse.fromWeb(response);
+				}),
+			),
+		),
 		// The built web app, added last: the router's specificity makes every route above win, so this `GET *` is reached
 		// only for app routes and asset files. Present only when a web app is configured.
 		...(staticHandler === undefined ? [] : [ HttpRouter.add("GET", "*", Effect.map(HttpServerRequest.HttpServerRequest, (request) => staticHandler(request))), ]),
