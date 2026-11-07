@@ -223,6 +223,13 @@ and `iss`, and the code exchanged at the issuer for a 30-day token with full acc
 paired, the page offered one-click approval with no code field. Sharing & access lists the client as "Manual agent ·
 Bot · 4 scopes", revocable. No faults.
 
+Thread tools (`a9bdda3`), by hand in the same web app, with a demo host whose model fans out two slow children without
+waiting: the parent's run shows "2 subagents · 2 working" and "Waiting on 2 subagents Adder, Multiplier"; the Lineage
+panel lists both running. When each settles its report arrives in the parent as a message "Sent by T3 Code" and the
+parent answers it in a new turn; Lineage then shows them under "Previous agents". A child opens as "Subagent of ·
+<parent>" under the parent's breadcrumb, its first message attributed to the parent thread, with a composer for a
+follow-up. No faults.
+
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.
 
