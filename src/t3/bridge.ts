@@ -917,9 +917,8 @@ export class Bridge {
 		launchText?: string;
 		title?: string;
 		provenance?: Provenance;
-		/** A child thread: its parent link, the node of its card and how it was started; `cwd`, a folder of its own under the
-		 * project (a worktree). */
-		child?: { readonly lineage: ThreadLineage; readonly nodeId: string; readonly spawn: Spawn; readonly cwd?: string };
+		/** A child thread: its parent link, the node of its card and how it was started. */
+		child?: { readonly lineage: ThreadLineage; readonly nodeId: string; readonly spawn: Spawn };
 	}): Promise<string> {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
@@ -929,8 +928,8 @@ export class Bridge {
 		this.#writable(id);
 		if (this.#summary(id) !== undefined) return id;
 		const scratchRoot = this.config.scratchDir;
-		let cwd: string | undefined = options.child?.cwd;
-		if (cwd === undefined && options.launchText !== undefined && scratchRoot !== undefined && isScratchRoot(project.cwd, scratchRoot)) {
+		let cwd: string | undefined;
+		if (options.launchText !== undefined && scratchRoot !== undefined && isScratchRoot(project.cwd, scratchRoot)) {
 			const env = this.config.env;
 			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
 			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);

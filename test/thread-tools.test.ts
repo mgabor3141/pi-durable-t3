@@ -14,8 +14,6 @@ import { Orchestration } from "../src/t3/orchestration.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
 import { createNamed, makeThreads } from "./threads-harness.ts";
-import { execFileSync } from "node:child_process";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 type Msg = { role: string; content: unknown };
@@ -72,7 +70,7 @@ async function setup(options: { readonly waitSignal?: () => AbortSignal | undefi
 	const create = createNamed(f.threads, f.harness, f.model);
 	await create({ threadId: "a", projectId: "p", title: "Parent" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-threads-"));
-	bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry, env: new NodeExecutionEnv({ cwd: f.root }) }, log, f.threads, f.model.models);
+	bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	orchestration.start();
@@ -238,30 +236,4 @@ it("a restart's signal ends a wait; the report is sent when the work settles", {
 	gate("w1").release();
 	const woke = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("[Report from thread")));
 	expect(woke!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text).toContain("[AGENT]: released w1");
-});
-
-it("a child can work in a git worktree of its own; its reports say where it stands", { timeout: 60_000 }, async () => {
-	const { bridge, ask, sawAll, f } = await setup();
-	const repo = f.projects[0]!.cwd;
-	const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo, encoding: "utf8" });
-	git("init", "-q");
-	git("commit", "-q", "--allow-empty", "-m", "base");
-	const base = git("rev-parse", "HEAD").trim();
-
-	await ask("a", { name: "thread_prompt", args: { new: { title: "Worker", worktree: true }, message: "What is 2+2?" } });
-	const [first] = await sawAll(1);
-	const child = first.threadId as string;
-	const path = `${repo}/.worktrees/${child}`;
-	expect(first.report).toContain(`[Worktree ${path} on branch thread/${child}: 0 commits since ${base.slice(0, 12)}, clean]`);
-	expect(bridge.threadRecord(child)!.spawn!.worktree).toEqual({ path, branch: `thread/${child}`, base });
-	expect(bridge.threadShell(child).worktreePath, "the child runs in its worktree").toBe(path);
-	expect(git("worktree", "list")).toContain(path);
-
-	// Work lands on the child's branch, not in the parent's checkout.
-	execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work"], { cwd: path });
-	execFileSync("sh", ["-c", "echo x > dirty.txt"], { cwd: path });
-	await ask("a", { name: "thread_prompt", args: { threadId: child, message: "And 1+1?" } });
-	const [, second] = await sawAll(2);
-	expect(second.report).toContain(`: 1 commit since ${base.slice(0, 12)}, 1 changed file]`);
-	expect(git("rev-parse", "HEAD").trim(), "the parent's checkout did not move").toBe(base);
 });

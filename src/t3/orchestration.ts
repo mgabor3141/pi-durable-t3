@@ -6,7 +6,6 @@
 // starting a turn there if it is idle. The request is kept on the receiving thread's record until it is delivered, and
 // its delivery is idempotent, so a restart delivers it once.
 import { createHash, randomUUID } from "node:crypto";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { NotifyRequest, Provenance, Thread } from "../threads.ts";
 import type { Bridge } from "./bridge.ts";
@@ -34,7 +33,7 @@ export type PromptMode = "auto" | "followUp" | "steer" | "notify";
 
 export interface PromptInput {
 	readonly threadId?: string;
-	readonly new?: { readonly title?: string; readonly model?: string; readonly fork?: boolean; readonly worktree?: boolean };
+	readonly new?: { readonly title?: string; readonly model?: string; readonly fork?: boolean };
 	readonly message: string;
 	readonly mode?: PromptMode;
 	readonly wait?: boolean;
@@ -117,13 +116,13 @@ export class Orchestration {
 		if (!wait) return { threadId, messageId, notify };
 		const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_MS));
 		const settled = await this.#waitSettled(threadId, messageId, timeoutMs, signal);
-		if (settled !== undefined) return { threadId, messageId, report: await this.#described(settled), notify: false };
+		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
 		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
 		if (!notify && caller !== undefined) {
 			await this.#ask(threadId, caller, commandId, messageId);
 			notify = true;
 		}
-		return { threadId, messageId, report: await this.#described(this.#activeReport(await this.#projection(threadId), messageId)), notify };
+		return { threadId, messageId, report: this.#activeReport(await this.#projection(threadId), messageId), notify };
 	}
 
 	#existing(threadId: string, caller: string | undefined): string {
@@ -149,11 +148,9 @@ export class Orchestration {
 		if (parentRun === undefined) throw new ThreadToolError("The calling thread has no run to start a child from.");
 		const ordinal = this.#bridge.threadRecords().filter((thread) => thread.lineage.parentThreadId === caller && thread.spawn !== undefined).length + 1;
 		const title = spec.title?.trim() || subagentThreadTitle({ parentTitle: parent.title || "New thread", title: null, prompt, ordinal });
-		const worktree = spec.worktree === true ? await this.#worktree(caller, parent.projectId, childId) : undefined;
-		const spawn = { parentRunId: parentRun.id as string, prompt: prompt.slice(0, 2_000), ...(worktree === undefined ? {} : { worktree }) };
+		const spawn = { parentRunId: parentRun.id as string, prompt: prompt.slice(0, 2_000) };
 		const nodeId = childCardNodeId(childId);
 		if (spec.fork === true) {
-			if (worktree !== undefined) throw new ThreadToolError("A forked thread works where its parent does; pass worktree without fork.");
 			// The caller's history up to its last settled run: the run in flight is this call's own, still open.
 			const settled = runs.find((run) => !isActiveRun(run));
 			if (settled === undefined) throw new ThreadToolError("Nothing to fork yet: the calling thread has no finished run.");
@@ -164,7 +161,7 @@ export class Orchestration {
 				projectId: parent.projectId,
 				title,
 				provenance,
-				child: { lineage: { parentThreadId: caller, relationshipToParent: "subagent", rootThreadId: parent.lineage.rootThreadId }, nodeId, spawn, ...(worktree === undefined ? {} : { cwd: worktree.path }) },
+				child: { lineage: { parentThreadId: caller, relationshipToParent: "subagent", rootThreadId: parent.lineage.rootThreadId }, nodeId, spawn },
 			});
 		}
 		const model = spec.model ?? (this.#bridge.threadShell(caller).modelSelection.model as string | undefined);
@@ -177,43 +174,6 @@ export class Orchestration {
 		}
 		this.#log.info("thread started a child", { parent: caller, child: childId, fork: spec.fork === true });
 		return childId;
-	}
-
-	/** A git worktree for a new child: from the caller's checkout at its HEAD, under the project's `.worktrees`, on a
-	 * branch of the child's own. */
-	async #worktree(caller: string, projectId: string, childId: string): Promise<{ path: string; branch: string; base: string }> {
-		const project = this.#bridge.config.registry.list().find((candidate) => candidate.id === projectId);
-		if (project === undefined) throw new ThreadToolError(`Unknown project ${projectId}.`);
-		const from = this.#bridge.threadShell(caller).worktreePath ?? project.cwd;
-		const head = await this.#git(["rev-parse", "HEAD"], from);
-		if (head.code !== 0) throw new ThreadToolError(`${from} is not a git checkout with a commit, so it has no worktree to give: ${head.out.trim()}`);
-		const base = head.out.trim();
-		const path = `${project.cwd.replace(/\/+$/, "")}/.worktrees/${childId}`;
-		const branch = `thread/${childId}`;
-		const added = await this.#git(["worktree", "add", "-b", branch, path, base], from);
-		if (added.code !== 0 && !/already exists/.test(added.out)) throw new ThreadToolError(`git worktree add failed: ${added.out.trim()}`);
-		return { path, branch, base };
-	}
-
-	/** Run git in the workspace; its output (both streams) and exit code. */
-	async #git(args: readonly string[], cwd: string): Promise<{ readonly code: number; readonly out: string }> {
-		const env = this.#bridge.config.env;
-		if (env === undefined) throw new ThreadToolError("This host has no workspace to run git in.");
-		let out = "";
-		const result = await env.exec(["git", ...args], { cwd, timeout: 60, onOutput: (text) => void (out += text) }, this.#bridge.config.context ?? BACKGROUND_CONTEXT);
-		if (!result.ok) return { code: -1, out: result.error.message };
-		return { code: result.value.exitCode, out };
-	}
-
-	/** A child's report, with where its worktree stands when it has one (Hermes's result fields, as a line). */
-	async #described(entry: Report): Promise<Report> {
-		const worktree = this.#bridge.threadRecord(entry.threadId)?.spawn?.worktree;
-		if (worktree === undefined) return entry;
-		const [count, status] = await Promise.all([this.#git(["rev-list", "--count", `${worktree.base}..HEAD`], worktree.path), this.#git(["status", "--porcelain"], worktree.path)]);
-		const commits = count.code === 0 ? Number(count.out.trim()) : undefined;
-		const changed = status.code === 0 ? status.out.split("\n").filter((line) => line.trim() !== "").length : undefined;
-		const state = commits === undefined || changed === undefined ? "unreadable" : `${commits} commit${commits === 1 ? "" : "s"} since ${worktree.base.slice(0, 12)}, ${changed === 0 ? "clean" : `${changed} changed file${changed === 1 ? "" : "s"}`}`;
-		return { ...entry, text: `${entry.text}\n[Worktree ${worktree.path} on branch ${worktree.branch}: ${state}]` };
 	}
 
 	#depth(thread: Thread): number {
@@ -253,8 +213,7 @@ export class Orchestration {
 				return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
 			}),
 		);
-		const described = await Promise.all(reports.map((entry) => this.#described(entry)));
-		return { reports: described, verdict: worstVerdict(described.map((entry) => entry.verdict)) };
+		return { reports, verdict: worstVerdict(reports.map((entry) => entry.verdict)) };
 	}
 
 	async #waitSettled(threadId: string, messageId: string, timeoutMs: number, signal?: AbortSignal): Promise<Report | undefined> {
@@ -376,7 +335,7 @@ export class Orchestration {
 							throw error;
 						});
 					if (ready === undefined) continue;
-					await this.#deliver(threadId, request, await this.#described(ready));
+					await this.#deliver(threadId, request, ready);
 				}
 			} catch (error) {
 				if (!this.#closed) this.#log.warn("thread notification follower stopped", { threadId, error: error instanceof Error ? error.message : String(error) });
