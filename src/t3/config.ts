@@ -7,6 +7,7 @@ import type { ServerSettingsStore } from "../settings.ts";
 import type { TitleThread } from "./title-thread.ts";
 import type { PreviewBrowserConfig } from "./preview-config.ts";
 import type { RpcLog } from "./logging.ts";
+import type { HostRoute } from "./host-route.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
@@ -55,13 +56,3 @@ export function serverCwd(config: BridgeConfig): string {
 	return config.registry.list()[0]?.cwd ?? config.stateDir;
 }
 
-/**
- * An HTTP route the integrator adds to the host's listener, in web-standard terms. It is public: anyone who can reach
- * the host can call it, so it authenticates its own callers (an OAuth callback checks its `state`). Its path is under
- * `/host/`, which T3 never uses: the router refuses two routes on one path, and a clash would stop the server.
- */
-export type HostRoute = {
-	readonly method: "GET" | "POST";
-	readonly path: `/host/${string}`;
-	handle(request: Request): Promise<Response>;
-};

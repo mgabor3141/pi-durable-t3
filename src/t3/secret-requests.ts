@@ -10,10 +10,7 @@ import { SecretRequestError, type SecretRequestAnswerInput } from "@t3tools/cont
 import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 
-/** Where an answered secret goes. The integrator's: this host keeps no secret store of its own. */
-export interface SecretSink {
-	save(name: string, value: string): Promise<void>;
-}
+import type { SecretSink } from "./secret-sink.ts";
 
 /** The tool's name, as T3's. */
 export const REQUEST_SECRET_TOOL = "request_secret";
