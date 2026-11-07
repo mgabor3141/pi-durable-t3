@@ -52,7 +52,8 @@ export type Actor = "user" | "agent" | "system";
 /** Where it came from (T3's `OrchestrationV2CreationSource`). */
 export type CreationSource = "web" | "mobile" | "mcp" | "provider" | "server";
 /** T3's creation fields: a thread's, and a user-role message's. */
-export type Provenance = { readonly createdBy: Actor; readonly creationSource: CreationSource };
+/** Who wrote something, and for a message one thread sends another, the sending thread (T3's `senderThreadId`). */
+export type Provenance = { readonly createdBy: Actor; readonly creationSource: CreationSource; readonly senderThreadId?: string };
 /** What a write that names no provenance gets: a person in T3's web app, as T3's own server assumes. */
 export const USER_WEB: Provenance = { createdBy: "user", creationSource: "web" };
 
@@ -712,6 +713,7 @@ export class Threads {
 		if (input.provenance !== undefined) {
 			data.createdBy = input.provenance.createdBy;
 			data.creationSource = input.provenance.creationSource;
+			if (input.provenance.senderThreadId !== undefined) data.senderThreadId = input.provenance.senderThreadId;
 		}
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;

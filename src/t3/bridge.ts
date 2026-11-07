@@ -746,6 +746,38 @@ export class Bridge {
 		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
+	/** A thread's shell: its sidebar row, current whether or not the thread is open. */
+	threadShell(threadId: string): OrchestrationV2ThreadShell {
+		return this.#shellFor(threadId);
+	}
+
+	/**
+	 * Wait until `read` answers from the thread's projection, holding the thread open meanwhile; `undefined` when the time
+	 * is up first. Every new view of the thread wakes it; nothing polls.
+	 */
+	async waitFor<T>(threadId: string, read: (projection: OrchestrationV2ThreadProjection) => T | undefined, timeoutMs: number, signal?: AbortSignal): Promise<T | undefined> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		const release = this.acquire(threadId);
+		const timedOut = new Error("timed out");
+		try {
+			const view = this.#viewOf(threadId);
+			return await view.waitFor(
+				() => {
+					const projection = view.loaded ? view.result?.projection : undefined;
+					return projection === undefined ? undefined : read(projection);
+				},
+				timeoutMs,
+				() => timedOut,
+				signal,
+			);
+		} catch (error) {
+			if (error === timedOut) return undefined;
+			throw error;
+		} finally {
+			release();
+		}
+	}
+
 	/** Subscribe to a thread's stream (`ThreadView.subscribe`). A thread the host does not know refuses synchronously (the
 	 * stream carries the typed not-found); it never sends an empty projection. */
 	subscribeThread(threadId: string, afterSequence: number | undefined, update: (update: StreamUpdate) => void, onEnd: () => void = () => {}): () => void {

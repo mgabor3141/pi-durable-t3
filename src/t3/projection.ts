@@ -434,8 +434,10 @@ export function projectThread(
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
 			// A subagent's first message is its parent's call: T3 records it as the agent's, with the sending thread.
 			const fromParent = meta.subagentOf !== undefined && intent === "turn_start";
-			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : authorOf(entry.data);
-			const sender = fromParent ? { senderThreadId: id(meta.subagentOf!.parentThreadId) } : {};
+			const { senderThreadId, ...written } = authorOf(entry.data);
+			const author = fromParent ? ({ createdBy: "agent", creationSource: "provider" } as const) : written;
+			// The thread a message came from: a subagent's parent, or the thread that sent it (`t3_thread_send`).
+			const sender = fromParent ? { senderThreadId: id(meta.subagentOf!.parentThreadId) } : senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
 				...author,
@@ -737,7 +739,7 @@ export function projectThread(
 			contextHandoffId: null,
 		} as Any);
 		messages.push({
-			...authorOf(item.entry?.data),
+			...(({ senderThreadId, ...written }) => ({ ...written, ...(senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) }) }))(authorOf(item.entry?.data)),
 			id: id(item.messageId),
 			threadId: id(threadId),
 			runId: id(queuedRunId),
