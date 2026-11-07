@@ -1252,6 +1252,9 @@ export class Bridge {
 						: { threadId, conversationId, at, reason: "first-message", signal };
 				const model = this.textGenerationModel();
 				if (model !== undefined) Object.assign(request, { model });
+				// T3's title instructions, capped as T3's `policyInstruction` caps them.
+				const instructions = (this.config.settings.current().threadTitleInstructions as string | undefined)?.trim();
+				if (instructions) Object.assign(request, { instructions: instructions.slice(0, 20_000) });
 				const title = await hook(request);
 				await this.#completeTitle(threadId, requestId, title, previousTitle);
 			} catch (error) {

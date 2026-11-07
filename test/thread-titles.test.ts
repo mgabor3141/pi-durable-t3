@@ -258,7 +258,7 @@ it("a first message that fails leaves no seed title (T3 stores both in one comma
 	expect(calls).toHaveLength(0);
 }, 30_000);
 
-it("hands the title hook T3's text-generation model when it names one of this host's models", async () => {
+it("hands the title hook T3's text-generation model (when it names one of this host's) and its title instructions", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	fixture.model.respond(...Array.from({ length: 4 }, () => fauxAssistantMessage("pong")));
 	const { hook, calls } = manualHook();
@@ -268,11 +268,13 @@ it("hands the title hook T3's text-generation model when it names one of this ho
 	bridge.config.settings.update({ textGenerationModelSelection: { instanceId: "pi", model: "faux/nope" } } as never);
 	expect(bridge.textGenerationModel(), "a model this host lacks").toBeUndefined();
 	bridge.config.settings.update({ textGenerationModelSelection: { instanceId: "pi", model: "faux/faux-1", options: [{ id: "thinking", value: "low" }] } } as never);
+	bridge.config.settings.update({ threadTitleInstructions: "  Use sentence case.  " } as never);
 	expect(bridge.textGenerationModel()).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
 
 	const threadId = await newThread(bridge);
 	await send(bridge, threadId, 1, "Seed");
 	await until("the hook call", () => calls.length === 1);
 	expect(calls[0]!.request.model).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
+	expect(calls[0]!.request.instructions, "T3's title instructions, trimmed").toBe("Use sentence case.");
 	calls[0]!.resolve(undefined);
 }, 30_000);
