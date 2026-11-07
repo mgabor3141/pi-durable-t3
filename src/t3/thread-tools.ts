@@ -25,6 +25,7 @@ const prompt = Type.Object({
 			title: Type.Optional(Type.String()),
 			model: Type.Optional(Type.String({ description: "provider/model; default: yours" })),
 			fork: Type.Optional(Type.Boolean({ description: "Start with your history instead of only the message" })),
+			worktree: Type.Optional(Type.Boolean({ description: "Work in a git worktree of its own (branch thread/<id>), so it can edit without touching your checkout; reports say where it stands. Remove it with git worktree remove when done" })),
 		}),
 	),
 	message: Type.String(),

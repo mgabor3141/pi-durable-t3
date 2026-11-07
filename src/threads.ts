@@ -80,6 +80,8 @@ export type Spawn = {
 	parentRunId: string;
 	prompt: string;
 	outcome?: { status: "completed" | "failed" | "interrupted" | "cancelled"; result: string | null; completedAt: number };
+	/** The child works in a git worktree of its own: where, on which branch, from which commit. */
+	worktree?: { path: string; branch: string; base: string };
 };
 
 /** The sidebar's durable snapshot of a thread's latest visible message, so an unopened thread still sorts and previews
