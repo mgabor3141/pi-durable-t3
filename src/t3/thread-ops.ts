@@ -32,14 +32,29 @@ import {
 	type ThreadMetadataMcpUpdateResult,
 } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import type { AuthMcpClientAccess, RuntimeMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 
-/** Who is calling: the thread the call comes from, if any, and the web origin its links should open in. */
-export type Caller = { readonly threadId?: string; readonly webOrigin?: string };
+/** Who is calling: the thread the call comes from, or the MCP client that signed in over OAuth (`./mcp-oauth.ts`) with
+ * the access the user approved; and the web origin its links should open in. */
+export type Caller = {
+	readonly threadId?: string;
+	readonly webOrigin?: string;
+	readonly client?: { readonly sessionId: string; readonly access: AuthMcpClientAccess };
+};
+
+/** How much a runtime mode allows, narrowest first (T3's `runtimeModeRank`). */
+const RUNTIME_MODE_RANK: Record<RuntimeMode, number> = { "approval-required": 0, "auto-accept-edits": 1, auto: 2, "full-access": 3 };
+
+/** The broadest mode a client may drive (T3's `clientModeCeiling`): its access, or the narrowest for read-only. */
+const clientCeiling = (access: AuthMcpClientAccess): RuntimeMode => (access === "read-only" ? "approval-required" : access);
+
+/** The namespace of a caller's request keys (T3's `requestNamespace`): its thread, or `client:<session>`. */
+const namespaceOf = (caller: Caller): string | undefined => caller.threadId ?? (caller.client === undefined ? undefined : `client:${caller.client.sessionId}`);
 
 type Failure = OrchestratorMcpFailure["code"];
 const fail = (code: Failure, message: string): never => {
@@ -134,6 +149,22 @@ export class ThreadOps {
 		const shell = this.#shell(caller.threadId);
 		if (shell === undefined) fail("parent_not_active", `The calling thread ${caller.threadId} no longer exists.`);
 		return shell;
+	}
+
+	/**
+	 * T3's `writesThreads` check: a read-only client writes nothing, and a client may not drive a thread broader than
+	 * the access it was approved for. Every thread here runs at `full-access`, so only a `full-access` client writes.
+	 */
+	#mayWrite(caller: Caller, threadId: string | undefined): void {
+		const client = caller.client;
+		if (client === undefined) return;
+		if (client.access === "read-only") fail("capability_denied", "This tool changes the environment, and this MCP client was approved for read-only access.");
+		const target = threadId === undefined ? undefined : this.#shell(threadId);
+		if (target === undefined) return;
+		const ceiling = clientCeiling(client.access);
+		if (RUNTIME_MODE_RANK[target.runtimeMode] > RUNTIME_MODE_RANK[ceiling]) {
+			fail("runtime_mode_escalation_denied", `Child runtime mode ${target.runtimeMode} is broader than parent mode ${ceiling}.`);
+		}
 	}
 
 	#shell(threadId: string): OrchestrationV2ThreadShell | undefined {
@@ -312,14 +343,15 @@ export class ThreadOps {
 	 * starts one; `queue` waits for the running turn; `steer` and `restart` need a running turn.
 	 */
 	async send(caller: Caller, input: OrchestratorMcpThreadSendInput): Promise<OrchestratorMcpThreadSendResult> {
+		this.#mayWrite(caller, input.threadId);
 		const parent = this.#caller(caller);
 		const before = await this.#projection(input.threadId);
 		const mode = input.mode ?? "auto";
 		const running = before.runs.find((run) => run.status === "running");
 		if ((mode === "steer" || mode === "restart") && running === undefined) fail("thread_not_sendable", `Thread ${input.threadId} has no running turn to ${mode}.`);
 		const key = input.clientRequestId ?? randomUUID();
-		const messageId = `mcp-${stableId(caller.threadId, key, "thread-send", "message")}`;
-		const commandId = `mcp-${stableId(caller.threadId, key, "thread-send")}`;
+		const messageId = `mcp-${stableId(namespaceOf(caller), key, "thread-send", "message")}`;
+		const commandId = `mcp-${stableId(namespaceOf(caller), key, "thread-send")}`;
 		try {
 			await this.#bridge.sendMessage({
 				threadId: input.threadId,
@@ -378,6 +410,7 @@ export class ThreadOps {
 
 	/** `t3_thread_interrupt`: interrupt the thread's running turn (or the run named, if it is the running one). */
 	async interrupt(caller: Caller, input: OrchestratorMcpThreadInterruptInput): Promise<OrchestratorMcpThreadInterruptResult> {
+		this.#mayWrite(caller, input.threadId);
 		this.#caller(caller);
 		const projection = await this.#projection(input.threadId);
 		const named = input.runId === undefined ? undefined : projection.runs.find((run) => run.id === input.runId);
@@ -399,10 +432,11 @@ export class ThreadOps {
 
 	/** `t3_thread_update`: rename a thread, or regenerate its title (this thread when none is named). */
 	async update(caller: Caller, input: ThreadMetadataMcpUpdateInput): Promise<ThreadMetadataMcpUpdateResult> {
+		this.#mayWrite(caller, input.threadId);
 		const parent = this.#caller(caller);
 		const threadId = input.threadId ?? parent?.id ?? fail("target_required", "Name a threadId outside a thread.");
 		if (!this.#bridge.hasThread(threadId)) fail("thread_not_found", `Thread ${threadId} was not found.`);
-		const commandId = `mcp-${stableId(caller.threadId, input.clientRequestId ?? randomUUID(), "thread-update", input.action)}`;
+		const commandId = `mcp-${stableId(namespaceOf(caller), input.clientRequestId ?? randomUUID(), "thread-update", input.action)}`;
 		const command = { type: "thread.metadata.update", commandId, threadId, ...(input.action === "rename" ? { title: input.title } : { regenerateTitle: true }) };
 		let sequence = 0;
 		try {
@@ -429,6 +463,11 @@ export class ThreadOps {
 	 * `clientRequestId` returns the same threads.
 	 */
 	async create(caller: Caller, input: OrchestratorMcpCreateThreadsInput): Promise<OrchestratorMcpCreateThreadsResult> {
+		this.#mayWrite(caller, undefined);
+		// T3's `actsAsCaller`: the new threads' origin is the calling thread's run, so a client outside a thread cannot.
+		if (caller.threadId === undefined) {
+			fail("thread_credential_required", "create_threads acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.");
+		}
 		const parent = this.#caller(caller) ?? fail("parent_not_active", "Thread creation requires a calling thread.");
 		const parentProjection = await this.#projection(parent.id);
 		if (latestActiveRun(parentProjection) === undefined) fail("parent_not_active", "Thread creation requires an active run in the calling thread.");
@@ -436,17 +475,17 @@ export class ThreadOps {
 		const created: OrchestratorMcpCreateThreadsResult["threads"][number][] = [];
 		for (const [index, request] of input.threads.entries()) {
 			if (request.target?.environmentId !== undefined) fail("invalid_request", "Linked environments are not supported by this host.");
-			const threadId = `mcp-${stableId(caller.threadId, key, "create-thread", index)}`;
+			const threadId = `mcp-${stableId(namespaceOf(caller), key, "create-thread", index)}`;
 			const model = request.target?.model ?? parent.modelSelection.model;
 			const title = createdThreadTitle({ parentTitle: parent.title, title: request.title, prompt: request.prompt, index });
 			try {
 				await this.#bridge.launchThread({
-					commandId: `mcp-${stableId(caller.threadId, key, "create-thread-command", index)}`,
+					commandId: `mcp-${stableId(namespaceOf(caller), key, "create-thread-command", index)}`,
 					threadId,
 					projectId: parent.projectId,
 					title,
 					modelSelection: { model },
-					...(request.prompt === undefined ? {} : { initialMessage: { messageId: `mcp-${stableId(caller.threadId, key, "create-thread-message", index)}`, text: request.prompt } }),
+					...(request.prompt === undefined ? {} : { initialMessage: { messageId: `mcp-${stableId(namespaceOf(caller), key, "create-thread-message", index)}`, text: request.prompt } }),
 					provenance: { createdBy: "agent", creationSource: "mcp", senderThreadId: parent.id },
 				});
 			} catch (error) {

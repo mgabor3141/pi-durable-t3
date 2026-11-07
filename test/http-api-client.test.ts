@@ -124,10 +124,66 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 
 	// What this host does not do: pull requests refuse with the contract's error; the rest is a plain 404.
 	expect(await failure(client.pullRequests.diff({ headers: bearer, payload: { projectId, repository: "o/r", number: 1 } }))).toMatchObject({ _tag: "PullRequestUnavailableError" });
-	for (const path of ["/.well-known/oauth-protected-resource", "/api/connect/link-state", "/api/hooks/h/t"]) {
+	for (const path of ["/api/connect/link-state", "/api/hooks/h/t"]) {
 		expect((await fetch(`http://127.0.0.1:${PORT}${path}`, { headers: bearer })).status, path).toBe(404);
 	}
 	expect(host.out(), "the unsupported calls are logged").toContain("unsupported HTTP endpoint");
+
+	// MCP OAuth, as the web app's `/connect-agent` page and an agent call it: metadata, registration, the approval
+	// details, the decision (a pairing code, one click from a browser session, or a denial), and the code exchange.
+	const origin = `http://127.0.0.1:${PORT}`;
+	expect(await run(client.mcpOAuth.mcpProtectedResource({}))).toMatchObject({ resource: `${origin}/mcp`, authorization_servers: [origin] });
+	expect(await run(client.mcpOAuth.authorizationServer({}))).toMatchObject({ issuer: origin, token_endpoint: `${origin}/oauth/mcp/token`, code_challenge_methods_supported: ["S256"] });
+	expect(await failure(client.mcpOAuth.register({ payload: { redirect_uris: ["http://example.com/cb"] } }))).toMatchObject({ name: "AuthMcpRegistrationError", error: "invalid_redirect_uri" });
+	const registered = await run(client.mcpOAuth.register({ payload: { client_name: "Api agent", redirect_uris: ["http://127.0.0.1:9/cb"] } }));
+	expect(registered).toMatchObject({ client_name: "Api agent", token_endpoint_auth_method: "none" });
+	const { createHash } = await import("node:crypto");
+	const verifier = "v".repeat(43);
+	const authorization = {
+		response_type: "code",
+		client_id: registered.client_id,
+		redirect_uri: "http://127.0.0.1:9/cb",
+		code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+		code_challenge_method: "S256",
+		state: Redacted.make("s1"),
+	};
+	const details = await run(client.mcpOAuth.approval({ payload: authorization }));
+	expect(details).toEqual({ clientName: "Api agent", redirectHost: "127.0.0.1:9", environmentHost: `127.0.0.1:${PORT}` });
+	expect(await run(client.mcpOAuth.approval({ payload: { ...authorization, code_challenge_method: "plain" } })), "a verified client hears of its own mistakes").toMatchObject({
+		redirectTo: expect.stringContaining("error=invalid_request"),
+	});
+	expect(await failure(client.mcpOAuth.approval({ payload: { ...authorization, client_id: "forged.sig" } }))).toMatchObject({ _tag: "AuthMcpApprovalError", message: expect.stringContaining("unknown app") });
+	const page = await fetch(`${origin}/oauth/mcp/authorize?client_id=forged.sig`, { redirect: "manual" });
+	expect(page.status, "an unknown client sees a page, not a redirect").toBe(400);
+	expect(await page.text()).toContain("This sign-in cannot continue");
+	expect((await fetch(`${origin}/oauth/mcp/authorize?${new URLSearchParams({ ...authorization, state: "s1" })}`, { redirect: "manual" })).headers.get("location")).toMatch(/^\/connect-agent\?/);
+	expect(await failure(client.mcpOAuth.register({ payload: { software_id: "t3code-peer-link", redirect_uris: ["http://127.0.0.1:9/cb"] } })), "peer links wait for the setting").toMatchObject({ error: "invalid_client_metadata" });
+	const decide = (decision: Any) => client.mcpOAuth.decision({ payload: { authorization, decision } });
+	expect(await failure(decide({ _tag: "pairing-code", access: "read-only", code: "nope" }))).toMatchObject({ _tag: "AuthMcpApprovalError", message: "That pairing code is unknown, expired, or already used." });
+	expect((await run(decide({ _tag: "deny" }))).redirectTo).toBe("http://127.0.0.1:9/cb?error=access_denied&state=s1&iss=" + encodeURIComponent(origin));
+	const approved = new URL((await run(decide({ _tag: "pairing-code", access: "read-only", code: pairCode(root) }))).redirectTo);
+	expect(approved.searchParams.get("state")).toBe("s1");
+	const exchange = (code: string, codeVerifier: string) =>
+		client.mcpOAuth.token({ payload: { grant_type: "authorization_code", code: Redacted.make(code), redirect_uri: "http://127.0.0.1:9/cb", client_id: registered.client_id, code_verifier: Redacted.make(codeVerifier) } });
+	const issued = await run(exchange(approved.searchParams.get("code")!, verifier));
+	expect(issued).toMatchObject({ token_type: "Bearer", scope: "orchestration:read" });
+	expect(await failure(exchange(approved.searchParams.get("code")!, verifier)), "a code is used once").toMatchObject({ name: "AuthMcpTokenError", error: "invalid_grant" });
+	const wrongVerifier = new URL((await run(decide({ _tag: "pairing-code", access: "read-only", code: pairCode(root) }))).redirectTo).searchParams.get("code")!;
+	expect(await failure(exchange(wrongVerifier, "w".repeat(43)))).toMatchObject({ name: "AuthMcpTokenError", error: "invalid_grant" });
+	expect(await failure(exchange(wrongVerifier, verifier)), "and spent even when the check failed").toMatchObject({ error: "invalid_grant" });
+	// One click from a signed-in browser: its session offers the access it holds and approves with a CSRF token.
+	const browser = await fetch(`${origin}/api/auth/browser-session`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ credential: pairCode(root) }) });
+	const cookie = browser.headers.get("set-cookie")!.split(";")[0]!;
+	const withCookie = (await fetch(`${origin}/oauth/mcp/approval`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ ...authorization, state: "s1" }) }).then((response) => response.json())) as Any;
+	expect(withCookie.oneClickAccess).toEqual(["read-only", "approval-required", "auto-accept-edits", "auto", "full-access"]);
+	const click = (csrfToken: string) =>
+		fetch(`${origin}/oauth/mcp/decision`, {
+			method: "POST",
+			headers: { "content-type": "application/json", cookie },
+			body: JSON.stringify({ authorization: { ...authorization, state: "s1" }, decision: { _tag: "browser-session", access: "full-access", csrfToken } }),
+		}).then((response) => response.json()) as Promise<Any>;
+	expect(await click("forged")).toMatchObject({ message: "Your session cannot approve this request. Enter a pairing code instead." });
+	expect((await click(withCookie.csrfToken)).redirectTo).toContain("code=");
 
 	// The web app's trace upload: authenticated, then dropped (T3 with no OTLP endpoint configured).
 	const traces = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${PORT}/api/observability/v1/traces`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: "{}" });

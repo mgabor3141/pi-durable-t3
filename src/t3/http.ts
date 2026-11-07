@@ -38,7 +38,7 @@ import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
 import { makeRpcLayer } from "./rpc.ts";
-import { makeHttpApiLayer } from "./http-api.ts";
+import { makeHttpApiLayer, requestOrigin } from "./http-api.ts";
 import { makeMcpLayer } from "./mcp.ts";
 import type { SecretRequests } from "./secret-requests.ts";
 import { ThreadOps } from "./thread-ops.ts";
@@ -48,6 +48,7 @@ import { CurrentAuthSession } from "./session-context.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 import type { PreviewSessions } from "./preview.ts";
 import { makePreviewStreamHandler } from "./preview-http.ts";
+import { McpOAuth } from "./mcp-oauth.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -258,7 +259,17 @@ export function makeServerLayer(deps: {
 		return resolveSession(request);
 	};
 
+	// The browser session cookie alone (same-origin): what may approve an MCP client with one click.
+	const resolveBrowserSession = (request: HttpServerRequest.HttpServerRequest) => {
+		const cookie = request.cookies[SESSION_COOKIE_NAME];
+		if (cookie === undefined || !cookieOriginAllowed(request)) return undefined;
+		return auth.verifySessionToken(cookie);
+	};
+	const mcpOAuth = new McpOAuth(auth, { linksEnabled: () => bridge.config.settings.current().linkedEnvironmentsEnabled === true });
+
 	const apiLayer = makeHttpApiLayer({
+		resolveBrowserSession,
+		mcpOAuth,
 		bridge,
 		auth,
 		log,
@@ -271,7 +282,7 @@ export function makeServerLayer(deps: {
 	});
 
 	// T3's orchestrator MCP server over this host's threads (`mcp.ts`).
-	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log), log, version: SERVER_VERSION, resolveSession });
+	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log), log, version: SERVER_VERSION, resolveClient: (request) => auth.verifyMcpClient(request.headers.authorization), originOf: requestOrigin });
 
 	const routes = Layer.mergeAll(
 		// The web app sends its traces here (T3's `layerOtlpTracesProxyRoute`). This host exports no traces, which is T3's

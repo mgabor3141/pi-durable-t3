@@ -2,11 +2,11 @@
 // Streamable HTTP at protocol 2025-06-18, the toolkit T3 advertises (`mcp-toolkit.ts`, with T3's compacted input
 // schemas), and handlers over `ThreadOps`. A tool this host does not do answers the contract's failure and is logged.
 //
-// Who calls: a paired client's bearer (or the same-origin session), whose scopes gate reads and writes as T3's tool
-// access does. Which thread calls: the request's `_meta` — `"t3/threadId"`, or `"pi-durable/conversationId"` for an
-// agent that knows only its own conversation (the thread whose head it is). Without either, the call has no thread.
-import { randomUUID } from "node:crypto";
-import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope, type AuthEnvironmentScope, OrchestratorMcpFailure } from "@t3tools/contracts";
+// Who calls: an MCP client that signed in over OAuth (`mcp-oauth.ts`), with the bearer session `/mcp` alone accepts and
+// the access the user approved; no other credential works here, and a request without one is told where to sign in
+// (T3's `resource_metadata` challenge). Such a client has no calling thread: it reads, and writes as far as its access
+// allows. An agent inside this host acts as its own thread through `T3Attachment.threadTools` instead.
+import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope, type AuthEnvironmentScope, type AuthMcpClientAccess, OrchestratorMcpFailure } from "@t3tools/contracts";
 import { McpProtocol, McpSchema, McpServer, type Tool, Toolkit } from "effect/ai";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -22,8 +22,11 @@ import { OrchestratorToolkit } from "./mcp-toolkit.ts";
 import { advertisedJsonSchema } from "./t3-server.ts";
 import type { Caller, ThreadOps } from "./thread-ops.ts";
 
-/** The session a request to `/mcp` authenticated with (provided per request by the auth middleware). */
-class McpSession extends Context.Service<McpSession, { readonly scopes: readonly string[] }>()("pi-durable-t3/McpSession") {}
+/** The MCP client a request to `/mcp` authenticated as (provided per request by the auth middleware). */
+class McpSession extends Context.Service<
+	McpSession,
+	{ readonly sessionId: string; readonly scopes: readonly string[]; readonly access: AuthMcpClientAccess; readonly webOrigin: string | undefined }
+>()("pi-durable-t3/McpSession") {}
 
 /** The tools this host answers; every other tool of the toolkit is refused. */
 const SUPPORTED = new Set(["t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_wait", "t3_thread_interrupt", "create_threads", "t3_thread_update"]);
@@ -35,7 +38,10 @@ export interface McpDeps {
 	readonly ops: ThreadOps;
 	readonly log: Logger;
 	readonly version: string;
-	readonly resolveSession: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
+	/** The MCP client session the request's bearer carries (`AuthStore.verifyMcpClient`). */
+	readonly resolveClient: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
+	/** The request's origin (where its links open, and where the challenge points). */
+	readonly originOf: (request: HttpServerRequest.HttpServerRequest) => string;
 }
 
 /** T3's `decodeAsAdvertised`: calls are decoded with the JSON codec of each tool's parameters. */
@@ -58,21 +64,7 @@ const withAdvertisedSchemas = <A, E, R>(toolkit: Toolkit.Toolkit<Record<string, 
 	});
 
 export function makeMcpLayer(deps: McpDeps) {
-	const { bridge, ops, log } = deps;
-
-	/** The calling thread, from the request's `_meta`. */
-	const callerOf = Effect.gen(function* () {
-		const context = yield* McpSchema.McpRequestContext;
-		const meta = (context.requestMetadata ?? {}) as Record<string, unknown>;
-		const threadId = meta["t3/threadId"];
-		if (typeof threadId === "string") return { threadId } satisfies Caller;
-		const conversationId = meta["pi-durable/conversationId"];
-		if (typeof conversationId === "number") {
-			const owner = yield* Effect.promise(() => bridge.threadIdForConversation(conversationId));
-			return (owner === undefined ? {} : { threadId: owner }) satisfies Caller;
-		}
-		return {} satisfies Caller;
-	});
+	const { ops, log } = deps;
 
 	/** A tool call: the scope its access needs, then the operation; a thrown `OrchestratorMcpFailure` is its failure. */
 	const call =
@@ -81,8 +73,11 @@ export function makeMcpLayer(deps: McpDeps) {
 			Effect.gen(function* () {
 				const session = yield* McpSession;
 				const scope: AuthEnvironmentScope = WRITES.has(name) ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope;
+				if (WRITES.has(name) && session.access === "read-only") {
+					return yield* Effect.fail(new OrchestratorMcpFailure({ code: "capability_denied", message: "This tool changes the environment, and this MCP client was approved for read-only access." }));
+				}
 				if (!session.scopes.includes(scope)) return yield* Effect.fail(new OrchestratorMcpFailure({ code: "capability_denied", message: `This client lacks the ${scope} scope ${name} needs.` }));
-				const caller = yield* callerOf;
+				const caller: Caller = { client: { sessionId: session.sessionId, access: session.access }, ...(session.webOrigin === undefined ? {} : { webOrigin: session.webOrigin }) };
 				return yield* Effect.tryPromise({
 					try: async () => run(caller, input),
 					catch: (error) => (error instanceof OrchestratorMcpFailure ? error : new OrchestratorMcpFailure({ code: "orchestration_error", message: (error as Error).message || String(error) })),
@@ -107,15 +102,24 @@ export function makeMcpLayer(deps: McpDeps) {
 	});
 	const handlersLayer = OrchestratorToolkit.toLayer(handlers as never);
 
-	// A request without a usable credential is refused before the protocol sees it, as T3's MCP auth does.
+	// A request without an MCP client credential is refused before the protocol sees it, and told where to sign in
+	// (T3's `unauthorized`, with OAuth offered).
 	const auth = HttpRouter.middleware<{ provides: McpSession }>()((httpEffect) =>
 		Effect.gen(function* () {
 			const request = yield* HttpServerRequest.HttpServerRequest;
-			const session = deps.resolveSession(request);
+			const session = deps.resolveClient(request);
 			if (session === undefined) {
-				return HttpServerResponse.jsonUnsafe({ error: "invalid_token", error_description: "Pair this client first.", traceId: randomUUID() }, { status: 401, headers: { "www-authenticate": 'Bearer error="invalid_token"' } });
+				const presented = request.headers.authorization !== undefined;
+				const challenge = `Bearer resource_metadata="${deps.originOf(request)}/.well-known/oauth-protected-resource/mcp"${presented ? ', error="invalid_token"' : ""}`;
+				return HttpServerResponse.jsonUnsafe(
+					{ error: "invalid_mcp_credential", message: "A valid T3 Code MCP credential is required." },
+					{ status: 401, headers: { "cache-control": "no-store", "www-authenticate": challenge } },
+				);
 			}
-			return yield* httpEffect.pipe(Effect.provideService(McpSession, { scopes: session.scopes }));
+			const access: AuthMcpClientAccess = session.access ?? (session.scopes.includes(AuthOrchestrationOperateScope) ? "approval-required" : "read-only");
+			// A peer link's links open in its own environment; any other client's, in this host's web app.
+			const webOrigin = session.peerLink === true ? undefined : deps.originOf(request);
+			return yield* httpEffect.pipe(Effect.provideService(McpSession, { sessionId: session.id, scopes: session.scopes, access, webOrigin }));
 		}),
 	).layer;
 

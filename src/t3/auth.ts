@@ -2,7 +2,7 @@
 // hashes in <dir>/auth.json (mode 0600); tickets and the live-connection counts live in memory. Codes are
 // single-use; a host mints one with `mintPairingCode` (`../bridge.ts`), and a paired client mints, lists and
 // revokes them over the Connections endpoints (`./http.ts`), which read and write this one store.
-import { AuthStandardClientScopes } from "@t3tools/contracts";
+import { AuthStandardClientScopes, type AuthMcpClientAccess, mcpClientScopes } from "@t3tools/contracts";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +12,11 @@ import { readJson, writeJsonAtomic } from "./json-store.ts";
  * link a *user* copies by hand, so it is a one-time token, and it shows — like `t3 auth pairing create`. */
 export const ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
 export const ONE_TIME_TOKEN_SUBJECT = "one-time-token";
+/** T3's subject for a session an MCP client got over OAuth (`./mcp-oauth.ts`): accepted by `/mcp` only, and refused
+ * everywhere else (T3's `rejectMcpClientAudience`). */
+export const MCP_CLIENT_SUBJECT = "mcp-client";
+/** T3's `MCP_CLIENT_SESSION_TTL`. */
+const MCP_CLIENT_SESSION_TTL_MS = 30 * 86_400_000;
 
 type DeviceType = "desktop" | "mobile" | "tablet" | "bot" | "unknown";
 
@@ -54,7 +59,14 @@ export interface StoredToken {
 	createdAt: number;
 	expiresAt: number;
 	lastConnectedAt?: number;
+	/** An MCP client's approved access (T3 derives it from the scopes and the `runtimeModeCeiling`). */
+	access?: AuthMcpClientAccess;
+	/** Registered as another T3 environment's peer link. */
+	peerLink?: boolean;
 }
+
+/** Why an approval code was refused (T3's `ServerAuthMcpApprovalCodeError`). */
+export type McpApprovalCodeRefusal = "unknown_or_used" | "not_a_pairing_code" | "insufficient_scope";
 
 interface AuthFile {
 	environmentId: string;
@@ -288,6 +300,49 @@ export class AuthStore {
 		return { session: { token, expiresIn: Math.floor(this.#ttlMs / 1000), scopes, session } };
 	}
 
+	/**
+	 * Spend a pairing code to approve an MCP client at `access` (T3's `consumeMcpApprovalCode`). A code that lacks the
+	 * scopes the access needs is refused and left unspent; the host's own startup credential is not a pairing code.
+	 */
+	consumeMcpApprovalCode(code: string, access: AuthMcpClientAccess): McpApprovalCodeRefusal | undefined {
+		const now = Date.now();
+		const codeHash = hash(code.trim());
+		const data = this.#read();
+		const grant = data.pairings.find((pairing) => pairing.expiresAt > now && sameHash(pairing.hash, codeHash));
+		if (grant === undefined) return "unknown_or_used";
+		if (!mcpClientScopes(access).every((scope) => grant.scopes.includes(scope))) return "insufficient_scope";
+		this.#write({ ...data, pairings: data.pairings.filter((pairing) => pairing.id !== grant.id) });
+		this.#emit({ type: "pairingLinkRemoved", id: grant.id });
+		return grant.subject === ADMINISTRATIVE_BOOTSTRAP_SUBJECT ? "not_a_pairing_code" : undefined;
+	}
+
+	/** A bearer session for an MCP client that completed OAuth (T3's `issueMcpClientSession`). */
+	issueMcpClientSession(input: { label: string; access: AuthMcpClientAccess; peerLink: boolean; client: ClientMetadata }): { token: string; session: StoredToken } {
+		const now = Date.now();
+		const token = newSecret(32);
+		const session: StoredToken = {
+			id: randomUUID(),
+			hash: hash(token),
+			subject: MCP_CLIENT_SUBJECT,
+			scopes: [...mcpClientScopes(input.access)],
+			method: "bearer-access-token",
+			label: input.label,
+			...(input.client.ipAddress === undefined ? {} : { ipAddress: input.client.ipAddress }),
+			...(input.client.userAgent === undefined ? {} : { userAgent: input.client.userAgent }),
+			deviceType: "bot",
+			...(input.client.os === undefined ? {} : { os: input.client.os }),
+			...(input.client.browser === undefined ? {} : { browser: input.client.browser }),
+			createdAt: now,
+			expiresAt: now + MCP_CLIENT_SESSION_TTL_MS,
+			access: input.access,
+			...(input.peerLink ? { peerLink: true } : {}),
+		};
+		const data = this.#read();
+		this.#write({ ...data, tokens: [...data.tokens.filter((stored) => stored.expiresAt > now), session] });
+		this.#emit({ type: "clientUpserted", session });
+		return { token, session };
+	}
+
 	/** Every live client session, newest first; the boundary sorts by T3's priority and marks `current`. */
 	listClientSessions(): StoredToken[] {
 		const now = Date.now();
@@ -320,6 +375,11 @@ export class AuthStore {
 
 	/** The session a live socket belongs to (its ticket carries only the token hash). */
 	sessionOfTokenHash(tokenHash: string): StoredToken | undefined {
+		const session = this.#sessionOfTokenHash(tokenHash);
+		return session?.subject === MCP_CLIENT_SUBJECT ? undefined : session;
+	}
+
+	#sessionOfTokenHash(tokenHash: string): StoredToken | undefined {
 		return this.#read().tokens.find((token) => token.expiresAt > Date.now() && sameHash(token.hash, tokenHash));
 	}
 
@@ -354,7 +414,20 @@ export class AuthStore {
 		return this.#connected.has(sessionId);
 	}
 
+	/** The session a bearer header carries. An MCP client's session is refused: it is accepted by `/mcp` only. */
 	verifyBearer(header: string | undefined): StoredToken | undefined {
+		const session = this.#bearer(header);
+		return session?.subject === MCP_CLIENT_SUBJECT ? undefined : session;
+	}
+
+	/** The MCP client session a bearer header carries, for `/mcp`; any other session is refused there (T3's
+	 * `authenticateMcpClient`). */
+	verifyMcpClient(header: string | undefined): StoredToken | undefined {
+		const session = this.#bearer(header);
+		return session?.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token" ? session : undefined;
+	}
+
+	#bearer(header: string | undefined): StoredToken | undefined {
 		const match = /^(?:Bearer|DPoP)\s+(.+)$/i.exec(header ?? "");
 		if (!match) return undefined;
 		return this.#findByToken(match[1]!.trim());
@@ -363,7 +436,8 @@ export class AuthStore {
 	/** The session a browser session cookie carries, given the raw cookie value (its token, hashed against the store).
 	 * The same-origin web app authenticates every call with this cookie, not a bearer. */
 	verifySessionToken(token: string): StoredToken | undefined {
-		return this.#findByToken(token);
+		const session = this.#findByToken(token);
+		return session?.subject === MCP_CLIENT_SUBJECT ? undefined : session;
 	}
 
 	#findByToken(token: string): StoredToken | undefined {

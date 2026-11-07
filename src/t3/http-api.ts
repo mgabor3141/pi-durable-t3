@@ -6,6 +6,12 @@ import { randomUUID } from "node:crypto";
 import {
 	AuthAccessTokenType,
 	AuthAccessWriteScope,
+	AuthMcpApprovalError,
+	type AuthMcpAuthorizationRequest,
+	AuthMcpClientAccess,
+	AuthMcpRegistrationError,
+	AuthMcpTokenError,
+	mcpClientScopes,
 	AuthOrchestrationReadScope,
 	AuthSessionId,
 	AuthStandardClientScopes,
@@ -32,6 +38,18 @@ import {
 	ThreadId,
 } from "@t3tools/contracts";
 import { parseOAuthScope } from "@t3tools/shared/oauthScope";
+import {
+	type AuthorizationParams,
+	authorizationServerMetadata,
+	type McpOAuth,
+	type McpOAuthClient,
+	McpOAuthRedirectError,
+	type McpRegistrationRefusal,
+	McpTokenRefusal,
+	protectedResourceMetadata,
+	redirectForError,
+	urlsFor,
+} from "./mcp-oauth.ts";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -46,7 +64,7 @@ import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import type { AuthStore, ClientMetadata, PairingRateLimit, StoredToken } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
-import { InvalidThreadHistoryCursorError, decodeThreadHistoryCursor, projectThreadProjectionForWire, projectedRowEncodedBytes } from "./t3-server.ts";
+import { InvalidThreadHistoryCursorError, decodeThreadHistoryCursor, projectThreadProjectionForWire, projectedRowEncodedBytes, renderMcpOAuthErrorPage } from "./t3-server.ts";
 import { boundedSnapshot, historyPage } from "./thread-stream.ts";
 
 export interface HttpApiDeps {
@@ -61,7 +79,26 @@ export interface HttpApiDeps {
 	/** The browser session cookie for a session token. */
 	readonly sessionCookie: (token: string, expiresAtMs: number) => string;
 	readonly sessionCookieName: string;
+	/** The same-origin browser session cookie's session alone (T3's `authenticateBrowserSession`): what may approve an
+	 * MCP client with one click. */
+	readonly resolveBrowserSession: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
+	readonly mcpOAuth: McpOAuth;
 }
+
+/** The web app's page that asks the user to approve an MCP client. */
+const APPROVAL_PAGE_PATH = "/connect-agent";
+/** T3's headers for the sign-in error page. */
+const OAUTH_PAGE_HEADERS = {
+	"content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+	"x-frame-options": "DENY",
+	"cache-control": "no-store",
+	"referrer-policy": "no-referrer",
+	"x-content-type-options": "nosniff",
+};
+
+/** The request's origin, as T3's `requestUrls` reads it (`HttpServerRequest.toURL`). */
+export const requestOrigin = (request: HttpServerRequest.HttpServerRequest): string =>
+	Option.match(HttpServerRequest.toURL(request), { onNone: () => "http://localhost", onSome: (url) => url.origin });
 
 // T3 stamps its errors with the request's trace id; this host has no tracing, so each error gets a fresh id to quote.
 const traceId = () => randomUUID();
@@ -303,18 +340,129 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 		handlers.handle("diff", () => Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }))),
 	);
 
-	// MCP OAuth, T3 Connect and webhooks are not served by this host yet.
+	// MCP OAuth (T3's `mcpOAuthHttp` over `./mcp-oauth.ts`): the metadata, registration, the authorize redirect into the
+	// web app's `/connect-agent` page, the page's approval and decision calls, and the code exchange.
+	const oauth = deps.mcpOAuth;
+	const urls = Effect.map(HttpServerRequest.HttpServerRequest, (request) => urlsFor(requestOrigin(request)));
+	const reveal = ({ state, ...request }: AuthMcpAuthorizationRequest): AuthorizationParams => ({
+		...request,
+		...(state === undefined ? {} : { state: Redacted.value(state) }),
+	});
+	/** An unverified client or redirect is reported, never redirected; any other problem goes back through the
+	 * (verified) redirect URI. */
+	const forwardedAuthorization = (request: AuthMcpAuthorizationRequest) =>
+		Effect.gen(function* () {
+			const { issuer, resource } = yield* urls;
+			try {
+				return oauth.validateAuthorization({ issuer, resource }, reveal(request));
+			} catch (error) {
+				if (error instanceof McpOAuthRedirectError) return { redirectTo: redirectForError(error, issuer) };
+				return yield* Effect.fail(new AuthMcpApprovalError({ message: (error as Error).message }));
+			}
+		});
 	const mcpOAuth = HttpApiBuilder.group(EnvironmentHttpApi, "mcpOAuth", (handlers) =>
 		handlers
-			.handleRaw("protectedResource", () => unsupported("mcpOAuth.protectedResource"))
-			.handleRaw("mcpProtectedResource", () => unsupported("mcpOAuth.mcpProtectedResource"))
-			.handleRaw("authorizationServer", () => unsupported("mcpOAuth.authorizationServer"))
-			.handleRaw("register", () => unsupported("mcpOAuth.register"))
-			.handleRaw("authorize", () => unsupported("mcpOAuth.authorize"))
-			.handleRaw("approval", () => unsupported("mcpOAuth.approval"))
-			.handleRaw("decision", () => unsupported("mcpOAuth.decision"))
-			.handleRaw("token", () => unsupported("mcpOAuth.token")),
+			.handle("protectedResource", () => Effect.map(urls, protectedResourceMetadata))
+			.handle("mcpProtectedResource", () => Effect.map(urls, protectedResourceMetadata))
+			.handle("authorizationServer", () => Effect.map(urls, authorizationServerMetadata))
+			.handle("register", ({ payload }) =>
+				Effect.gen(function* () {
+					let client: McpOAuthClient;
+					try {
+						client = oauth.register(payload);
+					} catch (error) {
+						const refusal = error as McpRegistrationRefusal;
+						return yield* Effect.fail(new AuthMcpRegistrationError({ error: refusal.error, error_description: refusal.description }));
+					}
+					yield* noStore;
+					log.info("MCP client registered", { client: client.name, peerLink: client.peerLink });
+					return {
+						client_id: client.clientId,
+						client_name: client.name,
+						redirect_uris: client.redirectUris,
+						grant_types: ["authorization_code" as const],
+						response_types: ["code" as const],
+						token_endpoint_auth_method: "none" as const,
+					};
+				}),
+			)
+			.handleRaw("authorize", ({ request }) =>
+				Effect.gen(function* () {
+					const { issuer, resource } = yield* urls;
+					const url = new URL(request.url, issuer);
+					const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer" };
+					try {
+						oauth.validateAuthorization({ issuer, resource }, Object.fromEntries(url.searchParams) as AuthorizationParams);
+						return HttpServerResponse.redirect(`${APPROVAL_PAGE_PATH}${url.search}`, { headers });
+					} catch (error) {
+						if (error instanceof McpOAuthRedirectError) return HttpServerResponse.redirect(redirectForError(error, issuer), { headers });
+						return HttpServerResponse.text(renderMcpOAuthErrorPage((error as Error).message), { status: 400, contentType: "text/html; charset=utf-8", headers: OAUTH_PAGE_HEADERS });
+					}
+				}),
+			)
+			.handle("approval", ({ payload, request }) =>
+				Effect.gen(function* () {
+					const resolved = yield* forwardedAuthorization(payload);
+					if ("redirectTo" in resolved) return resolved;
+					const { issuer } = yield* urls;
+					const session = oauth.approvingBrowserSession(deps.resolveBrowserSession(request), resolved);
+					yield* noStore;
+					return {
+						clientName: resolved.client.name,
+						redirectHost: new URL(resolved.redirectUri).host,
+						environmentHost: new URL(issuer).host,
+						...(session === undefined
+							? {}
+							: {
+									csrfToken: session.csrfToken,
+									oneClickAccess: AuthMcpClientAccess.literals.filter((access) => mcpClientScopes(access).every((scope) => session.scopes.includes(scope))),
+								}),
+					};
+				}),
+			)
+			.handle("decision", ({ payload, request }) =>
+				Effect.gen(function* () {
+					const resolved = yield* forwardedAuthorization(payload.authorization);
+					if ("redirectTo" in resolved) return resolved;
+					yield* noStore;
+					const { decision } = payload;
+					if (decision._tag === "deny") {
+						log.info("MCP client sign-in denied", { client: resolved.client.name });
+						return { redirectTo: oauth.deny(resolved) };
+					}
+					try {
+						const redirectTo = oauth.approve({ browserSession: deps.resolveBrowserSession(request), authorization: resolved, decision });
+						log.info("MCP client sign-in approved", { client: resolved.client.name, access: decision.access, method: decision._tag });
+						return { redirectTo };
+					} catch (error) {
+						return yield* Effect.fail(new AuthMcpApprovalError({ message: (error as Error).message }));
+					}
+				}),
+			)
+			.handle("token", ({ payload, request }) =>
+				Effect.gen(function* () {
+					yield* noStore;
+					const userAgent = request.headers["user-agent"];
+					const { code, code_verifier: verifier, ...token } = payload;
+					try {
+						const { session: _session, ...result } = oauth.exchangeCode({
+							urls: yield* urls,
+							client: { ipAddress: addressOf(request), ...(userAgent ? { userAgent } : {}) },
+							token: {
+								...token,
+								...(code === undefined ? {} : { code: Redacted.value(code) }),
+								...(verifier === undefined ? {} : { code_verifier: Redacted.value(verifier) }),
+							},
+						});
+						return result;
+					} catch (error) {
+						if (!(error instanceof McpTokenRefusal)) throw error;
+						return yield* Effect.fail(new AuthMcpTokenError({ error: error.error, error_description: error.description }));
+					}
+				}),
+			),
 	);
+	// T3 Connect and webhooks are not served by this host.
 	const connect = HttpApiBuilder.group(EnvironmentHttpApi, "connect", (handlers) =>
 		handlers
 			.handleRaw("linkProof", () => unsupported("connect.linkProof"))

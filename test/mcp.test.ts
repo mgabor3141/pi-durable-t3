@@ -1,6 +1,7 @@
-// `/mcp` over HTTP, as an MCP client speaks it: initialize, list T3's orchestrator tools (T3's names, minus the link
-// tools a host without links hides), call the thread tools with a calling thread in `_meta`, and get the contract's
-// failure for a tool this host does not do. Without a credential the endpoint refuses.
+// `/mcp` over HTTP, as an MCP client speaks it: sign in over OAuth (`mcp-oauth-client.ts`), initialize, list T3's
+// orchestrator tools (T3's names, minus the link tools a host without links hides), call the thread tools as a client
+// outside any thread, within the access the user approved, and get the contract's failure for a tool this host does
+// not do. Only an MCP client's credential opens it, and that credential opens nothing else.
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, seedProjects, t3Dir } from "./host-process-harness.ts";
+import { signInMcpClient } from "./mcp-oauth-client.ts";
 
 const PORT = 4963;
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-mcp-"));
@@ -38,7 +40,7 @@ async function rpc(token: string | undefined, session: string | undefined, body:
 	return { status: response.status, session: response.headers.get("mcp-session-id") ?? session, message: data ? (JSON.parse(data) as Record<string, unknown>) : undefined };
 }
 
-it("serves T3's orchestrator tools to an MCP client, with the caller from _meta", async () => {
+it("serves T3's orchestrator tools to a signed-in MCP client, within its access", async () => {
 	const root = join(scratch, "host");
 	const projectId = "c0ffee00-4444-4444-8444-444444444444";
 	await mkdir(join(root, "projects", "m"), { recursive: true });
@@ -60,7 +62,22 @@ it("serves T3's orchestrator tools to an MCP client, with the caller from _meta"
 	}
 	ws.close();
 
-	expect((await rpc(undefined, undefined, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} })).status).toBe(401);
+	const origin = `http://127.0.0.1:${PORT}`;
+	// Without an MCP client's credential: 401, pointing at where to sign in. A paired client's token is not one.
+	for (const credential of [undefined, token]) {
+		const refused = await fetch(`${origin}/mcp`, { method: "POST", headers: credential === undefined ? {} : { authorization: `Bearer ${credential}` } });
+		expect(refused.status).toBe(401);
+		expect(refused.headers.get("www-authenticate")).toContain(`resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`);
+	}
+	const full = await signInMcpClient(origin, { code: pairCode(root), access: "full-access" });
+	expect(full.scope).toContain("orchestration:operate");
+	// The client's token is for `/mcp` alone (T3's audience check).
+	expect(await (await fetch(`${origin}/api/auth/session`, { headers: { authorization: `Bearer ${full.token}` } })).json()).toMatchObject({ authenticated: false });
+	const reader = await signInMcpClient(origin, { code: pairCode(root), access: "read-only", name: "reader" });
+	expect(reader.scope).toBe("orchestration:read");
+	const approver = await signInMcpClient(origin, { code: pairCode(root), access: "approval-required", name: "approver" });
+	{
+		const token = full.token;
 
 	const init = await rpc(token, undefined, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
 	expect(init.status).toBe(200);
@@ -77,10 +94,11 @@ it("serves T3's orchestrator tools to an MCP client, with the caller from _meta"
 	const call = async (id: number, name: string, args: unknown, meta?: unknown) =>
 		(await rpc(token, session, { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args, ...(meta === undefined ? {} : { _meta: meta }) } })).message?.result as { isError?: boolean; structuredContent?: Record<string, unknown>; content?: { text: string }[] };
 
-	const list = await call(3, "t3_thread_list", {}, { "t3/threadId": "mcp-a" });
+	const list = await call(3, "t3_thread_list", { projectId });
 	expect(list.isError).toBe(false);
 	Schema.decodeUnknownSync(Schema.toCodecJson(OrchestratorMcpThreadListResult))(list.structuredContent);
-	expect(list.structuredContent).toMatchObject({ projectId, currentThreadId: "mcp-a", total: 2 });
+	expect(list.structuredContent).toMatchObject({ projectId, total: 2 });
+	expect((list.structuredContent as { threads: { link: string }[] }).threads[0]!.link, "links open in this host's web app").toMatch(new RegExp(`^${origin}/`));
 
 	const read = await call(4, "t3_thread_read", { threadId: "mcp-b" });
 	expect(read.isError).toBe(false);
@@ -95,4 +113,26 @@ it("serves T3's orchestrator tools to an MCP client, with the caller from _meta"
 	const delegated = await call(6, "delegate_task", { task: "x" });
 	expect(delegated.isError).toBe(true);
 	expect(host.out()).toContain("unsupported MCP tool");
+
+	// A client outside a thread cannot act as one; a full-access client may write to any thread.
+	const created = await call(7, "create_threads", { threads: [{ prompt: "hi" }] });
+	expect(JSON.parse(created.content![0]!.text)).toMatchObject({ code: "thread_credential_required" });
+	const renamed = await call(8, "t3_thread_update", { threadId: "mcp-b", action: "rename", title: "Renamed by a client" });
+	expect(renamed.isError).toBe(false);
+	expect(renamed.structuredContent).toMatchObject({ threadId: "mcp-b", title: "Renamed by a client" });
+	}
+
+	// The access the user approved bounds what each client may do.
+	const failureOf = async (credential: string, name: string, args: unknown) => {
+		const init = await rpc(credential, undefined, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+		await rpc(credential, init.session, { jsonrpc: "2.0", method: "notifications/initialized" });
+		const result = (await rpc(credential, init.session, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } })).message?.result as { isError?: boolean; content?: { text: string }[] };
+		return result.isError === true ? (JSON.parse(result.content![0]!.text) as { code: string; message: string }) : undefined;
+	};
+	expect(await failureOf(reader.token, "t3_thread_read", { threadId: "mcp-a" }), "a reader reads").toBeUndefined();
+	expect(await failureOf(reader.token, "t3_thread_send", { threadId: "mcp-a", message: "x" })).toMatchObject({ code: "capability_denied", message: expect.stringContaining("read-only") });
+	expect(await failureOf(approver.token, "t3_thread_update", { threadId: "mcp-a", action: "rename", title: "x" })).toMatchObject({
+		code: "runtime_mode_escalation_denied",
+		message: "Child runtime mode full-access is broader than parent mode approval-required.",
+	});
 }, 60_000);

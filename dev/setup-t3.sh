@@ -105,6 +105,9 @@ cp "$CACHE/apps/server/src/auth/RpcAuthorization.ts" "$here/vendor/t3-server/Rpc
 # The input schema T3 advertises for an MCP tool (compacted JSON Schema), as-is.
 [ -f "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" ] || { echo "setup:t3: apps/server/src/mcp/advertisedJsonSchema.ts missing"; exit 1; }
 cp "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" "$here/vendor/t3-server/advertisedJsonSchema.ts"
+# The page an MCP OAuth sign-in shows when it cannot continue, as-is.
+[ -f "$CACHE/apps/server/src/auth/mcpOAuthHtml.ts" ] || { echo "setup:t3: apps/server/src/auth/mcpOAuthHtml.ts missing"; exit 1; }
+cp "$CACHE/apps/server/src/auth/mcpOAuthHtml.ts" "$here/vendor/t3-server/mcpOAuthHtml.ts"
 cp "$here/vendor/contracts/tsconfig.json" "$here/vendor/t3-server/tsconfig.json"
 cat > "$here/vendor/t3-server/package.json" <<'JSON'
 { "name": "@t3tools/t3-server", "private": true, "type": "module", "exports": { "./*": "./*.ts" } }
