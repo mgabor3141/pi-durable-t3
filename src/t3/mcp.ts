@@ -29,9 +29,20 @@ class McpSession extends Context.Service<
 >()("pi-durable-t3/McpSession") {}
 
 /** The tools this host answers; every other tool of the toolkit is refused. */
-const SUPPORTED = new Set(["t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_wait", "t3_thread_interrupt", "create_threads", "t3_thread_update"]);
+const SUPPORTED = new Set([
+	"t3_thread_list",
+	"t3_thread_read",
+	"t3_thread_send",
+	"t3_thread_wait",
+	"t3_thread_interrupt",
+	"create_threads",
+	"t3_thread_update",
+	"schedule_task",
+	"list_scheduled_tasks",
+	"delete_scheduled_task",
+]);
 /** The tools that write (T3's `writesThreads` / `actsAsCaller`): they need `orchestration:operate`. */
-const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update"]);
+const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update", "schedule_task", "delete_scheduled_task"]);
 
 export interface McpDeps {
 	readonly bridge: Bridge;
@@ -99,6 +110,9 @@ export function makeMcpLayer(deps: McpDeps) {
 		t3_thread_interrupt: call("t3_thread_interrupt", (caller, input) => ops.interrupt(caller, input as never)),
 		create_threads: call("create_threads", (caller, input) => ops.create(caller, input as never)),
 		t3_thread_update: call("t3_thread_update", (caller, input) => ops.update(caller, input as never)),
+		schedule_task: call("schedule_task", (caller, input) => ops.scheduleTask(caller, input as never)),
+		list_scheduled_tasks: call("list_scheduled_tasks", (caller, input) => ops.listScheduledTasks(caller, input as never)),
+		delete_scheduled_task: call("delete_scheduled_task", (caller, input) => ops.deleteScheduledTask(caller, input as never)),
 	});
 	const handlersLayer = OrchestratorToolkit.toLayer(handlers as never);
 

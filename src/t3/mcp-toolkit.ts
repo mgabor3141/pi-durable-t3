@@ -1,10 +1,9 @@
 // T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.6), copied as it is so the
 // tool names, descriptions, schemas and annotations an agent sees are T3's. Removed: the server services each tool
-// depends on in T3 (`mcp.ts` supplies the handlers), and the three linked-environment tools, which T3 hides while links
-// are off and this host has none.
+// depends on in T3 (`mcp.ts` supplies the handlers), the three linked-environment tools, which T3 hides while links
+// are off and this host has none, and `orchestrator_capabilities` (the provider and model menu for `delegate_task`,
+// which this host does not serve).
 import {
-  OrchestratorMcpCapabilitiesInput,
-  OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
@@ -42,19 +41,6 @@ import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
 
-
-const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
-  description:
-    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
-  parameters: OrchestratorMcpCapabilitiesInput,
-  success: OrchestratorMcpCapabilitiesResult,
-  failure: OrchestratorMcpFailure,
-  failureMode: "return",
-})
-  .annotate(Tool.Title, "Get orchestration capabilities")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
@@ -266,7 +252,6 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 
 
 export const OrchestratorToolkit = Toolkit.make(
-  OrchestratorCapabilitiesTool,
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,

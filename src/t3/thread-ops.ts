@@ -37,6 +37,17 @@ import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
 import { CommandError } from "./errors.ts";
+import type { ScheduledTasks } from "./scheduled-tasks.ts";
+import type {
+	OrchestratorMcpDeleteScheduledTaskInput,
+	OrchestratorMcpDeleteScheduledTaskResult,
+	OrchestratorMcpListScheduledTasksInput,
+	OrchestratorMcpListScheduledTasksResult,
+	OrchestratorMcpSaveScheduledTaskInput,
+	OrchestratorMcpScheduledTask,
+	ScheduledTask,
+	ScheduledTaskUpsertInput,
+} from "@t3tools/contracts";
 import type { Logger } from "./logging.ts";
 
 /** Who is calling: the thread the call comes from, or the MCP client that signed in over OAuth (`./mcp-oauth.ts`) with
@@ -129,8 +140,10 @@ export class ThreadOps {
 	readonly #bridge: Bridge;
 	readonly #environmentId: string;
 	readonly #log: Logger;
+	readonly #scheduledTasks: ScheduledTasks | undefined;
 
-	constructor(bridge: Bridge, environmentId: string, log: Logger) {
+	constructor(bridge: Bridge, environmentId: string, log: Logger, scheduledTasks?: ScheduledTasks) {
+		this.#scheduledTasks = scheduledTasks;
 		this.#bridge = bridge;
 		this.#environmentId = environmentId;
 		this.#log = log;
@@ -505,5 +518,148 @@ export class ThreadOps {
 			} as OrchestratorMcpCreateThreadsResult["threads"][number]);
 		}
 		return { threads: created } as OrchestratorMcpCreateThreadsResult;
+	}
+
+	// ---- scheduled tasks (T3's `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task`) -------------------
+
+	/** The modes a caller may start work at: a thread's own (every thread here runs at full access), a client's
+	 * approved ceiling. */
+	#limits(caller: Caller): RuntimeMode {
+		return caller.client === undefined ? "full-access" : clientCeiling(caller.client.access);
+	}
+
+	#tasks(): ScheduledTasks {
+		return this.#scheduledTasks ?? fail("orchestration_error", "Scheduled tasks are not available on this host.");
+	}
+
+	/** The calling thread, which must have a live run (T3's `assertLiveCaller`); a client has none. */
+	async #liveParent(caller: Caller): Promise<OrchestrationV2ThreadShell | undefined> {
+		const parent = this.#caller(caller);
+		if (parent === undefined) return undefined;
+		if (latestActiveRun(await this.#projection(parent.id)) === undefined) fail("parent_not_active", "The calling provider no longer owns an active thread run.");
+		return parent;
+	}
+
+	#project(projectId: string): { readonly id: string } {
+		return this.#bridge.config.registry.list().find((project) => project.id === projectId) ?? fail("invalid_request", `Project ${projectId} was not found.`);
+	}
+
+	/** A task the caller may change: its runs (and its bound thread) run at modes no broader than the caller's. */
+	async #ownedTask(caller: Caller, scheduledTaskId: string): Promise<ScheduledTask> {
+		const task = this.#tasks().list().tasks.find((candidate) => candidate.id === scheduledTaskId) ?? fail("task_not_found", `Scheduled task ${scheduledTaskId} was not found.`);
+		const limit = this.#limits(caller);
+		const modes = [task.runtimeMode, ...(task.threadId !== null && this.#bridge.hasThread(task.threadId) ? [this.#bridge.threadShell(task.threadId).runtimeMode] : [])];
+		for (const mode of modes) {
+			if (RUNTIME_MODE_RANK[mode] > RUNTIME_MODE_RANK[limit]) fail("runtime_mode_escalation_denied", `Child runtime mode ${mode} is broader than parent mode ${limit}.`);
+		}
+		return task;
+	}
+
+	/** T3's `scheduledTaskSummary`; this host serves no webhooks, so no task carries one. */
+	#summary(task: ScheduledTask): OrchestratorMcpScheduledTask {
+		return {
+			scheduledTaskId: task.id,
+			title: task.title,
+			prompt: task.prompt,
+			enabled: task.enabled,
+			projectId: task.projectId,
+			boundThreadId: task.threadId,
+			schedule: task.schedule,
+			nextRunAt: task.nextRunAt,
+			lastRunStatus: task.lastRunStatus,
+		} as OrchestratorMcpScheduledTask;
+	}
+
+	async #upsert(input: ScheduledTaskUpsertInput, verb: string): Promise<ScheduledTask> {
+		try {
+			return (await this.#tasks().upsert(input)).task;
+		} catch (error) {
+			return fail("orchestration_error", `Could not ${verb} task: ${(error as Error).message}`);
+		}
+	}
+
+	/**
+	 * `schedule_task`: a new task (no `scheduledTaskId`), or a change to one. A new task runs at the caller's modes on the
+	 * calling thread's model, posting each run into the calling thread (`bindToCurrentThread`, the default inside a thread
+	 * of the same project) or starting a new thread per run at the project's root. T3 gives an unbound run a fresh
+	 * worktree; this host has no worktrees, so it runs at the root, as a Scratch project's does in T3.
+	 */
+	async scheduleTask(caller: Caller, input: OrchestratorMcpSaveScheduledTaskInput): Promise<OrchestratorMcpScheduledTask> {
+		this.#mayWrite(caller, undefined);
+		const parent = await this.#liveParent(caller);
+		const notInThread = "bindToCurrentThread needs an agent running inside a T3 thread.";
+		const otherProject = "bindToCurrentThread binds to this thread, which belongs to a different project.";
+		if (input.scheduledTaskId !== undefined) {
+			const existing = await this.#ownedTask(caller, input.scheduledTaskId);
+			if (input.bindToCurrentThread === true && (parent === undefined || parent.projectId !== existing.projectId)) fail("invalid_request", parent === undefined ? notInThread : otherProject);
+			const threadId = input.bindToCurrentThread === undefined ? existing.threadId : input.bindToCurrentThread && parent !== undefined ? parent.id : null;
+			const task = await this.#upsert(
+				{
+					id: existing.id,
+					title: input.title ?? existing.title,
+					prompt: input.prompt ?? existing.prompt,
+					enabled: input.enabled ?? existing.enabled,
+					schedule: input.schedule ?? existing.schedule,
+					projectId: existing.projectId,
+					threadId,
+					workspaceStrategy: { type: "root" },
+					modelSelection: existing.modelSelection,
+					runtimeMode: existing.runtimeMode,
+					interactionMode: existing.interactionMode,
+					createdBy: existing.createdBy,
+					creationSource: existing.creationSource,
+				} as ScheduledTaskUpsertInput,
+				"update scheduled",
+			);
+			return this.#summary(task);
+		}
+		if (input.prompt === undefined || input.schedule === undefined) fail("invalid_request", "A new scheduled task needs `prompt` and `schedule`.");
+		const projectId = input.projectId ?? parent?.projectId ?? fail("target_required", "Pass projectId: this MCP client is not running inside a T3 thread.");
+		this.#project(projectId);
+		const bind = input.bindToCurrentThread ?? (parent !== undefined && parent.projectId === projectId);
+		if (bind && (parent === undefined || parent.projectId !== projectId)) fail("invalid_request", parent === undefined ? notInThread : otherProject);
+		const modelSelection = parent?.modelSelection ?? fail("invalid_request", `Project ${projectId} has no default model, so this caller cannot pick one for it.`);
+		const derivedTitle = input.prompt!.split("\n")[0]?.trim() ?? "";
+		const key = input.clientRequestId;
+		const task = await this.#upsert(
+			{
+				title: input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task"),
+				prompt: input.prompt!,
+				enabled: input.enabled ?? true,
+				schedule: input.schedule!,
+				projectId,
+				threadId: bind && parent !== undefined ? parent.id : null,
+				workspaceStrategy: { type: "root" },
+				modelSelection,
+				runtimeMode: this.#limits(caller),
+				interactionMode: "default",
+				createdBy: "agent",
+				creationSource: "mcp",
+				...(key === undefined ? {} : { commandId: `mcp-${stableId(namespaceOf(caller), key, "schedule-task")}` }),
+			} as ScheduledTaskUpsertInput,
+			"schedule",
+		);
+		this.#log.info("scheduled task saved by an agent", { scheduledTaskId: task.id, threadId: caller.threadId });
+		return this.#summary(task);
+	}
+
+	/** `list_scheduled_tasks`: the given project's, else the calling thread's project's, else all of them. */
+	listScheduledTasks(caller: Caller, input: OrchestratorMcpListScheduledTasksInput): OrchestratorMcpListScheduledTasksResult {
+		const projectId = input.projectId ?? this.#caller(caller)?.projectId;
+		const tasks = this.#tasks().list().tasks.filter((task) => projectId === undefined || task.projectId === projectId);
+		return { tasks: tasks.map((task) => this.#summary(task)) } as OrchestratorMcpListScheduledTasksResult;
+	}
+
+	/** `delete_scheduled_task`: it stops at once. */
+	async deleteScheduledTask(caller: Caller, input: OrchestratorMcpDeleteScheduledTaskInput): Promise<OrchestratorMcpDeleteScheduledTaskResult> {
+		this.#mayWrite(caller, undefined);
+		await this.#liveParent(caller);
+		const existing = await this.#ownedTask(caller, input.scheduledTaskId);
+		try {
+			await this.#tasks().delete({ id: existing.id });
+		} catch (error) {
+			fail("orchestration_error", `Could not delete scheduled task: ${(error as Error).message}`);
+		}
+		return { scheduledTaskId: existing.id, deleted: true } as OrchestratorMcpDeleteScheduledTaskResult;
 	}
 }

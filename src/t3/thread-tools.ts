@@ -2,7 +2,12 @@
 // `thread_wait`, `thread_read`, `thread_search`, `thread_list`, `thread_cancel`. A call acts as the thread its own
 // conversation is the head of. Writes are safe to replay after a crash: a call without a `clientRequestId` uses its own
 // call id, so a replay is answered with what the first run did.
+import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
+import * as Schema from "effect/Schema";
+import { OrchestratorToolkit } from "./mcp-toolkit.ts";
+import { advertisedJsonSchema } from "./t3-server.ts";
+import type { ThreadOps } from "./thread-ops.ts";
 import { Type, type TSchema } from "typebox";
 import type { Bridge } from "./bridge.ts";
 import { MAX_ACTIVE_CHILDREN, MAX_DEPTH, type Orchestration, ThreadToolError } from "./orchestration.ts";
@@ -48,7 +53,7 @@ const cancel = Type.Object({ threadId: Type.String(), cascade: Type.Optional(Typ
 const reportJson = (entry: Report) => ({ threadId: entry.threadId, title: entry.title, runId: entry.runId, verdict: entry.verdict, toolCalls: entry.toolCalls, truncated: entry.truncated, report: entry.text });
 
 /** The thread tools, as one extension. `callers`: who may call them (default: the model and scripts). */
-export function threadToolsExtension(bridge: Bridge, orchestration: Orchestration, options: { readonly callers?: Callers } = {}): Extension {
+export function threadToolsExtension(bridge: Bridge, orchestration: Orchestration, options: { readonly callers?: Callers; readonly ops?: ThreadOps } = {}): Extension {
 	const callers = options.callers ?? ["model", "tools"];
 	const tool = <I>(name: string, description: string, parameters: TSchema, writes: boolean, run: (caller: string | undefined, input: I, api: Api) => Promise<unknown> | unknown): ToolRegistration =>
 		({
@@ -84,5 +89,35 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 		tool<{ parent?: string; status?: "active" | "idle"; projectId?: string; limit?: number }>("thread_list", LIST, list, false, (caller, input) => ({ threads: orchestration.list(caller, input) })),
 		tool<{ threadId: string; cascade?: boolean }>("thread_cancel", CANCEL, cancel, true, (caller, input) => orchestration.cancel(caller, input.threadId, input.cascade ?? true)),
 	];
+	// T3's scheduled-task tools, with T3's names, descriptions and schemas (the same operations `/mcp` serves).
+	const ops = options.ops;
+	if (ops !== undefined) {
+		const scheduled: Record<string, { readonly writes: boolean; readonly run: (caller: { threadId?: string }, input: never) => unknown }> = {
+			schedule_task: { writes: true, run: (caller, input) => ops.scheduleTask(caller, input) },
+			list_scheduled_tasks: { writes: false, run: (caller, input) => ops.listScheduledTasks(caller, input) },
+			delete_scheduled_task: { writes: false, run: (caller, input) => ops.deleteScheduledTask(caller, input) },
+		};
+		for (const [name, operation] of Object.entries(scheduled)) {
+			const contract = OrchestratorToolkit.tools[name as keyof typeof OrchestratorToolkit.tools];
+			const decode = Schema.decodeUnknownSync(Schema.toCodecJson(contract.parametersSchema as Schema.Top) as never);
+			const encode = Schema.encodeUnknownSync(Schema.toCodecJson(contract.successSchema as Schema.Top) as never);
+			tools.push(
+				tool<Record<string, unknown>>(name, contract.description ?? name, advertisedJsonSchema(contract) as unknown as TSchema, operation.writes, async (caller, input) => {
+					let decoded: unknown;
+					try {
+						decoded = decode(input);
+					} catch (error) {
+						throw new ThreadToolError((error as Error).message);
+					}
+					try {
+						return encode(await operation.run(caller === undefined ? {} : { threadId: caller }, decoded as never));
+					} catch (error) {
+						if (error instanceof OrchestratorMcpFailure) throw new ThreadToolError(`${error.code}: ${error.message}`);
+						throw error;
+					}
+				}),
+			);
+		}
+	}
 	return defineExtension({ name: "thread-tools", tools });
 }

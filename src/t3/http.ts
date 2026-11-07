@@ -282,7 +282,7 @@ export function makeServerLayer(deps: {
 	});
 
 	// T3's orchestrator MCP server over this host's threads (`mcp.ts`).
-	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log), log, version: SERVER_VERSION, resolveClient: (request) => auth.verifyMcpClient(request.headers.authorization), originOf: requestOrigin });
+	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log, deps.scheduledTasks), log, version: SERVER_VERSION, resolveClient: (request) => auth.verifyMcpClient(request.headers.authorization), originOf: requestOrigin });
 
 	const routes = Layer.mergeAll(
 		// The web app sends its traces here (T3's `layerOtlpTracesProxyRoute`). This host exports no traces, which is T3's

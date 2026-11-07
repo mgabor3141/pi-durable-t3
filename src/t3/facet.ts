@@ -116,7 +116,7 @@ export function startFacet(deps: {
 			await bridge.renameThread(threadId, title);
 		},
 		secretRequests: (sink) => secretRequests.extension(sink),
-		threadTools: (options) => threadToolsExtension(bridge, orchestration, options),
+		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		orchestration,
 		close: async () => {
 			closing = true;

@@ -11,6 +11,8 @@ import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { Orchestration } from "../src/t3/orchestration.ts";
+import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
+import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
 import { createNamed, makeThreads } from "./threads-harness.ts";
@@ -65,7 +67,10 @@ async function setup(options: { readonly waitSignal?: () => AbortSignal | undefi
 	let bridge: Bridge | undefined;
 	const late = new Proxy({} as Bridge, { get: (_target, key) => (bridge as unknown as Record<string | symbol, unknown>)[key] instanceof Function ? (bridge as never as Record<string | symbol, (...args: unknown[]) => unknown>)[key]!.bind(bridge) : (bridge as unknown as Record<string | symbol, unknown>)[key] });
 	const orchestration = new Orchestration(late, log, options);
-	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [threadToolsExtension(late, orchestration)] });
+	let tasks: ScheduledTasks | undefined;
+	const lateTasks = new Proxy({} as ScheduledTasks, { get: (_target, key) => { const value = (tasks as unknown as Record<string | symbol, unknown>)[key]; return value instanceof Function ? value.bind(tasks) : value; } });
+	const ops = new ThreadOps(late, "env-1", log, lateTasks);
+	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [threadToolsExtension(late, orchestration, { ops })] });
 	f.model.respond(...Array.from({ length: 60 }, () => brain));
 	const create = createNamed(f.threads, f.harness, f.model);
 	await create({ threadId: "a", projectId: "p", title: "Parent" });
@@ -74,6 +79,8 @@ async function setup(options: { readonly waitSignal?: () => AbortSignal | undefi
 	bridge.start();
 	await bridge.loaded();
 	orchestration.start();
+	tasks = new ScheduledTasks({ harness: f.harness, dispatch: scheduledTaskDispatch(bridge), log });
+	await tasks.load();
 	onTestFinished(async () => {
 		for (const entry of gates.values()) entry.release();
 		gates.clear();
@@ -92,7 +99,7 @@ async function setup(options: { readonly waitSignal?: () => AbortSignal | undefi
 		const projection = await settled("a", (candidate) => candidate.messages.filter((message) => message.text.startsWith("Parent saw:")).length >= count);
 		return projection!.messages.filter((message) => message.text.startsWith("Parent saw:")).map((message) => JSON.parse(message.text.slice("Parent saw: ".length)));
 	};
-	return { bridge, orchestration, f, ask, settled, sawAll };
+	return { bridge, orchestration, f, ask, settled, sawAll, tasks: () => tasks! };
 }
 
 it("a parent starts a child, waits for its report, and follows up on it", { timeout: 60_000 }, async () => {
@@ -236,4 +243,26 @@ it("a restart's signal ends a wait; the report is sent when the work settles", {
 	gate("w1").release();
 	const woke = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("[Report from thread")));
 	expect(woke!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text).toContain("[AGENT]: released w1");
+});
+
+it("an agent schedules, lists, changes and deletes a task with T3's tools", { timeout: 60_000 }, async () => {
+	const { ask, sawAll, tasks } = await setup();
+	await ask("a", { name: "schedule_task", args: { prompt: "Check the build\nand report", schedule: { type: "interval", everyMs: 3_600_000 } } });
+	const [created] = await sawAll(1);
+	expect(created).toMatchObject({ title: "Check the build", enabled: true, projectId: "p", boundThreadId: "a", schedule: { type: "interval", everyMs: 3_600_000 }, lastRunStatus: "never" });
+	const stored = tasks().list().tasks.find((task) => task.id === created.scheduledTaskId)!;
+	expect(stored).toMatchObject({ threadId: "a", runtimeMode: "full-access", createdBy: "agent", creationSource: "mcp", workspaceStrategy: { type: "root" } });
+
+	await ask("a", { name: "schedule_task", args: { scheduledTaskId: created.scheduledTaskId, enabled: false, bindToCurrentThread: false } });
+	await ask("a", { name: "list_scheduled_tasks", args: {} });
+	await ask("a", { name: "schedule_task", args: { prompt: "Hook", schedule: { type: "webhook" } } });
+	await ask("a", { name: "delete_scheduled_task", args: { scheduledTaskId: created.scheduledTaskId } });
+	await ask("a", { name: "delete_scheduled_task", args: { scheduledTaskId: created.scheduledTaskId } });
+	const [, changed, listed, webhook, deleted, again] = await sawAll(6);
+	expect(changed).toMatchObject({ enabled: false, boundThreadId: null, nextRunAt: null });
+	expect(listed.tasks).toEqual([expect.objectContaining({ scheduledTaskId: created.scheduledTaskId, enabled: false })]);
+	expect(webhook.error).toMatch(/^orchestration_error: Could not schedule task: /);
+	expect(deleted).toEqual({ scheduledTaskId: created.scheduledTaskId, deleted: true });
+	expect(again.error).toBe(`task_not_found: Scheduled task ${created.scheduledTaskId} was not found.`);
+	expect(tasks().list().tasks).toEqual([]);
 });
