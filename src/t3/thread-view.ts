@@ -257,7 +257,8 @@ export class ThreadView {
 			await Promise.race([
 				this.#changed.promise,
 				new Promise<void>((resolve) => {
-					timer = setTimeout(resolve, remaining);
+					// An unbounded wait arms no timer (Node fires an Infinity timeout at once).
+					if (Number.isFinite(remaining)) timer = setTimeout(resolve, remaining);
 					onAbort = resolve;
 					signal?.addEventListener("abort", onAbort, { once: true });
 				}),

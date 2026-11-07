@@ -21,9 +21,8 @@ export class ThreadToolError extends Error {}
 /** How deep children may nest under a thread that is not a child, and how many may be busy under one parent. */
 export const MAX_DEPTH = 3;
 export const MAX_ACTIVE_CHILDREN = 10;
-/** A wait's default: under codemode's five-minute script limit. */
-export const DEFAULT_WAIT_MS = 4 * 60_000;
-const MAX_WAIT_MS = 60 * 60_000;
+/** A wait with no `timeoutMs` lasts until the work settles (or the host's `waitSignal` ends it), as pi's do. */
+const waitMs = (timeoutMs: number | undefined) => (timeoutMs === undefined ? Number.POSITIVE_INFINITY : Math.max(1, timeoutMs));
 /** A follower re-arms its wait this often; it holds the thread open meanwhile. */
 const FOLLOW_CHUNK_MS = 60 * 60_000;
 
@@ -114,8 +113,7 @@ export class Orchestration {
 		}
 		await this.#bridge.sendMessage({ threadId, commandId, messageId, text: input.message, mode: mode === "steer" ? "steer" : "queue", provenance });
 		if (!wait) return { threadId, messageId, notify };
-		const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_MS));
-		const settled = await this.#waitSettled(threadId, messageId, timeoutMs, signal);
+		const settled = await this.#waitSettled(threadId, messageId, waitMs(input.timeoutMs), signal);
 		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
 		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
 		if (!notify && caller !== undefined) {
@@ -195,7 +193,7 @@ export class Orchestration {
 	async wait(caller: string | undefined, threadIds: readonly string[], timeoutMs: number | undefined, signal?: AbortSignal): Promise<{ readonly reports: readonly Report[]; readonly verdict: Verdict }> {
 		if (threadIds.length === 0) throw new ThreadToolError("Name at least one thread.");
 		for (const threadId of threadIds) this.#existing(threadId, caller);
-		const deadline = Date.now() + Math.min(MAX_WAIT_MS, Math.max(1, timeoutMs ?? DEFAULT_WAIT_MS));
+		const deadline = Date.now() + waitMs(timeoutMs);
 		const reports = await Promise.all(
 			threadIds.map(async (threadId) => {
 				const before = await this.#projection(threadId);

@@ -5,7 +5,7 @@
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { Type, type TSchema } from "typebox";
 import type { Bridge } from "./bridge.ts";
-import { DEFAULT_WAIT_MS, MAX_ACTIVE_CHILDREN, MAX_DEPTH, type Orchestration, ThreadToolError } from "./orchestration.ts";
+import { MAX_ACTIVE_CHILDREN, MAX_DEPTH, type Orchestration, ThreadToolError } from "./orchestration.ts";
 import type { Report } from "./reports.ts";
 
 type Callers = readonly ("model" | "tools")[];
@@ -30,11 +30,11 @@ const prompt = Type.Object({
 	message: Type.String(),
 	mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("followUp"), Type.Literal("steer"), Type.Literal("notify")])),
 	wait: Type.Optional(Type.Boolean({ description: "Default true" })),
-	timeoutMs: Type.Optional(Type.Number({ description: `Wait at most this long (default ${DEFAULT_WAIT_MS}); the work goes on, and its report is sent later` })),
+	timeoutMs: Type.Optional(Type.Number({ description: "Wait at most this long (default: until it settles); the work goes on, and its report is sent later" })),
 	notify: Type.Optional(Type.Boolean({ description: "Post the report into your thread when the work settles. Default: when not waiting" })),
 	clientRequestId: Type.Optional(Type.String()),
 });
-const wait = Type.Object({ threadIds: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), timeoutMs: Type.Optional(Type.Number()) });
+const wait = Type.Object({ threadIds: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), timeoutMs: Type.Optional(Type.Number({ description: "Default: until they settle" })) });
 const read = Type.Object({ threadId: Type.Optional(Type.String()), last: Type.Optional(Type.Number()), before: Type.Optional(Type.Number()) });
 const search = Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()) });
 const list = Type.Object({
