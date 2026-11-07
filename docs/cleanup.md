@@ -216,6 +216,13 @@ a read-only pairing link), Projects, Scheduled tasks, Providers, Threads, Genera
 `514d3cd`: a rollback sent as a snapshot left the web app's revert waiting (the bounded window omits rolled-back runs),
 `/api/observability/v1/traces` was not served, and the smoke scripts still seeded `projects.json`.
 
+MCP OAuth (`f53045a`), by hand in the same web app: a client registered over HTTP, its authorize link opened T3's
+`/connect-agent` page with our approval details (client name, both hosts, the five access levels, the pairing-code
+field without a session). Approving at full access with a pairing code redirected to the client with `code`, `state`
+and `iss`, and the code exchanged at the issuer for a 30-day token with full access's four scopes. After the browser
+paired, the page offered one-click approval with no code field. Sharing & access lists the client as "Manual agent ·
+Bot · 4 scopes", revocable. No faults.
+
 Claw (separate, small): codemode `memoryLimitBytes`; MCP servers connected after the bridge is attached, and a failed
 server retried; the restart drain treats a tool task whose owned work is all paused as paused.
 
