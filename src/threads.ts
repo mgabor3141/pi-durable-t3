@@ -34,7 +34,8 @@ import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
-import { APP_COMPACT_ENTRY } from "./t3/runs.ts";
+import { APP_COMPACT_ENTRY, APP_NOTE_ENTRY } from "./t3/runs.ts";
+import type { Message } from "@earendil-works/pi-ai";
 import { type SubagentRef, subagentThreadId } from "./t3/subagents.ts";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
@@ -67,6 +68,19 @@ export type ThreadLineage = {
 export type LinkOrigin = { sessionId: string; label: string; access?: string };
 /** T3's `OrchestrationV2DelegatedFrom`: the thread in a linked environment that delegated this one. */
 export type DelegatedFrom = { environmentId: string; threadId: string; title: string };
+/**
+ * A message that asked to be answered (`thread_prompt`'s `notify`): when the activity it started or joined in this thread
+ * settles, the activity's report is posted into `threadId`, the sender's thread. Kept on the receiving thread's record
+ * until it is delivered; the delivery's command id is `id`, so a retry after a crash is answered from its receipt.
+ */
+export type NotifyRequest = { id: string; threadId: string; messageId: string; createdAt: number };
+/** How a child thread was started: the parent's run (where its card is), the message, and how its latest run ended
+ * (written when it settles, so the card is right while the child's thread is closed). */
+export type Spawn = {
+	parentRunId: string;
+	prompt: string;
+	outcome?: { status: "completed" | "failed" | "interrupted" | "cancelled"; result: string | null; completedAt: number };
+};
 
 /** The sidebar's durable snapshot of a thread's latest visible message, so an unopened thread still sorts and previews
  * correctly after a restart. Updated on prompts and at run boundaries, not per token. */
@@ -108,7 +122,11 @@ export type ThreadRecord = {
 	createdBy: Actor;
 	creationSource: CreationSource;
 	lineage: ThreadLineage;
-	forkedFrom: { type: "run"; threadId: string; runId: string } | null;
+	forkedFrom: { type: "run"; threadId: string; runId: string } | { type: "node"; nodeId: string } | null;
+	/** A child thread (`lineage.relationshipToParent: "subagent"`): how its parent started it, for the parent's card. */
+	spawn?: Spawn;
+	/** Messages to this thread that asked to be answered, not yet answered. */
+	notify?: NotifyRequest[];
 	linkOrigin?: LinkOrigin;
 	delegatedFrom?: DelegatedFrom;
 	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
@@ -188,6 +206,8 @@ type CreateInput = {
 	readonly title?: string;
 	readonly provenance?: Provenance;
 	readonly lineage?: ThreadLineage;
+	readonly forkedFrom?: ThreadRecord["forkedFrom"];
+	readonly spawn?: Spawn;
 	readonly linkOrigin?: LinkOrigin;
 	readonly delegatedFrom?: DelegatedFrom;
 };
@@ -206,6 +226,8 @@ type MessageInput = {
 	readonly attachments?: readonly { type?: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number }[];
 	/** T3's structured composer context: the records its text references resolve against. Placed in the entry's `data`. */
 	readonly context?: JsonValue;
+	/** A note: added to the conversation without starting a turn (`APP_NOTE_ENTRY`); the next turn sees it. */
+	readonly note?: boolean;
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -583,6 +605,7 @@ export class Threads {
 		provenance: Provenance;
 		lineage?: ThreadLineage;
 		forkedFrom?: ThreadRecord["forkedFrom"];
+		spawn?: Spawn;
 		linkOrigin?: LinkOrigin;
 		delegatedFrom?: DelegatedFrom;
 	}): ThreadRecord {
@@ -596,6 +619,7 @@ export class Threads {
 			creationSource: input.provenance.creationSource,
 			lineage: input.lineage ?? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId },
 			forkedFrom: input.forkedFrom ?? null,
+			...(input.spawn === undefined ? {} : { spawn: input.spawn }),
 			...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
 			...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			deletedAt: null,
@@ -679,10 +703,21 @@ export class Threads {
 				title: input.title ?? "",
 				provenance: input.provenance ?? USER_WEB,
 				...(input.lineage === undefined ? {} : { lineage: input.lineage }),
+				...(input.forkedFrom === undefined ? {} : { forkedFrom: input.forkedFrom }),
+				...(input.spawn === undefined ? {} : { spawn: input.spawn }),
 				...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
 				...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			});
 			await this.#addThread(writes, record);
+			return record;
+		});
+	}
+
+	/** Change a live thread's record in one commit; `change` returns false to write nothing. */
+	async updateRecord(threadId: string, change: (record: ThreadRecord) => boolean | void): Promise<ThreadRecord> {
+		return this.#commit(async (_tx, writes) => {
+			const record = await writes.live(threadId);
+			if (change(record) !== false) await writes.putRecord(record);
 			return record;
 		});
 	}
@@ -717,6 +752,14 @@ export class Threads {
 		}
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
+		// A note reaches the model's context without starting a turn: a write whose entry carries the user message. Idle,
+		// it is appended at once; busy, pi-durable places it at the run's next boundary.
+		if (input.note === true) {
+			const message = { role: "user", content, timestamp: Date.now() } as unknown as Message;
+			const submission = await conversation.submit({ type: "write", requestId: input.requestId, entry: { kind: APP_NOTE_ENTRY, data, model: [message] } }, BACKGROUND_CONTEXT);
+			await this.#rememberInput(input);
+			return submission;
+		}
 		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
 		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
 		const view = await conversation.viewState(BACKGROUND_CONTEXT);
@@ -1133,7 +1176,16 @@ export class Threads {
 	 * T3's `thread.fork`: a new thread whose head is a fork of `sourceThreadId`'s head at `entryId` (inclusive), so a
 	 * response can be continued in its own thread. The target id is the client's, so a retried fork returns the same row.
 	 */
-	async fork(input: { sourceThreadId: string; targetThreadId: string; entryId: number; runId?: string; title?: string; provenance?: Provenance }): Promise<ThreadRecord> {
+	async fork(input: {
+		sourceThreadId: string;
+		targetThreadId: string;
+		entryId: number;
+		runId?: string;
+		title?: string;
+		provenance?: Provenance;
+		/** A child started with its parent's history: a child's lineage, card node and parent run instead of a fork's. */
+		child?: { readonly spawn: Spawn; readonly nodeId: string };
+	}): Promise<ThreadRecord> {
 		return this.#commit(async (tx, writes) => {
 			const existing = await writes.record(input.targetThreadId);
 			if (existing !== undefined) {
@@ -1152,8 +1204,14 @@ export class Threads {
 				head: fork.id,
 				title: input.title ?? `${source.title} fork`,
 				provenance: input.provenance ?? USER_WEB,
-				lineage: { parentThreadId: source.threadId, relationshipToParent: "fork", rootThreadId: source.lineage.rootThreadId },
-				forkedFrom: input.runId === undefined ? null : { type: "run", threadId: source.threadId, runId: input.runId },
+				lineage: { parentThreadId: source.threadId, relationshipToParent: input.child === undefined ? "fork" : "subagent", rootThreadId: source.lineage.rootThreadId },
+				forkedFrom:
+					input.child !== undefined
+						? { type: "node", nodeId: input.child.nodeId }
+						: input.runId === undefined
+							? null
+							: { type: "run", threadId: source.threadId, runId: input.runId },
+				...(input.child === undefined ? {} : { spawn: input.child.spawn }),
 				...(source.linkOrigin === undefined ? {} : { linkOrigin: source.linkOrigin }),
 			});
 			await this.#addThread(writes, record);

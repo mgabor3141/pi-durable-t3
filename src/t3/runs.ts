@@ -42,6 +42,10 @@ export const firstMessage = (entry: EntryRecord): DurableMessage | undefined =>
  * client's message id in the entry's `data` (see `Threads.submit`), and the display-only compact command.
  */
 export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user", APP_COMPACT_ENTRY]);
+/** A note (`thread_prompt` with `mode: "notify"`): a user message in the model's context that started no turn. It joins
+ * the run it was placed in (or after) as a step; it never starts one. */
+export const APP_NOTE_ENTRY = "app.note";
+export const isNoteEntry = (entry: EntryRecord) => entry.kind === APP_NOTE_ENTRY && firstMessage(entry)?.role === "user";
 export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
 /** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
 export const messageIdOf = (entry: EntryRecord): string | undefined => {
@@ -183,6 +187,13 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			continue;
 		}
 		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") runs.at(-1)?.steps.push(entry);
+		// A note joins the run it lands in; one before any run opens a run of its own (it is the thread's first message).
+		else if (isNoteEntry(entry)) {
+			const current = runs.at(-1);
+			if (current !== undefined) current.steps.push(entry);
+			else runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
+			pendingCard = undefined;
+		}
 	}
 	if (pendingCard !== undefined) runs.push({ userEntry: pendingCard, steps: [], synthetic: true, card: pendingCard, markerOnly: true });
 	return runs;

@@ -18,7 +18,7 @@ import type {
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
-import { type Provenance, type Thread, type Threads, USER_WEB } from "../threads.ts";
+import { type Provenance, type Spawn, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
 import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, ConversationId, EntryId } from "@earendil-works/pi-durable";
@@ -28,7 +28,7 @@ import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
-import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { undoTarget } from "./undo.ts";
@@ -555,6 +555,7 @@ export class Bridge {
 			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
 			subagents: new Map([...this.#subagents.values()].filter((ref) => ref.parentThreadId === threadId).map((ref) => [ref.taskId, ref])),
+			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			titleRegeneration: this.#titleRequests.has(threadId)
 				? { requestId: this.#titleRequests.get(threadId)!.requestId, startedAt: this.#titleRequests.get(threadId)!.startedAt }
@@ -629,6 +630,84 @@ export class Bridge {
 		if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(shell)) return;
 		this.#shells.set(threadId, shell);
 		this.#emitShell({ kind: "thread.updated", sequence: this.nextSequence(), location: "active", thread: shell });
+		// A child's change is its parent's card: an open parent re-projects.
+		const parent = this.#summary(threadId)?.spawn === undefined ? undefined : this.#summary(threadId)?.lineage.parentThreadId;
+		if (parent != null) this.#views.get(parent)?.recompute();
+	}
+
+	/** The cards of the threads this one started: from an open child's live shell, else from the outcome its record keeps. */
+	#children(threadId: string): ChildCard[] {
+		const cards: ChildCard[] = [];
+		for (const child of this.#directory) {
+			const spawn = child.spawn;
+			if (spawn === undefined || child.lineage.parentThreadId !== threadId) continue;
+			const view = this.#views.get(child.threadId);
+			const shell = view?.result?.shell;
+			let status: ChildCard["status"];
+			let result: string | null = null;
+			let completedAt: number | null = null;
+			if (shell !== undefined) {
+				const active = shell.activityRunStatus != null || ["queued", "preparing", "starting", "running", "waiting"].includes(shell.status);
+				status = active ? (shell.activityRunStatus === "waiting" ? "waiting" : "running") : shell.status === "idle" ? "pending" : (shell.status as ChildCard["status"]);
+				if (!active && shell.latestRunCompletedAt != null) completedAt = DateTime.toEpochMillis(shell.latestRunCompletedAt);
+				if (!active && shell.latestVisibleMessage?.role === "assistant") result = shell.latestVisibleMessage.text;
+			} else if (spawn.outcome !== undefined) {
+				status = spawn.outcome.status;
+				result = spawn.outcome.result;
+				completedAt = spawn.outcome.completedAt;
+			} else status = "running";
+			cards.push({
+				threadId: child.threadId,
+				title: child.title,
+				prompt: spawn.prompt,
+				parentRunId: spawn.parentRunId,
+				createdAt: child.createdAt,
+				status,
+				result,
+				completedAt,
+				model: shell === undefined ? null : shell.modelSelection.model,
+			});
+		}
+		return cards;
+	}
+
+	/** A child's run settled: keep its outcome on its record, so its parent's card is right after the child's view closes. */
+	#recordOutcome(view: ThreadView): void {
+		const spawn = this.#summary(view.threadId)?.spawn;
+		const projection = view.result?.projection;
+		if (spawn === undefined || projection === undefined) return;
+		const run = projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
+		if (run === undefined || !["completed", "failed", "interrupted", "cancelled"].includes(run.status)) return;
+		const answer = projection.messages.filter((message) => message.runId === run.id && message.role === "assistant" && message.text.trim() !== "").at(-1);
+		const outcome: NonNullable<Spawn["outcome"]> = {
+			status: run.status as NonNullable<Spawn["outcome"]>["status"],
+			result: answer?.text ?? null,
+			completedAt: run.completedAt === null ? Date.now() : DateTime.toEpochMillis(run.completedAt),
+		};
+		if (JSON.stringify(spawn.outcome) === JSON.stringify(outcome)) return;
+		void this.#store
+			.updateRecord(view.threadId, (record) => {
+				if (record.spawn === undefined) return false;
+				record.spawn.outcome = outcome;
+			})
+			.catch((error: unknown) => this.#log.warn("child outcome write failed", { threadId: view.threadId, error: error instanceof Error ? error.message : String(error) }));
+	}
+
+	// ---- records (for `orchestration.ts`) -----------------------------------------------------------------------
+
+	/** A live thread's record with its summary, from memory. */
+	threadRecord(threadId: string): Thread | undefined {
+		return this.#summary(threadId);
+	}
+
+	/** Every live thread, in creation order. */
+	threadRecords(): readonly Thread[] {
+		return this.#directory;
+	}
+
+	/** Change a live thread's record in one commit (`Threads.updateRecord`). */
+	updateThreadRecord(threadId: string, change: (record: ThreadRecord) => boolean | void): Promise<ThreadRecord> {
+		return this.#store.updateRecord(threadId, change);
 	}
 
 	// ---- threads ----------------------------------------------------------------------------------------------
@@ -675,6 +754,7 @@ export class Bridge {
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
 		if (change.loaded) this.#restoreAttachments(view.transcript);
 		if (change.loaded || change.settled) this.#remember(view);
+		if (change.settled) this.#recordOutcome(view);
 		this.#publishShell(view.threadId);
 	}
 
@@ -831,7 +911,15 @@ export class Bridge {
 	 * Scratch project a folder of its own, claimed at launch — a thread whose row already exists is a replayed create and
 	 * claims nothing, exactly T3's "only the first attempt claims one" (ManagedProjectFolders, ThreadLaunchService).
 	 */
-	async createThread(options: { threadId?: string | undefined; projectId: string; launchText?: string; title?: string; provenance?: Provenance }): Promise<string> {
+	async createThread(options: {
+		threadId?: string | undefined;
+		projectId: string;
+		launchText?: string;
+		title?: string;
+		provenance?: Provenance;
+		/** A child thread: its parent link, the node of its card and how it was started. */
+		child?: { readonly lineage: ThreadLineage; readonly nodeId: string; readonly spawn: Spawn };
+	}): Promise<string> {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
@@ -846,7 +934,14 @@ export class Bridge {
 			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
 			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);
 		}
-		await this.#store.create({ threadId: id, projectId: project.id, provenance: options.provenance ?? USER_WEB, ...(cwd === undefined ? {} : { cwd }), ...(options.title === undefined ? {} : { title: options.title }) });
+		await this.#store.create({
+			threadId: id,
+			projectId: project.id,
+			provenance: options.provenance ?? USER_WEB,
+			...(cwd === undefined ? {} : { cwd }),
+			...(options.title === undefined ? {} : { title: options.title }),
+			...(options.child === undefined ? {} : { lineage: options.child.lineage, forkedFrom: { type: "node" as const, nodeId: options.child.nodeId }, spawn: options.child.spawn }),
+		});
 		// Read the document back before answering: the next thread-existence check must see the new row.
 		return id;
 	}
@@ -993,6 +1088,8 @@ export class Bridge {
 		titleSeed?: string | undefined;
 		/** Who sent it (absent: a person in the web app). */
 		provenance?: Provenance;
+		/** Add it without starting a turn (`mode: "notify"`): the next turn sees it. */
+		note?: boolean;
 	}): Promise<void> {
 		this.#writable(input.threadId);
 		const release = this.acquire(input.threadId);
@@ -1050,6 +1147,7 @@ export class Bridge {
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each is one submission, keyed by the commandId for wire idempotency.
 			await (async () => {
+				if (input.note === true) return void (await this.#store.submit({ ...request, note: true }, undefined));
 				if (input.mode === "restart" && busy) await this.#store.abort({ threadId: input.threadId, conversationId: head });
 				if (input.mode === "steer") await this.#store.submit(request, "steer");
 				else if ((busy || compacting) && input.mode !== "restart") await this.#store.submit(request, "followUp");
@@ -1296,7 +1394,15 @@ export class Bridge {
 	 * `latest_stable` fork). A synthetic run anchored by a compaction summary has no user turn to rewind to, but its
 	 * last kept entry is still a valid fork point. The client names the target id, so a retried command returns the
 	 * same thread. */
-	async forkThread(input: { sourceThreadId: string; targetThreadId: string; runId?: string | undefined; title?: string | undefined; provenance?: Provenance }): Promise<string> {
+	async forkThread(input: {
+		sourceThreadId: string;
+		targetThreadId: string;
+		runId?: string | undefined;
+		title?: string | undefined;
+		provenance?: Provenance;
+		/** A child that starts with its parent's history (`thread_prompt` with `fork`). */
+		child?: { readonly spawn: Spawn; readonly nodeId: string };
+	}): Promise<string> {
 		this.#writable(input.targetThreadId);
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
 		if (parseSubagentThreadId(input.targetThreadId) !== undefined) throw new CommandError(`Thread ids ending in .sub.<number> are reserved for subagents: ${input.targetThreadId}`);
@@ -1310,6 +1416,7 @@ export class Bridge {
 			runId: run.runId,
 			provenance: input.provenance ?? USER_WEB,
 			...(input.title === undefined ? {} : { title: input.title }),
+			...(input.child === undefined ? {} : { child: input.child }),
 		});
 		return input.targetThreadId;
 	}

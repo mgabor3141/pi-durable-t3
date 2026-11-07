@@ -81,7 +81,7 @@ it("carries a thread's creation fields and lineage, and a message's sender, to t
 			createdBy: record.createdBy,
 			creationSource: record.creationSource,
 			lineage: record.lineage,
-			forkedFrom: record.forkedFrom,
+			forkedFrom: record.forkedFrom as never,
 		},
 		view.value as never,
 		{ rolledBack: [] },

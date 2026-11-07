@@ -99,6 +99,12 @@ export type AttachT3Options = {
 	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
 	readonly routes?: readonly HostRoute[];
 	/**
+	 * Ends the thread tools' waits (`thread_prompt`, `thread_wait`) when it aborts, read at each wait: a host that restarts
+	 * gives one that aborts when the restart starts draining, so a waiting tool returns and its turn can pause. The work
+	 * goes on, and its report is sent to the waiting thread when it settles.
+	 */
+	readonly waitSignal?: () => AbortSignal | undefined;
+	/**
 	 * Optional per-call observation for debugging the T3 wire: `onSuccess` for a request handler that succeeds or a
 	 * stream that opens, `onFailure` for a failing request, and `onStubbed` for a method this host does not implement.
 	 * The callbacks run synchronously and their exceptions are caught and logged, so a debug sink never breaks a call.
@@ -210,6 +216,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
 		...(options.routes === undefined ? {} : { routes: options.routes }),
+		...(options.waitSignal === undefined ? {} : { waitSignal: options.waitSignal }),
 	};
 	const tailscale = makeTailscaleCli();
 	const facet = startFacet({ threads, models: options.models, catalog, log, config, tailscale });

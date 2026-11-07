@@ -21,6 +21,7 @@ import { ScheduledTasks, scheduledTaskDispatch } from "./scheduled-tasks.ts";
 import { ThreadOps } from "./thread-ops.ts";
 import { SecretRequests, type SecretSink } from "./secret-requests.ts";
 import { threadToolsExtension } from "./thread-tools.ts";
+import { Orchestration } from "./orchestration.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
@@ -38,6 +39,7 @@ type FacetHandle = {
 	secretRequests(sink: SecretSink): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
+	readonly orchestration: Orchestration;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -85,6 +87,9 @@ export function startFacet(deps: {
 	});
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
 	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId));
+	// Threads that drive threads (`thread_prompt` and the rest); its followers deliver the reports the last process owed.
+	const orchestration = new Orchestration(bridge, log, { waitSignal: () => config.waitSignal?.() });
+	orchestration.start();
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
 	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, tailscale: deps.tailscale, files, preview, secretRequests })) as Effect.Effect<never>);
@@ -111,9 +116,11 @@ export function startFacet(deps: {
 			await bridge.renameThread(threadId, title);
 		},
 		secretRequests: (sink) => secretRequests.extension(sink),
-		threadTools: (options) => threadToolsExtension(bridge, new ThreadOps(bridge, auth.environmentId, log), options),
+		threadTools: (options) => threadToolsExtension(bridge, orchestration, options),
+		orchestration,
 		close: async () => {
 			closing = true;
+			orchestration.close();
 			await scheduledTasks.stop();
 			await preview?.closeAll();
 			await files.close();

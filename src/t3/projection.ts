@@ -22,7 +22,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { detailsConversationId, type SubagentRef, subagentNodeId } from "./subagents.ts";
@@ -54,6 +54,25 @@ const time = (ms: number | undefined): DateTime.Utc => {
 	return instant;
 };
 
+/** A thread another started, as its parent shows it: what the parent's card reads from the child's own thread. */
+export interface ChildCard {
+	readonly threadId: string;
+	readonly title: string;
+	/** The message that started it. */
+	readonly prompt: string;
+	/** The parent's run that started it. */
+	readonly parentRunId: string;
+	readonly createdAt: number;
+	readonly status: OrchestrationV2Subagent["status"];
+	/** Its latest answer once it settled. */
+	readonly result: string | null;
+	readonly completedAt: number | null;
+	readonly model: string | null;
+}
+
+/** The node of a child's card in its parent; the child's `forkedFrom` names it. */
+export const childCardNodeId = (childThreadId: string): string => `nc-${childThreadId}`;
+
 export interface ThreadMeta {
 	readonly threadId: string;
 	readonly projectId: string;
@@ -76,7 +95,10 @@ export interface ThreadMeta {
 	readonly createdBy?: "user" | "agent" | "system";
 	readonly creationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
 	readonly lineage?: { readonly parentThreadId: string | null; readonly relationshipToParent: "fork" | "subagent" | null; readonly rootThreadId: string };
-	readonly forkedFrom?: { readonly type: "run"; readonly threadId: string; readonly runId: string } | null;
+	readonly forkedFrom?: { readonly type: "run"; readonly threadId: string; readonly runId: string } | { readonly type: "node"; readonly nodeId: string } | null;
+	/** The threads this one started (`thread_prompt` with `new`), each shown as a card in the run that started it (T3's
+	 * app-owned subagent: a real thread that takes messages). */
+	readonly children?: readonly ChildCard[];
 	readonly linkOrigin?: { readonly sessionId: string; readonly label: string; readonly access?: string };
 	readonly delegatedFrom?: { readonly environmentId: string; readonly threadId: string; readonly title: string };
 	/** T3's manual settlement, durable on the thread row. */
@@ -681,13 +703,74 @@ export function projectThread(
 		// An assistant message is keyed by its run and its place among the run's assistant messages, not by its entry: the
 		// message streaming now and the entry it is committed as are one item, so a client keeps updating the same record.
 		let assistantIndex = 0;
+		// The cards of the threads this run started, each placed before the first assistant message that began after it.
+		const cards = (meta.children ?? []).filter((child) => child.parentRunId === runId).toSorted((left, right) => left.createdAt - right.createdAt);
+		const pushCards = (before: number) => {
+			while (cards.length > 0 && cards[0]!.createdAt < before) {
+				const child = cards.shift()!;
+				const cardNode = childCardNodeId(child.threadId);
+				const settledCard = child.completedAt !== null;
+				const startAt = time(child.createdAt);
+				const endAt = settledCard ? time(child.completedAt!) : null;
+				nodes.push({
+					id: id(cardNode),
+					threadId: id(threadId),
+					runId: id(runId),
+					parentNodeId: id(nodeId),
+					rootNodeId: id(nodeId),
+					kind: "subagent",
+					status: child.status as OrchestrationV2ExecutionNode["status"],
+					countsForRun: false,
+					providerThreadId: null,
+					providerTurnId: null,
+					nativeItemRef: null,
+					runtimeRequestId: null,
+					checkpointScopeId: null,
+					startedAt: startAt,
+					completedAt: endAt,
+				} as Any);
+				const card = {
+					origin: "app_owned",
+					driver: id(PROVIDER_DRIVER),
+					providerInstanceId: id(PROVIDER_INSTANCE_ID),
+					childThreadId: id(child.threadId),
+					prompt: child.prompt,
+					result: child.result,
+				};
+				subagents.push({
+					id: id(cardNode),
+					threadId: id(threadId),
+					runId: id(runId),
+					parentNodeId: id(nodeId),
+					createdBy: "agent",
+					providerThreadId: null,
+					nativeTaskRef: null,
+					title: child.title,
+					model: child.model,
+					status: child.status,
+					startedAt: startAt,
+					completedAt: endAt,
+					updatedAt: endAt ?? startAt,
+					...card,
+				} as Any);
+				turnItems.push({
+					...base(`ti-c${child.threadId}`, child.createdAt, child.status as OrchestrationV2TurnItem["status"], settledCard, child.completedAt ?? child.createdAt),
+					nodeId: id(cardNode),
+					title: child.title,
+					type: "subagent",
+					subagentId: id(cardNode),
+					...card,
+				} as Any);
+			}
+		};
 		draft.steps.forEach((step, stepIndex) => {
-			if (isUserEntry(step)) {
+			if (isUserEntry(step) || isNoteEntry(step)) {
 				pushUser(step, "steer");
 				return;
 			}
 			const m = firstMessage(step);
 			if (m?.role !== "assistant") return;
+			pushCards(m.timestamp ?? requestedAt);
 			const key = `${u.id}.${assistantIndex++}`;
 			// A partial interrupted by a crash is superseded by the resumed answer.
 			const superseded = m.stopReason === "aborted" && draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
@@ -695,6 +778,8 @@ export function projectThread(
 			pushAssistant(key, m, m.timestamp ?? requestedAt, false, toolResults, liveTools);
 		});
 		const partial = running ? live?.generation?.message : undefined;
+		if (partial?.role === "assistant") pushCards(partial.timestamp ?? Date.now());
+		pushCards(Infinity);
 		if (partial?.role === "assistant") {
 			pushAssistant(
 				`${u.id}.${assistantIndex}`,
@@ -888,7 +973,9 @@ export function projectThread(
 			? { type: "node", nodeId: id(sub.nodeId) }
 			: meta.forkedFrom == null
 				? null
-				: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
+				: meta.forkedFrom.type === "node"
+					? { type: "node", nodeId: id(meta.forkedFrom.nodeId) }
+					: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
 	const author = sub === undefined ? { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" } : ({ createdBy: "agent", creationSource: "provider" } as const);
 	const thread: Any = {
 		...author,
