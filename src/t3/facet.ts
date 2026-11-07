@@ -22,6 +22,7 @@ import { ThreadOps } from "./thread-ops.ts";
 import { SecretRequests, type SecretSink } from "./secret-requests.ts";
 import { threadToolsExtension } from "./thread-tools.ts";
 import { Orchestration } from "./orchestration.ts";
+import type { TextGenerationModel } from "./title-thread.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
@@ -40,6 +41,8 @@ type FacetHandle = {
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	readonly orchestration: Orchestration;
+	/** T3's text-generation model, when it names one of this host's (`Bridge.textGenerationModel`). */
+	textGenerationModel(): TextGenerationModel | undefined;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -118,6 +121,7 @@ export function startFacet(deps: {
 		secretRequests: (sink) => secretRequests.extension(sink),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		orchestration,
+		textGenerationModel: () => bridge.textGenerationModel(),
 		close: async () => {
 			closing = true;
 			orchestration.close();

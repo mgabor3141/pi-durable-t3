@@ -13,7 +13,13 @@ export type TitleThreadRequest = {
 	readonly previousTitle?: string;
 	/** Aborted when a rename or a newer request supersedes this one. */
 	readonly signal: AbortSignal;
+	/** T3's text-generation model (Settings), when it names one of this host's models: generate with it. Absent: the
+	 * setting is unset or names a model this host does not have, and the thread's own model is the one to use. */
+	readonly model?: TextGenerationModel;
 };
+
+/** A model for text generation (titles, summaries), from T3's `textGenerationModelSelection` setting. */
+export type TextGenerationModel = { readonly provider: string; readonly modelId: string; readonly thinkingLevel?: string };
 
 /** The integrator's title generator: a title, or `undefined` / "New thread" (/ the same title on regenerate) for no change. */
 export type TitleThread = (request: TitleThreadRequest) => Promise<string | undefined>;

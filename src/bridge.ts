@@ -18,6 +18,7 @@ import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/config.ts";
+import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
@@ -29,7 +30,7 @@ import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandEr
 import { ConfigError } from "./config.ts";
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
-export type { TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
+export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 export const DESKTOP_APP_ORIGIN = "t3code://app";
@@ -139,6 +140,11 @@ export type T3Attachment = {
 	 * to `sink` under the name the agent chose — never into the conversation. This host keeps no secrets itself.
 	 */
 	secretRequests(sink: SecretSink): Extension;
+	/**
+	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
+	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
+	 */
+	textGenerationModel(): TextGenerationModel | undefined;
 	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
@@ -264,6 +270,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
 		threadTools: (toolOptions) => facet.threadTools(toolOptions),
 		secretRequests: (sink) => facet.secretRequests(sink),
+		textGenerationModel: () => facet.textGenerationModel(),
 		...(facet.preview === undefined
 			? {}
 			: {

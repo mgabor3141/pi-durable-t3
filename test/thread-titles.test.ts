@@ -257,3 +257,22 @@ it("a first message that fails leaves no seed title (T3 stores both in one comma
 	expect((await fixture.threads.thread(threadId))!.title).toBe("");
 	expect(calls).toHaveLength(0);
 }, 30_000);
+
+it("hands the title hook T3's text-generation model when it names one of this host's models", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	fixture.model.respond(...Array.from({ length: 4 }, () => fauxAssistantMessage("pong")));
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+	// T3's stored default is its own (a Codex model): nothing here, so the thread's model is used.
+	expect(bridge.textGenerationModel()).toBeUndefined();
+	bridge.config.settings.update({ textGenerationModelSelection: { instanceId: "pi", model: "faux/nope" } } as never);
+	expect(bridge.textGenerationModel(), "a model this host lacks").toBeUndefined();
+	bridge.config.settings.update({ textGenerationModelSelection: { instanceId: "pi", model: "faux/faux-1", options: [{ id: "thinking", value: "low" }] } } as never);
+	expect(bridge.textGenerationModel()).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
+
+	const threadId = await newThread(bridge);
+	await send(bridge, threadId, 1, "Seed");
+	await until("the hook call", () => calls.length === 1);
+	expect(calls[0]!.request.model).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
+	calls[0]!.resolve(undefined);
+}, 30_000);

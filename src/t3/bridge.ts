@@ -28,7 +28,8 @@ import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
+import type { TextGenerationModel } from "./title-thread.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { detailsConversationId, parseSubagentThreadId, type SubagentRef, subagentNodeId, subagentThreadTitle } from "./subagents.ts";
 import { undoTarget } from "./undo.ts";
@@ -1217,6 +1218,21 @@ export class Bridge {
 	}
 
 	/** Run the integrator's hook for the current request, detached: the caller (a send, a regenerate) does not wait. */
+	/**
+	 * T3's text-generation model (Settings → the model for titles and other generated text), read at each use: the
+	 * model it names when that is one of this host's (`pi` provider, in the catalog), with its thinking level. Unset — the
+	 * stored default is T3's own, a Codex model — or a model this host lacks: `undefined`, and the caller uses the
+	 * thread's model.
+	 */
+	textGenerationModel(): TextGenerationModel | undefined {
+		const selection = this.config.settings.current().textGenerationModelSelection as { instanceId?: string; model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined;
+		if (selection === undefined || selection.instanceId !== PROVIDER_INSTANCE_ID || selection.model === undefined) return undefined;
+		const ref = splitSlug(selection.model);
+		if (ref === undefined || this.#models.getModel(ref.provider, ref.modelId) === undefined) return undefined;
+		const thinkingLevel = thinkingOf(selection.options);
+		return { provider: ref.provider, modelId: ref.modelId, ...(thinkingLevel === undefined ? {} : { thinkingLevel }) };
+	}
+
 	#generateTitle(threadId: string, requestId: string, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }): void {
 		const hook = this.config.titleThread;
 		const pending = this.#titleRequests.get(threadId);
@@ -1234,6 +1250,8 @@ export class Bridge {
 					kind.reason === "regenerate"
 						? { threadId, conversationId, at, reason: "regenerate", previousTitle: (previousTitle = this.#summary(threadId)?.title || "New thread"), signal }
 						: { threadId, conversationId, at, reason: "first-message", signal };
+				const model = this.textGenerationModel();
+				if (model !== undefined) Object.assign(request, { model });
 				const title = await hook(request);
 				await this.#completeTitle(threadId, requestId, title, previousTitle);
 			} catch (error) {
