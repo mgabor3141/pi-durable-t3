@@ -200,7 +200,12 @@ Each removes a mechanism, not just lines:
 3. Done: one `ThreadView` per open thread (`t3/thread-view.ts`: head watch → projection → stream → subscribers),
    alive while held; a subscriber is a hold, so one lifetime mechanism instead of a ref count beside a subscriber set.
    `Bridge` keeps the directory, the shell and command routing (1,707 → 1,320 lines). Bench unchanged.
-4. With the subagent work: subagent threads as records created at spawn, replacing discovery by scanning.
+4. Decided against, for now: subagent threads as records created at spawn. A pi subagent is a conversation owned by a
+   tool call (pi-durable's convention, with no T3 in it); recording it at spawn needs either a `conversationCreated`
+   Harness hook writing thread documents inside other code's commits (the threads layer would no longer be their only
+   writer) or a T3 call in the tool. Both cost more than the scan. T3 has two kinds of child too: provider-native
+   subagents, derived from the provider (as the scan derives them), and delegated tasks, which are app threads.
+   Delegated tasks (`delegate_task`) will be thread records from the start, created through the threads layer.
 
 ## Checked against the real web app
 
