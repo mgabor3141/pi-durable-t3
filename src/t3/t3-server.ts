@@ -22,3 +22,4 @@ export { makeLiveBodyDeduper, projectDomainEventForWire, projectThreadProjection
 export { applyOrchestrationV2ProjectionEvent } from "@t3tools/t3-server/orchestrationV2Projection";
 export { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
 export * as RpcAuthorization from "@t3tools/t3-server/RpcAuthorization";
+export { advertisedJsonSchema } from "@t3tools/t3-server/advertisedJsonSchema";

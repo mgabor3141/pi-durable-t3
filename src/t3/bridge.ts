@@ -746,6 +746,13 @@ export class Bridge {
 		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
 	}
 
+	/** The thread a conversation is shown as: the live thread whose head it is, or the subagent thread of a child. */
+	async threadIdForConversation(conversationId: number): Promise<string | undefined> {
+		const head = await this.#store.threadIdForConversation(conversationId);
+		if (head !== undefined) return head;
+		return [...this.#subagents.values()].find((ref) => ref.conversationId === conversationId)?.threadId;
+	}
+
 	/** A thread's shell: its sidebar row, current whether or not the thread is open. */
 	threadShell(threadId: string): OrchestrationV2ThreadShell {
 		return this.#shellFor(threadId);

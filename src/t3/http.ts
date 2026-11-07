@@ -39,6 +39,8 @@ import type { ModelCatalog } from "./models.ts";
 import type { Logger } from "./logging.ts";
 import { makeRpcLayer } from "./rpc.ts";
 import { makeHttpApiLayer } from "./http-api.ts";
+import { makeMcpLayer } from "./mcp.ts";
+import { ThreadOps } from "./thread-ops.ts";
 import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
@@ -266,6 +268,9 @@ export function makeServerLayer(deps: {
 		sessionCookieName: SESSION_COOKIE_NAME,
 	});
 
+	// T3's orchestrator MCP server over this host's threads (`mcp.ts`).
+	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log), log, version: SERVER_VERSION, resolveSession });
+
 	const routes = Layer.mergeAll(
 		// The web app sends its traces here (T3's `layerOtlpTracesProxyRoute`). This host exports no traces, which is T3's
 		// answer with no OTLP endpoint configured: the caller must hold `orchestration:operate`, and the batch is dropped.
@@ -436,7 +441,7 @@ export function makeServerLayer(deps: {
 		maxAge: 600,
 	});
 
-	return HttpRouter.serve(Layer.mergeAll(routes, apiLayer, pairingRateLimit, cors) as Any, { disableLogger: true }).pipe(
+	return HttpRouter.serve(Layer.mergeAll(routes, apiLayer, mcpLayer, pairingRateLimit, cors) as Any, { disableLogger: true }).pipe(
 		Layer.provide(NodeHttpServer.layer(() => httpServer, { host: bridge.config.host, port: bridge.config.port })),
 	);
 }

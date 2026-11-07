@@ -20,7 +20,7 @@ mkdir -p "$here/node_modules/@t3tools"
 ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
 ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
 ln -sfn ../../vendor/t3-server "$here/node_modules/@t3tools/t3-server"
-if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/ThreadStream.ts" ] && [ -f "$here/web/index.html" ]; then
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/web/index.html" ]; then
   echo "setup:t3: already at $T3_TAG"
   exit 0
 fi
@@ -102,6 +102,9 @@ TS
 # T3's per-method WS authorization, as-is: the scope each RPC needs (apps/server/src/auth).
 [ -f "$CACHE/apps/server/src/auth/RpcAuthorization.ts" ] || { echo "setup:t3: apps/server/src/auth/RpcAuthorization.ts missing"; exit 1; }
 cp "$CACHE/apps/server/src/auth/RpcAuthorization.ts" "$here/vendor/t3-server/RpcAuthorization.ts"
+# The input schema T3 advertises for an MCP tool (compacted JSON Schema), as-is.
+[ -f "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" ] || { echo "setup:t3: apps/server/src/mcp/advertisedJsonSchema.ts missing"; exit 1; }
+cp "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" "$here/vendor/t3-server/advertisedJsonSchema.ts"
 cp "$here/vendor/contracts/tsconfig.json" "$here/vendor/t3-server/tsconfig.json"
 cat > "$here/vendor/t3-server/package.json" <<'JSON'
 { "name": "@t3tools/t3-server", "private": true, "type": "module", "exports": { "./*": "./*.ts" } }
