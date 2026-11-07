@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import type { Models } from "@earendil-works/pi-ai";
+import type { Extension } from "@earendil-works/pi-durable";
 import type { Threads } from "../threads.ts";
 import { AuthStore } from "./auth.ts";
 import { AttachmentStore } from "./attachment-store.ts";
@@ -17,6 +18,8 @@ import { WorkspaceFiles } from "./files.ts";
 import { WorkspaceAssets } from "./workspace-assets.ts";
 import type { ModelCatalog } from "./models.ts";
 import { ScheduledTasks, scheduledTaskDispatch } from "./scheduled-tasks.ts";
+import { ThreadOps } from "./thread-ops.ts";
+import { threadToolsExtension } from "./thread-tools.ts";
 import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
@@ -30,6 +33,8 @@ type FacetHandle = {
 	close(): Promise<void>;
 	/** A user rename of a thread (`T3Attachment.setTitle`). */
 	setTitle(threadId: string, title: string): Promise<void>;
+	/** The thread tools as an extension (`T3Attachment.threadTools`). */
+	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -101,6 +106,7 @@ export function startFacet(deps: {
 			await bridge.loaded();
 			await bridge.renameThread(threadId, title);
 		},
+		threadTools: (options) => threadToolsExtension(bridge, new ThreadOps(bridge, auth.environmentId, log), options),
 		close: async () => {
 			closing = true;
 			await scheduledTasks.stop();

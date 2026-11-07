@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
-import type { Harness } from "@earendil-works/pi-durable";
+import type { Extension, Harness } from "@earendil-works/pi-durable";
 import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { Threads } from "./threads.ts";
@@ -114,6 +114,13 @@ export type T3Attachment = {
 	close(): Promise<void>;
 	/** Rename a thread, as a user rename in T3 does: durable, and it cancels a pending title generation. */
 	setTitle(threadId: string, title: string): Promise<void>;
+	/**
+	 * T3's thread tools (`t3_thread_list`, `t3_thread_read`, `t3_thread_send`, `t3_thread_wait`, `t3_thread_interrupt`,
+	 * `create_threads`, `t3_thread_update`) as an extension to install in the Harness's registry: an agent's call acts as
+	 * the thread its conversation is the head of. The same operations `/mcp` serves. `callers` defaults to the model
+	 * and scripts.
+	 */
+	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
@@ -232,6 +239,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	return {
 		closed: facet.closed,
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
+		threadTools: (toolOptions) => facet.threadTools(toolOptions),
 		...(facet.preview === undefined
 			? {}
 			: {
