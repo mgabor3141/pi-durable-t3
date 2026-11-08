@@ -49,7 +49,7 @@ import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
-import type { AttachmentStore } from "./attachment-store.ts";
+import type { Attachments } from "./attachments.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
 import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
 import { AssetAccessError, AssetWorkspaceResolutionError, ThreadId, PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
@@ -91,7 +91,8 @@ interface RpcDeps {
 	readonly descriptor: () => ExecutionEnvironmentDescriptor;
 	readonly authDescriptor: ServerConfig["auth"];
 	readonly auth: AuthStore;
-	readonly attachments: AttachmentStore;
+	/** Absent: the host takes no attachments (no `attachmentsDir`). */
+	readonly attachments: Attachments | undefined;
 	readonly assets: WorkspaceAssets;
 	readonly scheduledTasks: ScheduledTasks;
 	readonly tailscale: TailscaleCli;
@@ -176,6 +177,12 @@ const fileFailure = (error: unknown) =>
 	error instanceof FileError
 		? { failure: error.failure, ...error.context, message: error.message, cause: error }
 		: { failure: "operation_failed" as const, message: (error as Error).message || String(error), cause: error };
+
+/** The attachments, for a call that needs them; a host without an `attachmentsDir` takes none. */
+function takesAttachments(deps: RpcDeps): Attachments {
+	if (deps.attachments === undefined) throw new Error("This host takes no attachments: attachT3 was given no attachmentsDir.");
+	return deps.attachments;
+}
 
 export function makeRpcLayer(deps: RpcDeps) {
 	const { bridge, log } = deps;
@@ -362,17 +369,17 @@ export function makeRpcLayer(deps: RpcDeps) {
 						: new UsageReadError({ reason: "scanFailed", detail: (error as Error).message || "The usage scan failed.", cause: error }),
 			}),
 		"server.refreshUsageRates": () => Effect.sync(() => piUsagePricing()),
+		// Attachments (capabilities.md): uploads wait in the state dir until their message is sent, which keeps them in the
+		// environment (`attachments.ts`). Without an `attachmentsDir` the host advertises no uploads, so a client never
+		// calls these; one that does anyway fails.
 		"attachments.createUploadUrl": (input) =>
-			Effect.sync(() => deps.attachments.mintUpload(input)),
+			Effect.sync(() => takesAttachments(deps).mintUpload(input)),
 		"attachments.delete": (input) =>
-			Effect.sync(() => deps.attachments.deleteUpload(input.attachmentId)),
-		// Image attachments, the data-URL path (capabilities.md): the client sends the bytes inline, this host stores
-		// them under the bridge's dir and answers a persisted record; display is served by `assets.createUrl` + the
-		// `/api/assets/*` HTTP route (signature-authed, no bearer — like T3). The upload-URL path (`attachments.*`) is
-		// refused: this host does not advertise `attachmentUploads`, so the client never calls it.
+			Effect.sync(() => deps.attachments?.deleteUpload(input.attachmentId)),
+		// T3's data-URL path: the client sends an image inline, and it is kept in the environment at once.
 		"assets.persistChatAttachments": (input) =>
-			Effect.try({
-				try: () => ({ attachments: deps.attachments.persist(input.threadId, input.messageId, input.attachments ?? []) }),
+			Effect.tryPromise({
+				try: async () => ({ attachments: await takesAttachments(deps).persist(input.threadId, input.messageId, input.attachments ?? []) }),
 				catch: (error) => new PersistChatAttachmentsError({ message: (error as Error).message || String(error) }),
 			}),
 		"assets.createUrl": (input) => {
@@ -386,14 +393,17 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}
 			// Favicon/tool-output/github resources are not served by this host: the file panel reads text through `projects.readFile`.
 			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource }));
-			const minted = deps.attachments.mintAssetUrl({
-				attachmentId: resource.attachmentId,
-				...(typeof resource.fileName === "string" ? { fileName: resource.fileName } : {}),
-				...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
-			});
-			return minted === null
-				? Effect.fail(new AssetAttachmentNotFoundError({ resource }))
-				: Effect.succeed(minted);
+			const attachments = deps.attachments;
+			if (attachments === undefined) return Effect.fail(new AssetAttachmentNotFoundError({ resource }));
+			return Effect.promise(() =>
+				attachments
+					.mintAssetUrl({
+						attachmentId: resource.attachmentId,
+						...(typeof resource.fileName === "string" ? { fileName: resource.fileName } : {}),
+						...(typeof resource.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+					})
+					.catch(() => null),
+			).pipe(Effect.flatMap((minted) => (minted === null ? Effect.fail(new AssetAttachmentNotFoundError({ resource })) : Effect.succeed(minted))));
 		},
 		// The config stream: the store's change signal is what emits `settingsUpdated`, the event on which the projection
 		// replaces `config.settings` (capabilities.md).

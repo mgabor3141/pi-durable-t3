@@ -8,7 +8,8 @@ import type { Models } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
 import type { Threads } from "../threads.ts";
 import { AuthStore } from "./auth.ts";
-import { AttachmentStore } from "./attachment-store.ts";
+import { Attachments } from "./attachments.ts";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Bridge } from "./bridge.ts";
 import type { BridgeConfig } from "./config.ts";
 import { makeServerLayer } from "./http.ts";
@@ -58,8 +59,12 @@ export function startFacet(deps: {
 }): FacetHandle {
 	const { catalog, log, config } = deps;
 	const auth = new AuthStore(config.stateDir, { tokenTtlSeconds: config.tokenTtlSeconds });
-	// The image-attachment store lives under the bridge's dir and signs its URLs with the auth store's durable key.
-	const attachments = new AttachmentStore(join(config.stateDir, "attachments"), auth);
+	// Attachments live in the environment (`attachmentsDir`); their URLs are signed with the auth store's durable key.
+	// Without a dir, the host takes none.
+	const attachments =
+		config.attachmentsDir === undefined || config.env === undefined
+			? undefined
+			: new Attachments({ stateDir: config.stateDir, signer: auth, env: config.env, dir: config.attachmentsDir, context: config.context ?? BACKGROUND_CONTEXT });
 
 	const bridge = new Bridge(config, log, deps.threads, deps.models, attachments);
 	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);

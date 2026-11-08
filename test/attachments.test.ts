@@ -2,7 +2,7 @@
 // reporting an entry's images. No host, storage, model, or network.
 import { describe, expect, it } from "vitest";
 import { selectImageBlocks } from "../src/t3/bridge.ts";
-import type { AttachmentRecord } from "../src/t3/attachment-store.ts";
+import type { AttachmentRecord } from "../src/t3/attachments.ts";
 import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { projectThread, type ThreadMeta } from "../src/t3/projection.ts";
 

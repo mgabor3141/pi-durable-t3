@@ -32,7 +32,7 @@ import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
 import { WsRpcGroup } from "@t3tools/contracts";
 import { type AuthStore, PairingRateLimit } from "./auth.ts";
-import { ATTACHMENT_UPLOAD_ROUTE_PREFIX, type AttachmentStore } from "./attachment-store.ts";
+import { ATTACHMENT_UPLOAD_ROUTE_PREFIX, type Attachments } from "./attachments.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
 import type { Bridge } from "./bridge.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -57,7 +57,7 @@ export const SERVER_VERSION = "0.1.6";
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
 
-function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSessions | undefined): () => ExecutionEnvironmentDescriptor {
+function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSessions | undefined, attachments: Attachments | undefined): () => ExecutionEnvironmentDescriptor {
 	const os = platform() === "darwin" ? "darwin" : platform() === "linux" ? "linux" : platform() === "win32" ? "windows" : "unknown";
 	const cpu = arch() === "arm64" ? "arm64" : arch() === "x64" ? "x64" : "other";
 	return (): ExecutionEnvironmentDescriptor => ({
@@ -76,8 +76,8 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				threadSettlement: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
-				attachmentUploads: true,
-				fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
+				// Attachments only where they can be kept (`attachT3`'s `attachmentsDir`).
+				...(attachments === undefined ? {} : { attachmentUploads: true, fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES } }),
 			},
 		});
 }
@@ -197,7 +197,7 @@ export function makeServerLayer(deps: {
 	catalog: ModelCatalog;
 	log: Logger;
 	httpServer: Server;
-	attachments: AttachmentStore;
+	attachments: Attachments | undefined;
 	assets: WorkspaceAssets;
 	scheduledTasks: ScheduledTasks;
 	tailscale: TailscaleCli;
@@ -206,7 +206,7 @@ export function makeServerLayer(deps: {
 	secretRequests: SecretRequests;
 }) {
 	const { bridge, auth, log, httpServer, attachments, assets, preview } = deps;
-	const descriptor = makeDescriptor(bridge, auth, preview);
+	const descriptor = makeDescriptor(bridge, auth, preview, attachments);
 	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview, secretRequests: deps.secretRequests });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
@@ -323,7 +323,7 @@ export function makeServerLayer(deps: {
 				if (slash <= 0) return HttpServerResponse.text("Not Found", { status: 404 });
 				const token = suffix.slice(0, slash);
 				const filename = decodeURIComponent(suffix.slice(slash + 1));
-				const attachment = attachments.resolveAsset(token, filename);
+				const attachment = attachments === undefined ? null : yield* Effect.promise(() => attachments.resolveAsset(token, filename).catch(() => null));
 				const asset = attachment ?? (yield* Effect.promise(() => assets.resolve(token, filename).catch(() => null)));
 				if (asset === null) return HttpServerResponse.text("Not Found", { status: 404 });
 				return HttpServerResponse.uint8Array(asset.bytes, {
@@ -342,6 +342,7 @@ export function makeServerLayer(deps: {
 				const path = new URL(request.url, "http://bridge").pathname;
 				const token = path.slice(ATTACHMENT_UPLOAD_ROUTE_PREFIX.length + 1);
 				const body = yield* request.arrayBuffer.pipe(Effect.catch(() => Effect.succeed(new ArrayBuffer(0))));
+				if (attachments === undefined) return HttpServerResponse.text("Not Found", { status: 404 });
 				const stored = attachments.storeUpload(token, Buffer.from(new Uint8Array(body)));
 				return stored.ok ? HttpServerResponse.empty({ status: 204 }) : HttpServerResponse.text(stored.detail, { status: stored.status });
 			}),

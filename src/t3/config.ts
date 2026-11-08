@@ -16,13 +16,15 @@ export interface FacetConfig {
 	readonly host: string;
 	readonly port: number;
 	readonly label: string;
-	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `auth.json` and `attachments/` live here. */
+	/** The bridge's dir (T3's `baseDir`): `t3-settings.json`, `auth.json` and `uploads/` (attachments not yet sent). */
 	readonly stateDir: string;
 	/** The environment T3 works in: its `cwd` is the root of every absolute path in the protocol. Required by
 	 * `attachT3`; optional here only so tests and older direct `Bridge` callers keep a local fallback. */
 	readonly env?: ExecutionEnv;
 	/** Invocation context for the environment. */
 	readonly context?: Context;
+	/** Where sent attachments live in `env`, each named to the model by path; `undefined` takes no attachments. */
+	readonly attachmentsDir?: string;
 	/** The Scratch project's root, when the feature is on; `undefined` refuses `projects.ensureScratch`. */
 	readonly scratchDir: string | undefined;
 	readonly tokenTtlSeconds: number;

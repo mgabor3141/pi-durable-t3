@@ -46,6 +46,8 @@ export type HostConfig = {
 	readonly stateDir: string;
 	/** The Scratch project's root (agent work output); under the data dir by default. */
 	readonly scratchDir: string;
+	/** Where sent attachments live (`attachT3`'s `attachmentsDir`); under the data dir. */
+	readonly attachmentsDir: string;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[] | undefined;
 	/** Tailscale Serve: publish the host on the tailnet HTTPS name (`tailscale serve`), and the HTTPS port to publish on. */
@@ -93,6 +95,7 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		label: doc.label,
 		stateDir: join(dataDir, "t3"),
 		scratchDir: resolve(dataDir, doc.scratch_dir ?? "scratch"),
+		attachmentsDir: join(dataDir, "attachments"),
 		tokenTtlSeconds: doc.token_ttl_days * 86_400,
 		corsOrigins: doc.cors_origins,
 		tailscaleServe: doc.tailscale_serve,

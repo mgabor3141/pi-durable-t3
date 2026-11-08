@@ -2,7 +2,6 @@
 // and one `ThreadView` per open thread (`thread-view.ts`: its head watch, projection and stream). Commands land here.
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { basename } from "node:path";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DateTime } from "effect";
@@ -19,7 +18,7 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import { type Provenance, type Spawn, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
-import type { AttachmentRecord, AttachmentStore } from "./attachment-store.ts";
+import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, ConversationId, EntryId } from "@earendil-works/pi-durable";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -38,8 +37,6 @@ import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost }
 
 export { CommandError, type StreamUpdate };
 
-/** Where file attachments are copied so the workspace tools can read them by path. */
-export const ATTACHMENT_WORKSPACE_DIR = "/home/agent/attachments";
 
 /** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
  * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
@@ -106,7 +103,7 @@ export class Bridge {
 	readonly #store: Threads;
 	readonly #models: Models;
 	readonly #log: Logger;
-	readonly #attachments: AttachmentStore | undefined;
+	readonly #attachments: Attachments | undefined;
 	readonly #views = new Map<string, ThreadView>();
 	readonly #viewHost: ThreadViewHost;
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
@@ -127,7 +124,7 @@ export class Bridge {
 	#sequence = 0;
 	#startedAt = new Date().toISOString();
 
-	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: AttachmentStore) {
+	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: Attachments) {
 		this.config = config;
 		this.#log = log;
 		this.#store = store;
@@ -618,7 +615,6 @@ export class Bridge {
 	/** After each projection of an open thread: the shell, and on load or at a run's end the sidebar summary. */
 	#projected(view: ThreadView, change: { readonly loaded: boolean; readonly settled: boolean }): void {
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
-		if (change.loaded) this.#restoreAttachments(view.transcript);
 		if (change.loaded || change.settled) this.#remember(view);
 		if (change.settled) this.#recordOutcome(view);
 		this.#publishShell(view.threadId);
@@ -887,53 +883,29 @@ export class Bridge {
 		}
 	}
 
-	/** Restore an old uploaded image from the bytes its entry already carries. The client used to delete its pending
-	 * upload after sending; the model's image block is the remaining copy, so a missing file is repaired on first load. */
-	#restoreAttachments(entries: readonly EntryRecord[] | undefined): void {
-		if (this.#attachments === undefined || entries === undefined) return;
-		for (const entry of entries) {
-			const records = attachmentsOf(entry);
-			if (records.length === 0) continue;
-			const images: { data: string }[] = [];
-			for (const message of entry.model ?? []) {
-				if (!Array.isArray(message.content)) continue;
-				for (const block of message.content) if (block.type === "image") images.push(block);
-			}
-			records.forEach((record, index) => {
-				if (record.type === "file" || this.#attachments!.resolvePath(record.id) !== null) return;
-				const image = images[index];
-				if (image !== undefined) this.#attachments!.restoreFromData(record, image.data);
-			});
-		}
-	}
-
-	/** The image content blocks for a prompt, gated on the head's model (see `selectImageBlocks`). */
-	#imageBlocks(state: ThreadView, attachments: readonly AttachmentRecord[] | undefined): ContentBlock[] | undefined {
-		if (this.#attachments === undefined) return undefined;
+	/** The prompt's attachment blocks: T3's line naming where each attachment is saved (hidden in T3's display, as T3's
+	 * adapters add it to the provider message), then the images inline when the head's model takes them. */
+	#attachmentBlocks(state: ThreadView, kept: readonly KeptAttachment[]): ContentBlock[] | undefined {
+		if (kept.length === 0) return undefined;
 		const model = state.configuration?.model ?? state.view?.docs["pi.agent"]?.model ?? null;
-		return selectImageBlocks(state.catalog, model, attachments, (id) => this.#attachments!.readForModel(id));
+		const bytes = new Map(kept.flatMap((attachment) => (attachment.bytes === undefined ? [] : [[attachment.record.id, attachment.bytes] as const])));
+		const images = selectImageBlocks(state.catalog, model, kept.map((attachment) => attachment.record), (id) => {
+			const found = bytes.get(id);
+			return found === undefined ? null : { data: Buffer.from(found).toString("base64"), mimeType: "" };
+		});
+		const lines = kept.map(({ record, path }) => `[Attached ${record.type ?? "image"} "${record.name}" is saved at: ${path}]`).join("\n\n");
+		return [{ type: "text" as const, text: lines, hidden: true }, ...(images ?? [])];
 	}
 
-	/** Copy file attachments into the workspace and return the path-bearing prompt line the model reads. */
-	async #filePrompt(attachments: readonly AttachmentRecord[] | undefined): Promise<string | undefined> {
-		const files = (attachments ?? []).filter((attachment) => attachment.type === "file");
-		if (files.length === 0) return undefined;
-		const env = this.config.env;
-		if (env === undefined || this.#attachments === undefined) throw new CommandError("This host cannot store file attachments.");
-		const context = this.config.context ?? BACKGROUND_CONTEXT;
-		const made = await env.createDir(ATTACHMENT_WORKSPACE_DIR, { recursive: true }, context);
-		if (!made.ok) throw new CommandError(`Cannot create the attachment directory: ${made.error.message}`);
-		const lines: string[] = [];
-		for (const file of files) {
-			const bytes = this.#attachments.readBytes(file.id);
-			const local = this.#attachments.resolvePath(file.id);
-			if (bytes === null || local === null) throw new CommandError(`Attachment ${file.name} is missing.`);
-			const target = `${ATTACHMENT_WORKSPACE_DIR}/${basename(local)}`;
-			const written = await env.writeFile(target, bytes, context);
-			if (!written.ok) throw new CommandError(`Cannot save attachment ${file.name}: ${written.error.message}`);
-			lines.push(`[Attached file "${file.name}" is saved at: ${target}]`);
+	/** A message's attachments, kept in the environment (`Attachments.keep`); a host without an attachment dir takes none. */
+	async #keepAttachments(threadId: string, messageId: string, records: readonly AttachmentRecord[] | undefined): Promise<KeptAttachment[]> {
+		if (records === undefined || records.length === 0) return [];
+		if (this.#attachments === undefined) throw new CommandError("This host takes no attachments.");
+		try {
+			return await this.#attachments.keep(threadId, messageId, records);
+		} catch (error) {
+			throw new CommandError((error as Error).message);
 		}
-		return lines.join("\n\n");
 	}
 
 	async sendMessage(input: {
@@ -987,15 +959,13 @@ export class Bridge {
 				this.#beginTitle(input.threadId, input.commandId);
 			}
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
-			// commandId for durable dedup (design.md, Invariants). Images ride along as content blocks (model) and entry
-			// data (display), only when the model accepts them; files are copied to the workspace and named by path.
-			// The client's upload is only a pending record: adopt it under a deterministic id before the message references
-			// it, because the client may delete the pending upload once the send is acknowledged.
-			const attachments = input.attachments === undefined || this.#attachments === undefined ? input.attachments : this.#attachments.adopt(input.threadId, input.messageId, input.attachments);
+			// commandId for durable dedup (design.md, Invariants). Attachments are kept in the environment before the message
+			// names them (an upload moves there under a deterministic id), then named to the model by path; images also go
+			// inline when the model takes them. The records ride in the entry's data, for display.
+			const kept = await this.#keepAttachments(input.threadId, input.messageId, input.attachments);
+			const attachments = input.attachments === undefined ? undefined : kept.map((attachment) => attachment.record);
 			const context = rebindContext(input.context, input.attachments, attachments);
-			const blocks = this.#imageBlocks(state, attachments);
-			const filePrompt = await this.#filePrompt(attachments);
-			const promptBlocks = filePrompt === undefined ? blocks : [{ type: "text" as const, text: filePrompt, hidden: true }, ...(blocks ?? [])];
+			const promptBlocks = this.#attachmentBlocks(state, kept);
 			const request = {
 				threadId: input.threadId,
 				conversationId: head,

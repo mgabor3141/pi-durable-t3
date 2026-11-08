@@ -49,7 +49,7 @@ export type AttachT3Options = {
 	readonly models: Models;
 	/**
 	 * The bridge's state directory, created if missing: it holds `t3-settings.json` (T3's server settings), `auth.json`
-	 * (the pairing store) and `attachments/`. The bridge opens them itself and writes them on the UI's behalf; one host
+	 * (the pairing store) and `uploads/` (attachments not yet sent). The bridge opens them itself and writes them on the UI's behalf; one host
 	 * per directory. Threads and projects live in the Harness's own storage.
 	 */
 	readonly stateDir: string;
@@ -60,6 +60,12 @@ export type AttachT3Options = {
 	readonly env: ExecutionEnv;
 	/** Invocation context for environment calls. Default: `BACKGROUND_CONTEXT`. */
 	readonly context?: Context;
+	/**
+	 * Where attachments live in `env`: each image and file a user sends is saved there as `<id>.<ext>` and named to the
+	 * model by path, as T3 names its own attachment store to its agents; images also go to the model inline when it
+	 * takes them. Nothing removes them. Omitted: the host takes no attachments (T3 is told it has no uploads).
+	 */
+	readonly attachmentsDir?: string;
 	/**
 	 * The Scratch project's ("No project") root — agent work output, NOT bridge state. Omitted: the feature is off,
 	 * the config advertises no `scratchWorkspaceRoot` and `projects.ensureScratch` is refused.
@@ -205,6 +211,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		env: options.env,
 		...(options.context === undefined ? {} : { context: options.context }),
 		scratchDir: options.scratchDir,
+		...(options.attachmentsDir === undefined ? {} : { attachmentsDir: options.attachmentsDir }),
 		tokenTtlSeconds: options.tokenTtlSeconds ?? 90 * 86_400,
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: webApp,

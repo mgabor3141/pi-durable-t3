@@ -10,7 +10,7 @@ import { AssetPreviewTypeValidationError, AssetWorkspaceAssetInspectionError, As
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { ASSET_ROUTE_PREFIX, type Signer } from "./attachment-store.ts";
+import { ASSET_ROUTE_PREFIX, type Signer } from "./attachments.ts";
 
 /** T3's asset URL lifetime (`ASSET_TOKEN_TTL_MS`). The client re-mints before this expires. */
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;

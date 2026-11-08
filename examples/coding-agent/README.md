@@ -77,8 +77,9 @@ In `~/.local/share/pi-durable-t3/` (`$XDG_DATA_HOME`), or `<dir>` with `--root`:
 | Path | What | Owner |
 |---|---|---|
 | `durable.db`, `models-store.json` | conversations, model choices | the agent (pi-durable) |
-| `t3/` | `t3-settings.json`, `projects.json`, `auth.json`, `attachments/` | the bridge (`stateDir`) |
+| `t3/` | `t3-settings.json`, `projects.json`, `auth.json`, `uploads/` (attachments not yet sent) | the bridge (`stateDir`) |
 | `scratch/` | one folder per "No project" thread | agent work output |
+| `attachments/` | every image and file sent in a thread, named to the model by path | the user's files |
 
 `t3/` pairs with `durable.db`: back up and move them together. A file that doesn't parse stops the host with
 a message naming it.

@@ -35,21 +35,30 @@ client's choices and the integrator's extensions.
 ## The bridge, on disk
 
 The bridge owns one directory — `attachT3`'s `stateDir` — and creates it if missing. Nothing in it is pointed at by
-the Harness's storage: settings, pairings and attachment bytes.
+the Harness's storage: settings, pairings and uploads not yet sent.
 
 | File | What | If lost |
 |---|---|---|
 | `t3-settings.json` (the state dir) | T3's server settings, stored as T3's server stores them | T3's defaults |
 | `auth.json` (the state dir) | Environment id; hashed pairing links and device sessions (bearer or browser cookie), each with its scopes and client metadata; the key that signs attachment URLs | Every device re-pairs |
-| `attachments/` (the state dir) | Image and file attachments, one file per attachment id | Past attachments stop rendering; the model's copy in pi-durable survives |
+| `uploads/` (the state dir) | Attachments uploaded and not yet sent, one file per upload id; moved into `attachmentsDir` when their message is sent, removed after a week otherwise | Uploads in a composer must be added again |
 | The scratch dir (`scratchDir`, if set) | "No project" threads: one folder per thread | Nothing the bridge needs; threads keep their recorded `cwd` |
 
-The JSON files are written atomically, mode 0600, and so are attachments; a symlinked file is written through its
+The JSON files are written atomically, mode 0600, and so are uploads; a symlinked file is written through its
 link, which stays. The scratch dir is agent work output, not bridge state. Like T3, a settings save merges into the
 file as it is on disk, so a hand edit made while the host runs is kept, and a file that no longer parses is refused
 (`read-file`) and left alone. Unlike T3, the file is not watched: clients see a hand edit at the next save or restart. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.
+
+## The bridge, in the environment
+
+| Path | What | If lost |
+|---|---|---|
+| `attachmentsDir` (`attachT3`'s option) | Every image and file sent in a thread, as `<id>.<ext>`: the agent reads them by the path its prompt names, and T3 shows them from here | Their messages show them as missing; an image the model took inline stays in its entry |
+
+Sent attachments live where the agent works, since that is where it can open them (T3 keeps its store on the agent's
+machine for the same reason). Nothing deletes them: the agent may tidy the folder, and T3 then shows those as missing.
 
 ## Not the bridge's: Tailscale Serve
 

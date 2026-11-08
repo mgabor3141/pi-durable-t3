@@ -120,6 +120,7 @@ async function main(): Promise<void> {
 			stateDir: config.stateDir,
 			env: new NodeExecutionEnv({ cwd: "/" }),
 			scratchDir: config.scratchDir,
+			attachmentsDir: config.attachmentsDir,
 			listen: config.listen,
 			label: config.label,
 			...(config.corsOrigins === undefined ? {} : { corsOrigins: config.corsOrigins }),

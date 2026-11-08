@@ -64,7 +64,8 @@ import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
 const t3 = await attachT3(harness, {
 	models,        // the models T3's picker lists
 	env,           // REQUIRED: the ExecutionEnv T3 reads, writes and runs in; its cwd is the path root
-	stateDir,      // the bridge's own files: t3-settings.json, auth.json, attachments/
+	stateDir,      // the bridge's own files: t3-settings.json, auth.json, uploads/ (attachments not yet sent)
+	attachmentsDir, // optional: absolute path in `env` where sent images and files live; omit to take no attachments
 	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
 	scratchDir,    // optional: absolute path in `env` where "No project" threads run; omit to turn it off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
@@ -147,7 +148,9 @@ Known limitations:
   itself once when a lazily loaded chunk fails to fetch, and during the restart there is nothing to reload into. Reload
   the page — the thread and its messages come back exactly as they were, including one holding a message the host was
   sent just before it died.
-- Attachments are images and files. Deleting a thread leaves its attachments in `stateDir/attachments/`; files are copied into the workspace at `/home/agent/attachments/` so the agent can read them by path.
+- Attachments are images and files, kept in `attachmentsDir` in the environment and named to the model by path, as T3
+  names its own attachment store to its agents; an image also goes inline when the model takes images. Nothing removes
+  them, a deleted thread's included. Without `attachmentsDir` the host takes none.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - A task parked by pi's crash-loop guard (after 5 crashes without progress) keeps its thread "running"; Stop clears it.
