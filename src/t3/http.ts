@@ -52,6 +52,30 @@ import { McpOAuth } from "./mcp-oauth.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
+
+/** T3's sandbox for an HTML asset (`http.ts`'s `HTML_CONTENT_SECURITY_POLICY`): an opaque origin, so a page cannot reach
+ * cookies, storage or this host's API, while its scripts still run. No `allow-modals`: agent HTML can open unasked. */
+const HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-popups allow-downloads";
+/** T3's policy for an SVG asset: styles only, sandboxed. */
+const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
+/**
+ * The type and headers an asset is served with (T3's `assetResponseHeaders` for an inline asset). HTML and SVG are
+ * sandboxed as T3 sandboxes them; any other XML type, which a browser may also run scripts in (XHTML), gets nothing at
+ * all. In the app these load in sandboxed frames anyway; the headers hold when an asset URL is opened in its own tab.
+ */
+export function assetResponse(mimeType: string): { contentType: string; headers: Record<string, string> } {
+	const type = mimeType.split(";", 1)[0]!.trim().toLowerCase();
+	const headers: Record<string, string> = { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" };
+	if (type === "text/html") {
+		headers["content-security-policy"] = HTML_CONTENT_SECURITY_POLICY;
+		return { contentType: "text/html; charset=utf-8", headers };
+	}
+	if (type === "image/svg+xml") headers["content-security-policy"] = SVG_CONTENT_SECURITY_POLICY;
+	else if (/\/xml$|\+xml$/.test(type)) headers["content-security-policy"] = "default-src 'none'; sandbox";
+	return { contentType: mimeType, headers };
+}
+
 export const SERVER_VERSION = "0.1.6";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
@@ -326,10 +350,8 @@ export function makeServerLayer(deps: {
 				const attachment = attachments === undefined ? null : yield* Effect.promise(() => attachments.resolveAsset(token, filename).catch(() => null));
 				const asset = attachment ?? (yield* Effect.promise(() => assets.resolve(token, filename).catch(() => null)));
 				if (asset === null) return HttpServerResponse.text("Not Found", { status: 404 });
-				return HttpServerResponse.uint8Array(asset.bytes, {
-					contentType: asset.mimeType,
-					headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
-				});
+				const served = assetResponse(asset.mimeType);
+				return HttpServerResponse.uint8Array(asset.bytes, { contentType: served.contentType, headers: served.headers });
 			}),
 		),
 		// The upload route (T3's `AttachmentUpload`): the signed URL is the credential, and the POST body is the file's
