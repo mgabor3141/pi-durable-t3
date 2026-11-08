@@ -1,4 +1,4 @@
-// `/mcp`: T3's orchestrator MCP server for this host's threads (T3's `McpHttpServer`, its orchestrator and project toolkits).
+// `/mcp`: T3's orchestrator MCP server for this host's threads (T3's `McpHttpServer`: its orchestrator, project and thread toolkits).
 // Streamable HTTP at protocol 2025-06-18, the toolkit T3 advertises (`mcp-toolkit.ts`, with T3's compacted input
 // schemas), and handlers over `ThreadOps`. A tool this host does not do answers the contract's failure and is logged.
 //
@@ -18,7 +18,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoredToken } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
-import { OrchestratorToolkit, ProjectToolkit } from "./mcp-toolkit.ts";
+import { OrchestratorToolkit, ProjectToolkit, ThreadToolkit } from "./mcp-toolkit.ts";
 import { advertisedJsonSchema } from "./t3-server.ts";
 import type { Caller, ThreadOps } from "./thread-ops.ts";
 
@@ -45,12 +45,16 @@ const SUPPORTED = new Set([
 	"t3_project_create",
 	"t3_project_update",
 	"t3_project_delete",
+	"t3_thread_organize",
+	"t3_queue",
+	"run_scheduled_task_now",
 ]);
 /** The tools that write (T3's `writesThreads` / `actsAsCaller`): they need `orchestration:operate`. */
-const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update", "schedule_task", "delete_scheduled_task", "t3_project_create", "t3_project_update", "t3_project_delete"]);
+const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update", "schedule_task", "delete_scheduled_task", "t3_project_create", "t3_project_update", "t3_project_delete", "t3_thread_organize", "run_scheduled_task_now"]);
 
-/** What `/mcp` serves: T3's orchestrator and project toolkits, as T3 registers both. */
-const ServedToolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit);
+/** What `/mcp` serves: T3's orchestrator, project and thread toolkits, as T3 registers them (each as far as this host
+ * goes, `mcp-toolkit.ts`). */
+const ServedToolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit, ThreadToolkit);
 
 export interface McpDeps {
 	readonly bridge: Bridge;
@@ -126,6 +130,9 @@ export function makeMcpLayer(deps: McpDeps) {
 		t3_project_create: call("t3_project_create", (caller, input) => ops.projectCreate(caller, input as never)),
 		t3_project_update: call("t3_project_update", (caller, input) => ops.projectUpdate(caller, input as never)),
 		t3_project_delete: call("t3_project_delete", (caller, input) => ops.projectDelete(caller, input as never)),
+		t3_thread_organize: call("t3_thread_organize", (caller, input) => ops.organize(caller, input as never)),
+		t3_queue: call("t3_queue", (caller, input) => ops.queue(caller, input as never)),
+		run_scheduled_task_now: call("run_scheduled_task_now", (caller, input) => ops.runScheduledTaskNow(caller, input as never)),
 	});
 	const handlersLayer = ServedToolkit.toLayer(handlers as never);
 

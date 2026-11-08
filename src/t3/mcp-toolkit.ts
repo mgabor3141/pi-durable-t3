@@ -40,6 +40,12 @@ import {
   ProjectCreatePayload,
   ProjectId,
   ProjectUpdatePayload,
+  IsoDateTime,
+  OrchestrationV2DispatchCommandResult,
+  RunId,
+  ScheduledTask,
+  ScheduledTaskId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
@@ -339,3 +345,79 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 }).annotate(Tool.Destructive, true);
 
 export const ProjectToolkit = Toolkit.make(ProjectListTool, ProjectReadTool, ProjectCreateTool, ProjectUpdateTool, ProjectDeleteTool);
+
+// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.7), the same way: the three tools this
+// host does, `t3_thread_organize`, `t3_queue` and `run_scheduled_task_now`. Left out: `t3_thread_search` (an agent
+// here has `thread_search`), `t3_thread_configure` (its values come from `orchestrator_capabilities`, not served),
+// `t3_thread_transfer` (fork and merge-back) and `t3_pending_request` (no user questions here).
+const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
+  description:
+    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    action: Schema.Literals(["pin", "unpin", "snooze", "unsnooze", "settle", "unsettle", "archive", "unarchive", "mark_unread"]),
+    snoozedUntil: Schema.optional(IsoDateTime),
+  }),
+  success: Schema.Union([OrchestrationV2DispatchCommandResult, Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) })]),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+})
+  .annotate(Tool.Title, "Organize a thread")
+  .annotate(Tool.Strict, true)
+  .annotate(Tool.Destructive, true);
+
+const commandTool = {
+  success: OrchestrationV2DispatchCommandResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+};
+const queueEntry = Schema.Struct({
+  queuedRunId: RunId,
+  text: Schema.String,
+  truncated: Schema.Boolean,
+});
+const QUEUE_READ_ACTIONS = ["list", "read"] as const;
+const QueueTool = Tool.make("t3_queue", {
+  ...commandTool,
+  description:
+    "Manage a thread's queued messages. Omit `threadId` for this thread. list: send order, paged by `cursor` and `limit`. read: up to 16,000 chars of one. edit: replace its `text`; attachments stay. cancel. reorder: before `beforeRunId`, or to the end with null. promote_to_steer: send it now as steering to active `targetRunId`. Writes fail once the run is no longer queued.",
+  parameters: Schema.Struct({
+    action: Schema.Literals([...QUEUE_READ_ACTIONS, "edit", "cancel", "reorder", "promote_to_steer"]),
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    queuedRunId: Schema.optional(RunId),
+    text: Schema.optional(Schema.String.check(Schema.isMaxLength(100000))),
+    beforeRunId: Schema.optional(Schema.NullOr(RunId)),
+    targetRunId: Schema.optional(RunId),
+    cursor: Schema.optional(NonNegativeInt),
+    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+  }),
+  success: Schema.Union([
+    Schema.Struct({ items: Schema.Array(queueEntry), nextCursor: Schema.NullOr(NonNegativeInt) }),
+    queueEntry,
+    OrchestrationV2DispatchCommandResult,
+  ]),
+}).annotate(Tool.Destructive, true);
+
+const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
+  ...commandTool,
+  description:
+    "Run one scheduled task now. Needs a full-access or default caller. Returns its thread, or null if not started. Success means started, not finished.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    taskId: ScheduledTaskId,
+  }),
+  success: Schema.Struct({
+    taskId: ScheduledTaskId,
+    threadId: ScheduledTask.fields.threadId,
+    link: Schema.optional(Schema.String),
+    lastRunStatus: ScheduledTask.fields.lastRunStatus,
+    runCount: NonNegativeInt,
+    nextRunAt: ScheduledTask.fields.nextRunAt,
+  }),
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+export const ThreadToolkit = Toolkit.make(ScheduledTaskRunTool, ThreadOrganizeTool, QueueTool);

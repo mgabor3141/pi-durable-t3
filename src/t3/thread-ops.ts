@@ -436,9 +436,8 @@ export class ThreadOps {
 
 	/** `t3_thread_update`: rename a thread, or regenerate its title. */
 	async update(caller: Caller, input: ThreadMetadataMcpUpdateInput): Promise<ThreadMetadataMcpUpdateResult> {
-		this.#mayWrite(caller, input.threadId);
-		const threadId = input.threadId ?? fail("target_required", "Name a threadId outside a thread.");
-		if (!this.#bridge.hasThread(threadId)) fail("thread_not_found", `Thread ${threadId} was not found.`);
+		const threadId = this.#target(caller, input.threadId);
+		this.#mayWrite(caller, threadId);
 		const commandId = `mcp-${stableId(namespaceOf(caller), input.clientRequestId ?? randomUUID(), "thread-update", input.action)}`;
 		const command = { type: "thread.metadata.update", commandId, threadId, ...(input.action === "rename" ? { title: input.title } : { regenerateTitle: true }) };
 		let sequence = 0;
@@ -682,4 +681,134 @@ export class ThreadOps {
 			return fail("invalid_request", message);
 		}
 	}
+
+	// ---- T3's thread toolkit: `t3_thread_organize`, `t3_queue`, `run_scheduled_task_now` ------------------------
+
+	/** The thread a tool acts on (T3's `readThread`): the one named, else the caller's own. */
+	#target(caller: Caller, threadId: string | undefined): string {
+		const id = threadId ?? caller.threadId ?? fail("target_required", "Name a threadId outside a thread.");
+		if (!this.#bridge.hasThread(id)) fail("thread_not_found", `Thread ${id} was not found.`);
+		return id;
+	}
+
+	/** One thread command, through the same dispatch as the web app's (T3's `dispatch`, `dispatchFailure`). */
+	async #command(command: Record<string, unknown> & { readonly type: string; readonly threadId: string }): Promise<{ sequence: number }> {
+		try {
+			const sequence = await dispatchCommand(this.#bridge, { commandId: `mcp-${randomUUID()}`, ...command } as unknown as DispatchCommand, { createdBy: "agent", creationSource: "mcp" }, this.#log);
+			return { sequence };
+		} catch (error) {
+			return fail(error instanceof CommandError ? "invalid_request" : "orchestration_error", (error as Error).message);
+		}
+	}
+
+	/** `t3_thread_organize`: the sidebar's actions. A thread's own agent settling it mid-turn settles it when the turn
+	 * ends, and only if the turn completes (T3's `settleThread` with `byOwnAgent`). */
+	async organize(caller: Caller, input: { readonly threadId?: string; readonly action: "pin" | "unpin" | "snooze" | "unsnooze" | "settle" | "unsettle" | "archive" | "unarchive" | "mark_unread"; readonly snoozedUntil?: string }): Promise<{ sequence: number } | { settlesWhenTurnEnds: true }> {
+		const threadId = this.#target(caller, input.threadId);
+		this.#mayWrite(caller, threadId);
+		switch (input.action) {
+			case "settle": {
+				const active = caller.threadId === threadId ? latestActiveRun(await this.#projection(threadId)) : undefined;
+				if (active !== undefined) {
+					this.#settleAfterRun(threadId, active.id as string);
+					return { settlesWhenTurnEnds: true };
+				}
+				return this.#command({ type: "thread.settle", threadId });
+			}
+			case "snooze":
+				if (input.snoozedUntil === undefined) fail("invalid_request", "snooze requires snoozedUntil.");
+				return this.#command({ type: "thread.snooze", threadId, snoozedUntil: input.snoozedUntil });
+			case "mark_unread":
+				return this.#command({ type: "thread.mark-unread", threadId });
+			default:
+				return this.#command({ type: `thread.${input.action}`, threadId });
+		}
+	}
+
+	/** Settle `threadId` once run `runId` has ended, if it completed (T3's `settleAfterRun`, waiting as long). Not kept
+	 * across a restart, as T3's is not. */
+	#settleAfterRun(threadId: string, runId: string): void {
+		void this.#bridge
+			.waitFor(threadId, (projection) => {
+				const run = projection.runs.find((candidate) => (candidate.id as string) === runId);
+				return run !== undefined && !isActive(run) ? run : undefined;
+			}, SETTLE_AFTER_RUN_WAIT_MS)
+			.then(async (run) => {
+				if (run?.status !== "completed") return;
+				await dispatchCommand(this.#bridge, { type: "thread.settle", commandId: `server:settle-after-run:${runId}`, threadId } as unknown as DispatchCommand, { createdBy: "agent", creationSource: "mcp" }, this.#log);
+			})
+			.catch((error: unknown) => this.#log.warn("settling a thread after its turn failed", { threadId, runId, error: (error as Error).message }));
+	}
+
+	/** `t3_queue`: a thread's queued messages, in send order. `reorder` is refused: the queue is pi-durable's inbox, whose
+	 * order this host does not change. */
+	async queue(
+		caller: Caller,
+		input: { readonly action: "list" | "read" | "edit" | "cancel" | "reorder" | "promote_to_steer"; readonly threadId?: string; readonly queuedRunId?: string; readonly text?: string; readonly beforeRunId?: string | null; readonly targetRunId?: string; readonly cursor?: number; readonly limit?: number },
+	): Promise<unknown> {
+		const threadId = this.#target(caller, input.threadId);
+		const projection = await this.#projection(threadId);
+		if (input.action === "list") {
+			const runs = queuedRunsInDeliveryOrder(projection);
+			const cursor = input.cursor ?? 0;
+			const end = cursor + (input.limit ?? 20);
+			return { items: runs.slice(cursor, end).flatMap((run) => queueEntry(projection, run.id as string, 1_000) ?? []), nextCursor: end < runs.length ? end : null };
+		}
+		const runId = input.queuedRunId ?? fail("invalid_request", "This action needs `queuedRunId`.");
+		if (input.action === "read") return queueEntry(projection, runId, 16_000) ?? fail("invalid_request", "The queued message was not found.");
+		this.#mayWrite(caller, threadId);
+		switch (input.action) {
+			case "edit": {
+				const text = input.text ?? fail("invalid_request", "This action needs `text`.");
+				return this.#command({ type: "queued-run.edit", threadId, runId, text });
+			}
+			case "reorder":
+				return fail("invalid_request", "reorder is not supported by pi-durable-t3: the queue keeps the order messages were sent in.");
+			case "promote_to_steer": {
+				const targetRunId = input.targetRunId ?? fail("invalid_request", "This action needs `targetRunId`.");
+				if ((latestActiveRun(projection)?.id as string | undefined) !== targetRunId) fail("invalid_request", `Run ${targetRunId} is not the running turn of thread ${threadId}.`);
+				return this.#command({ type: "queued-message.promote-to-steer", threadId, queuedRunId: runId, targetRunId });
+			}
+			default:
+				return this.#command({ type: "queued-run.cancel", threadId, runId });
+		}
+	}
+
+	/** `run_scheduled_task_now`: start a task's run; success means started, not finished. */
+	async runScheduledTaskNow(caller: Caller, input: { readonly taskId: string }): Promise<{ taskId: string; threadId: string | null; link?: string; lastRunStatus: ScheduledTask["lastRunStatus"]; runCount: number; nextRunAt: ScheduledTask["nextRunAt"] }> {
+		this.#mayWrite(caller, undefined);
+		if (!this.#tasks().list().tasks.some((task) => task.id === input.taskId)) fail("invalid_request", "The scheduled task was not found.");
+		let ran: { task: ScheduledTask; threadId: string | null };
+		try {
+			ran = await this.#tasks().runNow({ id: input.taskId });
+		} catch (error) {
+			return fail("orchestration_error", (error as Error).message);
+		}
+		const { task, threadId } = ran;
+		return { taskId: task.id, threadId, ...(threadId === null ? {} : { link: this.#link(caller, threadId) }), lastRunStatus: task.lastRunStatus, runCount: task.runCount, nextRunAt: task.nextRunAt };
+	}
 }
+
+/** T3's `queuedRunsInDeliveryOrder`: queued runs in the order they will be sent, a delegated completion first. */
+function queuedRunsInDeliveryOrder(projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">): OrchestrationV2ThreadProjection["runs"] {
+	const automatic = new Set(projection.messages.filter((message) => (message as { delegatedCompletion?: unknown }).delegatedCompletion !== undefined).map((message) => message.id));
+	return projection.runs
+		.filter((run) => run.status === "queued")
+		.toSorted((left, right) => {
+			const priority = Number(automatic.has(right.userMessageId)) - Number(automatic.has(left.userMessageId));
+			const position = (run: (typeof projection.runs)[number]) => (run as { queuePosition?: number }).queuePosition ?? run.ordinal;
+			return priority || position(left) - position(right) || left.ordinal - right.ordinal;
+		});
+}
+
+/** T3's queue entry: a queued run's message, cut to `limit` characters. */
+function queueEntry(projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">, runId: string, limit: number): { queuedRunId: string; text: string; truncated: boolean } | undefined {
+	const run = projection.runs.find((candidate) => (candidate.id as string) === runId && candidate.status === "queued");
+	const message = projection.messages.find((candidate) => candidate.id === run?.userMessageId);
+	if (run === undefined || message === undefined) return undefined;
+	const characters = Array.from(message.text);
+	return { queuedRunId: run.id as string, text: characters.slice(0, limit).join(""), truncated: characters.length > limit };
+}
+
+/** T3's `SETTLE_AFTER_RUN_WAIT_MS`: how long a thread's own settle waits for its turn to end. */
+const SETTLE_AFTER_RUN_WAIT_MS = 24 * 60 * 60 * 1_000;

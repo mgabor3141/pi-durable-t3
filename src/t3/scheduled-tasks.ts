@@ -26,7 +26,8 @@ export const POLL_INTERVAL_MS = 5_000;
 
 /** The two dispatch paths a run takes (T3's `threadLaunch.launch` and `threadManagement.sendToThread(mode: "queue")`). */
 export interface ScheduledTaskDispatch {
-	launch(input: { commandId: string; messageId: string; projectId: string; title: string; text: string; modelSelection: Task["modelSelection"]; provenance: Provenance }): Promise<void>;
+	/** Resolves with the new thread's id (a test's dispatch may resolve with nothing). */
+	launch(input: { commandId: string; messageId: string; projectId: string; title: string; text: string; modelSelection: Task["modelSelection"]; provenance: Provenance }): Promise<string | void>;
 	/** T3 passes no model to a bound run: it follows the thread's current selection (ScheduledTaskService). */
 	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string; provenance: Provenance }): Promise<void>;
 	/** T3's `ManagedProjectFolders.isScratchProject`. */
@@ -173,10 +174,11 @@ export class ScheduledTasks {
 		await this.#write({ ...task, nextRunAt: next, updatedAt: now.toISOString() });
 	}
 
-	async #runTask(task: Task, trigger: "scheduled" | "manual"): Promise<Task> {
+	/** Run `task`: the task as the run left it, and the thread the run went to (null when none started). */
+	async #runTask(task: Task, trigger: "scheduled" | "manual"): Promise<{ task: Task; threadId: string | null }> {
 		if (this.#activeRuns.has(task.id)) {
 			if (trigger !== "scheduled") throw taskError("Schedule task is already running.", task.id);
-			return task;
+			return { task, threadId: null };
 		}
 		this.#activeRuns.add(task.id);
 		let startedAtIso: string | undefined;
@@ -187,9 +189,9 @@ export class ScheduledTasks {
 			const active = this.#tasks.get(task.id);
 			if (active === undefined) {
 				if (trigger !== "scheduled") throw taskError("Schedule task not found.", task.id);
-				return task;
+				return { task, threadId: null };
 			}
-			if (trigger === "scheduled" && (!active.enabled || active.nextRunAt === null || Date.parse(active.nextRunAt) > startedAt.getTime())) return active;
+			if (trigger === "scheduled" && (!active.enabled || active.nextRunAt === null || Date.parse(active.nextRunAt) > startedAt.getTime())) return { task: active, threadId: null };
 
 			await this.#write({ ...active, updatedAt: startedAtIso, lastRunAt: startedAtIso, lastRunStatus: "running", lastRunError: null });
 
@@ -197,12 +199,15 @@ export class ScheduledTasks {
 			const commandId = `scheduled-task:${fireKey}`;
 			const messageId = `scheduled-task-message:${fireKey}`;
 			let lastRunError: string | null = null;
+			let threadId: string | null = null;
 			try {
 				if (active.threadId === null) {
 					// A run carries the task's provenance, as T3's `ScheduledTaskService` dispatches it.
-					await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
+					const launched = await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
+					threadId = typeof launched === "string" ? launched : null;
 				} else {
 					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
+					threadId = active.threadId;
 				}
 			} catch (error) {
 				lastRunError = errorMessage(error);
@@ -223,7 +228,7 @@ export class ScheduledTasks {
 			};
 			// Only the row this run marked: a task deleted (and recreated) mid-run is not stamped.
 			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) await this.#write(completed);
-			return completed;
+			return { task: completed, threadId: lastRunError === null ? threadId : null };
 		} catch (error) {
 			// Anything failing after the mark leaves the task `running`, which the poll skips forever: record the attempt.
 			const current = this.#tasks.get(task.id);
@@ -326,11 +331,12 @@ export class ScheduledTasks {
 		return { id: input.id };
 	}
 
-	async runNow(input: { id: string }): Promise<{ task: Task }> {
+	/** Run a task now: the task as the run left it, and the thread it went to (T3's `runTask`; the RPC answers the task). */
+	async runNow(input: { id: string }): Promise<{ task: Task; threadId: string | null }> {
 		if (!this.#ready) await this.load();
 		const task = this.#load(input.id);
 		try {
-			return { task: await this.#runTask(task, "manual") };
+			return await this.#runTask(task, "manual");
 		} catch (cause) {
 			throw taskError("Could not run schedule task.", input.id, cause);
 		}
@@ -401,8 +407,8 @@ export class ScheduledTasks {
  * host has), `sendToThread(mode: "queue")` is `message.dispatch` with `queue_after_active`. */
 export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 	return {
-		launch: async (input) => {
-			await bridge.launchThread({
+		launch: async (input) =>
+			bridge.launchThread({
 				commandId: input.commandId,
 				projectId: input.projectId,
 				title: input.title,
@@ -410,8 +416,7 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 				workspaceStrategy: { type: "root" },
 				initialMessage: { messageId: input.messageId, text: input.text },
 				provenance: input.provenance,
-			});
-		},
+			}),
 		queue: async (input) => {
 			// T3's sendToThread refuses a thread that is gone or belongs to another project; at boot, once the list is in.
 			await bridge.loaded();

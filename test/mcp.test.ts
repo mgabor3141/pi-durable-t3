@@ -88,7 +88,7 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	const listed = await rpc(token, session, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 	const names = ((listed.message?.result as { tools: { name: string }[] }).tools ?? []).map((tool) => tool.name).sort();
 	expect(names).toEqual(
-		["create_threads", "delegate_task", "delete_scheduled_task", "list_scheduled_tasks", "request_secret", "schedule_task", "t3_background_wait", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "task_cancel", "task_status", "t3_project_list", "t3_project_read", "t3_project_create", "t3_project_update", "t3_project_delete"].sort(),
+		["create_threads", "delegate_task", "delete_scheduled_task", "list_scheduled_tasks", "request_secret", "schedule_task", "t3_background_wait", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "task_cancel", "task_status", "t3_project_list", "t3_project_read", "t3_project_create", "t3_project_update", "t3_project_delete", "t3_thread_organize", "t3_queue", "run_scheduled_task_now"].sort(),
 	);
 
 	const call = async (id: number, name: string, args: unknown, meta?: unknown) =>
@@ -139,6 +139,12 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	expect(await failureOf(reader.token, "t3_project_update", { projectId, title: "x" })).toMatchObject({ code: "capability_denied" });
 	expect(await failureOf(full.token, "t3_project_update", { projectId, title: "Renamed over MCP" }), "a writer renames").toBeUndefined();
 	expect(await failureOf(full.token, "t3_project_read", { projectId: "nope" })).toMatchObject({ code: "invalid_request", message: "The project was not found." });
+	// Organizing threads and their queues (T3's thread toolkit): a reader reads a queue, only a writer changes anything.
+	expect(await failureOf(reader.token, "t3_queue", { threadId: "mcp-a", action: "list" }), "a reader lists a queue").toBeUndefined();
+	expect(await failureOf(reader.token, "t3_thread_organize", { threadId: "mcp-a", action: "pin" })).toMatchObject({ code: "capability_denied" });
+	expect(await failureOf(full.token, "t3_thread_organize", { action: "pin" }), "outside a thread, a thread must be named").toMatchObject({ code: "target_required" });
+	expect(await failureOf(full.token, "t3_thread_organize", { threadId: "mcp-a", action: "pin" }), "a writer pins").toBeUndefined();
+	expect(await failureOf(full.token, "run_scheduled_task_now", { taskId: "nope" })).toMatchObject({ code: "invalid_request", message: "The scheduled task was not found." });
 	expect(await failureOf(reader.token, "schedule_task", { prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({ code: "capability_denied" });
 	expect(await failureOf(full.token, "schedule_task", { prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({ code: "target_required" });
 	expect(await failureOf(full.token, "schedule_task", { projectId, prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({

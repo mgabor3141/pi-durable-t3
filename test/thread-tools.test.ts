@@ -311,6 +311,92 @@ it("an agent lists, creates, renames, repoints and deletes projects with T3's pr
 	expect(bridge.projects().map((project) => project.id)).toEqual(["p"]);
 });
 
+it("an agent renames and organizes threads with T3's tools; settling its own thread waits for its turn", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Helper" }, message: "What is 1+2?" } });
+	const [started] = await sawAll(1);
+	const child = started.threadId as string;
+	const later = new Date(Date.now() + 3_600_000).toISOString();
+	const steps: { name: string; args: Record<string, unknown> }[] = [
+		{ name: "t3_thread_update", args: { action: "rename", title: "Parent, renamed" } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "pin" } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "snooze" } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "unpin" } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "snooze", snoozedUntil: later } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "mark_unread" } },
+		{ name: "t3_thread_organize", args: { threadId: child, action: "archive" } },
+		{ name: "t3_thread_organize", args: { threadId: "nope", action: "pin" } },
+	];
+	for (const step of steps) await ask("a", step);
+	const [, renamed, pinned, noTime, , snoozed, unread, archived, unknown] = await sawAll(1 + steps.length);
+	expect(renamed, "no threadId: the caller's own thread").toMatchObject({ threadId: "a", title: "Parent, renamed" });
+	expect(pinned).toMatchObject({ sequence: expect.any(Number) });
+	expect(noTime.error).toBe("invalid_request: snooze requires snoozedUntil.");
+	expect(snoozed).toMatchObject({ sequence: expect.any(Number) });
+	expect(bridge.threadRecord(child)!.snoozedUntil).toBe(Date.parse(later));
+	expect(unread).toMatchObject({ sequence: expect.any(Number) });
+	expect(archived).toMatchObject({ sequence: expect.any(Number) });
+	expect(bridge.threadRecord(child)).toMatchObject({ archivedAt: expect.any(Number) });
+	expect(bridge.threadRecord(child)!.pinnedAt).toBeUndefined();
+	expect(unknown.error).toBe("thread_not_found: Thread nope was not found.");
+
+	// Settling its own thread mid-turn waits for the turn, and happens only once it completes.
+	await ask("a", { name: "t3_thread_organize", args: { action: "settle" } });
+	const [last] = (await sawAll(2 + steps.length)).slice(-1);
+	expect(last).toEqual({ settlesWhenTurnEnds: true });
+	for (let waited = 0; bridge.threadRecord("a")!.settledOverride !== "settled" && waited < 10_000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+	expect(bridge.threadRecord("a")!.settledOverride).toBe("settled");
+});
+
+it("an agent reads, edits, cancels and promotes another thread's queued messages", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Busy" }, message: "Hold on: q1", wait: false, notify: false } });
+	const [started] = await sawAll(1);
+	const busy = started.threadId as string;
+	await bridge.waitFor(busy, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	await bridge.sendMessage({ threadId: busy, commandId: "q-1", messageId: "qm-1", text: "first follow-up", mode: "queue" });
+	await bridge.sendMessage({ threadId: busy, commandId: "q-2", messageId: "qm-2", text: "second follow-up", mode: "queue" });
+	const queued = await bridge.waitFor(busy, (projection) => (projection.runs.filter((run) => run.status === "queued").length === 2 ? projection : undefined), 10_000);
+	const [firstId, secondId] = queued!.runs.filter((run) => run.status === "queued").map((run) => run.id as string);
+	const running = queued!.runs.find((run) => run.status === "running")!.id as string;
+
+	const steps: { name: string; args: Record<string, unknown> }[] = [
+		{ name: "t3_queue", args: { threadId: busy, action: "list" } },
+		{ name: "t3_queue", args: { threadId: busy, action: "edit", queuedRunId: firstId, text: "first, edited" } },
+		{ name: "t3_queue", args: { threadId: busy, action: "read", queuedRunId: firstId } },
+		{ name: "t3_queue", args: { threadId: busy, action: "reorder", queuedRunId: secondId, beforeRunId: firstId } },
+		{ name: "t3_queue", args: { threadId: busy, action: "promote_to_steer", queuedRunId: firstId, targetRunId: "r-nope" } },
+		{ name: "t3_queue", args: { threadId: busy, action: "cancel", queuedRunId: secondId } },
+		{ name: "t3_queue", args: { threadId: busy, action: "list" } },
+		{ name: "t3_queue", args: { threadId: busy, action: "promote_to_steer", queuedRunId: firstId, targetRunId: running } },
+	];
+	for (const step of steps) await ask("a", step);
+	const [, listed, edited, read, reorder, wrongTarget, cancelled, after, promoted] = await sawAll(1 + steps.length);
+	expect(listed).toEqual({ items: [{ queuedRunId: firstId, text: "first follow-up", truncated: false }, { queuedRunId: secondId, text: "second follow-up", truncated: false }], nextCursor: null });
+	expect(edited).toMatchObject({ sequence: expect.any(Number) });
+	expect(read).toEqual({ queuedRunId: firstId, text: "first, edited", truncated: false });
+	expect(reorder.error).toContain("reorder is not supported by pi-durable-t3");
+	expect(wrongTarget.error).toContain("is not the running turn");
+	expect(cancelled).toMatchObject({ sequence: expect.any(Number) });
+	expect(after.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);
+	expect(promoted).toMatchObject({ sequence: expect.any(Number) });
+	const steered = await bridge.waitFor(busy, (projection) => (projection.runs.every((run) => run.status !== "queued") ? projection : undefined), 10_000);
+	expect(steered, "the promoted message left the queue").toBeDefined();
+	gate("q1").release();
+});
+
+it("an agent runs a scheduled task now", { timeout: 60_000 }, async () => {
+	const { ask, sawAll, tasks } = await setup();
+	await ask("a", { name: "schedule_task", args: { prompt: "Report the build", schedule: { type: "interval", everyMs: 3_600_000 } } });
+	const [created] = await sawAll(1);
+	await ask("a", { name: "run_scheduled_task_now", args: { taskId: created.scheduledTaskId } });
+	await ask("a", { name: "run_scheduled_task_now", args: { taskId: "nope" } });
+	const [, ran, missing] = await sawAll(3);
+	expect(ran).toMatchObject({ taskId: created.scheduledTaskId, threadId: "a", lastRunStatus: "succeeded", runCount: 1, link: expect.any(String) });
+	expect(missing.error).toBe("invalid_request: The scheduled task was not found.");
+	expect(tasks().list().tasks[0]!.runCount).toBe(1);
+});
+
 it("an agent schedules, lists, changes and deletes a task with T3's tools", { timeout: 60_000 }, async () => {
 	const { ask, sawAll, tasks } = await setup();
 	await ask("a", { name: "schedule_task", args: { prompt: "Check the build\nand report", schedule: { type: "interval", everyMs: 3_600_000 } } });

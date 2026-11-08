@@ -575,7 +575,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"scheduledTasks.upsert": (input) => scheduled(async () => deps.scheduledTasks.upsert(input)),
 		"scheduledTasks.setEnabled": (input) => scheduled(async () => deps.scheduledTasks.setEnabled(input)),
 		"scheduledTasks.delete": (input) => scheduled(async () => deps.scheduledTasks.delete(input)),
-		"scheduledTasks.runNow": (input) => scheduled(() => deps.scheduledTasks.runNow(input)),
+		"scheduledTasks.runNow": (input) => scheduled(async () => ({ task: (await deps.scheduledTasks.runNow(input)).task })),
 		"scheduledTasks.rotateWebhookToken": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
 		"scheduledTasks.listWebhookDeliveries": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
 		"scheduledTasks.getWebhookDelivery": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),

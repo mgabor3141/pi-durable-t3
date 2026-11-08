@@ -6,10 +6,11 @@ import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import type { Context } from "@earendil-works/chord";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
-import { OrchestratorToolkit, ProjectToolkit } from "./mcp-toolkit.ts";
+import { OrchestratorToolkit, ProjectToolkit, ThreadToolkit } from "./mcp-toolkit.ts";
 
-/** What T3's project descriptions leave unsaid about this host, added to the agent's tools. */
+/** What T3's descriptions leave unsaid about this host, added to the agent's tools. */
 const PROJECT_CREATE_NOTE = "Here a project needs `workspaceRoot` (no git repositories are made), and has only a title and a folder.";
+const QUEUE_NOTE = "Here `reorder` is refused: the queue keeps the order messages were sent in.";
 const PROJECT_UPDATE_NOTE =
 	"Here a project has only a title and a folder. A new `workspaceRoot` points the project at another folder: no files move, and the project's existing threads keep running in the folder they started in.";
 import { advertisedJsonSchema } from "./t3-server.ts";
@@ -97,8 +98,8 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 		tool<{ parent?: string; status?: "active" | "idle"; projectId?: string; limit?: number }>("thread_list", LIST, list, false, (caller, input) => ({ threads: orchestration.list(caller, input) })),
 		tool<{ threadId: string; cascade?: boolean }>("thread_cancel", CANCEL, cancel, true, (caller, input) => orchestration.cancel(caller, input.threadId, input.cascade ?? true)),
 	];
-	// T3's scheduled-task and project tools, with T3's names, descriptions and schemas (the same operations `/mcp`
-	// serves).
+	// T3's tools for scheduled tasks, projects and organizing threads, with T3's names, descriptions and schemas (the
+	// same operations `/mcp` serves).
 	const ops = options.ops;
 	if (ops !== undefined) {
 		const t3Tools: Record<string, { readonly writes: boolean; readonly run: (caller: { threadId?: string }, input: never) => unknown; readonly note?: string }> = {
@@ -110,8 +111,16 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 			t3_project_create: { writes: false, run: (caller, input) => ops.projectCreate(caller, input), note: PROJECT_CREATE_NOTE },
 			t3_project_update: { writes: false, run: (caller, input) => ops.projectUpdate(caller, input), note: PROJECT_UPDATE_NOTE },
 			t3_project_delete: { writes: false, run: (caller, input) => ops.projectDelete(caller, input) },
+			run_scheduled_task_now: { writes: false, run: (caller, input) => ops.runScheduledTaskNow(caller, input) },
+			t3_thread_update: { writes: true, run: (caller, input) => ops.update(caller, input) },
+			t3_thread_organize: { writes: false, run: (caller, input) => ops.organize(caller, input) },
+			t3_queue: { writes: false, run: (caller, input) => ops.queue(caller, input), note: QUEUE_NOTE },
 		};
-		const contracts: Record<string, (typeof OrchestratorToolkit.tools)[keyof typeof OrchestratorToolkit.tools] | (typeof ProjectToolkit.tools)[keyof typeof ProjectToolkit.tools]> = { ...OrchestratorToolkit.tools, ...ProjectToolkit.tools };
+		const contracts: Record<string, (typeof OrchestratorToolkit.tools)[keyof typeof OrchestratorToolkit.tools] | (typeof ProjectToolkit.tools)[keyof typeof ProjectToolkit.tools] | (typeof ThreadToolkit.tools)[keyof typeof ThreadToolkit.tools]> = {
+			...OrchestratorToolkit.tools,
+			...ProjectToolkit.tools,
+			...ThreadToolkit.tools,
+		};
 		for (const [name, operation] of Object.entries(t3Tools)) {
 			const contract = contracts[name]!;
 			const decode = Schema.decodeUnknownSync(Schema.toCodecJson(contract.parametersSchema as Schema.Top) as never);
