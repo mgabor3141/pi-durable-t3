@@ -9,7 +9,7 @@ import { defineDoc, Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Threads } from "../src/threads.ts";
 import { projectThread } from "../src/t3/projection.ts";
-import { conversation, createNamed, idle, makeThreads, restart } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, restart, viewOf } from "./threads-harness.ts";
 import { createScriptedModel } from "./fake-model.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -67,7 +67,7 @@ it("carries a thread's creation fields and lineage, and a message's sender, to t
 	await threads.submit({ threadId: "agent-made", conversationId: created.head, requestId: "r1", messageId: "m1", message: "from another thread", provenance: { createdBy: "agent", creationSource: "mcp" } }, undefined);
 	await idle(harness, created.head);
 	const record = (await threads.list()).find((thread) => thread.threadId === "agent-made")!;
-	const view = await (await conversation(harness, created.head)).viewState(ctx);
+	const view = await viewOf(harness, created.head);
 	const { projection, shell } = projectThread(
 		{
 			threadId: record.threadId,
@@ -83,7 +83,7 @@ it("carries a thread's creation fields and lineage, and a message's sender, to t
 			lineage: record.lineage,
 			forkedFrom: record.forkedFrom as never,
 		},
-		view.value as never,
+		view as never,
 		{ rolledBack: [] },
 	);
 	expect({ createdBy: shell.createdBy, creationSource: shell.creationSource }).toEqual({ createdBy: "agent", creationSource: "mcp" });

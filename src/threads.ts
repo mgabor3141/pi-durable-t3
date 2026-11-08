@@ -745,8 +745,8 @@ export class Threads {
 		await this.#watermark(input.threadId);
 		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
 		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
-		const view = await conversation.viewState(BACKGROUND_CONTEXT);
-		const compacting = (((view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined)?.compactions?.length) ?? 0) > 0;
+		const live = await this.#harness.snapshot(LiveDoc, input.conversationId as ConversationId, BACKGROUND_CONTEXT);
+		const compacting = (live?.compactions?.length ?? 0) > 0;
 		if (compacting) {
 			const queued = await this.#enqueueInput(
 				input.conversationId as ConversationId,
@@ -1084,8 +1084,7 @@ export class Threads {
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
 		// A compaction may still be live after a bridge restart, when the per-thread map is empty. Leave it be rather
 		// than summarize the same cut twice.
-		const view = await conversation.viewState(BACKGROUND_CONTEXT);
-		const live = view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined;
+		const live = await this.#harness.snapshot(LiveDoc, conversation.id, BACKGROUND_CONTEXT);
 		if ((live?.compactions?.length ?? 0) > 0) return;
 		// A display-only command belongs to T3's projection and the durable thread, not to pi's model context. It must
 		// not carry `model`: otherwise a later turn sees `/compact` as if the user had typed it as a prompt.
@@ -1123,10 +1122,9 @@ export class Threads {
 	async #drainQueuedAfterCompact(threadId: string, conversationId: ConversationId): Promise<void> {
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) return;
-		const view = await conversation.viewState(BACKGROUND_CONTEXT);
-		const live = view.value.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
+		const live = await this.#harness.snapshot(LiveDoc, conversationId, BACKGROUND_CONTEXT);
 		if (live?.run !== undefined || (live?.compactions?.length ?? 0) > 0) return;
-		const inbox = view.value.docs["pi.inbox"] as { items?: readonly { mode: string }[] } | undefined;
+		const inbox = await this.#harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT);
 		if ((inbox?.items ?? []).some((item) => item.mode !== "write")) {
 			await this.startQueued(threadId, undefined, randomUUID());
 		}

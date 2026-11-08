@@ -717,7 +717,9 @@ export class Bridge {
 			}
 			this.#taskWatch = watch;
 			this.#onTaskGraph(watch.value);
-			watch.start(async (graph) => this.#onTaskGraph(graph));
+			watch.start(async (call) => {
+				if (call.kind === "value") this.#onTaskGraph(call.value);
+			});
 		} catch (error) {
 			this.#log.warn("the task graph watch failed: runs that start without a client are not followed", { error: error instanceof Error ? error.message : String(error) });
 		}

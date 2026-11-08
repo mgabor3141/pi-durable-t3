@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
 import { conversation, createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
 
 describe("manual compact", () => {
@@ -42,8 +43,7 @@ describe("manual compact", () => {
 		model.respond(summary.step);
 		// If compact still waited for the summary, this await would hang until the test timeout.
 		await threads.compact("t", undefined, "compact-command");
-		const view = await (await conversation(harness, thread.head)).viewState(BACKGROUND_CONTEXT);
-		const live = view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined;
+		const live = await harness.snapshot(LiveDoc, thread.head as ConversationId, BACKGROUND_CONTEXT);
 		expect((live?.compactions?.length ?? 0) > 0).toBe(true);
 		summary.release();
 		await idle(harness, thread.head);
@@ -64,8 +64,7 @@ describe("manual compact", () => {
 		const compacting = threads.compact("t", undefined);
 		// Wait until the compaction task is live before sending the next prompt.
 		for (let tries = 0; tries < 100; tries++) {
-			const view = await (await conversation(harness, thread.head)).viewState(BACKGROUND_CONTEXT);
-			const live = view.value.docs["pi.live"] as { compactions?: readonly unknown[] } | undefined;
+			const live = await harness.snapshot(LiveDoc, thread.head as ConversationId, BACKGROUND_CONTEXT);
 			if ((live?.compactions?.length ?? 0) > 0) break;
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}

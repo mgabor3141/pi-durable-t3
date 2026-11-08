@@ -58,8 +58,9 @@ interface Follower {
 	generation: number;
 	/** Bumped on every view, so a slow history load cannot overwrite a newer view. */
 	viewSeq: number;
-	/** The compaction cut the cached history was loaded for (`-1`: none). */
-	historyCutoff: number;
+	/** The view entries last split (`splitTranscript`), and the split: the active context and the history before it. */
+	splitOf: readonly unknown[] | undefined;
+	active: EntryRecord[];
 	history: EntryRecord[];
 	/** The head's `pi.agent` document as last read; its configuration is re-read only when it changes. */
 	agentKey: string | undefined;
@@ -76,26 +77,26 @@ const IDLE_MS = 30_000;
 /** The view of a head conversation that does not exist: no entries, no docs. */
 const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as ConversationView;
 
-/** The entry before the active context's first kept entry, when the view starts at a compaction; else `-1`. */
-function compactionCutoff(view: ConversationView): number {
-	const head = view.entries[0];
-	if (head?.kind !== "pi.compaction") return -1;
-	const firstKept = view.entries[1];
-	return (firstKept?.id ?? head.id) - 1;
-}
+/**
+ * The view's window: the whole transcript. pi-durable's view holds a window over the transcript (the newest 50 to 100
+ * entries by default); the projection reads all of it, as it did when the view was the active context and the history
+ * above a compaction was loaded beside it, so the window is made large enough never to drop an entry.
+ */
+const WHOLE_TRANSCRIPT = { min: 1_000_000_000, max: 2_000_000_000 };
 
-/** The entries above a compaction cut, for display only: compaction keeps them durably but drops them from the view. */
-async function loadHistory(conversation: Conversation, cutoff: number): Promise<EntryRecord[]> {
-	if (cutoff <= 0) return [];
-	const items: EntryRecord[] = [];
-	let cursor: Cursor | undefined;
-	do {
-		const page = await conversation.entries({ order: "ascending", maxEntryId: cutoff as EntryId }, 500, cursor, BACKGROUND_CONTEXT);
-		items.push(...(page.items as unknown as EntryRecord[]));
-		cursor = page.next;
-	} while (cursor !== undefined);
-	// Compaction markers are rendered as cards by the projection; an older summary here would be a stray bubble.
-	return items.filter((entry) => entry.kind !== "pi.compaction" && entry.id <= cutoff);
+/**
+ * The transcript as the projection reads it: the active context (from the newest head marker, such as a compaction
+ * summary, then the entries it keeps and every later one) and the history before it, for display only. The view lists the
+ * fork-aware history in entry order with each marker where it was written (after the entries it keeps); its `head` names
+ * the first kept entry. Older markers are dropped from the history: an older summary there would be a stray bubble.
+ */
+export function splitTranscript(entries: readonly EntryRecord[]): { active: EntryRecord[]; history: EntryRecord[] } {
+	const marker = entries.findLast((entry) => entry.kind === "pi.compaction" && entry.head !== undefined);
+	if (marker === undefined) return { active: [...entries], history: [] };
+	const firstKept = marker.head!;
+	const active = [marker, ...entries.filter((entry) => entry !== marker && entry.id >= firstKept)];
+	const history = entries.filter((entry) => entry.id < firstKept && entry.kind !== "pi.compaction");
+	return { active, history };
 }
 
 export class ThreadView {
@@ -224,7 +225,7 @@ export class ThreadView {
 			this.#idleTimer = undefined;
 		}
 		if (this.#follower !== undefined) return;
-		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, historyCutoff: -1, history: [], agentKey: undefined, closed: false };
+		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, splitOf: undefined, active: [], history: [], agentKey: undefined, closed: false };
 		this.#catalog = this.#host.catalog();
 		const head = this.#host.head(this.threadId);
 		if (head !== undefined) void this.#follow(head);
@@ -290,7 +291,8 @@ export class ThreadView {
 		const generation = ++follower.generation;
 		const previous = follower.watch;
 		follower.watch = undefined;
-		follower.historyCutoff = -1;
+		follower.splitOf = undefined;
+		follower.active = [];
 		follower.history = [];
 		follower.agentKey = undefined;
 		await previous?.stop().catch(() => {});
@@ -305,14 +307,14 @@ export class ThreadView {
 				await this.#setView(head, EMPTY_VIEW, undefined, current);
 				return;
 			}
-			const watch = (await conversation.watch(BACKGROUND_CONTEXT)) as unknown as WatchHandle<ConversationView>;
+			const watch = (await conversation.watch(BACKGROUND_CONTEXT, WHOLE_TRANSCRIPT)) as unknown as WatchHandle<ConversationView>;
 			if (!current()) {
 				await watch.stop().catch(() => {});
 				return;
 			}
 			follower.watch = watch;
-			watch.start(async (view) => {
-				if (current()) await this.#setView(head, view, conversation, current);
+			watch.start(async (call) => {
+				if (call.kind === "value" && current()) await this.#setView(head, call.value, conversation, current);
 			});
 			await this.#setView(head, watch.value, conversation, current);
 		} catch (error) {
@@ -344,13 +346,14 @@ export class ThreadView {
 		const follower = this.#follower!;
 		const seq = ++follower.viewSeq;
 		const latest = (): boolean => current() && follower.viewSeq === seq;
-		const cutoff = compactionCutoff(view);
-		if (cutoff !== follower.historyCutoff) {
-			const history = conversation === undefined ? [] : await loadHistory(conversation, cutoff).catch(() => []);
-			if (!latest()) return;
+		// The split is redone only when the entries changed: a token of a streamed answer changes `pi.live`, not them.
+		if (view.entries !== follower.splitOf) {
+			const { active, history } = splitTranscript(view.entries as unknown as EntryRecord[]);
+			follower.splitOf = view.entries;
+			follower.active = active;
 			follower.history = history;
-			follower.historyCutoff = cutoff;
 		}
+		view = { ...view, entries: follower.active } as ConversationView;
 		const agentKey = JSON.stringify(view.docs["pi.agent"] ?? null);
 		if (agentKey !== follower.agentKey) {
 			const agent = conversation === undefined ? undefined : await conversation.agent(BACKGROUND_CONTEXT).catch(() => undefined);

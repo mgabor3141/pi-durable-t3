@@ -31,7 +31,7 @@ The build on install needs the package's own devDependencies, so `pnpm install -
 That reuses the built package from the store and drops the dev tools. Once published, `pnpm add
 @mgabor3141/pi-durable-t3` needs neither.
 
-The pi packages are `^1.4.0` peers. T3's web app (release **v0.1.6**) ships in the package, and the bridge serves
+The pi packages are `^1.5.0` peers. T3's web app (release **v0.1.6**) ships in the package, and the bridge serves
 it. Node `>=22.19.0`. The public API is [listed below](#public-api); how to use it is
 [here](#attach-it-to-your-own-agent). For a
 whole agent to start from, copy the [example agent](examples/coding-agent/#use-it-as-a-template).
@@ -90,8 +90,9 @@ await t3.close();
 - The bridge reads no config file of its own; the example maps its `config.toml` onto these options.
 - `stateDir` belongs to the bridge, one host per directory. It pairs with the Harness's storage (threads
   point at its project ids), so back up and move the two together.
-- Upgrading from pi 1.3: back up first. pi 1.4 migrates `durable.db` to schema v2 on first open, and 1.3 then
-  refuses it (`Durable SQLite schema version 2 is newer than supported version 1`).
+- Upgrading pi is one way; back up first. pi 1.4 migrates `durable.db` to schema v2 on first open, and 1.3 then
+  refuses it (`Durable SQLite schema version 2 is newer than supported version 1`). pi 1.5 stores a conversation's
+  `pi.live` at a newer version the first time it writes it, and 1.4 cannot read it then.
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
   better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
   thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you (or the host closes); a

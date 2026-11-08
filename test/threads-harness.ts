@@ -13,6 +13,8 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { Project } from "../src/config.ts";
 import { Threads } from "../src/threads.ts";
 import { testRegistry } from "./test-registry.ts";
+import { splitTranscript } from "../src/t3/thread-view.ts";
+import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { ProjectRegistry } from "../src/registry.ts";
 import { createScriptedModel, type ScriptedModel } from "./fake-model.ts";
 
@@ -162,4 +164,13 @@ function textOf(content: unknown): string | undefined {
 /** The threads store of a Bridge that is never started: a project call does not touch threads, and any other use fails. */
 export function unstartedStore(): Threads {
 	return new Proxy({}, { get: (_target, name) => { throw new Error("this test's bridge has no threads store (read " + String(name) + ")"); } }) as Threads;
+}
+
+/** A conversation's view as the bridge projects it: one value of a watch over the whole transcript, its entries the
+ * active context (`splitTranscript`). */
+export async function viewOf(harness: Harness, id: number): Promise<ConversationView> {
+	const watch = await (await conversation(harness, id)).watch(ctx, { min: 1_000_000_000, max: 2_000_000_000 });
+	const view = watch.value as unknown as ConversationView;
+	await watch.stop();
+	return { ...view, entries: splitTranscript(view.entries as unknown as EntryRecord[]).active } as ConversationView;
 }

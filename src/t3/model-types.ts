@@ -86,6 +86,8 @@ export interface EntryRecord {
 	data?: unknown;
 	/** The task that appended the entry: a tool result's is the call's task. */
 	byTaskId?: number;
+	/** A head marker's first entry of the context it starts (a compaction summary's first kept entry). */
+	head?: number;
 }
 
 interface ToolSlot {
