@@ -113,14 +113,14 @@ export class Orchestration {
 		}
 		await this.#bridge.sendMessage({ threadId, commandId, messageId, text: input.message, mode: mode === "steer" ? "steer" : "queue", provenance });
 		if (!wait) return { threadId, messageId, notify };
-		const settled = await this.#waitSettled(threadId, messageId, waitMs(input.timeoutMs), signal);
+		const settled = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
 		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
 		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
 		if (!notify && caller !== undefined) {
 			await this.#ask(threadId, caller, commandId, messageId);
 			notify = true;
 		}
-		return { threadId, messageId, report: this.#activeReport(await this.#projection(threadId), messageId), notify };
+		return { threadId, messageId, report: this.#activeReport(await this.#projection(threadId), messageId, caller), notify };
 	}
 
 	#existing(threadId: string, caller: string | undefined): string {
@@ -199,7 +199,7 @@ export class Orchestration {
 				const before = await this.#projection(threadId);
 				const runs = before.runs.toSorted((left, right) => left.ordinal - right.ordinal);
 				const from = runs.find(isActiveRun) ?? runs.at(-1);
-				const options = { label: (id: string) => this.#label(id) };
+				const options = { ...(caller === undefined ? {} : { reader: caller }), label: (id: string) => this.#label(id) };
 				if (!isBusy(before) || from === undefined) return report(before, { ...options, fromRunId: from?.id as string | undefined });
 				const combined = this.#signal(signal);
 				const settled = await this.#bridge
@@ -214,18 +214,23 @@ export class Orchestration {
 		return { reports, verdict: worstVerdict(reports.map((entry) => entry.verdict)) };
 	}
 
-	async #waitSettled(threadId: string, messageId: string, timeoutMs: number, signal?: AbortSignal): Promise<Report | undefined> {
+	async #waitSettled(threadId: string, messageId: string, reader: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<Report | undefined> {
 		try {
-			return await this.#bridge.waitFor(threadId, (projection) => settledReport(projection, messageId, { own: messageId, label: (id) => this.#label(id) }), timeoutMs, this.#signal(signal));
+			return await this.#bridge.waitFor(threadId, (projection) => settledReport(projection, messageId, this.#reportOptions(messageId, reader)), timeoutMs, this.#signal(signal));
 		} catch (error) {
 			if ((error as Error).name === "AbortError" || this.#signal(signal)?.aborted === true) return undefined;
 			throw error;
 		}
 	}
 
-	#activeReport(projection: OrchestrationV2ThreadProjection, messageId: string): Report {
+	#activeReport(projection: OrchestrationV2ThreadProjection, messageId: string, reader: string | undefined): Report {
 		const runId = projection.messages.find((message) => (message.id as string) === messageId)?.runId;
-		return report(projection, { fromRunId: runId == null ? undefined : (runId as string), own: messageId, label: (id) => this.#label(id) });
+		return report(projection, { fromRunId: runId == null ? undefined : (runId as string), ...this.#reportOptions(messageId, reader) });
+	}
+
+	/** A report for the thread that sent `messageId` (`reader`, when it is a thread). */
+	#reportOptions(messageId: string, reader: string | undefined) {
+		return { own: messageId, ...(reader === undefined ? {} : { reader }), label: (id: string) => this.#label(id) };
 	}
 
 	/** The caller's signal, the host's (a restart ends waits), and this orchestration's own close, as one. */
@@ -240,7 +245,7 @@ export class Orchestration {
 		if (threadId === undefined) throw new ThreadToolError("Name a threadId: this call is not inside a thread.");
 		if (!this.#bridge.hasThread(threadId)) throw new ThreadToolError(`No thread ${threadId}.`);
 		const projection = await this.#projection(threadId);
-		const read = exchanges(projection, { count: Math.min(50, Math.max(1, input.last ?? 1)), ...(input.before === undefined ? {} : { before: input.before }), label: (id) => this.#label(id) });
+		const read = exchanges(projection, { count: Math.min(50, Math.max(1, input.last ?? 1)), ...(input.before === undefined ? {} : { before: input.before }), ...(caller === undefined ? {} : { reader: caller }), label: (id) => this.#label(id) });
 		const parts = read.reports.map((entry) => `=== exchange ${entry.ordinal} (${entry.verdict}) ===\n${entry.text}`);
 		if (read.earlier > 0) parts.unshift(`[${read.earlier} earlier exchange${read.earlier === 1 ? "" : "s"}; pass before: ${read.reports[0]?.ordinal} to read them]`);
 		return { threadId, title: projection.thread.title, text: parts.join("\n\n") || "[No exchanges yet]", earlier: read.earlier, oldestOrdinal: read.reports[0]?.ordinal ?? null };
@@ -327,7 +332,7 @@ export class Orchestration {
 					if (pending.length === 0) return;
 					const request = pending[0]!;
 					const ready = await this.#bridge
-						.waitFor(threadId, (projection) => settledReport(projection, request.messageId, { own: request.messageId, label: (id) => this.#label(id) }), FOLLOW_CHUNK_MS, this.#stop.signal)
+						.waitFor(threadId, (projection) => settledReport(projection, request.messageId, this.#reportOptions(request.messageId, request.threadId)), FOLLOW_CHUNK_MS, this.#stop.signal)
 						.catch((error: unknown) => {
 							if (this.#closed) return undefined;
 							throw error;

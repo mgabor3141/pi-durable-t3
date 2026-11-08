@@ -1,7 +1,8 @@
 // The exchange report (gmux's): what one activity of a thread did, as text an agent reads. An activity is the runs from
 // the one a message started or joined through the thread's latest, while the thread stays busy: follow-ups and steers
-// merge into it, and it settles once for everybody. The report lists every message that entered it (the reader's own
-// abbreviated), how much tool work it took, and the final answer; the verdict is beside it, never inside the prose.
+// merge into it, and it settles once for everybody. The report lists every message that entered it (the reader's own as
+// [YOU]), how much tool work it took, and the final answer, in the order they happened: a note placed after the answer
+// is listed after it. The verdict is beside the report, never inside the prose.
 import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 
 /** How an activity ended: `active` when it has not (a wait that timed out, or a read of running work). */
@@ -42,12 +43,13 @@ export interface Report {
 const clip = (text: string, max: number): { text: string; cut: boolean } => (text.length <= max ? { text, cut: false } : { text: `${text.slice(0, max)}…`, cut: true });
 
 /**
- * The report of the activity that `fromRunId` starts (the thread's latest run when absent). `own`: the message id the
- * reader sent, printed abbreviated. `labels`: how to name a sending thread.
+ * The report of the activity that `fromRunId` starts (the thread's latest run when absent). `reader`: the thread reading
+ * it, whose messages are its own ([YOU]). `own`: the message the reader just sent, printed abbreviated. `label`: how to
+ * name another sending thread.
  */
 export function report(
 	projection: OrchestrationV2ThreadProjection,
-	options: { readonly fromRunId?: string | null; readonly own?: string; readonly label?: (threadId: string) => string; readonly budget?: number } = {},
+	options: { readonly fromRunId?: string | null; readonly reader?: string; readonly own?: string; readonly label?: (threadId: string) => string; readonly budget?: number } = {},
 ): Report {
 	const threadId = projection.thread.id as string;
 	const title = projection.thread.title;
@@ -57,21 +59,22 @@ export function report(
 	const activity = runs.filter((run) => run.ordinal >= start.ordinal);
 	const ids = new Set(activity.map((run) => run.id as string));
 	const last = activity.at(-1)!;
+	const verdict = verdictOf(last);
+	const inActivity = (message: (typeof projection.messages)[number]) => message.runId !== null && ids.has(message.runId as string);
+	const answer = projection.messages.filter((message) => message.role === "assistant" && inActivity(message) && message.text.trim() !== "").at(-1);
+	// The projection lists messages in the order they happened: one after the answer (a note) is listed after it.
+	const answerIndex = answer === undefined ? -1 : projection.messages.indexOf(answer);
 	const lines: string[] = [];
-	for (const message of projection.messages) {
-		if (message.role !== "user" || message.runId === null || !ids.has(message.runId as string)) continue;
-		if (options.own !== undefined && (message.id as string) === options.own) {
-			lines.push(`[YOU]: ${clip(message.text.trim(), OWN_PROMPT_CHARS).text}`);
-			continue;
-		}
+	const late: string[] = [];
+	for (const [index, message] of projection.messages.entries()) {
+		if (message.role !== "user" || !inActivity(message)) continue;
 		const sender = message.senderThreadId === undefined ? undefined : (message.senderThreadId as string);
-		const who = sender !== undefined ? `THREAD ${options.label?.(sender) ?? sender}` : message.createdBy === "user" ? "USER" : "AGENT MESSAGE";
-		lines.push(`[${who}]: ${clip(message.text.trim(), MESSAGE_BUDGET).text}`);
+		const just = options.own !== undefined && (message.id as string) === options.own;
+		const who = just || (sender !== undefined && sender === options.reader) ? "YOU" : sender !== undefined ? `THREAD ${options.label?.(sender) ?? sender}` : message.createdBy === "user" ? "USER" : "AGENT MESSAGE";
+		(answerIndex >= 0 && index > answerIndex ? late : lines).push(`[${who}]: ${clip(message.text.trim(), just ? OWN_PROMPT_CHARS : MESSAGE_BUDGET).text}`);
 	}
 	const toolCalls = projection.turnItems.filter((item) => item.runId !== null && ids.has(item.runId as string) && TOOL_ITEMS.has(item.type)).length;
-	const verdict = verdictOf(last);
 	if (toolCalls > 0) lines.push(verdict === "active" ? `[Agent working: ${toolCalls} tool calls so far]` : `[Agent made ${toolCalls} tool calls]`);
-	const answer = projection.messages.filter((message) => message.role === "assistant" && message.runId !== null && ids.has(message.runId as string) && message.text.trim() !== "").at(-1);
 	let truncated = false;
 	if (answer !== undefined && (verdict !== "active" || answer.runId === last.id)) {
 		const cut = clip(answer.text.trim(), options.budget ?? REPORT_BUDGET);
@@ -84,6 +87,7 @@ export function report(
 		const error = projection.turnItems.filter((item) => item.runId === last.id && item.type === "error").at(-1) as { message?: string } | undefined;
 		lines.push(`[Agent failed${error?.message === undefined ? "" : `: ${error.message}`}]`);
 	}
+	lines.push(...late);
 	return { threadId, title, runId: start.id as string, verdict, toolCalls, text: lines.join("\n"), truncated };
 }
 
@@ -103,14 +107,15 @@ export function settledReport(projection: OrchestrationV2ThreadProjection, messa
 /** The last `count` exchanges (runs) before the run with ordinal `before`, oldest first, each as its own report. */
 export function exchanges(
 	projection: OrchestrationV2ThreadProjection,
-	options: { readonly count: number; readonly before?: number; readonly label?: (threadId: string) => string; readonly budget?: number },
+	options: { readonly count: number; readonly before?: number; readonly reader?: string; readonly label?: (threadId: string) => string; readonly budget?: number },
 ): { readonly reports: readonly (Report & { readonly ordinal: number })[]; readonly earlier: number } {
 	const runs = byOrdinal(projection.runs.filter((run) => run.status !== "rolled_back" && (options.before === undefined || run.ordinal < options.before)));
 	const chosen = runs.slice(Math.max(0, runs.length - options.count));
 	const single = (run: OrchestrationV2Run) => {
 		// One run alone: the projection narrowed to it, so the report covers this exchange and not those after it.
 		const only: OrchestrationV2ThreadProjection = { ...projection, runs: [run] };
-		return { ...report(only, { fromRunId: run.id as string, ...(options.label === undefined ? {} : { label: options.label }), ...(options.budget === undefined ? {} : { budget: options.budget }) }), ordinal: run.ordinal };
+		const { count: _count, before: _before, ...rest } = options;
+		return { ...report(only, { fromRunId: run.id as string, ...rest }), ordinal: run.ordinal };
 	};
 	return { reports: chosen.map(single), earlier: runs.length - chosen.length };
 }

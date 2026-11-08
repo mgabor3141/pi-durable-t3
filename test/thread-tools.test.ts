@@ -165,7 +165,11 @@ it("a note joins a thread's context without starting work; reads, lists and the 
 	const read = await settled("a", (projection) => projection.messages.filter((message) => message.text.startsWith("Parent saw:")).length === 4);
 	const [readResult, listResult] = read!.messages.filter((message) => message.text.startsWith("Parent saw:")).slice(2).map((message) => JSON.parse(message.text.slice("Parent saw: ".length)));
 	expect(readResult.text).toContain("=== exchange 1 (completed) ===");
-	expect(readResult.text).toContain("[AGENT]: 2");
+	// The reader's own messages are [YOU], as in thread_prompt's report, and the note, sent after the answer, follows it.
+	const order = ["[YOU]: What is 1+1?", "[AGENT]: 2", "[YOU]: FYI: the answer is used by a report."].map((line) => readResult.text.indexOf(line));
+	expect(order.every((index: number) => index >= 0), readResult.text).toBe(true);
+	expect(order).toEqual(order.toSorted((x: number, y: number) => x - y));
+	expect(readResult.text).not.toContain("[THREAD");
 	expect(listResult.threads).toEqual([expect.objectContaining({ threadId: childId, title: "Child", parentThreadId: "a" })]);
 
 	// A request to be answered that the last process kept on the record: a new process delivers it.
