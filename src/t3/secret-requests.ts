@@ -8,9 +8,10 @@
 // so: it is projected with T3's `file` delivery, whose note reads that the agent's commands can read the value.
 import { SecretRequestError, type SecretRequestAnswerInput } from "@t3tools/contracts";
 import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
 
 import type { SecretSink } from "./secret-sink.ts";
+import { int, opt, str } from "@earendil-works/pi-schema";
+import { object } from "./schema.ts";
 
 /** The tool's name, as T3's. */
 export const REQUEST_SECRET_TOOL = "request_secret";
@@ -78,12 +79,12 @@ export class SecretRequests {
 					name: REQUEST_SECRET_TOOL,
 					description:
 						"Ask the user to enter a secret (an API key, a password, a token) in a private card in this thread, and wait. The value never enters the chat. Returns the secret's name once saved; write it as ${NAME} wherever the value is needed (tool arguments, MCP config, $NAME in shell commands). Asked how to provide a secret: call this now, do not explain instead.",
-					parameters: Type.Object({
-						name: Type.String({ pattern: SECRET_NAME.source, description: "The name to save it under, like an environment variable: GITHUB_TOKEN. An existing secret of that name is replaced." }),
-						label: Type.String({ minLength: 1, description: "Card title, such as 'GitHub token'." }),
-						reason: Type.String({ minLength: 1, description: "What it is for and where to get it." }),
-						placeholder: Type.Optional(Type.String()),
-						timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: MAX_TIMEOUT_MS, description: "Default 10 min." })),
+					parameters: object({
+						name: str({ pattern: SECRET_NAME.source, description: "The name to save it under, like an environment variable: GITHUB_TOKEN. An existing secret of that name is replaced." }),
+						label: str({ minLength: 1, description: "Card title, such as 'GitHub token'." }),
+						reason: str({ minLength: 1, description: "What it is for and where to get it." }),
+						placeholder: opt(str()),
+						timeoutMs: opt(int({ minimum: 1000, maximum: MAX_TIMEOUT_MS, description: "Default 10 min." })),
 					}),
 					callers: ["model"],
 					// A rerun after a crash shows the same card (its turn item is the call) and waits again.

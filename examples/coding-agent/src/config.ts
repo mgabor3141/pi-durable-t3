@@ -1,14 +1,13 @@
-// The example's integrator file: `config.toml`, read with `smol-toml` and validated against one TypeBox schema
-// (defaults via `Value.Default`, `additionalProperties: false` so an unknown key is rejected, naming the file, key
-// path, and what was expected; checks the schema cannot express are below). The bridge takes plain options
+// The example's integrator file: `config.toml`, read with `smol-toml` and validated against one pi-schema schema
+// (defaults from each key's `default`, a closed object so an unknown key is rejected, naming the file, key path, and
+// what was expected; checks the schema cannot express are below). The bridge takes plain options
 // (`attachT3`); parsing a file is this example's choice. `~/.pi` is never read. `resolvePaths` picks the config file
 // and data dir: `--root <dir>` keeps them in one directory; otherwise XDG (`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`,
 // falling back to `~/.config` and `~/.local/share`).
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { Type } from "typebox";
-import { Value } from "typebox/value";
+import { arr, bool, compile, int, obj, opt, type Static, str, type ValidationError } from "@earendil-works/pi-schema";
 import { ConfigError } from "../../../src/bridge.ts";
 
 export { ConfigError };
@@ -17,12 +16,12 @@ function fail(file: string, message: string): never {
 	throw new ConfigError(`${file}: ${message}`);
 }
 
-/** TypeBox errors, one line each: the dotted key path and what was expected; unknown keys are named. */
-function describeErrors(file: string, errors: readonly { keyword: string; instancePath: string; message: string; params: object }[]): string {
-	const lines = errors.flatMap((e) => {
-		const at = e.instancePath.split("/").filter(Boolean).join(".");
-		if (e.keyword === "additionalProperties") return ((e.params as { additionalProperties?: string[] }).additionalProperties ?? []).map((k) => `${at ? `${at}.` : ""}unknown key "${k}"`);
-		return e.keyword === "boolean" && e.message === "schema is false" ? [] : [`${at || "(root)"}: ${e.message}`];
+/** Schema errors, one line each: the dotted key path and what was expected; unknown keys are named. */
+function describeErrors(file: string, errors: readonly ValidationError[]): string {
+	const lines = errors.map((e) => {
+		const keys = e.path.split("/").filter(Boolean).map((key) => key.replaceAll("~1", "/").replaceAll("~0", "~"));
+		if (e.keyword === "additionalProperties") return `${keys.slice(0, -1).map((key) => `${key}.`).join("")}unknown key "${keys.at(-1)}"`;
+		return `${keys.join(".") || "(root)"}: ${e.message}`;
 	});
 	return lines.length === 0 ? `Invalid ${file}` : `Invalid ${file}:\n  ${lines.join("\n  ")}`;
 }
@@ -57,20 +56,28 @@ export type HostConfig = {
 
 // One flat schema for `config.toml`: the example host's own options, mostly passed straight to `attachT3`. Projects and
 // the default model are not here: the T3 UI edits them (the bridge's projects.json and t3-settings.json).
-const HostTomlSchema = Type.Object(
-	{
-		listen: Type.String({ default: "127.0.0.1:3774", minLength: 1 }),
-		instructions: Type.Optional(Type.String({ minLength: 1 })),
-		label: Type.String({ default: "pi", minLength: 1 }),
-		scratch_dir: Type.Optional(Type.String({ minLength: 1 })),
-		token_ttl_days: Type.Integer({ default: 90, minimum: 1 }),
-		cors_origins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-		tailscale_serve: Type.Boolean({ default: false }),
-		tailscale_serve_port: Type.Integer({ default: 443, minimum: 1, maximum: 65_535 }),
-	},
-	{ additionalProperties: false },
-);
-type HostToml = Type.Static<typeof HostTomlSchema>;
+const HostTomlSchema = obj({
+	listen: str({ default: "127.0.0.1:3774", minLength: 1 }),
+	instructions: opt(str({ minLength: 1 })),
+	label: str({ default: "pi", minLength: 1 }),
+	scratch_dir: opt(str({ minLength: 1 })),
+	token_ttl_days: int({ default: 90, minimum: 1 }),
+	cors_origins: opt(arr(str({ minLength: 1 }))),
+	tailscale_serve: bool({ default: false }),
+	tailscale_serve_port: int({ default: 443, minimum: 1, maximum: 65_535 }),
+});
+type HostToml = Static<typeof HostTomlSchema>;
+const validateHostToml = compile(HostTomlSchema);
+
+/** Each top-level key's `default` where the document has no value (the schema is flat). */
+function withDefaults(parsed: unknown): unknown {
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return parsed;
+	const doc: Record<string, unknown> = { ...(parsed as Record<string, unknown>) };
+	for (const [key, schema] of Object.entries(HostTomlSchema.properties as Record<string, { default?: unknown }>)) {
+		if (doc[key] === undefined && schema.default !== undefined) doc[key] = schema.default;
+	}
+	return doc;
+}
 
 /** Parse and validate `config.toml` text for `dataDir` (TOML → defaults → schema → checks). Every relative path
  * (models store, scratch dir, relative `instructions`) resolves under `dataDir`; `file` names the source in messages.
@@ -82,9 +89,8 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 	} catch (error) {
 		fail(file, (error as Error).message);
 	}
-	const doc = Value.Default(HostTomlSchema, parsed) as HostToml;
-	const errors = [...Value.Errors(HostTomlSchema, doc)];
-	if (errors.length > 0) throw new ConfigError(describeErrors(file, errors));
+	const doc = withDefaults(parsed);
+	if (!validateHostToml.check(doc)) throw new ConfigError(describeErrors(file, validateHostToml.errors(doc)));
 	const { host, port } = parseListen(doc.listen, file);
 	return {
 		configFile: file,

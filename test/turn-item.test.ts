@@ -7,13 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
 import { expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { projectThreadProjectionForWire, projectTurnItemForDetail } from "../src/t3/t3-server.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { str } from "@earendil-works/pi-schema";
+import { object } from "../src/t3/schema.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -25,7 +26,7 @@ it("getTurnItem gives the full item behind a row whose output the wire withheld"
 			defineTool({
 				name: "codemode",
 				description: "run a script",
-				parameters: Type.Object({ code: Type.String() }),
+				parameters: object({ code: str() }),
 				execute: async () => ({ output: [{ type: "text" as const, text: "rows: 1, 2, 3" }] }),
 			}),
 		],

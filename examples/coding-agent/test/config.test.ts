@@ -33,7 +33,7 @@ describe("config.toml", () => {
 		// A port is a port: the range is the schema's, and the port only means anything with Serve on.
 		expect(() => parseConfigToml(`tailscale_serve_port = 0\n`, root)).toThrow(/tailscale_serve_port/);
 		expect(() => parseConfigToml(`tailscale_serve_port = 70000\n`, root)).toThrow(/tailscale_serve_port/);
-		expect(() => parseConfigToml(`tailscale_serve = "yes"\n`, root)).toThrow(/tailscale_serve: must be boolean/);
+		expect(() => parseConfigToml(`tailscale_serve = "yes"\n`, root)).toThrow(/tailscale_serve: expected boolean, got string/);
 	});
 
 	it("a minimal file carries the defaults", () => {
@@ -63,8 +63,8 @@ describe("config.toml", () => {
 	});
 
 	it("damage is refused by name (wrong types, unknown keys); a missing or empty file is the defaults", async () => {
-		expect(() => parseConfigToml(`listen = 123\n`, root)).toThrow(/config\.toml:[\s\S]*listen: must be string/);
-		expect(() => parseConfigToml(`token_ttl_days = "7"\n`, root)).toThrow(/token_ttl_days: must be integer/);
+		expect(() => parseConfigToml(`listen = 123\n`, root)).toThrow(/config\.toml:[\s\S]*listen: expected string, got integer/);
+		expect(() => parseConfigToml(`token_ttl_days = "7"\n`, root)).toThrow(/token_ttl_days: expected integer, got string/);
 		expect(() => parseConfigToml(`lstien = "127.0.0.1:1"\n`, root)).toThrow(/unknown key "lstien"/);
 		expect(() => parseConfigToml(`tailscale_serve = false\ntailscale-serve = true\n`, root)).toThrow(/unknown key/);
 		const dir = await tempRoot();

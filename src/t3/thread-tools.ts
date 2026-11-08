@@ -8,10 +8,11 @@ import * as Schema from "effect/Schema";
 import { OrchestratorToolkit } from "./mcp-toolkit.ts";
 import { advertisedJsonSchema } from "./t3-server.ts";
 import type { ThreadOps } from "./thread-ops.ts";
-import { Type, type TSchema } from "typebox";
 import type { Bridge } from "./bridge.ts";
 import { MAX_ACTIVE_CHILDREN, MAX_DEPTH, type Orchestration, ThreadToolError } from "./orchestration.ts";
 import type { Report } from "./reports.ts";
+import { arr, bool, num, opt, str, type Schema as ToolSchema, union } from "@earendil-works/pi-schema";
+import { literal, object } from "./schema.ts";
 
 type Callers = readonly ("model" | "tools")[];
 type Api = { readonly conversationId: number; readonly taskId: unknown; readonly callId: string; readonly signal?: AbortSignal };
@@ -23,39 +24,39 @@ const SEARCH = "Search every thread's messages (full text). Returns threads with
 const LIST = 'List threads, newest first. parent: "self" lists your children; status filters active or idle ones.';
 const CANCEL = "Stop a thread's work, its queued messages and (by default) its children's work. You will not get reports for threads you stopped.";
 
-const prompt = Type.Object({
-	threadId: Type.Optional(Type.String({ description: "The thread to prompt. Omit with new." })),
-	new: Type.Optional(
-		Type.Object({
-			title: Type.Optional(Type.String()),
-			model: Type.Optional(Type.String({ description: "provider/model; default: yours" })),
-			fork: Type.Optional(Type.Boolean({ description: "Start with your history instead of only the message" })),
+const prompt = object({
+	threadId: opt(str({ description: "The thread to prompt. Omit with new." })),
+	new: opt(
+		object({
+			title: opt(str()),
+			model: opt(str({ description: "provider/model; default: yours" })),
+			fork: opt(bool({ description: "Start with your history instead of only the message" })),
 		}),
 	),
-	message: Type.String(),
-	mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("followUp"), Type.Literal("steer"), Type.Literal("notify")])),
-	wait: Type.Optional(Type.Boolean({ description: "Default true" })),
-	timeoutMs: Type.Optional(Type.Number({ description: "Wait at most this long (default: until it settles); the work goes on, and its report is sent later" })),
-	notify: Type.Optional(Type.Boolean({ description: "Post the report into your thread when the work settles. Default: when not waiting" })),
-	clientRequestId: Type.Optional(Type.String()),
+	message: str(),
+	mode: opt(union([literal("auto"), literal("followUp"), literal("steer"), literal("notify")])),
+	wait: opt(bool({ description: "Default true" })),
+	timeoutMs: opt(num({ description: "Wait at most this long (default: until it settles); the work goes on, and its report is sent later" })),
+	notify: opt(bool({ description: "Post the report into your thread when the work settles. Default: when not waiting" })),
+	clientRequestId: opt(str()),
 });
-const wait = Type.Object({ threadIds: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), timeoutMs: Type.Optional(Type.Number({ description: "Default: until they settle" })) });
-const read = Type.Object({ threadId: Type.Optional(Type.String()), last: Type.Optional(Type.Number()), before: Type.Optional(Type.Number()) });
-const search = Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()) });
-const list = Type.Object({
-	parent: Type.Optional(Type.String({ description: 'A thread id, or "self"' })),
-	status: Type.Optional(Type.Union([Type.Literal("active"), Type.Literal("idle")])),
-	projectId: Type.Optional(Type.String()),
-	limit: Type.Optional(Type.Number()),
+const wait = object({ threadIds: arr(str(), { minItems: 1, maxItems: 20 }), timeoutMs: opt(num({ description: "Default: until they settle" })) });
+const read = object({ threadId: opt(str()), last: opt(num()), before: opt(num()) });
+const search = object({ query: str(), limit: opt(num()) });
+const list = object({
+	parent: opt(str({ description: 'A thread id, or "self"' })),
+	status: opt(union([literal("active"), literal("idle")])),
+	projectId: opt(str()),
+	limit: opt(num()),
 });
-const cancel = Type.Object({ threadId: Type.String(), cascade: Type.Optional(Type.Boolean({ description: "Default true" })) });
+const cancel = object({ threadId: str(), cascade: opt(bool({ description: "Default true" })) });
 
 const reportJson = (entry: Report) => ({ threadId: entry.threadId, title: entry.title, runId: entry.runId, verdict: entry.verdict, toolCalls: entry.toolCalls, truncated: entry.truncated, report: entry.text });
 
 /** The thread tools, as one extension. `callers`: who may call them (default: the model and scripts). */
 export function threadToolsExtension(bridge: Bridge, orchestration: Orchestration, options: { readonly callers?: Callers; readonly ops?: ThreadOps } = {}): Extension {
 	const callers = options.callers ?? ["model", "tools"];
-	const tool = <I>(name: string, description: string, parameters: TSchema, writes: boolean, run: (caller: string | undefined, input: I, api: Api) => Promise<unknown> | unknown): ToolRegistration =>
+	const tool = <I>(name: string, description: string, parameters: ToolSchema, writes: boolean, run: (caller: string | undefined, input: I, api: Api) => Promise<unknown> | unknown): ToolRegistration =>
 		({
 			name,
 			description,
@@ -102,7 +103,7 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 			const decode = Schema.decodeUnknownSync(Schema.toCodecJson(contract.parametersSchema as Schema.Top) as never);
 			const encode = Schema.encodeUnknownSync(Schema.toCodecJson(contract.successSchema as Schema.Top) as never);
 			tools.push(
-				tool<Record<string, unknown>>(name, contract.description ?? name, advertisedJsonSchema(contract) as unknown as TSchema, operation.writes, async (caller, input) => {
+				tool<Record<string, unknown>>(name, contract.description ?? name, advertisedJsonSchema(contract) as unknown as ToolSchema, operation.writes, async (caller, input) => {
 					let decoded: unknown;
 					try {
 						decoded = decode(input);

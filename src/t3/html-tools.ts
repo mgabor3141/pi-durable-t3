@@ -7,7 +7,6 @@ import type { Context } from "@earendil-works/chord";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { Browser } from "playwright-core";
-import { Type } from "typebox";
 import type { Threads } from "../threads.ts";
 import { type Attachments, createDeterministicAttachmentId } from "./attachments.ts";
 import {
@@ -22,6 +21,8 @@ import {
 	previewHtml,
 } from "./html-render.ts";
 import { APP_HTML_RENDER_ENTRY } from "./runs.ts";
+import { arr, int, opt, str, union } from "@earendil-works/pi-schema";
+import { literal, object } from "./schema.ts";
 
 type Callers = readonly ("model" | "tools")[];
 type Api = { readonly conversationId: number; readonly taskId: unknown; readonly callId: string };
@@ -36,25 +37,25 @@ export interface HtmlToolsDeps {
 	readonly browser?: () => Promise<Browser>;
 }
 
-const html = Type.String({ minLength: 1, maxLength: 512_000, description: "A complete, self-contained HTML document." });
-const renderParameters = Type.Object({
+const html = str({ minLength: 1, maxLength: 512_000, description: "A complete, self-contained HTML document." });
+const renderParameters = object({
 	html,
-	title: Type.String({ minLength: 1, maxLength: 200 }),
-	height: Type.Integer({ description: HTML_RENDER_HEIGHT_DESCRIPTION }),
+	title: str({ minLength: 1, maxLength: 200 }),
+	height: int({ description: HTML_RENDER_HEIGHT_DESCRIPTION }),
 });
-const previewParameters = Type.Object({
+const previewParameters = object({
 	html,
-	width: Type.Optional(Type.Integer({ description: HTML_PREVIEW_WIDTH_DESCRIPTION })),
-	appearance: Type.Optional(Type.Union([Type.Literal("dark"), Type.Literal("light")], { description: "Default dark." })),
+	width: opt(int({ description: HTML_PREVIEW_WIDTH_DESCRIPTION })),
+	appearance: opt(union([literal("dark"), literal("light")], { description: "Default dark." })),
 });
-const consoleMessage = Type.Object({ level: Type.Union([Type.Literal("log"), Type.Literal("info"), Type.Literal("warning"), Type.Literal("error")]), text: Type.String() });
-const PREVIEW_RESULT_SCHEMA = Type.Object({
-	width: Type.Integer(),
-	contentHeight: Type.Integer(),
-	capturedHeight: Type.Integer(),
-	consoleMessages: Type.Array(consoleMessage),
-	missingImages: Type.Optional(Type.Array(Type.String())),
-	screenshot: Type.Object({ mimeType: Type.Literal("image/png"), data: Type.String(), width: Type.Integer(), height: Type.Integer() }),
+const consoleMessage = object({ level: union([literal("log"), literal("info"), literal("warning"), literal("error")]), text: str() });
+const PREVIEW_RESULT_SCHEMA = object({
+	width: int(),
+	contentHeight: int(),
+	capturedHeight: int(),
+	consoleMessages: arr(consoleMessage),
+	missingImages: opt(arr(str())),
+	screenshot: object({ mimeType: literal("image/png"), data: str(), width: int(), height: int() }),
 });
 
 const failure = (message: string) => ({ output: [{ type: "text" as const, text: message }], isError: true });

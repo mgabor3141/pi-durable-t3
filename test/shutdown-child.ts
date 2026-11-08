@@ -7,7 +7,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "typebox";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ConversationId } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -19,6 +18,7 @@ import { openCodingHarness } from "../examples/coding-agent/src/host-runtime.ts"
 import { parseConfigToml } from "../examples/coding-agent/src/config.ts";
 import { installShutdown } from "../examples/coding-agent/src/shutdown.ts";
 import { createScriptedModel } from "./fake-model.ts";
+import { object } from "../src/t3/schema.ts";
 
 const [root, project, portArg, sleepArg] = process.argv.slice(2);
 if (root === undefined || project === undefined || portArg === undefined) throw new Error("usage: shutdown-child.ts <root> <project> <port> [tool-sleep-ms]");
@@ -30,7 +30,7 @@ const toolSleepMs = Number(sleepArg ?? 60_000);
 const slowTool = defineTool({
 	name: "slow",
 	description: "Sleep, ignoring the run's abort signal.",
-	parameters: Type.Object({}),
+	parameters: object({}),
 	async execute() {
 		await new Promise((resolve) => setTimeout(resolve, toolSleepMs));
 		return { structuredOutput: { output: "done" } };
