@@ -98,6 +98,8 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				threadTitleRegeneration: bridge.config.titleThread !== undefined,
 				// T3's sidebar settlement: manual settle/un-settle is durable on the thread row.
 				threadSettlement: true,
+				// The thread menu's "Don't auto-settle" (`thread.auto-settle.set`), kept on the thread.
+				threadAutoSettleOptOut: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
 				// Attachments only where they can be kept (`attachT3`'s `attachmentsDir`).

@@ -92,6 +92,18 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			case "thread.unsettle":
 				await bridge.unsettleThread(command.threadId);
 				break;
+			case "thread.archive":
+				await bridge.archiveThread(command.threadId);
+				break;
+			case "thread.unarchive":
+				await bridge.unarchiveThread(command.threadId);
+				break;
+			case "thread.snooze":
+				await bridge.snoozeThread(command.threadId, command.snoozedUntil);
+				break;
+			case "thread.unsnooze":
+				await bridge.unsnoozeThread(command.threadId);
+				break;
 			case "thread.visit":
 				await bridge.visitThread(command.threadId, command.visitedAt, command.opened === true, command.searchQuery);
 				break;

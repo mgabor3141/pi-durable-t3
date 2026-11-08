@@ -56,7 +56,7 @@ import { AssetAccessError, AssetWorkspaceResolutionError, ThreadId, PreviewInval
 
 const isAssetAccessError = Schema.is(AssetAccessError);
 import type { PreviewSessions } from "./preview.ts";
-import type { WsHandlers, WsItem, WsPayload } from "./ws-types.ts";
+import type { WsHandlers, WsItem, WsPayload, WsSuccess } from "./ws-types.ts";
 import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
 import { unsupportedMessage } from "./unsupported.ts";
 import type { SecretRequests } from "./secret-requests.ts";
@@ -448,6 +448,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					);
 				}),
 			),
+		[`orchestration.getArchivedShellSnapshot`]: () => Effect.sync(() => bridge.archivedShellSnapshot() as unknown as WsSuccess<"orchestration.getArchivedShellSnapshot">),
 		[`orchestration.subscribeShell`]: (input) =>
 			Stream.suspend(() => {
 				const initial: WsItem<"orchestration.subscribeShell">[] = [{ kind: "snapshot", snapshot: bridge.shellSnapshot() }];

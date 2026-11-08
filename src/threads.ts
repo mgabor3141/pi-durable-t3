@@ -152,6 +152,12 @@ export type ThreadRecord = {
 	lastVisitedAt?: number;
 	opens?: ThreadOpens;
 	autoSettleDisabledAt?: number;
+	/** T3's archive: hidden from the sidebar, listed in the archive. */
+	archivedAt?: number;
+	/** T3's snooze: hidden until `snoozedUntil` (set at `snoozedAt`); `lastSnoozeWakeAt` is when one last ended early. */
+	snoozedUntil?: number;
+	snoozedAt?: number;
+	lastSnoozeWakeAt?: number;
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;
 };
@@ -983,7 +989,9 @@ export class Threads {
 			thread.settledOverride = "settled";
 			thread.settledAt = already && thread.pinnedAt === undefined ? (thread.settledAt ?? at) : at;
 			delete thread.unsettledAt;
-			// As T3's settle: a settled thread leaves the pins and its dragged place.
+			// As T3's settle: a settled thread leaves the pins, its dragged place and any snooze.
+			delete thread.snoozedUntil;
+			delete thread.snoozedAt;
 			delete thread.pinnedAt;
 			delete thread.pinOrderKey;
 			delete thread.activeOrderKey;
@@ -1003,15 +1011,25 @@ export class Threads {
 		});
 	}
 
-	/** T3's automatic un-settle on new activity: no explicit override remains, only a wake stamp. */
-	async wake(threadId: string): Promise<void> {
+	/** T3's automatic un-settle on new activity: no explicit override remains, only a wake stamp. With `snooze` (a message
+	 * someone sent, not an automatic one), a snooze ends too. */
+	async wake(threadId: string, snooze = false): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
 			const thread = await writes.record(threadId);
-			if (thread === undefined || thread.deletedAt !== null || thread.settledOverride === undefined) return;
-			const wasActive = thread.settledOverride === "active";
-			delete thread.settledOverride;
-			delete thread.settledAt;
-			if (!wasActive) thread.unsettledAt = Date.now();
+			if (thread === undefined || thread.deletedAt !== null) return;
+			const settled = thread.settledOverride !== undefined;
+			const snoozed = snooze && thread.snoozedUntil !== undefined;
+			if (!settled && !snoozed) return;
+			if (settled) {
+				const wasActive = thread.settledOverride === "active";
+				delete thread.settledOverride;
+				delete thread.settledAt;
+				if (!wasActive) thread.unsettledAt = Date.now();
+			}
+			if (snoozed) {
+				delete thread.snoozedUntil;
+				delete thread.snoozedAt;
+			}
 			await writes.putRecord(thread);
 		});
 	}

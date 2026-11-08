@@ -62,11 +62,27 @@ const ms = (value: DateTime.Utc | null | undefined): number | null => (value == 
  * settled, pinned or kept active, with no run going, whose last activity is more than `days` old. It settles as of that
  * activity, not as of now, so it sorts among the settled by when it went quiet. `null`: it does not settle.
  */
-export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, now: number): number | null {
+export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, now: number, lastSnoozeWakeAt?: number): number | null {
 	if (shell.archivedAt !== null || shell.settledOverride !== null) return null;
 	if (shell.pinnedAt != null || shell.autoSettleDisabledAt != null) return null;
 	if (shell.pendingRuntimeRequest !== null || shell.activityRunStatus != null || shell.status === "running") return null;
+	if (isSnoozed(shell, now)) return null;
 	const times = [shell.latestUserMessageAt, shell.latestRunRequestedAt, shell.latestRunStartedAt, shell.latestRunCompletedAt].map(ms).filter((value) => value !== null);
 	const activityAt = times.length === 0 ? DateTime.toEpochMillis(shell.createdAt) : Math.max(...times);
-	return activityAt < now - days * DAY_MS ? activityAt : null;
+	// A snooze that woke the thread (ended early, or ran out) counts as activity, as in T3.
+	const snoozedUntil = ms(shell.snoozedUntil);
+	const timerWakeAt = snoozedUntil !== null && snoozedUntil <= now ? snoozedUntil : null;
+	const quietSince = Math.max(activityAt, lastSnoozeWakeAt ?? -Infinity, timerWakeAt ?? -Infinity);
+	return quietSince < now - days * DAY_MS ? quietSince : null;
+}
+
+/** T3's `isSnoozed`, as clients show it: snoozed until a time still ahead, unless a run failed after it was snoozed. */
+export function isSnoozed(shell: OrchestrationV2ThreadShell, now: number): boolean {
+	const until = ms(shell.snoozedUntil);
+	if (until === null || until <= now) return false;
+	if (shell.pendingRuntimeRequest !== null) return false;
+	const snoozedAt = ms(shell.snoozedAt);
+	const completedAt = ms(shell.latestRunCompletedAt);
+	const wokeOnError = shell.status === "failed" && (snoozedAt === null || (completedAt !== null && completedAt > snoozedAt));
+	return !wokeOnError;
 }

@@ -2,12 +2,6 @@
 
 const UNSUPPORTED: Record<string, string> = {
 	"thread.merge_back": "Merging a fork back is not supported by pi-durable-t3 yet.",
-	"thread.archive": "Archiving is not supported by pi-durable-t3 yet.",
-	"orchestration.subscribeArchivedShell": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
-	"orchestration.getArchivedShellSnapshot": "Archiving is not supported by pi-durable-t3 yet: there is nothing to list.",
-	"thread.unarchive": "Archiving is not supported by pi-durable-t3 yet.",
-	"thread.snooze": "Snoozing is not supported by pi-durable-t3 yet.",
-	"thread.unsnooze": "Snoozing is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
 	"subagent.stop": "Stopping one subagent card is not supported by pi-durable-t3: a child is a thread of its own, so stop that thread.",

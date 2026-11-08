@@ -361,6 +361,7 @@ export class Orchestration {
 				text: `${header}\n${ready.text}`,
 				mode: "queue",
 				provenance: { createdBy: "agent", creationSource: "server", senderThreadId: threadId },
+				automatic: true,
 			});
 			this.#log.info("thread report delivered", { from: threadId, to: request.threadId, verdict: ready.verdict });
 		}

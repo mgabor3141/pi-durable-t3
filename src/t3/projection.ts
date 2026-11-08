@@ -112,6 +112,11 @@ export interface ThreadMeta {
 	readonly lastVisitedAt?: number;
 	readonly opens?: { readonly openedAt: number; readonly score: number; readonly picks: readonly { readonly query: string; readonly at: number }[] };
 	readonly autoSettleDisabledAt?: number;
+	/** T3's archive and snooze, from the thread record. */
+	readonly archivedAt?: number;
+	readonly snoozedUntil?: number;
+	readonly snoozedAt?: number;
+	readonly lastSnoozeWakeAt?: number;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
 	/** The last rollback asked of the thread and its failure, from the thread record. */
@@ -902,6 +907,9 @@ export function projectThread(
 		autoSettleDisabledAt: meta.autoSettleDisabledAt === undefined ? null : time(meta.autoSettleDisabledAt),
 		lastVisitedAt: meta.lastVisitedAt === undefined ? null : time(meta.lastVisitedAt),
 		opens: meta.opens === undefined ? null : { openedAt: meta.opens.openedAt, score: meta.opens.score, picks: meta.opens.picks.map((pick) => ({ ...pick })) },
+		archivedAt: meta.archivedAt === undefined ? null : time(meta.archivedAt),
+		snoozedUntil: meta.snoozedUntil === undefined ? null : time(meta.snoozedUntil),
+		snoozedAt: meta.snoozedAt === undefined ? null : time(meta.snoozedAt),
 	};
 	const thread: Any = {
 		...author,
@@ -922,11 +930,11 @@ export function projectThread(
 		...(meta.delegatedFrom === undefined ? {} : { delegatedFrom: { ...meta.delegatedFrom, environmentId: id(meta.delegatedFrom.environmentId), threadId: id(meta.delegatedFrom.threadId) } }),
 		createdAt: time(meta.createdAt),
 		updatedAt,
-		archivedAt: null,
 		settledOverride: meta.settledOverride ?? null,
 		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
 		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
 		...sidebar,
+		lastSnoozeWakeAt: meta.lastSnoozeWakeAt === undefined ? null : time(meta.lastSnoozeWakeAt),
 		deletedAt: null,
 		...(meta.rollback === undefined
 			? {}
@@ -1014,7 +1022,6 @@ export function projectThread(
 		visibleItemCount: meta.summary === undefined || view !== undefined ? visibleTurnItems.length : meta.summary.visibleItemCount,
 		createdAt: time(meta.createdAt),
 		updatedAt,
-		archivedAt: null,
 		settledOverride: meta.settledOverride ?? null,
 		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
 		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),

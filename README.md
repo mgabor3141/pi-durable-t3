@@ -127,7 +127,7 @@ unconditionally). An armed port is released on shutdown.
 
 ## What works
 
-Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, unread across devices, live order and status for threads nobody is looking at), interrupts, per-thread model and thinking level, undo,
+Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, archive, snooze, unread across devices, live order and status for threads nobody is looking at), inline HTML pages the agent publishes (`T3Attachment.htmlTools`: T3's `html_render`, and `html_preview` with `preview`), interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
 nests under its parent as a full thread; the example agent has them),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
@@ -190,7 +190,9 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 
 - `attachT3(harness, options): Promise<T3Attachment>` and the `AttachT3Options` type (options are documented in the
   type's comments).
-- `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, and (when `preview` is configured) `previewBrowser.open(conversationId, url)`.
+- `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, `threadTools(options)`, `htmlTools(options)` (needs
+  `attachmentsDir`), `secretRequests(sink)`, `textGenerationModel()`, and (when `preview` is configured)
+  `previewBrowser.open(conversationId, url)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
 - `ConfigError`, `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.

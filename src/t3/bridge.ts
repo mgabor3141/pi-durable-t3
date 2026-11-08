@@ -459,6 +459,10 @@ export class Bridge {
 			...(thread?.lastVisitedAt === undefined ? {} : { lastVisitedAt: thread.lastVisitedAt }),
 			...(thread?.opens === undefined ? {} : { opens: thread.opens }),
 			...(thread?.autoSettleDisabledAt === undefined ? {} : { autoSettleDisabledAt: thread.autoSettleDisabledAt }),
+			...(thread?.archivedAt === undefined ? {} : { archivedAt: thread.archivedAt }),
+			...(thread?.snoozedUntil === undefined ? {} : { snoozedUntil: thread.snoozedUntil }),
+			...(thread?.snoozedAt === undefined ? {} : { snoozedAt: thread.snoozedAt }),
+			...(thread?.lastSnoozeWakeAt === undefined ? {} : { lastSnoozeWakeAt: thread.lastSnoozeWakeAt }),
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
@@ -487,8 +491,10 @@ export class Bridge {
 		return [...roots];
 	}
 
+	/** The live shell: T3's active threads. An archived thread is not in it (T3's `subscribeShell` snapshot sends
+	 * `archivedThreads: []`); the archive lists it (`archivedShellSnapshot`). */
 	shellSnapshot(): OrchestrationV2ShellSnapshot {
-		const threads = this.#directory.map((thread) => this.#shellFor(thread.threadId));
+		const threads = this.#directory.filter((thread) => thread.archivedAt === undefined).map((thread) => this.#shellFor(thread.threadId));
 		for (const shell of threads) this.#shells.set(shell.id as string, shell);
 		return {
 			schemaVersion: 1,
@@ -497,6 +503,16 @@ export class Bridge {
 			threads,
 			archivedThreads: [],
 		} as unknown as OrchestrationV2ShellSnapshot;
+	}
+
+	/** T3's `orchestration.getArchivedShellSnapshot`: the archived threads, newest archive first is the client's to sort. */
+	archivedShellSnapshot(): { schemaVersion: number; snapshotSequence: number; projects: OrchestrationProjectShell[]; threads: OrchestrationV2ThreadShell[] } {
+		return {
+			schemaVersion: 1,
+			snapshotSequence: this.nextSequence(),
+			projects: this.projects(),
+			threads: this.#directory.filter((thread) => thread.archivedAt !== undefined).map((thread) => this.#shellFor(thread.threadId)),
+		};
 	}
 
 	onShell(listener: (item: ShellItem) => void): () => void {
@@ -530,6 +546,13 @@ export class Bridge {
 		if (!this.hasThread(threadId)) return;
 		const shell = this.#shellFor(threadId);
 		const previous = this.#shells.get(threadId);
+		// Archived: it leaves the live shell, as T3's shell stream removes it (`shellStreamItemFromThreadShell`).
+		if (shell.archivedAt !== null) {
+			if (previous === undefined) return;
+			this.#shells.delete(threadId);
+			this.#emitShell({ kind: "thread.removed", sequence: this.nextSequence(), location: "active", threadId: ThreadId.make(threadId) });
+			return;
+		}
 		if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(shell)) return;
 		this.#shells.set(threadId, shell);
 		this.#emitShell({ kind: "thread.updated", sequence: this.nextSequence(), location: "active", thread: shell });
@@ -1018,14 +1041,19 @@ export class Bridge {
 		provenance?: Provenance;
 		/** Add it without starting a turn (`mode: "notify"`): the next turn sees it. */
 		note?: boolean;
+		/** Sent by the host on its own (a child's report), not by someone: it does not end a snooze (T3's automatic wake). */
+		automatic?: boolean;
 	}): Promise<void> {
 		const release = this.acquire(input.threadId);
 		try {
 			const state = this.#viewOf(input.threadId);
 			const head = await state.head();
-			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run.
-			if (this.#summary(input.threadId)?.settledOverride !== undefined) {
-				await this.#store.wake(input.threadId);
+			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run. A
+			// message someone sent also ends a snooze; an automatic one (a note, a child's report) does not.
+			const record = this.#summary(input.threadId);
+			const snooze = input.automatic !== true && input.note !== true && record?.snoozedUntil !== undefined;
+			if (record?.settledOverride !== undefined || snooze) {
+				await this.#store.wake(input.threadId, snooze);
 						this.#titleChanged(input.threadId);
 			}
 			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
@@ -1240,16 +1268,22 @@ export class Bridge {
 		}
 	}
 
+	/** T3's refusal of sidebar changes to an archived thread. */
+	#notArchived(threadId: string): void {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		if (this.#summary(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is archived.`);
+	}
+
 	/** T3's `thread.settle`: a durable sidebar settlement, reflected in the shell immediately. */
 	async settleThread(threadId: string): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		this.#notArchived(threadId);
 		await this.#store.settle(threadId);
 		this.#titleChanged(threadId);
 	}
 
 	/** T3's `thread.unsettle`: put the thread back in the active section, durably. */
 	async unsettleThread(threadId: string): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		this.#notArchived(threadId);
 		await this.#store.unsettle(threadId);
 		this.#titleChanged(threadId);
 	}
@@ -1257,8 +1291,60 @@ export class Bridge {
 	// ---- sidebar state (T3's server keeps it on the thread row) ------------------------------------------------
 
 	#sidebarChange(threadId: string, change: (record: ThreadRecord) => boolean | void): Promise<ThreadRecord> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		this.#notArchived(threadId);
 		return this.#store.updateRecord(threadId, change);
+	}
+
+	/** T3's `thread.archive`: out of the sidebar and into the archive; a title being generated is dropped. */
+	async archiveThread(threadId: string): Promise<void> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		if (this.#summary(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is already archived.`);
+		this.#cancelTitle(threadId);
+		const now = Date.now();
+		await this.#store.updateRecord(threadId, (record) => {
+			record.archivedAt = now;
+		});
+	}
+
+	/** T3's `thread.unarchive`. */
+	async unarchiveThread(threadId: string): Promise<void> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		if (this.#summary(threadId)?.archivedAt === undefined) throw new CommandError(`Thread ${threadId} is not archived.`);
+		await this.#store.updateRecord(threadId, (record) => {
+			delete record.archivedAt;
+		});
+	}
+
+	/** T3's `thread.snooze`: hidden until a time in the future; refused while a message waits in its queue (T3 refuses a
+	 * queued run someone sent). */
+	async snoozeThread(threadId: string, snoozedUntil: string): Promise<void> {
+		this.#notArchived(threadId);
+		const until = Date.parse(snoozedUntil);
+		const now = Date.now();
+		if (Number.isNaN(until) || until <= now) throw new CommandError(`Thread ${threadId} snooze wake time ${snoozedUntil} is not in the future.`);
+		const release = this.acquire(threadId);
+		try {
+			const { projection } = await this.#viewOf(threadId).projection(15_000);
+			if (projection.runs.some((run) => run.status === "queued")) throw new CommandError(`Thread ${threadId} has a queued run and cannot be snoozed.`);
+		} finally {
+			release();
+		}
+		await this.#store.updateRecord(threadId, (record) => {
+			record.snoozedUntil = until;
+			record.snoozedAt = now;
+		});
+	}
+
+	/** T3's `thread.unsnooze`: awake now, stamped unless it already was. */
+	async unsnoozeThread(threadId: string): Promise<void> {
+		const now = Date.now();
+		await this.#sidebarChange(threadId, (record) => {
+			const awake = record.snoozedUntil === undefined;
+			delete record.snoozedUntil;
+			delete record.snoozedAt;
+			if (!awake) record.lastSnoozeWakeAt = now;
+			if (awake && record.snoozedAt === undefined) return false;
+		});
 	}
 
 	/** T3's `thread.visit`: the read watermark moves forward only (by the client's clock); an open (`opened`) is counted for
@@ -1281,8 +1367,15 @@ export class Bridge {
 		const completedAt = this.#shellFor(threadId).latestRunCompletedAt;
 		if (completedAt == null) throw new CommandError(`Thread ${threadId} has no completed run to mark unread.`);
 		const at = DateTime.toEpochMillis(completedAt) - 1;
+		const now = Date.now();
 		await this.#sidebarChange(threadId, (record) => {
 			record.lastVisitedAt = at;
+			// T3 retires a snooze that already ran out, keeping when it woke.
+			if (record.snoozedUntil !== undefined && record.snoozedUntil <= now) {
+				record.lastSnoozeWakeAt = record.snoozedUntil;
+				delete record.snoozedUntil;
+				delete record.snoozedAt;
+			}
 		});
 	}
 
@@ -1299,6 +1392,10 @@ export class Bridge {
 				record.settledOverride = "active";
 				delete record.settledAt;
 			}
+			// A pinned thread is not snoozed (T3's pin wakes it, stamped).
+			if (record.snoozedUntil !== undefined) record.lastSnoozeWakeAt = now;
+			delete record.snoozedUntil;
+			delete record.snoozedAt;
 		});
 	}
 
@@ -1355,7 +1452,7 @@ export class Bridge {
 				const days = autoSettleDays(settings, thread.projectId);
 				if (days === null || !this.hasThread(thread.threadId)) continue;
 				const shell = this.#shellFor(thread.threadId);
-				const settledAt = autoSettleAt(shell, days, now);
+				const settledAt = autoSettleAt(shell, days, now, thread.lastSnoozeWakeAt);
 				if (settledAt === null) continue;
 				try {
 					await this.autoSettleThread(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), settledAt);
