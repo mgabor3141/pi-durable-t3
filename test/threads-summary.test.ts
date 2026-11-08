@@ -21,6 +21,7 @@ it("remembers a newer summary and ignores a late older one", async () => {
 		updatedAt: 200,
 		latestVisibleMessage: { id: "u1", role: "user", text: "latest prompt", updatedAt: 200 },
 		latestUserMessageAt: 200,
+		latestRun: null,
 		itemCount: 4,
 		visibleItemCount: 3,
 	});

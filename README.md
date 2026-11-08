@@ -127,7 +127,7 @@ unconditionally). An armed port is released on shutdown.
 
 ## What works
 
-Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), sidebar settlement, interrupts, per-thread model and thinking level, undo,
+Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, unread across devices, live order and status for threads nobody is looking at), interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding and removing projects, image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
 nests under its parent as a full thread; the example agent has them),
 and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve

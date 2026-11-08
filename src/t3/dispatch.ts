@@ -2,6 +2,7 @@
 // the provenance of whoever sent them. The `/ws` adapter sends a person's commands (`user`, the client's surface); an
 // agent's tools will send their own. One place maps a command to the bridge, as T3's `ThreadManagementService.dispatch`
 // is the one place both its WebSocket and its MCP server go through.
+import { DateTime } from "effect";
 import type { Bridge } from "./bridge.ts";
 import { CommandError } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
@@ -12,18 +13,9 @@ import type { Provenance } from "../threads.ts";
 /** A dispatched command, as the contract decoded it. */
 export type DispatchCommand = WsPayload<"orchestration.dispatchCommand">;
 
-/** Sidebar bookkeeping commands that may be acknowledged without host state. Everything else unknown fails. */
-const SIDEBAR_NO_OPS = new Set([
-	"thread.visit",
-	"thread.mark-unread",
-	"thread.auto-settle",
-	"thread.auto-settle.set",
-	"thread.pin",
-	"thread.unpin",
-	"thread.pin.reorder",
-	"thread.active.reorder",
-	"notification.delivery.accept",
-]);
+/** Commands acknowledged without host state: a notification's delivery receipt, which T3 records for its mobile push
+ * and this host does not send. Everything else unknown fails. */
+const SIDEBAR_NO_OPS = new Set(["notification.delivery.accept"]);
 
 /** The image and file attachments of a command (the persisted records the client sent), shaped for
  * `Bridge.sendMessage`. Unknown attachment types are dropped. */
@@ -99,6 +91,34 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				break;
 			case "thread.unsettle":
 				await bridge.unsettleThread(command.threadId);
+				break;
+			case "thread.visit":
+				await bridge.visitThread(command.threadId, command.visitedAt, command.opened === true, command.searchQuery);
+				break;
+			case "thread.mark-unread":
+				await bridge.markThreadUnread(command.threadId);
+				break;
+			case "thread.pin":
+				await bridge.pinThread(command.threadId, command.orderKey);
+				break;
+			case "thread.unpin":
+				await bridge.unpinThread(command.threadId);
+				break;
+			case "thread.pin.reorder":
+				await bridge.reorderThread(command.threadId, "pinned", command.orderKey);
+				break;
+			case "thread.active.reorder":
+				await bridge.reorderThread(command.threadId, "active", command.orderKey);
+				break;
+			case "thread.auto-settle.set":
+				await bridge.setAutoSettle(command.threadId, command.enabled);
+				break;
+			case "thread.auto-settle":
+				await bridge.autoSettleThread(
+					command.threadId,
+					DateTime.toEpochMillis(command.snapshotAt),
+					command.settledAt === undefined ? undefined : DateTime.toEpochMillis(command.settledAt),
+				);
 				break;
 			case "thread.model-selection.set":
 				await bridge.applySelection(command.threadId, command.modelSelection);

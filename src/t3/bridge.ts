@@ -17,10 +17,11 @@ import type {
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
-import { type Provenance, type Spawn, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
+import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
-import type { AgentChange, ConversationId, EntryId } from "@earendil-works/pi-durable";
+import type { AgentChange, ConversationId, EntryId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
+import { autoSettleAt, autoSettleDays, recordThreadOpen } from "./sidebar.ts";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord";
 import type { Logger } from "./logging.ts";
@@ -98,6 +99,9 @@ export type ProjectMutation = {
 
 
 
+/** How often T3 sweeps for threads to settle (`ThreadSettlementService`: every minute). */
+const SETTLE_SWEEP_MS = 60_000;
+
 export class Bridge {
 	readonly config: BridgeConfig;
 	readonly #store: Threads;
@@ -123,6 +127,15 @@ export class Bridge {
 	#closed = false;
 	#sequence = 0;
 	#startedAt = new Date().toISOString();
+	/** A hold per running thread, keeping it open until its run ends: the bridge sees every run end (and the sidebar, T3's
+	 * notifications and a parent's card with it) whether or not a client is looking. */
+	readonly #runHolds = new Map<string, () => void>();
+	/** The live tasks at the last task-graph frame. */
+	#liveTasks = new Set<string>();
+	#taskWatch: TaskGraphWatch | undefined;
+	#settleTimer: NodeJS.Timeout | undefined;
+	#settingsStop: (() => void) | undefined;
+	#sweeping = false;
 
 	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: Attachments) {
 		this.config = config;
@@ -151,8 +164,16 @@ export class Bridge {
 		this.#changeStop = this.#store.onChange((threadIds) => this.#applyDirectory(threadIds));
 		void this.#store
 			.load()
-			.then(() => this.#applyDirectory(undefined))
+			.then(() => {
+				this.#applyDirectory(undefined);
+				void this.#watchRuns();
+				void this.sweepSettlement();
+			})
 			.catch((error: unknown) => this.#log.warn("the thread directory failed to load", { error: error instanceof Error ? error.message : String(error) }));
+		// T3's settlement sweep: every minute, and when the settings change.
+		this.#settleTimer = setInterval(() => void this.sweepSettlement(), SETTLE_SWEEP_MS);
+		this.#settleTimer.unref();
+		this.#settingsStop = this.config.settings.subscribe(() => void this.sweepSettlement());
 		// A UI edit to the registry (add/remove/rename/move) lands here: removed ids emit a removal and every current
 		// project shell is re-emitted — a client keys shells by id, so an unchanged re-emission is a no-op.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
@@ -432,6 +453,12 @@ export class Bridge {
 			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
 			...(thread?.unsettledAt === undefined ? {} : { unsettledAt: thread.unsettledAt }),
+			...(thread?.pinnedAt === undefined ? {} : { pinnedAt: thread.pinnedAt }),
+			...(thread?.pinOrderKey === undefined ? {} : { pinOrderKey: thread.pinOrderKey }),
+			...(thread?.activeOrderKey === undefined ? {} : { activeOrderKey: thread.activeOrderKey }),
+			...(thread?.lastVisitedAt === undefined ? {} : { lastVisitedAt: thread.lastVisitedAt }),
+			...(thread?.opens === undefined ? {} : { opens: thread.opens }),
+			...(thread?.autoSettleDisabledAt === undefined ? {} : { autoSettleDisabledAt: thread.autoSettleDisabledAt }),
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
@@ -601,6 +628,8 @@ export class Bridge {
 
 	/** A thread that no longer exists: its view ends its subscriptions. */
 	#forget(threadId: string, error: Error): void {
+		this.#runHolds.get(threadId)?.();
+		this.#runHolds.delete(threadId);
 		const view = this.#views.get(threadId);
 		if (view === undefined) return;
 		this.#views.delete(threadId);
@@ -612,15 +641,81 @@ export class Bridge {
 		return this.#viewOf(threadId).hold();
 	}
 
-	/** After each projection of an open thread: the shell, and on load or at a run's end the sidebar summary. */
+	/** After each projection of an open thread: the shell, and the sidebar summary on a load, at a run's end, or when the
+	 * latest run changed otherwise (an undo); and a hold while the thread runs. */
 	#projected(view: ThreadView, change: { readonly loaded: boolean; readonly settled: boolean }): void {
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
-		if (change.loaded || change.settled) this.#remember(view);
+		const run = this.#keptRun(view);
+		const kept = this.#summary(view.threadId)?.summary?.latestRun;
+		const runChanged = run !== undefined && JSON.stringify(run) !== JSON.stringify(kept ?? null);
+		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
+		this.#holdWhileRunning(view);
 		this.#publishShell(view.threadId);
 	}
 
-	#remember(view: ThreadView): void {
+	/** The latest run as the summary keeps it, from an open thread's shell: `null` with no run, `undefined` while one runs
+	 * (the summary keeps the last settled run; a running thread is open, so its shell is the live one). */
+	#keptRun(view: ThreadView): SummaryRun | null | undefined {
+		const shell = view.result?.shell;
+		if (shell === undefined || shell.status === "running") return undefined;
+		if (shell.latestRunId === null) return null;
+		const ms = (value: DateTime.Utc | null | undefined): number | null => (value == null ? null : DateTime.toEpochMillis(value));
+		return {
+			id: String(shell.latestRunId),
+			status: shell.status,
+			requestedAt: ms(shell.latestRunRequestedAt) ?? DateTime.toEpochMillis(shell.createdAt),
+			startedAt: ms(shell.latestRunStartedAt),
+			completedAt: ms(shell.latestRunCompletedAt),
+		};
+	}
+
+	/** Keep a running thread open until its run ends; the run's end lets it close after the usual idle time. */
+	#holdWhileRunning(view: ThreadView): void {
+		const running = view.result?.shell.status === "running";
+		const hold = this.#runHolds.get(view.threadId);
+		if (running && hold === undefined && !this.#closed) this.#runHolds.set(view.threadId, view.hold());
+		else if (!running && hold !== undefined) {
+			this.#runHolds.delete(view.threadId);
+			hold();
+		}
+	}
+
+	/** Watch every task of the Harness: a thread's head conversation that gains live work (a prompt from anywhere — a
+	 * client, an agent, a scheduled task — or a run resumed after a restart) is opened, and its projection holds it while
+	 * it runs. Only a new task opens anything (a conversation's lasting background task does not hide a later run); a
+	 * projection that shows no run lets it close again. */
+	async #watchRuns(): Promise<void> {
+		try {
+			const watch = await this.#store.harness.watchTaskGraph(BACKGROUND_CONTEXT);
+			if (this.#closed) {
+				await watch.stop();
+				return;
+			}
+			this.#taskWatch = watch;
+			this.#onTaskGraph(watch.value);
+			watch.start(async (graph) => this.#onTaskGraph(graph));
+		} catch (error) {
+			this.#log.warn("the task graph watch failed: runs that start without a client are not followed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	#onTaskGraph(graph: TaskGraph): void {
+		if (this.#closed) return;
+		const arrived = new Set<number>();
+		for (const [taskId, task] of Object.entries(graph.tasks)) if (!this.#liveTasks.has(taskId)) arrived.add(Number(task.conversationId));
+		this.#liveTasks = new Set(Object.keys(graph.tasks));
+		if (arrived.size === 0) return;
+		const heads = new Map(this.#directory.map((thread) => [thread.head, thread.threadId]));
+		for (const conversationId of arrived) {
+			const threadId = heads.get(conversationId);
+			if (threadId === undefined || this.#runHolds.has(threadId)) continue;
+			// Open it for a projection; while that shows a run, `#holdWhileRunning` keeps it open.
+			this.acquire(threadId)();
+		}
+	}
+
+	#remember(view: ThreadView, run: SummaryRun | null | undefined): void {
 		const shell = view.result?.shell;
 		if (shell === undefined) return;
 		const latest = shell.latestVisibleMessage;
@@ -629,6 +724,7 @@ export class Bridge {
 				updatedAt: DateTime.toEpochMillis(shell.updatedAt),
 				latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
 				latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
+				...(run === undefined ? {} : { latestRun: run }),
 				itemCount: shell.itemCount,
 				visibleItemCount: shell.visibleItemCount,
 			})
@@ -1158,6 +1254,120 @@ export class Bridge {
 		this.#titleChanged(threadId);
 	}
 
+	// ---- sidebar state (T3's server keeps it on the thread row) ------------------------------------------------
+
+	#sidebarChange(threadId: string, change: (record: ThreadRecord) => boolean | void): Promise<ThreadRecord> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		return this.#store.updateRecord(threadId, change);
+	}
+
+	/** T3's `thread.visit`: the read watermark moves forward only (by the client's clock); an open (`opened`) is counted for
+	 * the command palette by the server's clock, with the query that picked the thread. */
+	async visitThread(threadId: string, visitedAt: string, opened: boolean, searchQuery: string | undefined): Promise<void> {
+		const at = Date.parse(visitedAt);
+		if (Number.isNaN(at)) throw new CommandError(`Thread ${threadId} visit time ${visitedAt} is not a valid timestamp.`);
+		const now = Date.now();
+		await this.#sidebarChange(threadId, (record) => {
+			const forward = record.lastVisitedAt === undefined || at > record.lastVisitedAt;
+			if (!forward && !opened) return false;
+			if (forward) record.lastVisitedAt = at;
+			if (opened) record.opens = recordThreadOpen(record.opens, now, searchQuery);
+		});
+	}
+
+	/** T3's `thread.mark-unread`: the watermark goes back to just before the latest run's end. */
+	async markThreadUnread(threadId: string): Promise<void> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		const completedAt = this.#shellFor(threadId).latestRunCompletedAt;
+		if (completedAt == null) throw new CommandError(`Thread ${threadId} has no completed run to mark unread.`);
+		const at = DateTime.toEpochMillis(completedAt) - 1;
+		await this.#sidebarChange(threadId, (record) => {
+			record.lastVisitedAt = at;
+		});
+	}
+
+	/** T3's `thread.pin`: pinned once (a later pin keeps its time and place); pinning a settled thread makes it active. */
+	async pinThread(threadId: string, orderKey: string | undefined): Promise<void> {
+		const now = Date.now();
+		await this.#sidebarChange(threadId, (record) => {
+			const already = record.pinnedAt !== undefined;
+			if (!already) {
+				record.pinnedAt = now;
+				if (orderKey !== undefined) record.pinOrderKey = orderKey;
+			}
+			if (record.settledOverride === "settled") {
+				record.settledOverride = "active";
+				delete record.settledAt;
+			}
+		});
+	}
+
+	/** T3's `thread.unpin`. */
+	async unpinThread(threadId: string): Promise<void> {
+		await this.#sidebarChange(threadId, (record) => {
+			if (record.pinnedAt === undefined && record.pinOrderKey === undefined) return false;
+			delete record.pinnedAt;
+			delete record.pinOrderKey;
+		});
+	}
+
+	/** T3's `thread.pin.reorder` and `thread.active.reorder`: the thread's place among the pins, or in the active section. */
+	async reorderThread(threadId: string, section: "pinned" | "active", orderKey: string): Promise<void> {
+		await this.#sidebarChange(threadId, (record) => {
+			const field = section === "pinned" ? "pinOrderKey" : "activeOrderKey";
+			if (record[field] === orderKey) return false;
+			record[field] = orderKey;
+		});
+	}
+
+	/** T3's `thread.auto-settle.set`: turn automatic settlement off for this thread (stamped once), or back on. */
+	async setAutoSettle(threadId: string, enabled: boolean): Promise<void> {
+		const now = Date.now();
+		await this.#sidebarChange(threadId, (record) => {
+			if (enabled === (record.autoSettleDisabledAt === undefined)) return false;
+			if (enabled) delete record.autoSettleDisabledAt;
+			else record.autoSettleDisabledAt = now;
+		});
+	}
+
+	/** T3's `thread.auto-settle`: settle a thread nobody settled or kept active, unless it changed after `snapshotAt`. */
+	async autoSettleThread(threadId: string, snapshotAt: number, settledAt: number | undefined): Promise<void> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		const shell = this.#shellFor(threadId);
+		if (shell.settledOverride !== null || DateTime.toEpochMillis(shell.updatedAt) > snapshotAt) {
+			throw new CommandError(`Thread ${threadId} changed before automatic settlement.`);
+		}
+		await this.#store.settle(threadId, settledAt);
+	}
+
+	/**
+	 * T3's settlement sweep (`ThreadSettlementService`): settle every thread that has been quiet for longer than its
+	 * project's `sidebarAutoSettleAfterDays` (T3's default: 3 days; `null` turns it off), as of when it went quiet. Pinned
+	 * threads, threads kept active, threads with automatic settlement turned off, and running threads stay.
+	 */
+	async sweepSettlement(now = Date.now()): Promise<void> {
+		if (this.#closed || this.#sweeping) return;
+		this.#sweeping = true;
+		try {
+			const settings = this.config.settings.current();
+			for (const thread of this.#directory) {
+				if (this.#closed) return;
+				const days = autoSettleDays(settings, thread.projectId);
+				if (days === null || !this.hasThread(thread.threadId)) continue;
+				const shell = this.#shellFor(thread.threadId);
+				const settledAt = autoSettleAt(shell, days, now);
+				if (settledAt === null) continue;
+				try {
+					await this.autoSettleThread(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), settledAt);
+				} catch (error) {
+					this.#log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: error instanceof Error ? error.message : String(error) });
+				}
+			}
+		} finally {
+			this.#sweeping = false;
+		}
+	}
+
 	async interrupt(threadId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
@@ -1299,6 +1509,10 @@ export class Bridge {
 		for (const pending of this.#titleRequests.values()) pending.controller.abort();
 		this.#titleRequests.clear();
 		this.#closed = true;
+		if (this.#settleTimer !== undefined) clearInterval(this.#settleTimer);
+		this.#settingsStop?.();
+		await this.#taskWatch?.stop().catch(() => {});
+		this.#runHolds.clear();
 		for (const view of this.#views.values()) view.release();
 		this.#changeStop?.();
 		this.#registryStop?.();

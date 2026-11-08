@@ -106,7 +106,11 @@ T3's RPC group (`t3/ws-types.ts`) and run behind T3's own per-method scope check
 serves outside its HttpApi stays a plain route: assets, uploads, the preview stream, `/ws` and the web app. Behind them, the bridge writes
 through the threads layer (`threads.ts`) and reads with one watch on the threads document plus, per open thread, a
 `ThreadView` (`t3/thread-view.ts`) that watches its head conversation, projects each view and streams the changes; a
-write that needs the head waits for that thread's load, never by polling.
+write that needs the head waits for that thread's load, never by polling. A thread is open while something holds it (a
+command, a read, a subscriber) and for 30 s after, and **for as long as it runs**: one watch on the Harness's task graph
+opens a thread whose head gains a task, wherever the work came from, and its projection holds it until the run ends.
+Closed, a thread's shell comes from its record and summary, which keeps the latest settled run, so the sidebar sorts it
+and shows its state exactly as when it is open.
 
 Rate limiting keys on the socket address, never on a client-supplied header.
 

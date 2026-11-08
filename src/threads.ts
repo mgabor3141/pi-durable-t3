@@ -82,18 +82,24 @@ export type Spawn = {
 	outcome?: { status: "completed" | "failed" | "interrupted" | "cancelled"; result: string | null; completedAt: number };
 };
 
-/** The sidebar's durable snapshot of a thread's latest visible message, so an unopened thread still sorts and previews
- * correctly after a restart. Updated on prompts and at run boundaries, not per token. */
+/** A thread's latest run as the sidebar shows it: T3's shell fields `latestRunId`, `status` and the run's times. */
+export type SummaryRun = { id: string; status: string; requestedAt: number; startedAt: number | null; completedAt: number | null };
+
+/** The sidebar's durable snapshot of a thread: its latest visible message and its latest run, so an unopened thread
+ * still sorts, previews and shows its state as an open one does, after a restart too. Updated on prompts, on a load,
+ * and whenever the latest run changes; not per token. */
 export type ThreadSummary = {
 	updatedAt: number;
 	latestVisibleMessage: { id: string; role: string; text: string; updatedAt: number } | null;
 	latestUserMessageAt: number | null;
+	/** Absent in a summary written before runs were kept: unknown until the thread is next opened or runs. */
+	latestRun?: SummaryRun | null;
 	itemCount: number;
 	visibleItemCount: number;
 };
 type StoredSummary = ThreadSummary & { revision: number };
 /** A thread with no summary yet (revision 0: never written). */
-const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, latestUserMessageAt: null, itemCount: 0, visibleItemCount: 0, revision: 0 };
+const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, latestUserMessageAt: null, latestRun: null, itemCount: 0, visibleItemCount: 0, revision: 0 };
 
 /** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
 /** An undo this thread applied: the head it moved to and the head it left. The runs the left head has and the new one
@@ -137,9 +143,22 @@ export type ThreadRecord = {
 	undos: AppliedUndo[];
 	/** The last rollback asked of this thread, and why it failed (`null`: it did not), as T3 keeps it on the thread. */
 	rollback?: { requestId: string; failure: string | null };
+	/** T3's sidebar state, kept on the thread as T3 keeps it on its row (`OrchestrationV2AppThread`): a pin and its place
+	 * among the pins, the thread's dragged place in the active section, the read watermark (`thread.visit`), how often it
+	 * was opened (for the command palette's ranking), and when automatic settlement was turned off for it. */
+	pinnedAt?: number;
+	pinOrderKey?: string;
+	activeOrderKey?: string;
+	lastVisitedAt?: number;
+	opens?: ThreadOpens;
+	autoSettleDisabledAt?: number;
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;
 };
+
+/** T3's `OrchestrationV2ThreadOpens`: an open count halving every two weeks as of `openedAt`, and the palette queries
+ * that picked the thread, newest first. Times in epoch milliseconds. */
+export type ThreadOpens = { openedAt: number; score: number; picks: { query: string; at: number }[] };
 
 /** One live thread as the bridge reads it: its record and, once it has one, its sidebar summary. */
 export type Thread = ThreadRecord & { summary?: ThreadSummary };
@@ -479,6 +498,7 @@ export class Threads {
 				updatedAt: existing === undefined ? summary.updatedAt : Math.max(existing.updatedAt, summary.updatedAt),
 				latestVisibleMessage: summary.latestVisibleMessage === undefined ? (existing?.latestVisibleMessage ?? null) : summary.latestVisibleMessage,
 				latestUserMessageAt: summary.latestUserMessageAt === undefined ? (existing?.latestUserMessageAt ?? null) : summary.latestUserMessageAt,
+				latestRun: summary.latestRun === undefined ? (existing?.latestRun ?? null) : summary.latestRun,
 				itemCount: summary.itemCount ?? existing?.itemCount ?? 0,
 				visibleItemCount: summary.visibleItemCount ?? existing?.visibleItemCount ?? 0,
 				revision: existing?.revision ?? 0,
@@ -715,6 +735,8 @@ export class Threads {
 			await this.#rememberInput(input);
 			return submission;
 		}
+		// Before the run exists, so its completion is after the watermark however fast it is.
+		await this.#watermark(input.threadId);
 		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
 		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
 		const view = await conversation.viewState(BACKGROUND_CONTEXT);
@@ -749,6 +771,21 @@ export class Threads {
 		// The sidebar preview must show the prompt before the run starts; the run boundary updates the assistant reply.
 		await this.#rememberInput(input);
 		return submission;
+	}
+
+	/** T3's first-dispatch read watermark: a thread never visited gets one just before its first run, so that run's
+	 * completion shows as unread on every client. A thread with none shows nothing unread (T3 keeps imported history read). */
+	async #watermark(threadId: string): Promise<void> {
+		if (this.#records.get(threadId)?.lastVisitedAt !== undefined) return;
+		try {
+			const at = Date.now() - 1;
+			await this.updateRecord(threadId, (record) => {
+				if (record.lastVisitedAt !== undefined) return false;
+				record.lastVisitedAt = at;
+			});
+		} catch (error) {
+			this.#onWarn(`prompt committed but its read watermark failed: ${String(error)}`, error);
+		}
 	}
 
 	/** Queue a prompt behind a live manual compaction without starting a run. The summary's write submission sees the
@@ -936,8 +973,12 @@ export class Threads {
 			const thread = await writes.live(threadId);
 			const already = thread.settledOverride === "settled";
 			thread.settledOverride = "settled";
-			thread.settledAt = already ? (thread.settledAt ?? at) : at;
+			thread.settledAt = already && thread.pinnedAt === undefined ? (thread.settledAt ?? at) : at;
 			delete thread.unsettledAt;
+			// As T3's settle: a settled thread leaves the pins and its dragged place.
+			delete thread.pinnedAt;
+			delete thread.pinOrderKey;
+			delete thread.activeOrderKey;
 			await writes.putRecord(thread);
 		});
 	}

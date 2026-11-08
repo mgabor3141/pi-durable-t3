@@ -17,16 +17,16 @@ Projections are rebuilt from it on every change.
 
 | What | If lost |
 |---|---|
-| One record per thread (`pi-durable-t3.thread`): its head conversation, title, T3's creation fields (`createdBy`, `creationSource`), `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`, settlement, its last 50 applied undos (each the head it moved to and the head it left, from which the rolled-back runs are read), and the last rollback's outcome | The thread. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
+| One record per thread (`pi-durable-t3.thread`): its head conversation, title, T3's creation fields (`createdBy`, `creationSource`), `lineage`, `forkedFrom`, `linkOrigin`, `delegatedFrom`, settlement, T3's sidebar state (pin and its place, dragged place, read watermark, opens, auto-settle switched off), its last 50 applied undos (each the head it moved to and the head it left, from which the rolled-back runs are read), and the last rollback's outcome | The thread. T3 lists only threads created through T3; conversations started by other code on the same Harness are not listed |
 | A deleted thread's record, with `deletedAt` | A deleted thread could come back: the record is the tombstone that keeps a late prompt to its head from promoting it |
-| One sidebar summary per thread (`pi-durable-t3.thread-summary`) | An unopened thread previews and sorts as new until it is opened |
+| One sidebar summary per thread (`pi-durable-t3.thread-summary`): its latest visible message, latest user message and latest settled run, so a closed thread shows as an open one does | An unopened thread previews and sorts as new until it is opened. A summary written before runs were kept has none until the thread next runs or is opened |
 | Command receipts (`pi-durable-t3.command-receipts`): the last 1,000 commands the host accepted and the sequence each was answered with (T3's `CommandReceiptStore`: a retried `commandId` gets the first answer, across restarts). A prompt's command id is also its pi-durable request id, so a resent prompt is sent once whatever path it comes by | A retried command runs again |
 | The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
 | The project registry (`pi-durable-t3.projects`): id, path, title per project. A thread's project is checked in the commit that writes the thread | Project names; threads keep their `cwd` |
 | Scheduled tasks (`pi-durable-t3.scheduled-tasks`), as T3's schema encodes them: trigger, prompt, project/thread, model, provenance, run state (`nextRunAt`, last run, count). Read strictly at boot: a task this version cannot decode stops the host | The tasks; the threads they made stay |
 
-Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt and
-run boundary — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
+Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt, run boundary
+and change of the latest run — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
 in memory: one threads layer per Harness.
 
 Each conversation's agent config (`pi.agent`: model, thinking level, `cwd`) is pi-durable's, set by the

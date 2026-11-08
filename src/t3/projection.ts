@@ -104,6 +104,13 @@ export interface ThreadMeta {
 	readonly settledOverride?: "settled" | "active";
 	readonly settledAt?: number;
 	readonly unsettledAt?: number;
+	/** T3's sidebar state from the thread record (`threads.ts`): pin, dragged place, read watermark, opens, auto-settle. */
+	readonly pinnedAt?: number;
+	readonly pinOrderKey?: string;
+	readonly activeOrderKey?: string;
+	readonly lastVisitedAt?: number;
+	readonly opens?: { readonly openedAt: number; readonly score: number; readonly picks: readonly { readonly query: string; readonly at: number }[] };
+	readonly autoSettleDisabledAt?: number;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
 	/** The last rollback asked of the thread and its failure, from the thread record. */
@@ -298,7 +305,8 @@ export function projectThread(
 		const lastEntry = draft.steps.at(-1) ?? u;
 		// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
 		const lastMessage = firstMessage(lastEntry);
-		const completedMs = running ? null : endOf(lastMessage, requestedAt);
+		// Never before it was asked for: a message stamped earlier (a clock step, a reply made ahead) still ends the run then.
+		const completedMs = running ? null : Math.max(requestedAt, endOf(lastMessage, requestedAt));
 		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
 		// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
 		const runModel: Any = (() => {
@@ -854,6 +862,15 @@ export function projectThread(
 				? { type: "node", nodeId: id(meta.forkedFrom.nodeId) }
 				: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
 	const author = { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" };
+	// T3's sidebar state, on the thread and its shell alike.
+	const sidebar = {
+		pinnedAt: meta.pinnedAt === undefined ? null : time(meta.pinnedAt),
+		pinOrderKey: meta.pinOrderKey ?? null,
+		activeOrderKey: meta.activeOrderKey ?? null,
+		autoSettleDisabledAt: meta.autoSettleDisabledAt === undefined ? null : time(meta.autoSettleDisabledAt),
+		lastVisitedAt: meta.lastVisitedAt === undefined ? null : time(meta.lastVisitedAt),
+		opens: meta.opens === undefined ? null : { openedAt: meta.opens.openedAt, score: meta.opens.score, picks: meta.opens.picks.map((pick) => ({ ...pick })) },
+	};
 	const thread: Any = {
 		...author,
 		id: id(threadId),
@@ -877,7 +894,7 @@ export function projectThread(
 		settledOverride: meta.settledOverride ?? null,
 		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
 		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
-		lastVisitedAt: null,
+		...sidebar,
 		deletedAt: null,
 		...(meta.rollback === undefined
 			? {}
@@ -913,6 +930,8 @@ export function projectThread(
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
 	const lastVisibleMessage = messages.at(-1);
 	const lastUser = messages.findLast((message) => message.role === "user");
+	// Not loaded: the latest run the summary kept, so a closed thread sorts and shows its state as an open one does.
+	const keptRun = view === undefined ? (meta.summary?.latestRun ?? null) : null;
 	const shell: OrchestrationV2ThreadShell = {
 		...author,
 		id: id(threadId),
@@ -928,15 +947,15 @@ export function projectThread(
 		lineage: thread.lineage,
 		forkedFrom: thread.forkedFrom,
 		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
-		latestRunId: latestRun?.id ?? null,
-		latestRunRequestedAt: latestRun?.requestedAt ?? null,
-		latestRunStartedAt: latestRun?.startedAt ?? null,
-		latestRunCompletedAt: latestRun?.completedAt ?? null,
+		latestRunId: latestRun?.id ?? (keptRun === null ? null : id(keptRun.id)),
+		latestRunRequestedAt: latestRun?.requestedAt ?? (keptRun === null ? null : time(keptRun.requestedAt)),
+		latestRunStartedAt: latestRun?.startedAt ?? (keptRun?.startedAt == null ? null : time(keptRun.startedAt)),
+		latestRunCompletedAt: latestRun?.completedAt ?? (keptRun?.completedAt == null ? null : time(keptRun.completedAt)),
 		activeRunId: activeRun?.id ?? null,
 		activityRunStartedAt: activeRun?.startedAt ?? null,
 		activityRunStatus: activeRun === undefined ? null : "running",
 		// T3's shell status is the latest run's status, and "idle" only for a thread that never ran (ProjectionStore.ts).
-		status: busy ? "running" : (latestRun?.status ?? "idle"),
+		status: busy ? "running" : (latestRun?.status ?? keptRun?.status ?? "idle"),
 		pendingRuntimeRequest: null,
 		latestVisibleMessage:
 			lastVisibleMessage === undefined
@@ -967,6 +986,7 @@ export function projectThread(
 		settledOverride: meta.settledOverride ?? null,
 		settledAt: meta.settledAt === undefined ? null : time(meta.settledAt),
 		...(meta.unsettledAt === undefined ? {} : { unsettledAt: time(meta.unsettledAt) }),
+		...sidebar,
 		deletedAt: null,
 	} as Any;
 
