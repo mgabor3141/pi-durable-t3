@@ -92,6 +92,12 @@ The code shows what each operation does. These are the rules it cannot show on i
 - **Unknown threads are a typed not-found** on every path, never an empty thread made up on the spot.
 - **Storage only grows.** pi-durable has no delete. Removing drops pointers, never data.
 
+## Migrations
+
+None in the host. There are no users to carry along, so a version-1 store is refused at boot, not converted, and
+existing instances are migrated by hand. `scripts/` keeps the one-off scripts used for that, such as
+`migrate-threads-v2.mjs` (the single threads document to per-thread records); the host never runs them.
+
 ## Facet
 
 The facet serves T3's HTTP routes and `/ws` (orchestration protocol 2, Effect RPC over JSON). Its handlers are typed by
@@ -109,3 +115,54 @@ the browser-session cookie — the one credential a page can ride — authentica
 `EnvironmentAuth.isBrowserOriginAllowed`). A page that rebinds a hostname onto the listener therefore arrives with no
 credentials: it reads the public descriptor and spends the pairing rate limit, and nothing else
 (`test/auth-boundary.test.ts`).
+
+## Thread stream
+
+`subscribeThread` is T3's: a bounded first snapshot (T3's `THREAD_HISTORY_PAGE_POLICY` over T3's windowed read, with
+`historyCursor` and `hasMoreHistory`; `/history` serves older pages), then changes in 50 ms windows as `*.updated` /
+`*.created` events. The events are derived by diffing two projections of the thread, and every batch is checked by
+applying it with T3's own client reducer; a change no event can say (a record that went away) is sent as a snapshot.
+T3's paging, wire projection, body deduper and client reducer are vendored by `dev/setup-t3.sh` into `vendor/shared`
+and `vendor/t3-server`. Assistant items keep one id from first token to commit, and turn items are numbered in the
+order they enter the thread, as T3's `nextTurnItemOrdinal` does. An `afterSequence` resume replays the last 128 events
+(T3's `decideThreadResume`), else sends a snapshot; a subscriber more than 512 items behind gets a snapshot. The
+sequence is a clock-floored counter of this process, so after a restart every resume is a snapshot, which the contract
+allows.
+
+Cost of one streamed reply of about 4 s (`bench/thread-stream.bench.test.ts`, faux model):
+
+| earlier turns | bounded open | full projection | items during the reply | snapshots | bytes for the reply | CPU |
+|---:|---:|---:|---:|---:|---:|---:|
+| 50 | 47 KB | 254 KB | 96 | 0 | 355 KB | 0.28 s |
+| 200 | 47 KB | 1.0 MB | 96 | 0 | 355 KB | 0.26 s |
+| 500 | 47 KB | 2.5 MB | 96 | 0 | 350 KB | 0.48 s |
+
+The reply costs the same on every thread. Before this design (a full projection on every change) the same reply cost
+9.8, 38.6 and 31.2 MB. Re-projecting the whole thread on a change is cheap once dates are shared and records compared
+structurally, so per-run memoization was measured and left out.
+
+## Peer links (not built yet)
+
+How T3 links environments (`apps/server/src/peer/`, `docs/internals/remote.md`, behind the Linked environments beta),
+for when we build it:
+
+- **The link is an MCP client session.** The linking environment signs in to the other one's `/mcp` as an ordinary
+  outside OAuth client, approved with a pairing code from the other side, and keeps the token in its secret store. The
+  other side needs nothing new: it sees one more client under Sharing & access and can revoke it there.
+- **Tools route by parameter.** A tool whose input takes `environmentId` runs in the linked environment once the local
+  caller has passed its access checks; the thread it names is checked where it lives. Tools that act as the calling
+  thread cannot be forwarded.
+- **Limits travel with the call** (`T3-Mode-Limit`), and the receiver only ever narrows with them.
+- **Identity is checked before the token leaves:** only to an address whose public descriptor reports the linked
+  environment id.
+- **One session, many callers:** idempotency keys are hashed with the caller's namespace before they leave.
+- **Long waits are chunked** into calls of at most 50 s, since T3 Connect's edge drops idle requests after about 100 s.
+- **Fencing by origin.** Work a link starts carries an immutable `linkOrigin`, stamped by the receiver from the signed
+  session, and so does everything derived from it. Below full access, linked work may change only threads with the
+  same origin and cannot touch projects, settings, scheduled tasks or the receiver's own links. Reads are not fenced.
+- **Remote delegation:** `delegate_task` can target a linked environment; the parent records `remoteChild`, and a
+  follower completes the task when the remote child settles.
+
+Our side already has the server half: `/mcp` with T3's tool surface, OAuth with pairing-code approval, and thread
+records with `linkOrigin` and `delegatedFrom`. What is missing is the client half (T3's `PeerLinks`,
+`PeerMcpClient`, `PeerForwarding`).
