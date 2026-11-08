@@ -1,6 +1,7 @@
 // Pure mapping from a pi conversation (the head's `ConversationView` plus the thread's directory row) to T3's thread
 // projection and shell: one user turn per run (`runs.ts`), one synthetic "ready" checkpoint per settled run plus a
 // baseline (`undo.ts`'s ids), and an aborted assistant partial hidden when a later entry of the run supersedes it.
+import { HTML_RENDER_MESSAGE, HTML_RENDER_TOOL_NAME } from "./html-render.ts";
 import type {
 	OrchestrationV2Checkpoint,
 	OrchestrationV2CheckpointScope,
@@ -22,7 +23,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
@@ -151,6 +152,19 @@ export interface ProjectionResult {
 const thinkingOf = (content: ContentBlock[]): string =>
 	content.flatMap((block) => (block.type === "thinking" ? [block.thinking] : [])).join("");
 
+
+/** An html_render call's result without its page reference (its `message` stays): the published page is shown once,
+ * from its own entry. */
+function withoutHtmlRender(output: string): string {
+	try {
+		const parsed = JSON.parse(output) as Record<string, unknown>;
+		if (typeof parsed !== "object" || parsed === null || !("htmlRender" in parsed)) return output;
+		const { htmlRender: _shownByItsEntry, ...rest } = parsed;
+		return JSON.stringify(rest);
+	} catch {
+		return output;
+	}
+}
 
 export function projectThread(
 	meta: ThreadMeta,
@@ -580,13 +594,16 @@ export function projectThread(
 						...(failed ? { outputIndicatesFailure: true } : {}),
 					} as Any);
 				} else {
+					// The model's own html_render call: its page is the `app.html-render` entry's item, so the call's output
+					// must not name it too, or T3 would show the page twice.
+					const shown = block.name === HTML_RENDER_TOOL_NAME && output !== undefined ? withoutHtmlRender(output) : output;
 					turnItems.push({
 						...common,
 						title: block.name,
 						type: "dynamic_tool",
 						toolName: block.name,
 						input: block.arguments,
-						...(output === undefined ? {} : { output }),
+						...(shown === undefined ? {} : { output: shown }),
 					} as Any);
 				}
 			}
@@ -685,6 +702,21 @@ export function projectThread(
 		draft.steps.forEach((step, stepIndex) => {
 			if (isUserEntry(step) || isNoteEntry(step)) {
 				pushUser(step, "steer");
+				return;
+			}
+			// A published page: T3's html_render tool item, which its timeline shows inline (`htmlRenderFromToolItem`).
+			const render = htmlRenderOf(step);
+			if (render !== undefined) {
+				const { createdAt, ...reference } = render;
+				pushCards(createdAt);
+				turnItems.push({
+					...base(`ti-h${step.id}`, createdAt, "completed", true),
+					title: HTML_RENDER_TOOL_NAME,
+					type: "dynamic_tool",
+					toolName: HTML_RENDER_TOOL_NAME,
+					input: { title: reference.title, height: reference.height },
+					output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }),
+				} as Any);
 				return;
 			}
 			const m = firstMessage(step);

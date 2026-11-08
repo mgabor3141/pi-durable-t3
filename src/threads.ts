@@ -788,6 +788,14 @@ export class Threads {
 		}
 	}
 
+	/** A display-only entry (no model message: pi never sees it), written into a conversation; busy, pi-durable places it
+	 * at the run's next boundary. `requestId` makes a retry write it once. */
+	async writeDisplayEntry(conversationId: number, requestId: string, kind: string, data: Record<string, JsonValue>): Promise<void> {
+		const conversation = await this.#harness.conversation(conversationId as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${conversationId}`);
+		await conversation.submit({ type: "write", requestId, entry: { kind, data } }, BACKGROUND_CONTEXT);
+	}
+
 	/** Queue a prompt behind a live manual compaction without starting a run. The summary's write submission sees the
 	 * queued inbox items and places them at its final boundary, so the prompt starts after the new context exists. */
 	async #enqueueInput(

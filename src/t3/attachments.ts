@@ -378,6 +378,14 @@ export class Attachments {
 		return { bytes: read.value, mimeType: mediaTypeFromPath(path), fileName: claims.fileName ?? filename };
 	}
 
+	/** Keep a file the host made (an `html_render` page) under its attachment id, as a sent attachment is kept; returns its
+	 * path. The id's suffix names its type, as T3's ids do (`…-html`). */
+	async writeGenerated(attachmentId: string, bytes: Uint8Array): Promise<string> {
+		const record = { id: attachmentId, mimeType: "", name: "" } as AttachmentRecord;
+		await this.#write(record, bytes);
+		return this.pathOf(record);
+	}
+
 	async #write(record: AttachmentRecord, bytes: Uint8Array): Promise<void> {
 		const made = await this.#env.createDir(this.#dir, { recursive: true }, this.#context);
 		if (!made.ok) throw new Error(`Cannot create the attachment directory ${this.#dir}: ${made.error.message}`);
@@ -420,6 +428,22 @@ function deterministicId(threadId: string, messageId: string, index: number, byt
 /** Media type from a file's extension (the id's suffix, not a client-supplied mime). */
 function mediaTypeFromPath(path: string): string {
 	const ext = extname(path).toLowerCase();
-	const byExt: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
+	// Images, and the documents and media T3 serves inline (HTML and SVG sandboxed by the asset route); the rest downloads.
+	const byExt: Record<string, string> = {
+		".png": "image/png",
+		".jpg": "image/jpeg",
+		".jpeg": "image/jpeg",
+		".gif": "image/gif",
+		".webp": "image/webp",
+		".svg": "image/svg+xml",
+		".html": "text/html",
+		".htm": "text/html",
+		".pdf": "application/pdf",
+		".mp3": "audio/mpeg",
+		".wav": "audio/wav",
+		".ogg": "audio/ogg",
+		".mp4": "video/mp4",
+		".webm": "video/webm",
+	};
 	return byExt[ext] ?? "application/octet-stream";
 }

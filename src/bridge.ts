@@ -136,6 +136,13 @@ export type T3Attachment = {
 	 */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/**
+	 * T3's html tools: `html_render` shows a finished page (a chart, a diagram, a mockup) inline in the caller's thread,
+	 * above its reply, and `html_preview` — only with `preview` configured — renders a page in that browser and returns a
+	 * PNG, its height and its console, so the agent can check it first. Pages are kept in `attachmentsDir` (required).
+	 * `callers` as for `threadTools`.
+	 */
+	htmlTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
+	/**
 	 * T3's `request_secret` as a model-facing tool: the thread shows T3's secret card, and the value the user enters goes
 	 * to `sink` under the name the agent chose — never into the conversation. This host keeps no secrets itself.
 	 */
@@ -269,6 +276,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		closed: facet.closed,
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
 		threadTools: (toolOptions) => facet.threadTools(toolOptions),
+		htmlTools: (toolOptions) => facet.htmlTools(toolOptions),
 		secretRequests: (sink) => facet.secretRequests(sink),
 		textGenerationModel: () => facet.textGenerationModel(),
 		...(facet.preview === undefined

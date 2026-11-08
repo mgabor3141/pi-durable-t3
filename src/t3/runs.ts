@@ -22,6 +22,19 @@ export const APP_COMPACT_ENTRY = "app.compact";
  * context. */
 export const APP_RELOAD_ENTRY = "app.reload";
 
+/** A page `html_render` published (`html-tools.ts`): display-only, shown where it landed in its run as T3's html_render
+ * tool item. Its data is T3's `HtmlRenderReference` and when it was published. */
+export const APP_HTML_RENDER_ENTRY = "app.html-render";
+
+/** The reference an html-render entry carries, if it is one. */
+export function htmlRenderOf(entry: EntryRecord): { attachmentId: string; title: string; height: number; heights?: [number, number][]; createdAt: number } | undefined {
+	if (entry.kind !== APP_HTML_RENDER_ENTRY) return undefined;
+	const data = entry.data as Record<string, unknown> | undefined;
+	if (data === undefined || typeof data.attachmentId !== "string" || typeof data.title !== "string" || typeof data.height !== "number" || typeof data.createdAt !== "number") return undefined;
+	const heights = Array.isArray(data.heights) ? (data.heights as [number, number][]) : undefined;
+	return { attachmentId: data.attachmentId, title: data.title, height: data.height, ...(heights === undefined ? {} : { heights }), createdAt: data.createdAt };
+}
+
 /** The text a display-only command entry carries; the entry has no model messages, so pi never sees it. */
 const commandMessage = (entry: EntryRecord): DurableMessage | undefined => {
 	const data = entry.data;
@@ -189,7 +202,7 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			}
 			continue;
 		}
-		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") runs.at(-1)?.steps.push(entry);
+		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result" || entry.kind === APP_HTML_RENDER_ENTRY) runs.at(-1)?.steps.push(entry);
 		// A note joins the run it lands in; one before any run opens a run of its own (it is the thread's first message).
 		else if (isNoteEntry(entry)) {
 			const current = runs.at(-1);

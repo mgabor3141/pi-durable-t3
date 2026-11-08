@@ -23,6 +23,7 @@ import { ThreadOps } from "./thread-ops.ts";
 import { SecretRequests } from "./secret-requests.ts";
 import type { SecretSink } from "./secret-sink.ts";
 import { threadToolsExtension } from "./thread-tools.ts";
+import { htmlToolsExtension } from "./html-tools.ts";
 import { Orchestration } from "./orchestration.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import type { TailscaleCli } from "./tailscale.ts";
@@ -42,6 +43,8 @@ type FacetHandle = {
 	secretRequests(sink: SecretSink): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
+	/** T3's html tools as an extension (`T3Attachment.htmlTools`). */
+	htmlTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	readonly orchestration: Orchestration;
 	/** T3's text-generation model, when it names one of this host's (`Bridge.textGenerationModel`). */
 	textGenerationModel(): TextGenerationModel | undefined;
@@ -126,6 +129,21 @@ export function startFacet(deps: {
 		},
 		secretRequests: (sink) => secretRequests.extension(sink),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
+		htmlTools: (options) => {
+			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.
+			if (attachments === undefined || config.env === undefined) throw new Error("htmlTools needs attachT3's attachmentsDir (and env): published pages are kept there.");
+			return htmlToolsExtension(
+				{
+					threads: deps.threads,
+					threadIdOf: (conversationId) => bridge.threadIdForConversation(conversationId),
+					attachments,
+					env: config.env,
+					context: config.context ?? BACKGROUND_CONTEXT,
+					...(preview === undefined ? {} : { browser: () => preview.browser() }),
+				},
+				options,
+			);
+		},
 		orchestration,
 		textGenerationModel: () => bridge.textGenerationModel(),
 		close: async () => {
