@@ -883,8 +883,8 @@ export class Bridge {
 		}
 	}
 
-	/** The prompt's attachment blocks: T3's line naming where each attachment is saved (hidden in T3's display, as T3's
-	 * adapters add it to the provider message), then the images inline when the head's model takes them. */
+	/** The prompt's attachment blocks: where each attachment is saved ("Attachments:" and a path per line, hidden in T3's
+	 * display), then the images inline when the head's model takes them. */
 	#attachmentBlocks(state: ThreadView, kept: readonly KeptAttachment[]): ContentBlock[] | undefined {
 		if (kept.length === 0) return undefined;
 		const model = state.configuration?.model ?? state.view?.docs["pi.agent"]?.model ?? null;
@@ -893,8 +893,8 @@ export class Bridge {
 			const found = bytes.get(id);
 			return found === undefined ? null : { data: Buffer.from(found).toString("base64"), mimeType: "" };
 		});
-		const lines = kept.map(({ record, path }) => `[Attached ${record.type ?? "image"} "${record.name}" is saved at: ${path}]`).join("\n\n");
-		return [{ type: "text" as const, text: lines, hidden: true }, ...(images ?? [])];
+		const list = ["Attachments:", ...kept.map(({ path }) => `- ${path}`)].join("\n");
+		return [{ type: "text" as const, text: list, hidden: true }, ...(images ?? [])];
 	}
 
 	/** A message's attachments, kept in the environment (`Attachments.keep`); a host without an attachment dir takes none. */

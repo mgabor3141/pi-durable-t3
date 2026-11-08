@@ -1,5 +1,5 @@
 // Sending attachments through the bridge: each upload is kept in the environment under a deterministic id, the model
-// is told where (T3's "[Attached … is saved at: …]" line, hidden in T3's display), and an image also goes inline. The
+// is told where ("Attachments:" and a path per line, hidden in T3's display), and an image also goes inline. The
 // stored entry is what the model is sent, so this reads it back.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,7 +62,7 @@ it("an image and a file: both kept in the environment and named by path; the ima
 
 	const content = user.model![0]!.content as { type: string; text?: string; data?: string; hidden?: boolean }[];
 	const line = content.find((block) => block.type === "text" && block.hidden === true);
-	expect(line?.text).toBe(`[Attached image "shot.png" is saved at: ${imagePath}]\n\n[Attached file "spec.pdf" is saved at: ${filePath}]`);
+	expect(line?.text).toBe(`Attachments:\n- ${imagePath}\n- ${filePath}`);
 	const inline = content.filter((block) => block.type === "image");
 	// The faux model takes images, so the image also goes inline.
 	expect(inline.map((block) => block.data)).toEqual([PNG.toString("base64")]);

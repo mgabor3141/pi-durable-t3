@@ -148,8 +148,8 @@ Known limitations:
   itself once when a lazily loaded chunk fails to fetch, and during the restart there is nothing to reload into. Reload
   the page — the thread and its messages come back exactly as they were, including one holding a message the host was
   sent just before it died.
-- Attachments are images and files, kept in `attachmentsDir` in the environment and named to the model by path, as T3
-  names its own attachment store to its agents; an image also goes inline when the model takes images. Nothing removes
+- Attachments are images and files, kept in `attachmentsDir` in the environment and named to the model by path (a block
+  of `Attachments:` and one `- <path>` line each); an image also goes inline when the model takes images. Nothing removes
   them, a deleted thread's included. Without `attachmentsDir` the host takes none.
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
