@@ -102,6 +102,8 @@ export type ProjectMutation = {
 
 /** How often T3 sweeps for threads to settle (`ThreadSettlementService`: every minute). */
 const SETTLE_SWEEP_MS = 60_000;
+/** How long Stop waits for its abort before it answers; the run's end follows on its own. */
+const STOP_ADMIT_MS = 1_000;
 
 export class Bridge {
 	readonly config: BridgeConfig;
@@ -468,6 +470,7 @@ export class Bridge {
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
+			...(this.#stopOf(threadId, state) === undefined ? {} : { stop: this.#stopOf(threadId, state) }),
 			titleRegeneration: this.#titleRequests.has(threadId)
 				? { requestId: this.#titleRequests.get(threadId)!.requestId, startedAt: this.#titleRequests.get(threadId)!.startedAt }
 				: null,
@@ -675,6 +678,8 @@ export class Bridge {
 		const runChanged = run !== undefined && JSON.stringify(run) !== JSON.stringify(kept ?? null);
 		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
+		const stop = this.#stops.get(view.threadId);
+		if (stop !== undefined && view.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) this.#clearStop(view.threadId);
 		this.#holdWhileRunning(view);
 		this.#publishShell(view.threadId);
 	}
@@ -1495,16 +1500,82 @@ export class Bridge {
 		}
 	}
 
+	/**
+	 * Stop: shown at once, answered within `STOP_ADMIT_MS`. Every live task of the thread is marked aborted; the run ends
+	 * when its tools have returned, which is at once for a tool that listens for its abort. The thread shows "Stopping"
+	 * until then, and "not responding" past `Bridge.stopConfirmMs`. A run whose tasks have all ended already (its state
+	 * written outside pi-durable) has nothing to abort, so Stop ends it (`Threads.endDeadRun`).
+	 */
 	async interrupt(threadId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
 			const state = this.#viewOf(threadId);
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.
 			const head = await state.head();
-			await this.#store.abort({ threadId, conversationId: head });
+			const input = { threadId, conversationId: head };
+			this.#stopRequested(threadId, state);
+			// The abort resolves once every task it marked has ended, so a tool that does not listen would hold the answer.
+			// Its failure surfaces when it fails at once; a later one is logged.
+			const aborting = this.#store.abort(input).then(
+				() => undefined,
+				(error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+			);
+			const early = await Promise.race([aborting, new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), STOP_ADMIT_MS).unref())]);
+			if (early instanceof Error) throw early;
+			if (early === "waiting") {
+				void aborting.then((error) => {
+					if (error !== undefined) this.#log.warn("stop: the abort failed", { threadId, error: error.message });
+				});
+			}
+			const ended = await this.#store.endDeadRun(input);
+			if (ended.run !== undefined || ended.compactions.length > 0) {
+				this.#log.warn("stop: ended work whose tasks had already ended (its state was changed outside pi-durable)", { threadId, conversationId: head, runTask: ended.run, compactionTasks: ended.compactions });
+			}
 		} finally {
 			release();
 		}
+	}
+
+	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
+	#stops = new Map<string, { readonly taskId: number; readonly requestedAt: number; unresponsiveAt?: number; readonly timer: ReturnType<typeof setTimeout> }>();
+
+	/** How long a stopped run may take to end before the thread shows it not responding (T3's Claude adapter waits as
+	 * long for a Stop to be confirmed). */
+	static stopConfirmMs = 10_000;
+
+	#stopRequested(threadId: string, state: ThreadView): void {
+		const taskId = state.view?.docs["pi.live"]?.run?.taskId as number | undefined;
+		if (taskId === undefined || this.#stops.get(threadId)?.taskId === taskId) return;
+		this.#clearStop(threadId);
+		const timer = setTimeout(() => {
+			const stop = this.#stops.get(threadId);
+			if (stop?.timer !== timer) return;
+			stop.unresponsiveAt = Date.now();
+			this.#log.warn("stop: the run has not ended", { threadId, runTask: taskId, waitedMs: Bridge.stopConfirmMs });
+			this.#reproject(threadId);
+		}, Bridge.stopConfirmMs);
+		timer.unref();
+		this.#stops.set(threadId, { taskId, requestedAt: Date.now(), timer });
+		this.#reproject(threadId);
+	}
+
+	#clearStop(threadId: string): void {
+		const stop = this.#stops.get(threadId);
+		if (stop === undefined) return;
+		clearTimeout(stop.timer);
+		this.#stops.delete(threadId);
+	}
+
+	/** The Stop shown on the thread's running run, if its run is the one stopped. */
+	#stopOf(threadId: string, state: ThreadView | undefined): ThreadMeta["stop"] {
+		const stop = this.#stops.get(threadId);
+		if (stop === undefined || state?.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) return undefined;
+		return { requestedAt: stop.requestedAt, ...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: stop.unresponsiveAt }) };
+	}
+
+	#reproject(threadId: string): void {
+		this.#views.get(threadId)?.recompute();
+		this.#publishShell(threadId);
 	}
 
 	async cancelQueued(threadId: string, runId: string): Promise<void> {
@@ -1635,6 +1706,7 @@ export class Bridge {
 		// Shutdown cancels the title work it started: the hook's model call stops, and nothing lands on a closed host.
 		for (const pending of this.#titleRequests.values()) pending.controller.abort();
 		this.#titleRequests.clear();
+		for (const threadId of [...this.#stops.keys()]) this.#clearStop(threadId);
 		this.#closed = true;
 		if (this.#settleTimer !== undefined) clearInterval(this.#settleTimer);
 		this.#settingsStop?.();

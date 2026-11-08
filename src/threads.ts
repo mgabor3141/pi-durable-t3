@@ -21,6 +21,7 @@ import {
 	type EntryId,
 	InboxDoc,
 	LiveDoc,
+	type LiveState,
 	type Submission,
 	type SubmissionId,
 	type TaskId,
@@ -1158,6 +1159,54 @@ export class Threads {
 		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
 		await conversation.abort(BACKGROUND_CONTEXT);
+	}
+
+	/**
+	 * End a run that nothing is running any more: `pi.live` shows a run (or a compaction) whose task, and every tool call
+	 * it lists, has ended or does not exist. pi-durable ends a run in the same commit as its task, so this happens only
+	 * when the task records were changed outside pi-durable (an edited database), and the thread would show it running
+	 * forever, with every message queued behind it. Ended as pi-durable's `endRun` ends an aborted run: its inputs
+	 * unanswered, a `runFailure`, and the run's presentation removed; the call it left without a result gets the result
+	 * context derivation gives any orphaned call. A live task leaves the run alone: its own end clears it. Returns
+	 * the run's task and the compactions' tasks it ended.
+	 */
+	async endDeadRun(input: { threadId: string; conversationId: number }): Promise<{ readonly run?: number; readonly compactions: readonly number[] }> {
+		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
+		return conversation.commit(async (tx) => {
+			const live = (await tx.doc(LiveDoc, input.conversationId as ConversationId)) as LiveState;
+			const ended = async (taskId: number | undefined) => {
+				if (taskId === undefined) return true;
+				const task = await tx.task(taskId as TaskId);
+				return task === undefined || task.state.status === "terminal";
+			};
+			let endedRun: number | undefined;
+			const run = live.run;
+			if (run !== undefined) {
+				const calls = [...(live.tools ?? []).map((slot) => slot.taskId), ...(live.nestedTools ?? []).map((slot) => slot.taskId)];
+				const dead = (await ended(run.taskId)) && (await Promise.all(calls.map(ended))).every(Boolean);
+				if (dead) {
+					const inputs = [...run.inputs];
+					// A run that answered and runs only its `afterRun` tasks records no failure (`endRun`).
+					if ((run as { afterRun?: unknown }).afterRun === undefined) {
+						for (const id of inputs) tx.settleSubmission(id, { status: "unanswered", reason: "aborted" });
+						live.runFailure = { taskId: run.taskId, inputs, reason: "aborted", ...(run.first === undefined ? {} : { first: run.first }) };
+					}
+					delete live.run;
+					delete live.generation;
+					delete live.tools;
+					delete live.nestedTools;
+					endedRun = run.taskId as number;
+				}
+			}
+			const compactions: number[] = [];
+			for (const status of [...(live.compactions ?? [])]) if (await ended(status.taskId as number)) compactions.push(status.taskId as number);
+			if (compactions.length > 0) {
+				live.compactions = (live.compactions ?? []).filter((status) => !compactions.includes(status.taskId as number));
+				if (live.compactions.length === 0) delete live.compactions;
+			}
+			return { ...(endedRun === undefined ? {} : { run: endedRun }), compactions };
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/**

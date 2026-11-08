@@ -206,6 +206,28 @@ it("thread_cancel stops a thread and its children, and nobody is woken by the st
 	expect((await bridge.projection(child)).projection.runs, "the child did not start again").toHaveLength(1);
 });
 
+it("Stop on a parent waiting for its child ends the parent at once; the child works on", { timeout: 60_000 }, async () => {
+	const { bridge, ask } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Slow" }, message: "Hold on: s1" } });
+	const child = await (async () => {
+		for (let waited = 0; waited < 10_000; waited += 20) {
+			const found = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a");
+			if (found !== undefined) return found.threadId;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		throw new Error("no child");
+	})();
+	await bridge.waitFor(child, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	// The wait listens for the parent's Stop (a tool's abort is its context's signal), so the parent does not wait for s1.
+	const pressed = Date.now();
+	await bridge.interrupt("a");
+	const parent = await bridge.waitFor("a", (projection) => (projection.runs.every((run) => run.status !== "running") ? projection : undefined), 2_000);
+	expect(parent, "the parent ended before its child").toBeDefined();
+	expect(Date.now() - pressed).toBeLessThan(2_000);
+	expect((await bridge.projection(child)).projection.runs.at(-1)!.status, "the child was not stopped").toBe("running");
+	gate("s1").release();
+});
+
 it("thread_wait collects several children's reports with the worst verdict", { timeout: 60_000 }, async () => {
 	const { ask, sawAll } = await setup();
 	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 1+2?", wait: false, notify: false } });

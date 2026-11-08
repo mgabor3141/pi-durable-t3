@@ -5,6 +5,7 @@
 // undo of its run removes it.
 import type { Context } from "@earendil-works/chord";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
+import { abortable } from "./abortable.ts";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { Browser } from "playwright-core";
 import type { Threads } from "../threads.ts";
@@ -121,5 +122,6 @@ export function htmlToolsExtension(deps: HtmlToolsDeps, options: { readonly call
 		};
 		tools.push(preview as unknown as ToolRegistration);
 	}
-	return defineExtension({ name: "html-tools", tools });
+	// Neither call listens for Stop (the page is written, then measured or shot in the browser): each returns at once.
+	return defineExtension({ name: "html-tools", tools: tools.map(abortable) });
 }

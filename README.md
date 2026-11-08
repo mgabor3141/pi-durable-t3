@@ -155,6 +155,11 @@ Known limitations:
 - Usage counts each thread's current history: tokens spent on turns later undone drop out. Cost is what pi
   reports (no rate table), so cache savings show $0.00 and a free model shows "Unpriced".
 - A task parked by pi's crash-loop guard (after 5 crashes without progress) keeps its thread "running"; Stop clears it.
+- Stop answers within a second and shows T3's "Stopping" banner at once. The run ends when its tool calls have
+  returned: at once for a tool that listens for its abort (or is wrapped `abortable`). One that does not keeps the
+  banner up, "Agent not responding to Stop" after 10 seconds, until it returns. There is no Force stop: pi-durable
+  cannot end a task that is still running. A run whose tasks ended outside pi-durable (task records changed in the
+  database, the thread's live state left showing a run) has nothing left to abort; Stop ends it, and logs that it did.
 - Settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads`,
   `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
 - Search has no index: each query reads every thread.
@@ -196,6 +201,9 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `previewBrowser.open(conversationId, url)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
+- `abortable(tool)` and `abortableExtension(extension)`: a tool (or every tool of an extension) whose call returns the
+  moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
+  when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
 - `ConfigError`, `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
 
 T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,

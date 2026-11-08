@@ -34,6 +34,8 @@ type LiveToolSlot = NonNullable<LiveDoc["tools"]>[number];
 export const PROVIDER_INSTANCE_ID = "pi";
 export const PROVIDER_DRIVER = "pi";
 const BASELINE_SCOPE_ID = "cs-baseline";
+/** T3's message on a Stop the user asked for (`RunExecutionService.USER_STOP_REASON`). */
+const USER_STOP_REASON = "Stopped by user";
 
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
@@ -121,6 +123,9 @@ export interface ThreadMeta {
 	readonly lastSnoozeWakeAt?: number;
 	/** Directory status, used when no transcript is loaded. */
 	readonly running: boolean;
+	/** A Stop of the running run: when it was asked for, and when the run was found not ending (T3's
+	 * `run_interrupt_request`, which its clients show as "Stopping", then "Agent not responding to Stop"). */
+	readonly stop?: { readonly requestedAt: number; readonly unresponsiveAt?: number };
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
@@ -774,6 +779,18 @@ export function projectThread(
 				toolResults,
 				liveTools,
 			);
+		}
+		// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
+		const stop = running ? meta.stop : undefined;
+		if (stop !== undefined) {
+			turnItems.push({
+				...base(`ti-stop${u.id}`, stop.requestedAt, "completed", true),
+				providerTurnId: null,
+				title: "Interrupt requested",
+				type: "run_interrupt_request",
+				message: USER_STOP_REASON,
+				...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: time(stop.unresponsiveAt) }),
+			} as Any);
 		}
 	});
 
