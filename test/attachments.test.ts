@@ -8,14 +8,16 @@ import { projectThread, type ThreadMeta } from "../src/t3/projection.ts";
 
 const IMAGE = { type: "image" as const, id: "a-00000000-0000-4000-8000-000000000000-png", name: "p.png", mimeType: "image/png", sizeBytes: 75 };
 const FILE = { type: "file" as const, id: "a-00000000-0000-4000-8000-000000000000-pdf", name: "spec.pdf", mimeType: "application/pdf", sizeBytes: 42 };
-const read = (id: string): { data: string; mimeType: string } | null => (id === IMAGE.id ? { data: "AAAA", mimeType: "image/png" } : null);
+/** A valid 1×1 PNG: only an image a provider can read goes inline (`image-check.ts`). */
+const PNG_1PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+const read = (id: string): { data: string; mimeType: string } | null => (id === IMAGE.id ? { data: PNG_1PX, mimeType: "image/png" } : null);
 const visionCatalog = [{ provider: "pi", modelId: "vision", input: ["text", "image"] }];
 const textCatalog = [{ provider: "pi", modelId: "text", input: ["text"] }];
 
 describe("selectImageBlocks (the model image gate)", () => {
 	it("an image-input model receives the image blocks", () => {
 		const blocks = selectImageBlocks(visionCatalog, { provider: "pi", modelId: "vision" }, [IMAGE], read);
-		expect(blocks).toEqual([{ type: "image", data: "AAAA", mimeType: "image/png" }]);
+		expect(blocks).toEqual([{ type: "image", data: PNG_1PX, mimeType: "image/png" }]);
 	});
 
 	it("a text-only model, a null model, and a model absent from the catalog all get no blocks", () => {

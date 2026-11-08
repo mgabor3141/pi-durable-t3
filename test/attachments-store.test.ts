@@ -11,7 +11,7 @@ import { AuthStore } from "../src/t3/auth.ts";
 import { Attachments, inferImageExtension, parseBase64DataUrl, resolveAttachmentRelativePath, type Signer } from "../src/t3/attachments.ts";
 
 // A real 1×1 PNG (75 bytes), so the kept bytes and extension are real.
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 const PNG_BYTES = Buffer.from(PNG_B64, "base64");
 const DATA_URL = `data:image/png;base64,${PNG_B64}`;
 

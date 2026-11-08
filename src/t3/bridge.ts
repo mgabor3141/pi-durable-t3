@@ -1,6 +1,7 @@
 // The T3 view over the host's threads: the threads layer (`../threads.ts`) for every write, the directory and the shell,
 // and one `ThreadView` per open thread (`thread-view.ts`: its head watch, projection and stream). Commands land here.
 import { randomUUID } from "node:crypto";
+import { checkImageData, imageRefusal } from "./image-check.ts";
 import { mkdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -74,7 +75,14 @@ export function selectImageBlocks(
 		if (attachment.type === "file") continue;
 		const image = read(attachment.id);
 		if (image === null) continue;
-		blocks.push({ type: "image", data: image.data, mimeType: attachment.mimeType });
+		// Only an image a provider can read goes inline (`image-check.ts`); a broken one is named instead, so the model
+		// knows, and one image never stops the thread.
+		const verdict = checkImageData(image.data);
+		blocks.push(
+			verdict.ok
+				? { type: "image", data: image.data, mimeType: verdict.mimeType }
+				: ({ type: "text", text: imageRefusal(`${attachment.name}: ${verdict.reason}`), hidden: true } as ContentBlock),
+		);
 	}
 	return blocks.length === 0 ? undefined : blocks;
 }

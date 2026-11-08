@@ -8,6 +8,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
 import { createRegistry, type EnvTarget, type Extension, Harness, type Registry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { imageCheckExtension } from "../../../src/bridge.ts";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Storage } from "@earendil-works/pi-durable";
@@ -31,6 +32,7 @@ export async function openCodingHarness(
 
 	const registry = createRegistry();
 	registry.install(CodingTools); // read, write, edit, bash — available to conversations by default.
+	registry.install(imageCheckExtension()); // only images a provider can read reach the model (tool results, requests).
 	for (const extension of options.extensions ?? []) registry.install(extension);
 
 	const harness = await Harness.open(

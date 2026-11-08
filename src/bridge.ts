@@ -32,6 +32,7 @@ export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
+export { imageCheckExtension } from "./t3/image-check.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 export const DESKTOP_APP_ORIGIN = "t3code://app";

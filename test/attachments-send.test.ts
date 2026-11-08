@@ -16,7 +16,7 @@ import type { Logger } from "../src/t3/logging.ts";
 import { conversation, createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC", "base64");
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 const PDF = Buffer.from("%PDF-1.4\nnot really a PDF\n");
 
 it("an image and a file: both kept in the environment and named by path; the image also inline", { timeout: 60_000 }, async () => {

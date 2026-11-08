@@ -204,6 +204,9 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `abortable(tool)` and `abortableExtension(extension)`: a tool (or every tool of an extension) whose call returns the
   moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
   when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
+- `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
+  tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every
+  later request fail. Install it on the Harness's registry.
 - `ConfigError`, `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
 
 T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,

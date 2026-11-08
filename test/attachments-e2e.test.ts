@@ -10,7 +10,7 @@ import { connectWs, exitValue, pair, waitListening, type WsRpc } from "./ws-rpc.
 import { launch, pairCode, t3Dir, type Launched, seedProjects } from "./host-process-harness.ts";
 
 const PORT = 4964;
-const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC";
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 const PNG_BYTES = Buffer.from(PNG_B64, "base64");
 
 let root: string;

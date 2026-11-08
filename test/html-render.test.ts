@@ -24,7 +24,7 @@ import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC", "base64");
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 const env = new NodeExecutionEnv({ cwd: "/" });
 
 async function scratch(): Promise<string> {
