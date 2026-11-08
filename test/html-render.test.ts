@@ -8,6 +8,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { chromium, type Browser } from "playwright-core";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
@@ -124,6 +126,46 @@ it("html_render keeps the page and shows it in the thread as T3's html_render it
 	fresh.start();
 	await fresh.loaded();
 	expect((await shown(fresh)).renders.map((item) => htmlRenderFromToolItem(item as never))).toEqual([reference]);
+});
+
+it("a script's html_render (the way an agent that acts through codemode calls it) shows the page once, above the reply", { timeout: 60_000 }, async () => {
+	const dir = await scratch();
+	const holder: { threads?: Threads; bridge?: Bridge } = {};
+	const attachments = new Attachments({ stateDir: join(dir, "state"), signer: new AuthStore(join(dir, "state"), { tokenTtlSeconds: 60 }), env, dir: join(dir, "attachments"), context: BACKGROUND_CONTEXT });
+	const html = htmlToolsExtension(
+		{
+			get threads() {
+				return holder.threads!;
+			},
+			threadIdOf: (conversationId) => holder.bridge!.threadIdForConversation(conversationId),
+			attachments,
+			env,
+			context: BACKGROUND_CONTEXT,
+		},
+		{ callers: ["tools"] },
+	);
+	const codemode = createCodemodeExtension({ sandbox: new CodemodeSandbox({ memoryLimitBytes: 64 * 1024 * 1024 }) }) as never;
+	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [codemode, html] });
+	holder.threads = f.threads;
+	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
+	holder.bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+	onTestFinished(() => holder.bridge!.close());
+	holder.bridge.start();
+	await holder.bridge.loaded();
+
+	const code = 'const r = await tools.html_render({ html: "<p>chart</p>", title: "Chart", height: 200 }); return JSON.parse(r).message;';
+	f.model.respond(fauxAssistantMessage([fauxToolCall("codemode", { code }, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("Done."));
+	await holder.bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "Chart it.", mode: "start" });
+	await idle(f.harness, thread.head);
+
+	const items = (await holder.bridge.projection("t")).projection.turnItems as unknown as { type: string; toolName?: string; output?: unknown; text?: string }[];
+	const script = items.find((item) => item.type === "dynamic_tool" && item.toolName === "codemode");
+	expect(String(script?.output)).toContain("Shown to the reader above your reply.");
+	const renders = items.filter((item) => item.type === "dynamic_tool" && htmlRenderFromToolItem(item as never) !== undefined);
+	expect(renders.map((item) => htmlRenderFromToolItem(item as never)?.title)).toEqual(["Chart"]);
+	const reply = items.findIndex((item) => item.type === "assistant_message" && item.text === "Done.");
+	expect(items.indexOf(renders[0]!)).toBeLessThan(reply);
+	expect(items.indexOf(renders[0]!)).toBeGreaterThan(items.indexOf(script!));
 });
 
 it("html_render outside a T3 thread, and a page T3 refuses, answer the agent with why", async () => {
