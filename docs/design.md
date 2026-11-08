@@ -94,9 +94,8 @@ The code shows what each operation does. These are the rules it cannot show on i
 
 ## Migrations
 
-None in the host. There are no users to carry along, so a version-1 store is refused at boot, not converted, and
-existing instances are migrated by hand. `scripts/` keeps the one-off scripts used for that, such as
-`migrate-threads-v2.mjs` (the single threads document to per-thread records); the host never runs them.
+None in the host. There are no users to carry along, so a store of an older shape is refused at boot, not converted,
+and existing instances are migrated by hand.
 
 ## Facet
 
