@@ -967,6 +967,11 @@ export class Bridge {
 				await this.#store.compact(input.threadId, guidance === undefined || guidance === "" ? undefined : guidance, input.messageId);
 				return;
 			}
+			// `/reload`: the next request renders the system prompt afresh (`Threads.reload`); it starts no turn.
+			if (input.text.trim() === "/reload") {
+				await this.#store.reload(input.threadId, input.messageId);
+				return;
+			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.

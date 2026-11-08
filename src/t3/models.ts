@@ -86,7 +86,10 @@ export class ModelCatalog {
 					isCustom: false,
 					capabilities: thinkingCapabilities(model.thinkingLevels),
 				})),
-				slashCommands: [{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } }],
+				slashCommands: [
+					{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } },
+					{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
+				],
 				skills: [],
 			} as unknown as ServerProvider,
 		];

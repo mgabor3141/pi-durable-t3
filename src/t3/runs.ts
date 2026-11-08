@@ -18,9 +18,12 @@ export interface RunDraft {
 }
 
 export const APP_COMPACT_ENTRY = "app.compact";
+/** A display-only `/reload` command (`Threads.reload`): shown where it was typed, like a note, but never in the model's
+ * context. */
+export const APP_RELOAD_ENTRY = "app.reload";
 
-/** The text a compact command entry carries for display; the entry has no model messages, so pi never sees it. */
-const compactCommandMessage = (entry: EntryRecord): DurableMessage | undefined => {
+/** The text a display-only command entry carries; the entry has no model messages, so pi never sees it. */
+const commandMessage = (entry: EntryRecord): DurableMessage | undefined => {
 	const data = entry.data;
 	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const text = (data as { text?: unknown }).text;
@@ -36,16 +39,16 @@ export const isCompactCommandEntry = (entry: EntryRecord): boolean =>
 
 /** Model-visible message, or the display-only command T3 shows for a manual compaction. */
 export const firstMessage = (entry: EntryRecord): DurableMessage | undefined =>
-	entry.model?.[0] ?? (entry.kind === APP_COMPACT_ENTRY ? compactCommandMessage(entry) : undefined);
+	entry.model?.[0] ?? (entry.kind === APP_COMPACT_ENTRY || entry.kind === APP_RELOAD_ENTRY ? commandMessage(entry) : undefined);
 /**
  * Entry kinds that carry a user turn: pi-durable's default placement, this host's `app.user`, which rides the
  * client's message id in the entry's `data` (see `Threads.submit`), and the display-only compact command.
  */
 export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.user", APP_COMPACT_ENTRY]);
 /** A note (`thread_prompt` with `mode: "notify"`): a user message in the model's context that started no turn. It joins
- * the run it was placed in (or after) as a step; it never starts one. */
+ * the run it was placed in (or after) as a step; it never starts one. A `/reload` command is placed the same way. */
 export const APP_NOTE_ENTRY = "app.note";
-export const isNoteEntry = (entry: EntryRecord) => entry.kind === APP_NOTE_ENTRY && firstMessage(entry)?.role === "user";
+export const isNoteEntry = (entry: EntryRecord) => (entry.kind === APP_NOTE_ENTRY || entry.kind === APP_RELOAD_ENTRY) && firstMessage(entry)?.role === "user";
 export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
 /** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
 export const messageIdOf = (entry: EntryRecord): string | undefined => {

@@ -34,8 +34,9 @@ import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
-import { APP_COMPACT_ENTRY, APP_NOTE_ENTRY } from "./t3/runs.ts";
+import { APP_COMPACT_ENTRY, APP_NOTE_ENTRY, APP_RELOAD_ENTRY } from "./t3/runs.ts";
 import type { Message } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import { type ProjectRegistry, projectsInCommit } from "./registry.ts";
@@ -971,6 +972,33 @@ export class Threads {
 	 * during compaction time out. The live compaction is projected as the command's run, so T3 still shows the work;
 	 * prompts submitted while it runs are queued and land at the summary boundary. A repeated call while a compaction
 	 * is live is a no-op. */
+	/**
+	 * `/reload`: render the system prompt afresh at the next request. A `pi.system` write removes every section in effect,
+	 * so the next preparation renders all of them again; a host that keeps its prompt fixed for a thread (claw) renders
+	 * it again only then. The write waits for a boundary, like any change to the model's context. After a compaction
+	 * that has not prepared a request yet there is nothing to remove: that preparation writes the whole prompt anyway.
+	 * `messageId`: the typed command, shown where it was sent (display-only).
+	 */
+	async reload(threadId: string, messageId?: string): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${threadId}`);
+		if (messageId !== undefined) {
+			const data = { messageId, text: "/reload", timestamp: Date.now() };
+			await conversation.submit({ type: "write", requestId: `reload-command:${messageId}`, entry: { kind: APP_RELOAD_ENTRY, data } }, BACKGROUND_CONTEXT);
+		}
+		const view = await conversation.context(BACKGROUND_CONTEXT);
+		const head = view.head;
+		const prepared = view.entries.some((entry) => entry.kind === "pi.system" && (head === undefined || entry.id > head.id));
+		const shown = Object.keys(getCurrentSystemMessage(view.messages)?.sections ?? {});
+		if (!prepared || shown.length === 0) return;
+		const message = { role: "system" as const, content: "", sections: Object.fromEntries(shown.map((key) => [key, null])), timestamp: Date.now() };
+		await conversation.submit(
+			{ type: "write", ...(messageId === undefined ? {} : { requestId: `reload:${messageId}` }), entry: { kind: "pi.system", model: [message] } },
+			BACKGROUND_CONTEXT,
+		);
+	}
+
 	async compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void> {
 		const running = this.#compacting.get(threadId);
 		if (running !== undefined) return running;
