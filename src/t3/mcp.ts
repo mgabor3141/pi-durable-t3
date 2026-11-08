@@ -1,4 +1,4 @@
-// `/mcp`: T3's orchestrator MCP server for this host's threads (T3's `McpHttpServer`, the orchestrator toolkit only).
+// `/mcp`: T3's orchestrator MCP server for this host's threads (T3's `McpHttpServer`, its orchestrator and project toolkits).
 // Streamable HTTP at protocol 2025-06-18, the toolkit T3 advertises (`mcp-toolkit.ts`, with T3's compacted input
 // schemas), and handlers over `ThreadOps`. A tool this host does not do answers the contract's failure and is logged.
 //
@@ -18,7 +18,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { StoredToken } from "./auth.ts";
 import type { Bridge } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
-import { OrchestratorToolkit } from "./mcp-toolkit.ts";
+import { OrchestratorToolkit, ProjectToolkit } from "./mcp-toolkit.ts";
 import { advertisedJsonSchema } from "./t3-server.ts";
 import type { Caller, ThreadOps } from "./thread-ops.ts";
 
@@ -40,9 +40,17 @@ const SUPPORTED = new Set([
 	"schedule_task",
 	"list_scheduled_tasks",
 	"delete_scheduled_task",
+	"t3_project_list",
+	"t3_project_read",
+	"t3_project_create",
+	"t3_project_update",
+	"t3_project_delete",
 ]);
 /** The tools that write (T3's `writesThreads` / `actsAsCaller`): they need `orchestration:operate`. */
-const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update", "schedule_task", "delete_scheduled_task"]);
+const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads", "t3_thread_update", "schedule_task", "delete_scheduled_task", "t3_project_create", "t3_project_update", "t3_project_delete"]);
+
+/** What `/mcp` serves: T3's orchestrator and project toolkits, as T3 registers both. */
+const ServedToolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit);
 
 export interface McpDeps {
 	readonly bridge: Bridge;
@@ -101,7 +109,7 @@ export function makeMcpLayer(deps: McpDeps) {
 		);
 
 	const handlers: Record<string, unknown> = {};
-	for (const name of Object.keys(OrchestratorToolkit.tools)) if (!SUPPORTED.has(name)) handlers[name] = unsupported(name);
+	for (const name of Object.keys(ServedToolkit.tools)) if (!SUPPORTED.has(name)) handlers[name] = unsupported(name);
 	Object.assign(handlers, {
 		t3_thread_list: call("t3_thread_list", (caller, input) => ops.list(caller, input as never)),
 		t3_thread_read: call("t3_thread_read", (caller, input) => ops.read(caller, input as never)),
@@ -113,8 +121,13 @@ export function makeMcpLayer(deps: McpDeps) {
 		schedule_task: call("schedule_task", (caller, input) => ops.scheduleTask(caller, input as never)),
 		list_scheduled_tasks: call("list_scheduled_tasks", (caller, input) => ops.listScheduledTasks(caller, input as never)),
 		delete_scheduled_task: call("delete_scheduled_task", (caller, input) => ops.deleteScheduledTask(caller, input as never)),
+		t3_project_list: call("t3_project_list", (caller, input) => ops.projectList(caller, input as never)),
+		t3_project_read: call("t3_project_read", (caller, input) => ops.projectRead(caller, input as never)),
+		t3_project_create: call("t3_project_create", (caller, input) => ops.projectCreate(caller, input as never)),
+		t3_project_update: call("t3_project_update", (caller, input) => ops.projectUpdate(caller, input as never)),
+		t3_project_delete: call("t3_project_delete", (caller, input) => ops.projectDelete(caller, input as never)),
 	});
-	const handlersLayer = OrchestratorToolkit.toLayer(handlers as never);
+	const handlersLayer = ServedToolkit.toLayer(handlers as never);
 
 	// A request without an MCP client credential is refused before the protocol sees it, and told where to sign in
 	// (T3's `unauthorized`, with OAuth offered).
@@ -138,6 +151,6 @@ export function makeMcpLayer(deps: McpDeps) {
 	).layer;
 
 	const transport = McpServer.layerHttp({ name: "pi-durable-t3", version: deps.version, path: "/mcp", protocols: [McpProtocol.v2025_06_18], allowSessionTermination: true }).pipe(Layer.provide(auth));
-	const registration = Layer.effectDiscard(withAdvertisedSchemas(OrchestratorToolkit as never, McpServer.registerToolkit(decodeAsAdvertised(OrchestratorToolkit)))).pipe(Layer.provide(handlersLayer));
+	const registration = Layer.effectDiscard(withAdvertisedSchemas(ServedToolkit as never, McpServer.registerToolkit(decodeAsAdvertised(ServedToolkit)))).pipe(Layer.provide(handlersLayer));
 	return registration.pipe(Layer.provideMerge(transport));
 }

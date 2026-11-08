@@ -38,6 +38,8 @@ import type { Bridge } from "./bridge.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
 import { CommandError } from "./errors.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
+import { ProjectConflict, ProjectNotFound } from "../registry.ts";
+import type { ProjectMutation } from "./bridge.ts";
 import type {
 	OrchestratorMcpDeleteScheduledTaskInput,
 	OrchestratorMcpDeleteScheduledTaskResult,
@@ -68,6 +70,7 @@ const clientCeiling = (access: AuthMcpClientAccess): RuntimeMode => (access === 
 const namespaceOf = (caller: Caller): string | undefined => caller.threadId ?? (caller.client === undefined ? undefined : `client:${caller.client.sessionId}`);
 
 type Failure = OrchestratorMcpFailure["code"];
+type ProjectRecord = ReturnType<Bridge["projectRecords"]>[number];
 const fail = (code: Failure, message: string): never => {
 	throw new OrchestratorMcpFailure({ code, message });
 };
@@ -605,5 +608,78 @@ export class ThreadOps {
 			fail("orchestration_error", `Could not delete scheduled task: ${(error as Error).message}`);
 		}
 		return { scheduledTaskId: existing.id, deleted: true } as OrchestratorMcpDeleteScheduledTaskResult;
+	}
+
+	// ---- projects (T3's project toolkit) ------------------------------------------------------------------------
+
+	/** `t3_project_list`: a page of every project, in the registry's order (T3's `listPage`: offset cursor, 20 a page). */
+	projectList(_caller: Caller, input: { readonly cursor?: number; readonly limit?: number }): { projects: ProjectRecord[]; nextCursor: number | null } {
+		const all = this.#bridge.projectRecords();
+		const cursor = input.cursor ?? 0;
+		const limit = input.limit ?? 20;
+		return { projects: all.slice(cursor, cursor + limit), nextCursor: cursor + limit < all.length ? cursor + limit : null };
+	}
+
+	/** `t3_project_read`: one project. */
+	projectRead(_caller: Caller, input: { readonly projectId: string }): ProjectRecord {
+		return this.#bridge.projectRecords().find((project) => project.id === input.projectId) ?? fail("invalid_request", "The project was not found.");
+	}
+
+	/** `t3_project_create`: register a folder (made first with `createWorkspaceRootIfMissing`). The id derives from the
+	 * folder, as for a project added in the UI. */
+	async projectCreate(caller: Caller, input: Record<string, unknown> & { readonly title: string; readonly workspaceRoot?: string; readonly createWorkspaceRootIfMissing?: boolean }): Promise<ProjectRecord> {
+		this.#mayWrite(caller, undefined);
+		this.#onlyStoredFields("t3_project_create", input, ["title", "workspaceRoot", "createWorkspaceRootIfMissing"]);
+		if (input.workspaceRoot === undefined) fail("invalid_request", "A project here needs a workspaceRoot: this host makes no git repositories.");
+		const project = await this.#mutateProject(caller, {
+			type: "project.create",
+			projectId: "",
+			commandId: randomUUID(),
+			title: input.title,
+			workspaceRoot: input.workspaceRoot,
+			...(input.createWorkspaceRootIfMissing === undefined ? {} : { createWorkspaceRootIfMissing: input.createWorkspaceRootIfMissing }),
+		});
+		return project;
+	}
+
+	/** `t3_project_update`: rename, or point at another folder. Only the project changes: no file moves, and each thread
+	 * keeps the folder it runs in. */
+	async projectUpdate(caller: Caller, input: Record<string, unknown> & { readonly projectId: string; readonly title?: string; readonly workspaceRoot?: string }): Promise<ProjectRecord> {
+		this.#mayWrite(caller, undefined);
+		this.#onlyStoredFields("t3_project_update", input, ["projectId", "title", "workspaceRoot"]);
+		return this.#mutateProject(caller, {
+			type: "project.update",
+			projectId: input.projectId,
+			commandId: randomUUID(),
+			...(input.title === undefined ? {} : { title: input.title }),
+			...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+		});
+	}
+
+	/** `t3_project_delete`: the project, and with `force` its threads; the folder stays. */
+	async projectDelete(caller: Caller, input: { readonly projectId: string; readonly force?: boolean }): Promise<ProjectRecord> {
+		this.#mayWrite(caller, undefined);
+		return this.#mutateProject(caller, { type: "project.delete", projectId: input.projectId, commandId: randomUUID(), ...(input.force === undefined ? {} : { force: input.force }) });
+	}
+
+	/** A project here is a title and a folder: any other field T3's payload carries is refused by name, not dropped. */
+	#onlyStoredFields(tool: string, input: Record<string, unknown>, stored: readonly string[]): void {
+		const extra = Object.keys(input).filter((key) => key !== "environmentId" && !stored.includes(key) && input[key] !== undefined);
+		if (extra.length > 0) fail("invalid_request", `${tool}: ${extra.join(", ")} ${extra.length === 1 ? "is" : "are"} not supported by pi-durable-t3; a project here has only a title and a folder.`);
+	}
+
+	/** The mutation, with T3's messages for its refusals (`projectFailure`); any other refusal keeps its own. */
+	async #mutateProject(caller: Caller, mutation: ProjectMutation): Promise<ProjectRecord> {
+		try {
+			const project = await this.#bridge.mutateProject(mutation);
+			this.#log.info("project changed over MCP or by an agent", { type: mutation.type, projectId: project.id, threadId: caller.threadId });
+			return project;
+		} catch (error) {
+			const message = (error as Error).message ?? String(error);
+			if (error instanceof ProjectNotFound || /was not found/.test(message)) fail("invalid_request", "The project was not found.");
+			if (error instanceof ProjectConflict) fail("invalid_request", "The workspace is already registered to a project.");
+			if (/is not empty/.test(message)) fail("invalid_request", "The project is not empty; force=true is required to delete it.");
+			return fail("invalid_request", message);
+		}
 	}
 }

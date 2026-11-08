@@ -35,6 +35,11 @@ import {
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
   TrimmedNonEmptyString,
+  NonNegativeInt,
+  Project,
+  ProjectCreatePayload,
+  ProjectId,
+  ProjectUpdatePayload,
 } from "@t3tools/contracts";
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
@@ -269,3 +274,68 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadWaitTool,
   ThreadInterruptTool,
 );
+
+// T3's project toolkit (apps/server/src/mcp/toolkits/project/tools.ts at v0.1.7), the same way: T3's names,
+// descriptions, schemas and annotations, its server dependencies removed. Left out: `t3_project_clone` (a git clone;
+// this host has no git) and `t3_thread_launch` (`create_threads` starts threads here).
+const projectShared = {
+  success: Project,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+};
+const ProjectListTool = Tool.make("t3_project_list", {
+  ...projectShared,
+  description: "List projects. Pages can shift.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    cursor: Schema.optional(NonNegativeInt),
+    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+  }),
+  success: Schema.Struct({
+    projects: Schema.Array(Project),
+    nextCursor: Schema.NullOr(NonNegativeInt),
+  }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const ProjectReadTool = Tool.make("t3_project_read", {
+  ...projectShared,
+  description: "Read one project: workspace and saved scripts.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: ProjectId,
+  }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const ProjectCreateTool = Tool.make("t3_project_create", {
+  ...projectShared,
+  description:
+    "Register a project folder. `createWorkspaceRootIfMissing` creates it; a registered folder is rejected. No `workspaceRoot`: makes a git repo from `title` with README, icon, first commit (`commitError` on failure; project still exists). Clone first with `t3_project_clone` if needed.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    ...ProjectCreatePayload.fields,
+    workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
+  }),
+  success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
+}).annotate(Tool.Destructive, true);
+const ProjectUpdateTool = Tool.make("t3_project_update", {
+  ...projectShared,
+  description: "Update one project's settings. Omitted fields are unchanged.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: ProjectId,
+    ...ProjectUpdatePayload.fields,
+  }),
+}).annotate(Tool.Destructive, true);
+const ProjectDeleteTool = Tool.make("t3_project_delete", {
+  ...projectShared,
+  description: "Delete one project. Nonempty needs `force: true`. Folder on disk stays.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: ProjectId,
+    force: Schema.optionalKey(Schema.Boolean),
+  }),
+}).annotate(Tool.Destructive, true);
+
+export const ProjectToolkit = Toolkit.make(ProjectListTool, ProjectReadTool, ProjectCreateTool, ProjectUpdateTool, ProjectDeleteTool);

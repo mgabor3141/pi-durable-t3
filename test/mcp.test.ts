@@ -88,7 +88,7 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	const listed = await rpc(token, session, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 	const names = ((listed.message?.result as { tools: { name: string }[] }).tools ?? []).map((tool) => tool.name).sort();
 	expect(names).toEqual(
-		["create_threads", "delegate_task", "delete_scheduled_task", "list_scheduled_tasks", "request_secret", "schedule_task", "t3_background_wait", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "task_cancel", "task_status"].sort(),
+		["create_threads", "delegate_task", "delete_scheduled_task", "list_scheduled_tasks", "request_secret", "schedule_task", "t3_background_wait", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "task_cancel", "task_status", "t3_project_list", "t3_project_read", "t3_project_create", "t3_project_update", "t3_project_delete"].sort(),
 	);
 
 	const call = async (id: number, name: string, args: unknown, meta?: unknown) =>
@@ -134,6 +134,11 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	// Scheduled tasks: a reader lists; only a writer schedules, and outside a thread it names a project, whose default
 	// model it runs on (none here, so T3's refusal).
 	expect(await failureOf(reader.token, "list_scheduled_tasks", {}), "a reader lists tasks").toBeUndefined();
+	// Projects (T3's project toolkit): a reader lists and reads; only a writer changes one.
+	expect(await failureOf(reader.token, "t3_project_list", {}), "a reader lists projects").toBeUndefined();
+	expect(await failureOf(reader.token, "t3_project_update", { projectId, title: "x" })).toMatchObject({ code: "capability_denied" });
+	expect(await failureOf(full.token, "t3_project_update", { projectId, title: "Renamed over MCP" }), "a writer renames").toBeUndefined();
+	expect(await failureOf(full.token, "t3_project_read", { projectId: "nope" })).toMatchObject({ code: "invalid_request", message: "The project was not found." });
 	expect(await failureOf(reader.token, "schedule_task", { prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({ code: "capability_denied" });
 	expect(await failureOf(full.token, "schedule_task", { prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({ code: "target_required" });
 	expect(await failureOf(full.token, "schedule_task", { projectId, prompt: "x", schedule: { type: "interval", everyMs: 3_600_000 } })).toMatchObject({

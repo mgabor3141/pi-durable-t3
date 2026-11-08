@@ -2,7 +2,7 @@
 // context: a parent starts a child and waits for its report; follows up on it; starts one without waiting and gets the
 // report posted into its own thread as the next turn; adds a note without starting work; and a request to be answered
 // that a previous process left on a record is delivered after a restart.
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -266,6 +266,49 @@ it("a wait that runs out returns at once; the report is sent when the work settl
 	gate("w1").release();
 	const woke = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("[Report from thread")));
 	expect(woke!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text).toContain("[AGENT]: released w1");
+});
+
+it("an agent lists, creates, renames, repoints and deletes projects with T3's project tools", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll, f } = await setup();
+	const folder = join(f.root, "made-by-agent");
+	const elsewhere = join(f.root, "elsewhere");
+	await mkdir(elsewhere);
+	const steps: { name: string; args: Record<string, unknown> }[] = [
+		{ name: "t3_project_list", args: {} },
+		{ name: "t3_project_create", args: { title: "Agent's", workspaceRoot: folder, createWorkspaceRootIfMissing: true } },
+		{ name: "t3_project_create", args: { title: "From a title" } },
+		{ name: "t3_project_create", args: { title: "Again", workspaceRoot: folder } },
+	];
+	for (const step of steps) await ask("a", step);
+	const [listed, created, untitled, twice] = await sawAll(steps.length);
+	expect(listed).toMatchObject({ projects: [{ id: "p", workspaceRoot: f.projects[0]!.cwd }], nextCursor: null });
+	expect(created).toMatchObject({ title: "Agent's", workspaceRoot: folder, deletedAt: null });
+	expect((await stat(folder)).isDirectory(), "the folder was made").toBe(true);
+	expect(untitled.error).toContain("needs a workspaceRoot");
+	expect(twice.error).toBe("invalid_request: The workspace is already registered to a project.");
+	const id = created.id as string;
+
+	const more: { name: string; args: Record<string, unknown> }[] = [
+		{ name: "t3_project_update", args: { projectId: id, title: "Renamed" } },
+		{ name: "t3_project_update", args: { projectId: id, workspaceRoot: elsewhere } },
+		{ name: "t3_project_update", args: { projectId: id, pinned: true } },
+		{ name: "t3_project_read", args: { projectId: id } },
+		{ name: "t3_project_delete", args: { projectId: "p" } },
+		{ name: "t3_project_delete", args: { projectId: id } },
+		{ name: "t3_project_read", args: { projectId: id } },
+	];
+	for (const step of more) await ask("a", step);
+	const [, , , , renamed, moved, pinned, read, notEmpty, deleted, gone] = await sawAll(steps.length + more.length);
+	expect(renamed).toMatchObject({ id, title: "Renamed", workspaceRoot: folder });
+	expect(moved).toMatchObject({ id, title: "Renamed", workspaceRoot: elsewhere });
+	expect(pinned.error, "a field this host does not store is refused by name").toContain("pinned is not supported by pi-durable-t3");
+	expect(read).toMatchObject({ id, title: "Renamed", workspaceRoot: elsewhere });
+	expect(notEmpty.error).toBe("invalid_request: The project is not empty; force=true is required to delete it.");
+	expect(deleted).toMatchObject({ id, deletedAt: expect.any(String) });
+	expect(gone.error).toBe("invalid_request: The project was not found.");
+	expect((await stat(elsewhere)).isDirectory(), "a deleted project's folder stays").toBe(true);
+	// The UI's project list followed every change.
+	expect(bridge.projects().map((project) => project.id)).toEqual(["p"]);
 });
 
 it("an agent schedules, lists, changes and deletes a task with T3's tools", { timeout: 60_000 }, async () => {
