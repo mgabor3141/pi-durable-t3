@@ -13,6 +13,7 @@ import type {
 	OrchestrationV2ShellSnapshot,
 	OrchestrationV2ThreadProjection,
 	OrchestrationV2ThreadShell,
+	OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
@@ -785,6 +786,17 @@ export class Bridge {
 		} finally {
 			release();
 		}
+	}
+
+	/**
+	 * T3's `orchestration.getTurnItem`: one item of a thread's projection as it is stored. The shell and stream send a
+	 * *wire* item, whose tool output is withheld (`outputOmitted`, as T3's `projectTurnItemForWire` withholds it); a row
+	 * the user expands asks here for the full one. `null`: the thread has no such item.
+	 */
+	async turnItem(threadId: string, itemId: string): Promise<OrchestrationV2TurnItem | null> {
+		const { projection } = await this.projection(threadId);
+		const items = [...projection.turnItems, ...projection.visibleTurnItems.map((row) => row.item)];
+		return (items.find((item) => String(item.id) === itemId) as OrchestrationV2TurnItem | undefined) ?? null;
 	}
 
 	/**

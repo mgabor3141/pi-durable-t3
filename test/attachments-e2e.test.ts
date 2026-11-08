@@ -103,6 +103,16 @@ it("persist → mint a signed URL → serve the bytes → dispatch → the threa
 		expect(await poll(async () => ((exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-att" }), "projection") as Projection).runs.some((r) => r.status === "completed"))), "the offline reply model answered the turn").toBe(true);
 		const shown = await userAttachments(ws);
 		expect(shown.map((a) => a.id), "the thread shows the persisted image").toEqual([record.id]);
+
+		// orchestration.getTurnItem answers over /ws (T3's lazy row detail): every item the thread has, and null for one it
+		// does not. Before, the web app showed "Couldn't load output: orchestration.getTurnItem is not supported".
+		const items = (exitValue(await ws.call("orchestration.getThreadProjection", { threadId: "t-att" }), "projection") as { turnItems: { id: string; type: string }[] }).turnItems;
+		expect(items.length).toBeGreaterThan(0);
+		for (const item of items) {
+			const answer = exitValue(await ws.call("orchestration.getTurnItem", { threadId: "t-att", itemId: item.id }), "getTurnItem") as { item: { id: string; type: string } | null };
+			expect(answer.item, `item ${item.id}`).toMatchObject({ id: item.id, type: item.type });
+		}
+		expect(exitValue(await ws.call("orchestration.getTurnItem", { threadId: "t-att", itemId: "ti-nope" }), "getTurnItem")).toEqual({ item: null });
 		ws.close();
 	} finally {
 		if (!ws.isClosed()) ws.close();

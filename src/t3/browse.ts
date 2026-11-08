@@ -4,7 +4,7 @@
 // other call needs. T3 paths are absolute in the environment; a relative path resolves against the current project.
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 
 /** Mirror of `@t3tools/shared/path`'s `isWindowsAbsolutePath` (a Windows path is refused on a non-Windows server). */
 function isWindowsAbsolutePath(value: string): boolean {
@@ -79,4 +79,87 @@ export async function browseFilesystem(input: {
 	}
 	entries.sort((left, right) => left.name.localeCompare(right.name));
 	return { parentPath, entries };
+}
+
+// ---- file metadata (T3's `filesystem.getMetadata`) ----------------------------------------------------------------
+
+/** T3's `fileHeaderMimeType` (`workspace/fileHeaderMimeType.ts`): the type an extensionless file's first bytes name. */
+export function fileHeaderMimeType(bytes: Uint8Array): string | undefined {
+	const startsWith = (signature: readonly number[], offset = 0) => signature.every((byte, index) => bytes[offset + index] === byte);
+	if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+	if (startsWith([0xff, 0xd8, 0xff])) return "image/jpeg";
+	if (startsWith([0x50, 0x4b, 0x03, 0x04])) return "application/zip";
+	if (startsWith([0x52, 0x49, 0x46, 0x46]) && startsWith([0x57, 0x45, 0x42, 0x50], 8)) return "image/webp";
+	const header = new TextDecoder().decode(bytes);
+	if (header.startsWith("GIF87a") || header.startsWith("GIF89a")) return "image/gif";
+	if (header.startsWith("%PDF-")) return "application/pdf";
+	if (header.startsWith("SQLite format 3\0")) return "application/vnd.sqlite3";
+	if (!header.startsWith("#!")) return undefined;
+	const interpreter = header.split("\n", 1)[0] ?? "";
+	if (/\bpython[\d.]*\b/.test(interpreter)) return "text/x-python";
+	if (/\b(?:node|nodejs)\b/.test(interpreter)) return "text/javascript";
+	if (/\bruby\b/.test(interpreter)) return "text/x-ruby";
+	if (/\b(?:sh|bash|zsh|fish)\b/.test(interpreter)) return "text/x-shellscript";
+	return undefined;
+}
+
+export type FileMetadata = { kind: "file"; byteLength: number; mimeType?: string } | { kind: "directory" } | { kind: "other" };
+
+/** The environment's home, for `~/` paths: asked of its shell once. `undefined` when it cannot say. */
+const homes = new WeakMap<ExecutionEnv, Promise<string | undefined>>();
+function homeOf(env: ExecutionEnv, context: Context): Promise<string | undefined> {
+	let home = homes.get(env);
+	if (home === undefined) {
+		let stdout = "";
+		home = env
+			.exec("printf %s \"$HOME\"", { onOutput: (text, _context, info) => void (info.stream === "stdout" && (stdout += text)) }, context)
+			.then((result) => (result.ok && result.value.exitCode === 0 && stdout.startsWith("/") ? stdout : undefined))
+			.catch(() => undefined);
+		homes.set(env, home);
+	}
+	return home;
+}
+
+/**
+ * T3's `filesystem.getMetadata` (`WorkspaceFileSystem.getMetadata`), read through the environment: for each path a reply
+ * mentions, whether it is a file (with its size, and the type its first bytes name when it has no extension), a
+ * directory or something else; `null` for a path that is not absolute (after `~/`) or does not exist. Entries follow the
+ * request's order; a repeated path is read once. The web app draws a reply's file chips from it.
+ */
+export async function filesystemMetadata(env: ExecutionEnv, paths: readonly string[], context: Context): Promise<(FileMetadata | null)[]> {
+	const unique = [...new Set(paths)];
+	const read = async (requested: string): Promise<FileMetadata | null> => {
+		let path = requested;
+		if (path === "~" || path.startsWith("~/")) {
+			const home = await homeOf(env, context);
+			if (home === undefined) return null;
+			path = home + path.slice(1);
+		}
+		if (!path.startsWith("/")) return null;
+		const info = await env.fileInfo(path, context);
+		if (!info.ok) return null;
+		if (info.value.kind === "directory") return { kind: "directory" };
+		if (info.value.kind !== "file") return { kind: "other" };
+		const byteLength = info.value.size;
+		let mimeType: string | undefined;
+		if (extname(path) === "" && byteLength > 0) {
+			const reader = await env.openBinaryReader(path, undefined, context);
+			if (reader.ok) {
+				try {
+					const head = await reader.value.read(0, 512, context);
+					if (head.ok) mimeType = fileHeaderMimeType(head.value);
+				} finally {
+					await reader.value.close(context);
+				}
+			}
+		}
+		return { kind: "file", byteLength, ...(mimeType === undefined ? {} : { mimeType }) };
+	};
+	const entries = new Map<string, FileMetadata | null>();
+	for (let index = 0; index < unique.length; index += 8) {
+		const batch = unique.slice(index, index + 8);
+		const results = await Promise.all(batch.map((path) => read(path).catch(() => null)));
+		batch.forEach((path, offset) => entries.set(path, results[offset]!));
+	}
+	return paths.map((path) => entries.get(path) ?? null);
 }

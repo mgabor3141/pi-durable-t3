@@ -38,13 +38,13 @@ import { ProviderInstanceExists, SettingsReadError } from "../settings.ts";
 import { accessChangeEvent, accessSnapshot } from "./access.ts";
 import { type AuthStore } from "./auth.ts";
 import { type Bridge, CommandError } from "./bridge.ts";
-import { browseFilesystem, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
+import { browseFilesystem, filesystemMetadata, BrowseCurrentProjectRequired, BrowseReadDirectoryFailed, BrowseWindowsPathUnsupported } from "./browse.ts";
 import { serverCwd } from "./config.ts";
 import { EntriesError, FileError, type WorkspaceFiles } from "./files.ts";
 import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "./thread-stream.ts";
-import { RpcAuthorization } from "./t3-server.ts";
+import { projectTurnItemForDetail, RpcAuthorization } from "./t3-server.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
@@ -315,6 +315,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 				() => bridge.ensureScratch(),
 				(message) => new OrchestrationDispatchCommandError({ message }),
 			),
+		// T3's file chips: a reply's mentioned paths, as metadata read through the environment (`browse.ts`). A host
+		// without an environment answers every path as unknown (`null`), as T3 answers one it cannot read.
+		"filesystem.getMetadata": (input) =>
+			Effect.promise(async () => {
+				const env = deps.bridge.config.env;
+				const entries = env === undefined ? input.paths.map(() => null) : await filesystemMetadata(env, input.paths, deps.bridge.config.context ?? BACKGROUND_CONTEXT);
+				return { entries };
+			}),
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
 		"filesystem.browse": (input) =>
 			Effect.tryPromise({
@@ -508,6 +516,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 						),
 					);
 				}),
+			),
+		// T3's `orchestration.getTurnItem`: the full item behind a row whose output the wire withheld (`outputOmitted`),
+		// bounded to 256 KiB as T3 bounds an on-demand read. `{ item: null }` for an item the thread does not have.
+		[`orchestration.getTurnItem`]: (input) =>
+			toPromiseEffect(
+				async () => {
+					const item = await bridge.turnItem(input.threadId, input.itemId);
+					return { item: item === null ? null : projectTurnItemForDetail(item) };
+				},
+				(message) => new OrchestrationV2GetThreadProjectionError({ threadId: input.threadId, message: `Failed to load turn item: ${message}` }),
 			),
 		[`orchestration.getThreadProjection`]: (input) =>
 

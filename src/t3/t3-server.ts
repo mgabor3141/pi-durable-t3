@@ -18,7 +18,7 @@ export {
 	THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
 	THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
 } from "@t3tools/t3-server/threadHistoryPaging";
-export { makeLiveBodyDeduper, projectDomainEventForWire, projectThreadProjectionForWire, projectTurnItemForWire } from "@t3tools/t3-server/WireProjection";
+export { makeLiveBodyDeduper, projectDomainEventForWire, projectThreadProjectionForWire, projectTurnItemForDetail, projectTurnItemForWire } from "@t3tools/t3-server/WireProjection";
 export { applyOrchestrationV2ProjectionEvent } from "@t3tools/t3-server/orchestrationV2Projection";
 export { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
 export * as RpcAuthorization from "@t3tools/t3-server/RpcAuthorization";
