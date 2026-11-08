@@ -66,6 +66,18 @@ function nextRunAt(task: Pick<Task, "enabled" | "schedule">, from: Date): string
 	return next !== null && Number.isFinite(next.getTime()) ? next.toISOString() : null;
 }
 
+/** T3's `nextRunAfterRun`: a one-time task counts from the run's start (`lastRunAt`), so a manual run that began before its
+ * time does not use it up. */
+function nextRunAfterRun(task: Pick<Task, "enabled" | "schedule" | "lastRunAt">, now: Date): string | null {
+	const startedAt = task.schedule.type === "once" && task.lastRunAt !== null ? new Date(task.lastRunAt) : now;
+	return nextRunAt(task, Number.isFinite(startedAt.getTime()) ? startedAt : now);
+}
+
+/** T3's `requireFutureOnce`: an enabled one-time task whose time has passed would never run, so saving it is refused. */
+function requireFutureOnce(task: Pick<Task, "enabled" | "schedule">, now: Date, taskId: string): void {
+	if (task.enabled && task.schedule.type === "once" && nextRunAt(task, now) === null) throw taskError("The run time has passed. Pick a time in the future.", taskId);
+}
+
 export class ScheduledTasks {
 	readonly #harness: Harness;
 	readonly #tasks = new Map<string, Task>();
@@ -104,7 +116,7 @@ export class ScheduledTasks {
 			const now = this.#now();
 			for (const task of [...this.#tasks.values()]) {
 				if (task.lastRunStatus !== "running") continue;
-				await this.#write({ ...task, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, nextRunAt: nextRunAt(task, now), updatedAt: now.toISOString(), runCount: task.runCount + 1 });
+				await this.#write({ ...task, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, nextRunAt: nextRunAfterRun(task, now), updatedAt: now.toISOString(), runCount: task.runCount + 1 });
 			}
 			this.#ready = true;
 		})();
@@ -203,7 +215,8 @@ export class ScheduledTasks {
 				...source,
 				updatedAt: completedAt.toISOString(),
 				lastRunAt: startedAtIso,
-				nextRunAt: nextRunAt(source, completedAt),
+				// A manual run that starts before a one-time run must not use it up.
+				nextRunAt: nextRunAt(source, source.schedule.type === "once" ? new Date(startedAtIso) : completedAt),
 				lastRunStatus: lastRunError === null ? "succeeded" : "failed",
 				lastRunError,
 				runCount: source.runCount + 1,
@@ -217,7 +230,7 @@ export class ScheduledTasks {
 			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) {
 				try {
 					const now = this.#now();
-					await this.#write({ ...current, lastRunStatus: "failed", lastRunError: errorMessage(error), nextRunAt: nextRunAt(current, now), updatedAt: now.toISOString(), runCount: current.runCount + 1 });
+					await this.#write({ ...current, lastRunStatus: "failed", lastRunError: errorMessage(error), nextRunAt: nextRunAfterRun(current, now), updatedAt: now.toISOString(), runCount: current.runCount + 1 });
 				} catch (releaseError) {
 					this.#log?.warn("could not release a stuck scheduled task run", { taskId: task.id, error: errorMessage(releaseError) });
 				}
@@ -255,9 +268,11 @@ export class ScheduledTasks {
 		const id = input.id ?? `scheduled-task:${input.commandId ?? randomUUID()}`;
 		const existing = this.#tasks.get(id);
 		if (input.requireExisting === true && existing === undefined) throw taskError("Schedule task not found.", id);
-		const schedule = input.schedule;
+		// A one-time run's time is stored as UTC ISO, as T3 stores it.
+		const schedule: Task["schedule"] = input.schedule.type === "once" ? { type: "once", runAt: new Date(Date.parse(input.schedule.runAt)).toISOString() } : input.schedule;
 		// Editing a title or prompt must not postpone (or resurrect) a due run: only schedule/enabled changes restart it.
 		const scheduleUnchanged = existing !== undefined && existing.enabled === input.enabled && isSameSchedule(existing.schedule, schedule);
+		if (!scheduleUnchanged) requireFutureOnce({ enabled: input.enabled, schedule }, now, id);
 		const task: Task = {
 			id: id as Task["id"],
 			title: input.title,
@@ -290,6 +305,7 @@ export class ScheduledTasks {
 		const existing = this.#load(input.id);
 		if (existing.enabled === input.enabled) return { task: existing };
 		const now = this.#now();
+		requireFutureOnce({ enabled: input.enabled, schedule: existing.schedule }, now, input.id);
 		const task = { ...existing, enabled: input.enabled, nextRunAt: nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now), updatedAt: now.toISOString() };
 		await this.#write(task);
 		return { task };

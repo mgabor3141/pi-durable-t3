@@ -12,9 +12,14 @@ export function parseTimeOfDay(value: string): { hour: number; minute: number } 
 }
 
 /** The next occurrence strictly after `from`: interval = `from + max(everyMs, 1 min)`; fixed time = the first local
- * HH:MM after `from` (today through a week out) on an allowed weekday (0 = Sunday). Webhooks have none. */
+ * HH:MM after `from` (today through a week out) on an allowed weekday (0 = Sunday); once = its `runAt` while that is
+ * still ahead. Webhooks have none. */
 export function nextScheduledRunAt(schedule: ScheduledTaskSchedule, from: Date): Date | null {
 	if (schedule.type === "webhook") return null;
+	if (schedule.type === "once") {
+		const runAt = Date.parse(schedule.runAt);
+		return Number.isFinite(runAt) && runAt > from.getTime() ? new Date(runAt) : null;
+	}
 	if (schedule.type === "interval") {
 		// Stored rows from before the one-minute floor stay readable but never run faster than it.
 		return new Date(from.getTime() + Math.max(schedule.everyMs, MIN_SCHEDULED_TASK_INTERVAL_MS));
@@ -43,6 +48,7 @@ function weekdayKey(weekdays: readonly number[] | undefined): string {
 export function isSameSchedule(a: ScheduledTaskSchedule, b: ScheduledTaskSchedule): boolean {
 	if (a.type === "interval") return b.type === "interval" && a.everyMs === b.everyMs;
 	if (a.type === "webhook") return b.type === "webhook";
+	if (a.type === "once") return b.type === "once" && Date.parse(a.runAt) === Date.parse(b.runAt);
 	if (b.type !== "fixed_time") return false;
 	const aTime = parseTimeOfDay(a.timeOfDay);
 	const bTime = parseTimeOfDay(b.timeOfDay);

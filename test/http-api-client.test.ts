@@ -72,7 +72,7 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 
 	// metadata and auth
 	const descriptor = await run(client.metadata.descriptor());
-	expect(descriptor.serverVersion).toBe("0.1.6");
+	expect(descriptor.serverVersion).toBe("0.1.7");
 	expect((await run(client.auth.session({ headers: {} }))).authenticated).toBe(false);
 	const session = await run(client.auth.session({ headers: bearer }));
 	expect(session).toMatchObject({ authenticated: true, sessionMethod: "bearer-access-token" });

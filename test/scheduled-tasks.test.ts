@@ -151,6 +151,33 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(after).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null, runCount: 1, lastRunAt: "2026-07-01T12:01:00.000Z", nextRunAt: "2026-07-01T12:02:00.000Z" });
 	});
 
+	it("a one-time task runs once at its time; a manual run before it does not use it up; a past time is refused", async () => {
+		const { tasks, calls, advance } = await fixture();
+		// Stored as UTC ISO, as T3 stores it.
+		const task = (await tasks.upsert(input({ schedule: { type: "once", runAt: "2026-07-01T14:30:00+02:00" } }))).task;
+		expect(task.schedule).toEqual({ type: "once", runAt: "2026-07-01T12:30:00.000Z" });
+		expect(task.nextRunAt).toBe("2026-07-01T12:30:00.000Z");
+
+		// A manual run at 12:10 leaves the 12:30 run in place.
+		advance(10 * 60_000);
+		await tasks.runNow({ id: task.id });
+		expect(tasks.list().tasks[0]).toMatchObject({ runCount: 1, nextRunAt: "2026-07-01T12:30:00.000Z" });
+		advance(20 * 60_000);
+		await tasks.tick();
+		expect(calls).toHaveLength(2);
+		expect(tasks.list().tasks[0]).toMatchObject({ runCount: 2, nextRunAt: null, enabled: true });
+		advance(60 * 60_000);
+		await tasks.tick();
+		expect(calls, "never again").toHaveLength(2);
+
+		// Its time has passed: saving it enabled with a new past time, or turning it back on, is refused.
+		await expect(tasks.upsert(input({ id: task.id, requireExisting: true, schedule: { type: "once", runAt: "2026-07-01T11:00:00Z" } }))).rejects.toThrow("The run time has passed. Pick a time in the future.");
+		await tasks.setEnabled({ id: task.id, enabled: false });
+		await expect(tasks.setEnabled({ id: task.id, enabled: true })).rejects.toThrow("The run time has passed.");
+		expect(nextScheduledRunAt({ type: "once", runAt: "2026-07-01T13:00:00Z" }, new Date("2026-07-01T12:00:00Z"))?.toISOString()).toBe("2026-07-01T13:00:00.000Z");
+		expect(isSameSchedule({ type: "once", runAt: "2026-07-01T15:00:00+02:00" }, { type: "once", runAt: "2026-07-01T13:00:00Z" })).toBe(true);
+	});
+
 	it("a task bound to a thread queues the prompt there; a failed dispatch is a failed run", async () => {
 		let fail = false;
 		const queued: Call[] = [];

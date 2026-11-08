@@ -92,6 +92,9 @@ export type ThreadSummary = {
 	updatedAt: number;
 	latestVisibleMessage: { id: string; role: string; text: string; updatedAt: number } | null;
 	latestUserMessageAt: number | null;
+	/** The latest message a person wrote (not an agent's prompt or a child's report: T3's `latestUserAuthoredMessageAt`).
+	 * Absent in a summary written before it was kept: the latest user message stands in. */
+	latestUserAuthoredMessageAt?: number | null;
 	/** Absent in a summary written before runs were kept: unknown until the thread is next opened or runs. */
 	latestRun?: SummaryRun | null;
 	itemCount: number;
@@ -152,6 +155,8 @@ export type ThreadRecord = {
 	lastVisitedAt?: number;
 	opens?: ThreadOpens;
 	autoSettleDisabledAt?: number;
+	/** T3's thread tags, in the order they were added (exact spelling and case). */
+	tags?: string[];
 	/** T3's archive: hidden from the sidebar, listed in the archive. */
 	archivedAt?: number;
 	/** T3's snooze: hidden until `snoozedUntil` (set at `snoozedAt`); `lastSnoozeWakeAt` is when one last ended early. */
@@ -505,6 +510,11 @@ export class Threads {
 				latestVisibleMessage: summary.latestVisibleMessage === undefined ? (existing?.latestVisibleMessage ?? null) : summary.latestVisibleMessage,
 				latestUserMessageAt: summary.latestUserMessageAt === undefined ? (existing?.latestUserMessageAt ?? null) : summary.latestUserMessageAt,
 				latestRun: summary.latestRun === undefined ? (existing?.latestRun ?? null) : summary.latestRun,
+				...(summary.latestUserAuthoredMessageAt === undefined
+					? existing?.latestUserAuthoredMessageAt === undefined
+						? {}
+						: { latestUserAuthoredMessageAt: existing.latestUserAuthoredMessageAt }
+					: { latestUserAuthoredMessageAt: summary.latestUserAuthoredMessageAt }),
 				itemCount: summary.itemCount ?? existing?.itemCount ?? 0,
 				visibleItemCount: summary.visibleItemCount ?? existing?.visibleItemCount ?? 0,
 				revision: existing?.revision ?? 0,
@@ -832,6 +842,7 @@ export class Threads {
 				updatedAt: at,
 				latestVisibleMessage: { id: input.messageId ?? `user-${at}`, role: "user", text: input.message.slice(0, 500), updatedAt: at },
 				latestUserMessageAt: at,
+				...((input.provenance?.createdBy ?? "user") === "user" ? { latestUserAuthoredMessageAt: at } : {}),
 			});
 		} catch (error) {
 			this.#onWarn(`prompt committed but its sidebar summary failed: ${String(error)}`, error);

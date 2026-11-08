@@ -238,7 +238,10 @@ async function openPage(browser: Browser, width: number, appearance: "dark" | "l
 				return;
 			}
 			const text = raw.replaceAll(PAGE_URL, PAGE_NAME);
-			messages.push({ level, text: text.length > MAX_CONSOLE_TEXT_CHARS ? `${text.slice(0, MAX_CONSOLE_TEXT_CHARS)}…` : text });
+			// Not half an emoji: a lone surrogate breaks the JSON a provider parses (T3 v0.1.7).
+			const last = text.charCodeAt(MAX_CONSOLE_TEXT_CHARS - 1);
+			const end = last >= 0xd800 && last <= 0xdbff ? MAX_CONSOLE_TEXT_CHARS - 1 : MAX_CONSOLE_TEXT_CHARS;
+			messages.push({ level, text: text.length > MAX_CONSOLE_TEXT_CHARS ? `${text.slice(0, end)}…` : text });
 		};
 		page.on("console", (message) => {
 			const level = CONSOLE_LEVELS[message.type()];

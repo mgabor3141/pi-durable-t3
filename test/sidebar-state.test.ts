@@ -168,3 +168,22 @@ it("the settlement sweep settles quiet threads as of when they went quiet, and l
 	// A thread someone un-settled stays active.
 	expect(bridge.threadShell("quiet").settledOverride).toBe("active");
 });
+
+it("tags: added once, in order, removed; in the shell only when there are some; kept across a restart; fine on an archived thread", async () => {
+	const f = await fixture();
+	await f.create({ threadId: "t", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	expect("tags" in bridge.threadShell("t")).toBe(false);
+	for (const [tag, tagged] of [["work", true], ["Urgent", true], ["work", true]] as const) await dispatch(bridge, { type: "thread.tag.set", threadId: "t", tag, tagged });
+	expect(bridge.threadShell("t").tags).toEqual(["work", "Urgent"]);
+	const fresh = f.bridge();
+	fresh.start();
+	await fresh.loaded();
+	expect(fresh.threadShell("t").tags).toEqual(["work", "Urgent"]);
+	await dispatch(bridge, { type: "thread.archive", threadId: "t" });
+	await dispatch(bridge, { type: "thread.tag.set", threadId: "t", tag: "work", tagged: false });
+	await dispatch(bridge, { type: "thread.tag.set", threadId: "t", tag: "Urgent", tagged: false });
+	expect("tags" in bridge.archivedShellSnapshot().threads[0]!).toBe(false);
+});

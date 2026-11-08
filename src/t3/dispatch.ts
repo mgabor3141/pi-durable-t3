@@ -92,6 +92,9 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			case "thread.unsettle":
 				await bridge.unsettleThread(command.threadId);
 				break;
+			case "thread.tag.set":
+				await bridge.setThreadTag(command.threadId, command.tag, command.tagged);
+				break;
 			case "thread.archive":
 				await bridge.archiveThread(command.threadId);
 				break;

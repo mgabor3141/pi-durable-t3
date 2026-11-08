@@ -61,6 +61,8 @@ export type DurableMessage =
 			timestamp?: number;
 			provider?: string;
 			model?: string;
+			/** The pi thinking level the request asked for (pi 1.5 records it on the answer). */
+			thinkingLevel?: string;
 			/** The provider's own model id for this response; pi's usage reader prices on it when present. */
 			responseModel?: string;
 			/** Token counts and cost pi recorded for this turn (pi-ai `Usage`). */

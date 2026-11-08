@@ -460,6 +460,7 @@ export class Bridge {
 			...(thread?.opens === undefined ? {} : { opens: thread.opens }),
 			...(thread?.autoSettleDisabledAt === undefined ? {} : { autoSettleDisabledAt: thread.autoSettleDisabledAt }),
 			...(thread?.archivedAt === undefined ? {} : { archivedAt: thread.archivedAt }),
+			...(thread?.tags === undefined ? {} : { tags: thread.tags }),
 			...(thread?.snoozedUntil === undefined ? {} : { snoozedUntil: thread.snoozedUntil }),
 			...(thread?.snoozedAt === undefined ? {} : { snoozedAt: thread.snoozedAt }),
 			...(thread?.lastSnoozeWakeAt === undefined ? {} : { lastSnoozeWakeAt: thread.lastSnoozeWakeAt }),
@@ -749,6 +750,7 @@ export class Bridge {
 				updatedAt: DateTime.toEpochMillis(shell.updatedAt),
 				latestVisibleMessage: latest === null ? null : { id: latest.id, role: latest.role, text: latest.text, updatedAt: DateTime.toEpochMillis(latest.updatedAt) },
 				latestUserMessageAt: shell.latestUserMessageAt === null ? null : DateTime.toEpochMillis(shell.latestUserMessageAt),
+				latestUserAuthoredMessageAt: shell.latestUserAuthoredMessageAt == null ? null : DateTime.toEpochMillis(shell.latestUserAuthoredMessageAt),
 				...(run === undefined ? {} : { latestRun: run }),
 				itemCount: shell.itemCount,
 				visibleItemCount: shell.visibleItemCount,
@@ -1297,6 +1299,18 @@ export class Bridge {
 		return this.#store.updateRecord(threadId, change);
 	}
 
+	/** T3's `thread.tag.set`: add a tag (once) or remove it. Tags are not sidebar state T3 refuses on an archived thread. */
+	async setThreadTag(threadId: string, tag: string, tagged: boolean): Promise<void> {
+		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
+		await this.#store.updateRecord(threadId, (record) => {
+			const current = record.tags ?? [];
+			const next = tagged ? (current.includes(tag) ? current : [...current, tag]) : current.filter((existing) => existing !== tag);
+			if (next.length === current.length && next.every((value, index) => value === current[index])) return false;
+			if (next.length === 0) delete record.tags;
+			else record.tags = next;
+		});
+	}
+
 	/** T3's `thread.archive`: out of the sidebar and into the archive; a title being generated is dropped. */
 	async archiveThread(threadId: string): Promise<void> {
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
@@ -1393,6 +1407,8 @@ export class Bridge {
 			if (record.settledOverride === "settled") {
 				record.settledOverride = "active";
 				delete record.settledAt;
+				// T3 v0.1.7: the un-settle is stamped, as any other.
+				record.unsettledAt = now;
 			}
 			// A pinned thread is not snoozed (T3's pin wakes it, stamped).
 			if (record.snoozedUntil !== undefined) record.lastSnoozeWakeAt = now;

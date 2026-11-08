@@ -20,10 +20,10 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
-import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOption } from "./model-types.ts";
+import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, stopReason, authorOf } from "./runs.ts";
+import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
@@ -112,6 +112,8 @@ export interface ThreadMeta {
 	readonly lastVisitedAt?: number;
 	readonly opens?: { readonly openedAt: number; readonly score: number; readonly picks: readonly { readonly query: string; readonly at: number }[] };
 	readonly autoSettleDisabledAt?: number;
+	/** T3's thread tags, from the thread record. */
+	readonly tags?: readonly string[];
 	/** T3's archive and snooze, from the thread record. */
 	readonly archivedAt?: number;
 	readonly snoozedUntil?: number;
@@ -168,6 +170,33 @@ function withoutHtmlRender(output: string): string {
 		return JSON.stringify(rest);
 	} catch {
 		return output;
+	}
+}
+
+/** Same model, and the same thinking level where both runs name one (an answer from before pi recorded the level names
+ * none: comparing it would show a switch that did not happen). */
+function sameModel(left: Any, right: Any): boolean {
+	if (left?.model !== right?.model) return false;
+	const a = thinkingLevelOf(left?.options);
+	const b = thinkingLevelOf(right?.options);
+	return a === undefined || b === undefined || a === b;
+}
+
+/**
+ * T3's `modelSwitchSince`: a run's user message shows the model or effort change it brought, measured from the latest
+ * run the timeline shows (not a rolled-back or queued run, a `/compact` command, or a run with no prompt of its own).
+ */
+function markModelSwitches(runs: readonly Any[], turnItems: Any[], drafts: readonly RunDraft[]): void {
+	const userItems = new Map<string, Any>();
+	for (const item of turnItems) if (item.type === "user_message" && item.inputIntent === "turn_start") userItems.set(String(item.messageId), item);
+	const hidden = new Set(drafts.flatMap((draft) => (draft.synthetic === true || isCompactCommandEntry(draft.userEntry) ? [`r${draft.userEntry.id}`] : [])));
+	let previous: Any;
+	for (const run of runs) {
+		if (run.status === "rolled_back" || run.status === "queued" || hidden.has(String(run.id))) continue;
+		const item = userItems.get(String(run.userMessageId));
+		if (item === undefined) continue;
+		if (previous !== undefined && !sameModel(previous.modelSelection, run.modelSelection)) item.modelSwitch = { from: previous.modelSelection, to: run.modelSelection };
+		previous = run;
 	}
 }
 
@@ -331,7 +360,7 @@ export function projectThread(
 		const runModel: Any = (() => {
 			const m = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
 			return m?.role === "assistant" && m.provider !== undefined && m.model !== undefined
-				? { instanceId: PROVIDER_INSTANCE_ID, model: `${m.provider}/${m.model}` }
+				? { instanceId: PROVIDER_INSTANCE_ID, model: `${m.provider}/${m.model}`, ...(m.thinkingLevel === undefined ? {} : { options: thinkingOption(m.thinkingLevel) }) }
 				: modelSelection;
 		})();
 		const settled = !running;
@@ -748,6 +777,8 @@ export function projectThread(
 		}
 	});
 
+	markModelSwitches(runs, turnItems, drafts);
+
 	// A manual compaction is a durable task, not an optimistic client request. Project its live status so a reload
 	// still shows that the context is being compacted; the completed summary replaces this item at the cut.
 	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
@@ -907,6 +938,8 @@ export function projectThread(
 		autoSettleDisabledAt: meta.autoSettleDisabledAt === undefined ? null : time(meta.autoSettleDisabledAt),
 		lastVisitedAt: meta.lastVisitedAt === undefined ? null : time(meta.lastVisitedAt),
 		opens: meta.opens === undefined ? null : { openedAt: meta.opens.openedAt, score: meta.opens.score, picks: meta.opens.picks.map((pick) => ({ ...pick })) },
+		// As T3's shell: only a thread that has tags carries them.
+		...(meta.tags === undefined || meta.tags.length === 0 ? {} : { tags: [...meta.tags] }),
 		archivedAt: meta.archivedAt === undefined ? null : time(meta.archivedAt),
 		snoozedUntil: meta.snoozedUntil === undefined ? null : time(meta.snoozedUntil),
 		snoozedAt: meta.snoozedAt === undefined ? null : time(meta.snoozedAt),
@@ -970,6 +1003,7 @@ export function projectThread(
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
 	const lastVisibleMessage = messages.at(-1);
 	const lastUser = messages.findLast((message) => message.role === "user");
+	const lastUserAuthored = messages.findLast((message) => message.role === "user" && ((message as Any).createdBy ?? "user") === "user");
 	// Not loaded: the latest run the summary kept, so a closed thread sorts and shows its state as an open one does.
 	const keptRun = view === undefined ? (meta.summary?.latestRun ?? null) : null;
 	const shell: OrchestrationV2ThreadShell = {
@@ -1014,7 +1048,12 @@ export function projectThread(
 						updatedAt: lastVisibleMessage.updatedAt,
 					},
 		latestUserMessageAt: lastUser?.createdAt ?? (meta.summary?.latestUserMessageAt == null ? null : time(meta.summary.latestUserMessageAt)),
-		latestUserAuthoredMessageAt: lastUser?.createdAt ?? (meta.summary?.latestUserMessageAt == null ? null : time(meta.summary.latestUserMessageAt)),
+		// Only what a person wrote: an agent's prompt or a child's report is a user-role message too (T3's field excludes them).
+		latestUserAuthoredMessageAt: (() => {
+			if (view !== undefined) return lastUserAuthored?.createdAt ?? null;
+			const at = meta.summary?.latestUserAuthoredMessageAt === undefined ? meta.summary?.latestUserMessageAt : meta.summary.latestUserAuthoredMessageAt;
+			return at == null ? null : time(at);
+		})(),
 		hasActionableProposedPlan: false,
 		pendingBackgroundTasks: [],
 		providerInstanceHistory: [id(PROVIDER_INSTANCE_ID)],

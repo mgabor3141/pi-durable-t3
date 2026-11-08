@@ -1,4 +1,4 @@
-// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.6), copied as it is so the
+// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.7), copied as it is so the
 // tool names, descriptions, schemas and annotations an agent sees are T3's. Removed: the server services each tool
 // depends on in T3 (`mcp.ts` supplies the handlers), the three linked-environment tools, which T3 hides while links
 // are off and this host has none, and `orchestrator_capabilities` (the provider and model menu for `delegate_task`,
@@ -118,7 +118,7 @@ const ScheduleTaskTool = Tool.make("schedule_task", {
   failure: OrchestratorMcpFailure,
   failureMode: "return",
 })
-  .annotate(Tool.Title, "Schedule a recurring task")
+  .annotate(Tool.Title, "Schedule a task")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 

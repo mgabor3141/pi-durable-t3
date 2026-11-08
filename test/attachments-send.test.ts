@@ -13,7 +13,7 @@ import { AuthStore } from "../src/t3/auth.ts";
 import { Attachments } from "../src/t3/attachments.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAACAAEA//8DAAAGAAVXv6vUAAAAAElFTkSuQmCC", "base64");
@@ -66,4 +66,32 @@ it("an image and a file: both kept in the environment and named by path; the ima
 	const inline = content.filter((block) => block.type === "image");
 	// The faux model takes images, so the image also goes inline.
 	expect(inline.map((block) => block.data)).toEqual([PNG.toString("base64")]);
+});
+
+it("a steer carries its attachments into the running turn (activeSteeringAcceptsAttachments)", { timeout: 60_000 }, async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-steer-att-"));
+	const home = join(scratch, "workspace", "attachments");
+	const attachments = new Attachments({ stateDir: join(scratch, "state"), signer: new AuthStore(join(scratch, "state"), { tokenTtlSeconds: 60 }), env: new NodeExecutionEnv({ cwd: "/" }), dir: home, context: BACKGROUND_CONTEXT });
+	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+	bridge.start();
+	await bridge.loaded();
+	onTestFinished(async () => {
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	});
+	const slow = gated("first");
+	f.model.respond(slow.step, fauxAssistantMessage("saw it"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "start", mode: "start" });
+	for (let i = 0; i < 200 && bridge.threadShell("t").status !== "running"; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+	const minted = attachments.mintUpload({ type: "image", name: "shot.png", mimeType: "image/png", sizeBytes: PNG.byteLength });
+	expect(attachments.storeUpload(minted.relativeUrl.slice("/api/attachments/upload/".length), PNG)).toEqual({ ok: true });
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "look", mode: "steer", attachments: [{ type: "image", id: minted.attachmentId, name: "shot.png", mimeType: "image/png", sizeBytes: PNG.byteLength }] });
+	slow.release();
+	await idle(f.harness, thread.head);
+	const entries = (await (await conversation(f.harness, thread.head)).context(BACKGROUND_CONTEXT)).entries;
+	const steer = entries.find((entry) => (entry.data as { messageId?: string } | undefined)?.messageId === "m2")!;
+	const content = steer.model![0]!.content as { type: string; data?: string }[];
+	expect(content.filter((block) => block.type === "image").map((block) => block.data)).toEqual([PNG.toString("base64")]);
 });

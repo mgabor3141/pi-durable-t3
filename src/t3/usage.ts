@@ -304,6 +304,31 @@ function piSource(stateDir: string, volumeId: string, sessions: number, scannedF
 	};
 }
 
+type ModelSelector = { readonly provider?: string | undefined; readonly model: string };
+type ModelFilter = { readonly include?: readonly ModelSelector[] | undefined; readonly exclude?: readonly ModelSelector[] | undefined };
+
+/** T3's `keepsUsageRecord`: a record matches a selector by its model as recorded (`provider/model` here) and, when the
+ * selector names one, its source's provider (`pi`). Kept when an include matches (or there is none) and no exclude does. */
+function keepsUsageRecord(filter: ModelFilter | undefined, record: UsageRecord): boolean {
+	if (filter === undefined) return true;
+	const model = record.model.trim();
+	const matches = (selector: ModelSelector) => selector.model === model && (selector.provider === undefined || selector.provider === "pi");
+	return (filter.include?.some(matches) ?? true) && !(filter.exclude?.some(matches) ?? false);
+}
+
+const selectorKey = (selector: ModelSelector) => JSON.stringify([selector.provider ?? null, selector.model]);
+const canonicalSelectors = (selectors: readonly ModelSelector[]) =>
+	[...new Map(selectors.map((selector) => [selectorKey(selector), selector]))].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, selector]) => selector);
+
+/** T3's `canonicalModelFilter`: one form for equal filters (deduplicated, code-unit order), so a client can compare the
+ * filter echoed back with its own; an empty one is none. */
+export function canonicalModelFilter(filter: ModelFilter | undefined): ModelFilter | undefined {
+	if (filter === undefined) return undefined;
+	const exclude = filter.exclude?.length ? canonicalSelectors(filter.exclude) : undefined;
+	if (filter.include === undefined && exclude === undefined) return undefined;
+	return { ...(filter.include === undefined ? {} : { include: canonicalSelectors(filter.include) }), ...(exclude === undefined ? {} : { exclude }) };
+}
+
 /** The pricing this host reports: no model rate table, because pi prices its own turns (see `PRICING_SOURCE`). */
 export function piUsagePricing(): UsagePricing {
 	return { status: "unavailable", source: PRICING_SOURCE, fetchedAt: null, knownModels: 0 };
@@ -321,6 +346,8 @@ export async function summarizeUsage(
 ): Promise<UsageSummary> {
 	const startedAt = Date.now();
 	const readAt = new Date(startedAt).toISOString();
+	// T3's Usage tab sends the model filter set in settings (`usageModelFilter`); the summary echoes the one it applied.
+	const modelFilter = canonicalModelFilter((input as { modelFilter?: ModelFilter }).modelFilter);
 	// Every conversation contributes a source session; a conversation with usage is a scanned "file", one without is skipped.
 	const records: UsageRecord[] = [];
 	const sessions = new Set<string>();
@@ -332,7 +359,8 @@ export async function summarizeUsage(
 		else {
 			scannedFiles += 1;
 			sessions.add(String(conversation.conversationId));
-			records.push(...conversationRecords);
+			// As T3's aggregator: the filter drops records, not the sources they were read from.
+			records.push(...conversationRecords.filter((record) => keepsUsageRecord(modelFilter, record)));
 		}
 	}
 	const volumeId = await readVolumeId(stateDir);
@@ -346,5 +374,6 @@ export async function summarizeUsage(
 		sources: [piSource(stateDir, volumeId, sessions.size, scannedFiles, skippedFiles)],
 		pricing: piUsagePricing(),
 		scanDurationMs: Math.max(0, Date.now() - startedAt),
-	};
+		...(modelFilter === undefined ? {} : { modelFilter }),
+	} as UsageSummary;
 }

@@ -27,6 +27,8 @@ export const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
 		supportsInterrupt: true,
 		supportsActiveSteering: true,
 		activeSteeringInterruptsTools: no,
+		// A steer is an input like any other: its images and files go with it.
+		activeSteeringAcceptsAttachments: true,
 		supportsSteeringByInterruptRestart: true,
 		supportsQueuedMessages: true,
 		terminalStatusQuality: "strong",

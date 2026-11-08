@@ -106,6 +106,27 @@ describe("getUsageSummary (buckets, cost source, dedupe, window)", () => {
 		expect(summary.sources[0]!.fingerprint.volumeId).toMatch(/^\d+:\d+$/);
 	});
 
+	it("applies T3's model filter (v0.1.7) to records, echoes it in canonical form, and still counts the sources read", async () => {
+		const entries = [
+			assistant(1, { timestamp: D1, provider: "openai", model: "gpt-5" }),
+			assistant(2, { timestamp: D1, provider: "anthropic", model: "claude-sonnet-4-5" }),
+		];
+		const models = async (modelFilter: unknown) => {
+			const summary = await summarizeUsage({ ...window(), modelFilter } as UsageSummaryInput, [{ conversationId: 1, entries }], stateDir);
+			return { models: summary.buckets.map((bucket) => bucket.model).sort(), echoed: (summary as { modelFilter?: unknown }).modelFilter, scanned: summary.sources[0]!.scannedFiles };
+		};
+		expect(await models(undefined)).toEqual({ models: ["anthropic/claude-sonnet-4-5", "openai/gpt-5"], echoed: undefined, scanned: 1 });
+		expect(await models({ exclude: [{ model: "openai/gpt-5" }, { provider: "pi", model: "openai/gpt-5" }, { model: "openai/gpt-5" }] })).toEqual({
+			models: ["anthropic/claude-sonnet-4-5"],
+			echoed: { exclude: [{ provider: "pi", model: "openai/gpt-5" }, { model: "openai/gpt-5" }] },
+			scanned: 1,
+		});
+		expect((await models({ include: [{ provider: "pi", model: "openai/gpt-5" }] })).models).toEqual(["openai/gpt-5"]);
+		// Another source's provider matches nothing here; an empty filter is none.
+		expect((await models({ include: [{ provider: "codex", model: "openai/gpt-5" }] })).models).toEqual([]);
+		expect((await models({ exclude: [] })).echoed).toBeUndefined();
+	});
+
 	it("marks a zero-cost model as unpriced, with no category cost and the token split intact", async () => {
 		const free = usage({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 		const summary = await summarizeUsage(window(), [{ conversationId: 1, entries: [assistant(1, { timestamp: D1, usage: free })] }], stateDir);
