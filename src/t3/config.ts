@@ -37,7 +37,6 @@ export interface FacetConfig {
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	readonly routes?: readonly HostRoute[];
-	readonly waitSignal?: () => AbortSignal | undefined;
 	/** Optional per-call RPC observation for debugging the wire. Absent: nothing is called. */
 	readonly rpcLog?: RpcLog;
 }

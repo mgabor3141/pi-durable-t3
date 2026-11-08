@@ -63,10 +63,10 @@ const brain: FauxResponseStep = (context, options) => {
 	return fauxAssistantMessage("ok");
 };
 
-async function setup(options: { readonly waitSignal?: () => AbortSignal | undefined } = {}) {
+async function setup() {
 	let bridge: Bridge | undefined;
 	const late = new Proxy({} as Bridge, { get: (_target, key) => (bridge as unknown as Record<string | symbol, unknown>)[key] instanceof Function ? (bridge as never as Record<string | symbol, (...args: unknown[]) => unknown>)[key]!.bind(bridge) : (bridge as unknown as Record<string | symbol, unknown>)[key] });
-	const orchestration = new Orchestration(late, log, options);
+	const orchestration = new Orchestration(late, log);
 	let tasks: ScheduledTasks | undefined;
 	const lateTasks = new Proxy({} as ScheduledTasks, { get: (_target, key) => { const value = (tasks as unknown as Record<string | symbol, unknown>)[key]; return value instanceof Function ? value.bind(tasks) : value; } });
 	const ops = new ThreadOps(late, "env-1", log, lateTasks);
@@ -236,12 +236,9 @@ it("a forked child starts with its parent's history; children nest at most three
 	expect(nested.report).toContain("nest at most 3 deep");
 });
 
-it("a restart's signal ends a wait; the report is sent when the work settles", { timeout: 60_000 }, async () => {
-	const drain = new AbortController();
-	const { ask, sawAll, settled } = await setup({ waitSignal: () => drain.signal });
-	await ask("a", { name: "thread_prompt", args: { new: {}, message: "Hold on: w1" } });
-	await new Promise((resolve) => setTimeout(resolve, 300));
-	drain.abort();
+it("a wait that runs out returns at once; the report is sent when the work settles", { timeout: 60_000 }, async () => {
+	const { ask, sawAll, settled } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "Hold on: w1", timeoutMs: 300 } });
 	const [ended] = await sawAll(1);
 	expect(ended).toMatchObject({ verdict: "active", notify: true });
 	gate("w1").release();

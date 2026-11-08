@@ -21,7 +21,7 @@ export class ThreadToolError extends Error {}
 /** How deep children may nest under a thread that is not a child, and how many may be busy under one parent. */
 export const MAX_DEPTH = 3;
 export const MAX_ACTIVE_CHILDREN = 10;
-/** A wait with no `timeoutMs` lasts until the work settles (or the host's `waitSignal` ends it), as pi's do. */
+/** A wait with no `timeoutMs` lasts until the work settles (or the call is aborted), as pi's do. */
 const waitMs = (timeoutMs: number | undefined) => (timeoutMs === undefined ? Number.POSITIVE_INFINITY : Math.max(1, timeoutMs));
 /** A follower re-arms its wait this often; it holds the thread open meanwhile. */
 const FOLLOW_CHUNK_MS = 60 * 60_000;
@@ -62,16 +62,14 @@ export interface ThreadSummaryRow {
 export class Orchestration {
 	readonly #bridge: Bridge;
 	readonly #log: Logger;
-	readonly #waitSignal: () => AbortSignal | undefined;
 	/** The threads a follower is delivering for, so each has one. */
 	readonly #following = new Set<string>();
 	#closed = false;
 	readonly #stop = new AbortController();
 
-	constructor(bridge: Bridge, log: Logger, options: { readonly waitSignal?: () => AbortSignal | undefined } = {}) {
+	constructor(bridge: Bridge, log: Logger) {
 		this.#bridge = bridge;
 		this.#log = log;
-		this.#waitSignal = options.waitSignal ?? (() => undefined);
 	}
 
 	/** Resume delivering what the last process owed: every thread whose record keeps a request to be answered. */
@@ -233,9 +231,9 @@ export class Orchestration {
 		return { own: messageId, ...(reader === undefined ? {} : { reader }), label: (id: string) => this.#label(id) };
 	}
 
-	/** The caller's signal, the host's (a restart ends waits), and this orchestration's own close, as one. */
+	/** The caller's signal, and this orchestration's own close, as one. */
 	#signal(signal: AbortSignal | undefined): AbortSignal {
-		return AbortSignal.any([this.#stop.signal, ...(signal === undefined ? [] : [signal]), ...(this.#waitSignal() === undefined ? [] : [this.#waitSignal()!])]);
+		return AbortSignal.any([this.#stop.signal, ...(signal === undefined ? [] : [signal])]);
 	}
 
 	// ---- reading ----------------------------------------------------------------------------------------------

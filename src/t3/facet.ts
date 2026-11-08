@@ -92,7 +92,7 @@ export function startFacet(deps: {
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
 	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId));
 	// Threads that drive threads (`thread_prompt` and the rest); its followers deliver the reports the last process owed.
-	const orchestration = new Orchestration(bridge, log, { waitSignal: () => config.waitSignal?.() });
+	const orchestration = new Orchestration(bridge, log);
 	orchestration.start();
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
