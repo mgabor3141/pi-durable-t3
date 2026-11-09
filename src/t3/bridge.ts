@@ -38,6 +38,9 @@ import { undoTarget } from "./undo.ts";
 import { CommandError } from "./errors.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
+/** How long a message waits for the integrator's `messageContext` before it goes on without it. */
+export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
+
 export { CommandError, type StreamUpdate };
 
 
@@ -1045,6 +1048,26 @@ export class Bridge {
 		return [{ type: "text" as const, text: list, hidden: true }, ...(images ?? [])];
 	}
 
+	/** The integrator's `messageContext` for a message: at most `MESSAGE_CONTEXT_TIMEOUT_MS`; a failure is logged, not fatal. */
+	async #messageContext(threadId: string, conversationId: number, text: string): Promise<string | undefined> {
+		const hook = this.config.messageContext;
+		if (hook === undefined) return undefined;
+		const signal = AbortSignal.timeout(MESSAGE_CONTEXT_TIMEOUT_MS);
+		const late = () => new Error(`no answer within ${MESSAGE_CONTEXT_TIMEOUT_MS} ms`);
+		try {
+			const answer = await Promise.race([
+				hook({ threadId, conversationId: conversationId as ConversationId, text, signal }),
+				new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(late()), { once: true })),
+			]);
+			// An answer that settled as the wait ended (a hook resolving on its abort) is as late as none.
+			if (signal.aborted) throw late();
+			return answer === undefined || answer.trim() === "" ? undefined : answer;
+		} catch (error) {
+			this.#log.warn("message context failed; the message goes on without it", { threadId, error: (error as Error).message });
+			return undefined;
+		}
+	}
+
 	/** A message's attachments, kept in the environment (`Attachments.keep`); a host without an attachment dir takes none. */
 	async #keepAttachments(threadId: string, messageId: string, records: readonly AttachmentRecord[] | undefined): Promise<KeptAttachment[]> {
 		if (records === undefined || records.length === 0) return [];
@@ -1118,7 +1141,11 @@ export class Bridge {
 			const kept = await this.#keepAttachments(input.threadId, input.messageId, input.attachments);
 			const attachments = input.attachments === undefined ? undefined : kept.map((attachment) => attachment.record);
 			const context = rebindContext(input.context, input.attachments, attachments);
-			const promptBlocks = this.#attachmentBlocks(state, kept);
+			const attachmentBlocks = this.#attachmentBlocks(state, kept);
+			// The integrator's context for this message (memories), stored with it: a note or an automatic message gets none.
+			const extra = input.note === true || input.automatic === true ? undefined : await this.#messageContext(input.threadId, head, input.text);
+			const contextBlocks: ContentBlock[] = extra === undefined ? [] : [{ type: "text", text: extra, hidden: true } as ContentBlock];
+			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,
 				conversationId: head,

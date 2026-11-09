@@ -19,6 +19,7 @@ import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/host-route.ts";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
+import type { MessageContext } from "./t3/message-context.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
@@ -31,6 +32,7 @@ import { ConfigError } from "./config.ts";
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
+export type { MessageContext, MessageContextRequest } from "./t3/message-context.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
 
@@ -103,6 +105,13 @@ export type AttachT3Options = {
 	 * first message's seed and renames still work, and "Regenerate title" is refused.
 	 */
 	readonly titleThread?: TitleThread;
+	/**
+	 * Context for the model about each message that starts or steers a turn, such as memories recalled for it. The text
+	 * you resolve with is stored with the message, hidden in T3's display and thread search, so the prompt cache holds.
+	 * Not called for notes or automatic messages (a child's report). The bridge waits at most 5 seconds; a rejection or a
+	 * timeout is logged as a warning and the message goes on without it. Absent: none.
+	 */
+	readonly messageContext?: MessageContext;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
@@ -225,6 +234,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
+		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
 		tailscaleServe:
 			options.tailscaleServe === undefined
 				? undefined
