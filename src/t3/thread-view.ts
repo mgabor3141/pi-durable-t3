@@ -85,18 +85,17 @@ const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as Con
 const WHOLE_TRANSCRIPT = { min: 1_000_000_000, max: 2_000_000_000 };
 
 /**
- * The transcript as the projection reads it: the active context (from the newest head marker, such as a compaction
- * summary, then the entries it keeps and every later one) and the history before it, for display only. The view lists the
- * fork-aware history in entry order with each marker where it was written (after the entries it keeps); its `head` names
- * the first kept entry. Older markers are dropped from the history: an older summary there would be a stray bubble.
+ * The transcript as the projection reads it: the active context (from the newest compaction's first kept entry, every
+ * later entry) and the history before it, for display only, both in entry order. The view lists the fork-aware history
+ * in entry order with each compaction summary where it was written: after the entries it keeps, where it took effect.
+ * The projection shows each summary there, as T3 shows any provider's compaction at the moment it happened; earlier
+ * summaries stay in the history the same way.
  */
 export function splitTranscript(entries: readonly EntryRecord[]): { active: EntryRecord[]; history: EntryRecord[] } {
 	const marker = entries.findLast((entry) => entry.kind === "pi.compaction" && entry.head !== undefined);
 	if (marker === undefined) return { active: [...entries], history: [] };
 	const firstKept = marker.head!;
-	const active = [marker, ...entries.filter((entry) => entry !== marker && entry.id >= firstKept)];
-	const history = entries.filter((entry) => entry.id < firstKept && entry.kind !== "pi.compaction");
-	return { active, history };
+	return { active: entries.filter((entry) => entry.id >= firstKept), history: entries.filter((entry) => entry.id < firstKept) };
 }
 
 export class ThreadView {

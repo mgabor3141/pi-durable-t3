@@ -164,11 +164,13 @@ export const isAbortedToolResult = (entry: EntryRecord) =>
  * still going: its last step is a completed tool round (every call of the last assistant entry has a result, none of
  * them aborted). After an interrupted tool round the run has ended, so the next user entry starts a new one.
  *
- * A compaction is a context head, not a step of a run: it closes the run before it and its card belongs at the cut.
- * When the cut fell inside a turn (pi's split-turn compaction) the kept tail starts with assistant/tool entries that
- * no user prompt precedes, so the compaction entry anchors a synthetic run and the tail stays visible instead of
- * being dropped. A compaction that kept a user turn attaches its card to that turn's run; one that kept nothing is a
- * marker-only draft.
+ * A compaction summary is a step of the run it landed in, where it was written: the card shows when the context was
+ * compacted, as T3 shows a provider's compaction (a background compaction lands at a boundary while the agent works;
+ * a `/compact` lands in its own run). The run goes on after it: it changes the model's context, not the turn.
+ * Only a transcript that starts with a compaction (an undone head's active context, which has no history before the
+ * cut) has no run for it: when the kept tail starts inside a turn (pi's split-turn compaction), its assistant/tool
+ * entries have no user prompt, so the summary anchors a synthetic run and the tail stays visible; when it starts with
+ * a user turn, the card goes before that turn's run; when it kept nothing, the draft is marker-only.
  */
 export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 	const runs: RunDraft[] = [];
@@ -176,6 +178,11 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 	let pendingCard: EntryRecord | undefined;
 	for (const [index, entry] of entries.entries()) {
 		if (entry.kind === "pi.compaction") {
+			const current = runs.at(-1);
+			if (current !== undefined && current.markerOnly !== true) {
+				current.steps.push(entry);
+				continue;
+			}
 			steerable = false;
 			pendingCard = entry;
 			const next = entries[index + 1];

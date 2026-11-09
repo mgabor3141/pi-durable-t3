@@ -241,12 +241,17 @@ export function projectThread(
 		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
 	};
 	const history = memory.history ?? [];
-	const drafts = groupRuns([...history, ...(view?.entries ?? [])]);
-	// A live manual compaction has a durable /compact user entry. Treat that entry as its run, so T3 paints the
-	// compacting state with a real run id (its composer queues instead of starting a parallel turn).
-	const compactDraft = drafts.findLast((draft) => isCompactCommandEntry(draft.userEntry));
-	const liveCompactionRunId = compactDraft === undefined ? null : `r${compactDraft.userEntry.id}`;
-	const busy = view === undefined ? meta.running : live?.run !== undefined || (liveCompactions.length > 0 && liveCompactionRunId !== null);
+	const transcript = [...history, ...(view?.entries ?? [])];
+	const drafts = groupRuns(transcript);
+	const compactionTokens = compactionTokenCounts(transcript);
+	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
+	// that entry as its run, so T3 paints the compacting state with a real run id (its composer queues instead of
+	// starting a parallel turn). An older /compact, long done, is not the run of a compaction that runs now.
+	const manualCompaction = liveCompactions.find((compaction) => compactionTrigger(compaction) === "manual");
+	const newestDraft = drafts.at(-1);
+	const compactDraft = newestDraft !== undefined && isCompactCommandEntry(newestDraft.userEntry) && !newestDraft.steps.some(isCompactionEntry) ? newestDraft : undefined;
+	const manualCompactionRunId = manualCompaction === undefined || compactDraft === undefined ? null : `r${compactDraft.userEntry.id}`;
+	const busy = view === undefined ? meta.running : live?.run !== undefined || manualCompactionRunId !== null;
 	// The thread's folder of its own, as T3 spells it on a thread row: a folder UNDER the project root (the registry's
 	// cover rule, `Threads.#projectForConversation`), null for a thread running at the root itself.
 	const worktreePath = meta.projectPath === undefined || !meta.cwd.startsWith(`${meta.projectPath}/`) ? null : meta.cwd;
@@ -317,6 +322,7 @@ export function projectThread(
 		const message = firstMessage(entry);
 		const at = message?.timestamp ?? meta.createdAt;
 		const summary = textOf(message?.role === "user" ? message.content : undefined);
+		const tokens = compactionTokens.get(entry.id);
 		turnItems.push({
 			id: id(`ti-k${entry.id}`),
 			threadId: id(threadId),
@@ -335,6 +341,8 @@ export function projectThread(
 			type: "compaction",
 			driver: id(PROVIDER_DRIVER),
 			...(summary.length === 0 ? {} : { summary }),
+			...(tokens?.before === undefined ? {} : { beforeTokenCount: tokens.before }),
+			...(tokens?.after === undefined ? {} : { afterTokenCount: tokens.after }),
 		} as Any);
 	};
 
@@ -374,7 +382,8 @@ export function projectThread(
 						? "failed"
 						: "interrupted";
 		}
-		const lastEntry = draft.steps.at(-1) ?? u;
+		// A compaction card is not a place to fork at or a run's last message: the run's own last entry is.
+		const lastEntry = draft.steps.findLast((step) => !isCompactionEntry(step)) ?? u;
 		// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
 		const lastMessage = firstMessage(lastEntry);
 		// Never before it was asked for: a message stamped earlier (a clock step, a reply made ahead) still ends the run then.
@@ -774,6 +783,12 @@ export function projectThread(
 				pushUser(step, "steer");
 				return;
 			}
+			// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
+			if (isCompactionEntry(step)) {
+				pushCards(firstMessage(step)?.timestamp ?? requestedAt);
+				pushCompaction(step, ordinal, runId);
+				return;
+			}
 			// A published page: T3's html_render tool item, which its timeline shows inline (`htmlRenderFromToolItem`).
 			const render = htmlRenderOf(step);
 			if (render !== undefined) {
@@ -827,15 +842,26 @@ export function projectThread(
 
 	markModelSwitches(runs, turnItems, drafts);
 
-	// A manual compaction is a durable task, not an optimistic client request. Project its live status so a reload
-	// still shows that the context is being compacted; the completed summary replaces this item at the cut.
+	// A live compaction is shown only while something waits for it, as T3 shows a provider's compaction: a manual one
+	// (`/compact`, its own run; a reload still shows it) and a blocking one (the agent's next request waits for it, in
+	// the agent's run). A background compaction runs while the agent keeps working, so it has no row until its summary
+	// lands. The completed summary replaces this item where it lands.
+	const agentRunId = live?.run !== undefined && newestDraft !== undefined ? `r${newestDraft.userEntry.id}` : null;
+	const lastActivityAt = (draft: RunDraft | undefined): number => {
+		const last = draft?.steps.findLast((step) => firstMessage(step)?.timestamp !== undefined) ?? draft?.userEntry;
+		return (last === undefined ? undefined : firstMessage(last)?.timestamp) ?? meta.updatedAt;
+	};
 	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
 	for (const compaction of liveCompactions) {
-		const startedAt = Date.now();
+		const manual = compaction === manualCompaction;
+		const runId = manual ? manualCompactionRunId : compaction.blocking === true ? agentRunId : null;
+		if (runId === null && !manual) continue;
+		// Stable across projections: when it was asked for (the /compact) or when the agent's run paused for it.
+		const startedAt = manual && compactDraft !== undefined ? (firstMessage(compactDraft.userEntry)?.timestamp ?? meta.updatedAt) : lastActivityAt(newestDraft);
 		turnItems.push({
 			id: id(`ti-live-compaction-${compaction.taskId ?? liveOrdinal}`),
 			threadId: id(threadId),
-			runId: liveCompactionRunId === null ? null : id(liveCompactionRunId),
+			runId: runId === null ? null : id(runId),
 			nodeId: null,
 			providerThreadId: id(providerThreadId),
 			providerTurnId: null,
@@ -1117,4 +1143,42 @@ export function projectThread(
 	} as Any;
 
 	return { projection, shell, runs: projectedRuns, forkRuns };
+}
+
+/** A compaction summary entry: shown as T3's compaction card where it landed. */
+function isCompactionEntry(entry: EntryRecord): boolean {
+	return entry.kind === "pi.compaction";
+}
+
+/** Why a live compaction runs, as pi-durable records it in `pi.live` (`manual`, `threshold`, `overflow`). */
+function compactionTrigger(compaction: Any): string | undefined {
+	return typeof compaction?.trigger === "string" ? compaction.trigger : undefined;
+}
+
+/**
+ * The context size before and after each compaction, as T3's card shows it ("Context compacted 183k → 41k tokens"):
+ * before, what the last request before the summary used (its input, cache and answer); after, what the first request
+ * after it sent. A request without usage (one that failed) does not count. Each is absent until there is such a request.
+ */
+export function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord["id"], { before?: number; after?: number }> {
+	const counts = new Map<EntryRecord["id"], { before?: number; after?: number }>();
+	let lastContext: number | undefined;
+	let waiting: { before?: number; after?: number }[] = [];
+	for (const entry of entries) {
+		if (isCompactionEntry(entry)) {
+			const count: { before?: number; after?: number } = lastContext === undefined ? {} : { before: lastContext };
+			counts.set(entry.id, count);
+			waiting.push(count);
+			continue;
+		}
+		const message = firstMessage(entry);
+		if (message?.role !== "assistant") continue;
+		const usage = (message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage;
+		const sent = (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
+		if (sent <= 0) continue;
+		for (const count of waiting) count.after = sent;
+		waiting = [];
+		lastContext = sent + (usage?.output ?? 0);
+	}
+	return counts;
 }

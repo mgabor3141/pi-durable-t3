@@ -10,12 +10,12 @@ import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 // A compacted thread through the bridge's view: pi-durable's view lists the whole transcript with the compaction summary
-// where it was written (after the entries it keeps); the bridge shows the history above the cut, the card at the cut,
-// then the kept tail and later turns (`splitTranscript`). Here the cut falls inside turn 3, so its answer is the tail's
-// first entry. The same projection after a restart.
+// where it was written (after the entries it keeps); the bridge shows every turn in order and the card where the summary
+// landed, as T3 shows a provider's compaction: here in the `/compact` run, which T3 folds into one compaction row. The
+// cut fell inside turn 3, and nothing marks it in the timeline. The same projection after a restart.
 const shape = (items: readonly { type: string; text?: string }[]) => items.map((item) => [item.type, (item.text ?? "").slice(0, 12)]);
 
-it("a compacted thread shows its history, the card at the cut, the kept tail and later turns, after a restart too", async () => {
+it("a compacted thread shows its turns in order and the card where the summary landed, after a restart too", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "probe-"));
@@ -38,17 +38,19 @@ it("a compacted thread shows its history, the card at the cut, the kept tail and
 	await new Promise((r) => setTimeout(r, 200));
 	const { projection } = await bridge.projection("t");
 	const items = projection.turnItems as unknown as { type: string; text?: string; runId: string }[];
+	const command = items.find((item) => item.type === "user_message" && item.text === "/compact")!;
+	expect(items.find((item) => item.type === "compaction")!.runId, "the card is in the /compact run").toBe(command.runId);
 	expect(shape(items)).toEqual([
 		["user_message", "question 1"],
 		["assistant_message", "answer 1 xxx"],
 		["user_message", "question 2"],
 		["assistant_message", "answer 2 xxx"],
 		["user_message", "question 3"],
-		["compaction", ""],
 		["assistant_message", "answer 3 xxx"],
 		["user_message", "question 4"],
 		["assistant_message", "answer 4 xxx"],
 		["user_message", "/compact"],
+		["compaction", ""],
 		["user_message", "question 5"],
 		["assistant_message", "answer 5"],
 	]);
