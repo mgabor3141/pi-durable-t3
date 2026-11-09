@@ -29,6 +29,25 @@ import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 
+/** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
+const CODEMODE_TOOL = "codemode";
+/** The tool name T3's web app shows as JavaScript. */
+const T3_JAVASCRIPT_TOOL = "js";
+const HEADLINE_MAX = 200;
+
+/**
+ * A script's first line that says something: blank lines and codemode's `// @options` line are skipped. Null for a
+ * script with none (T3 then labels the row "Run JavaScript").
+ */
+export function scriptHeadline(code: string): string | null {
+	for (const line of code.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed === "" || /^\/\/\s*@options\b/u.test(trimmed)) continue;
+		return trimmed.length > HEADLINE_MAX ? `${trimmed.slice(0, HEADLINE_MAX - 1)}…` : trimmed;
+	}
+	return null;
+}
+
 type LiveToolSlot = NonNullable<LiveDoc["tools"]>[number];
 
 export const PROVIDER_INSTANCE_ID = "pi";
@@ -631,6 +650,18 @@ export function projectThread(
 						input: block.arguments.command,
 						...(output === undefined ? {} : { output }),
 						...(failed ? { outputIndicatesFailure: true } : {}),
+					} as Any);
+				} else if (block.name === CODEMODE_TOOL && typeof block.arguments.code === "string") {
+					// T3 shows a JavaScript tool (`js`, `isJavaScriptReplTool` in T3's shared toolActivity) with a code icon, its
+					// title as the row's label, and its `code` highlighted as TypeScript; a script's first line is that label,
+					// as a command's own text is a command row's.
+					turnItems.push({
+						...common,
+						title: scriptHeadline(block.arguments.code),
+						type: "dynamic_tool",
+						toolName: T3_JAVASCRIPT_TOOL,
+						input: { code: block.arguments.code },
+						...(output === undefined ? {} : { output }),
 					} as Any);
 				} else {
 					// The model's own html_render call: its page is the `app.html-render` entry's item, so the call's output

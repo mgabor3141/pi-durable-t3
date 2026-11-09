@@ -43,14 +43,15 @@ it("getTurnItem gives the full item behind a row whose output the wire withheld"
 	});
 
 	f.model.respond(
-		fauxAssistantMessage([fauxToolCall("codemode", { code: "return text(list)" }, { id: "call-1" })], { stopReason: "toolUse" }),
+		fauxAssistantMessage([fauxToolCall("codemode", { code: "// @options: {\"timeout_ms\": 1000}\n\nconst list = await tools.read({ path: \"rows\" });\nreturn text(list);" }, { id: "call-1" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage("read them"),
 	);
 	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "list", mode: "start" });
 	await idle(f.harness, thread.head);
 	const { projection } = await bridge.projection("t");
-	const item = (projection.turnItems as unknown as { id: string; type: string; toolName?: string }[]).find((candidate) => candidate.type === "dynamic_tool" && candidate.toolName === "codemode")!;
-	expect(item).toBeDefined();
+	const item = (projection.turnItems as unknown as { id: string; type: string; toolName?: string }[]).find((candidate) => candidate.type === "dynamic_tool" && candidate.toolName === "js")!;
+	// A script is T3's JavaScript row: a code icon, the script's first line as the label, the code highlighted.
+	expect(item).toMatchObject({ title: 'const list = await tools.read({ path: "rows" });', input: { code: expect.stringContaining("return text(list);") } });
 
 	const wire = projectThreadProjectionForWire(projection).turnItems.find((candidate) => String(candidate.id) === item.id)!;
 	expect(wire).toMatchObject({ type: "dynamic_tool", outputOmitted: true });
@@ -58,7 +59,7 @@ it("getTurnItem gives the full item behind a row whose output the wire withheld"
 	// What the client does when the row is expanded: ask for the item by id.
 	const full = await bridge.turnItem("t", item.id);
 	expect(full, "the thread has the item").not.toBeNull();
-	expect(full).toMatchObject({ id: item.id, type: "dynamic_tool", toolName: "codemode" });
+	expect(full).toMatchObject({ id: item.id, type: "dynamic_tool", toolName: "js" });
 	expect((full as { outputOmitted?: boolean }).outputOmitted).toBeUndefined();
 	// Bounded for the wire, as T3 bounds an on-demand read.
 	expect(projectTurnItemForDetail(full!)).toMatchObject({ id: item.id, type: "dynamic_tool" });
@@ -66,4 +67,11 @@ it("getTurnItem gives the full item behind a row whose output the wire withheld"
 	// An item the thread does not have is null, not an error; an unknown thread is an error.
 	expect(await bridge.turnItem("t", "ti-nope")).toBeNull();
 	await expect(bridge.turnItem("nope", item.id)).rejects.toThrow(/Unknown thread/);
+});
+
+it("a script's headline is its first line that says something", async () => {
+	const { scriptHeadline } = await import("../src/t3/projection.ts");
+	expect(scriptHeadline("// @options: {}\n\n  // Compare the sizes\nconst a = 1;")).toBe("// Compare the sizes");
+	expect(scriptHeadline("\n \n")).toBeNull();
+	expect(scriptHeadline("x".repeat(500))).toHaveLength(200);
 });

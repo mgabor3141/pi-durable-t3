@@ -159,7 +159,7 @@ it("a script's html_render (the way an agent that acts through codemode calls it
 	await idle(f.harness, thread.head);
 
 	const items = (await holder.bridge.projection("t")).projection.turnItems as unknown as { type: string; toolName?: string; output?: unknown; text?: string }[];
-	const script = items.find((item) => item.type === "dynamic_tool" && item.toolName === "codemode");
+	const script = items.find((item) => item.type === "dynamic_tool" && item.toolName === "js");
 	expect(String(script?.output)).toContain("Shown to the reader above your reply.");
 	const renders = items.filter((item) => item.type === "dynamic_tool" && htmlRenderFromToolItem(item as never) !== undefined);
 	expect(renders.map((item) => htmlRenderFromToolItem(item as never)?.title)).toEqual(["Chart"]);
