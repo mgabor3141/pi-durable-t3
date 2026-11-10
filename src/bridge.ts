@@ -26,7 +26,6 @@ import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
-import { DEFAULT_TAILSCALE_SERVE_PORT, makeTailscaleCli, type TailscaleCommandError } from "./t3/tailscale.ts";
 
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 import { ConfigError } from "./config.ts";
@@ -88,20 +87,8 @@ export type AttachT3Options = {
 	/** Bearer-token lifetime, seconds. Default 90 days. */
 	readonly tokenTtlSeconds?: number;
 	/**
-	 * Publish this host over Tailscale Serve: `tailscale serve --bg --https=<port> http://127.0.0.1:<bound port>`,
-	 * armed once the listener is up and released on close, so the app is reachable at
-	 * `https://<machine>.<tailnet>.ts.net[:port]` (443 needs no port in the URL). Absent (the default): off.
-	 *
-	 * A Serve failure only warns: startup never depends on Tailscale. Before arming, the host reads
-	 * `tailscale serve status` and refuses to arm an HTTPS port that already maps elsewhere — unlike T3, which arms
-	 * unconditionally and would take over (and later remove) a mapping another process created. Serve forwards to
-	 * loopback carrying the machine's MagicDNS `Host`; the host checks no `Host` header (like T3), so a forwarded
-	 * request reaches the same routes and the same credential check as any other.
-	 */
-	readonly tailscaleServe?: { readonly port?: number };
-	/**
-	 * A route to this host that you run yourself, such as your own tailnet node or an SSH relay into the environment,
-	 * instead of `tailscaleServe` (setting both is refused). T3 learns its HTTPS URL (`directEndpoints`) and the SSH host
+	 * A route to this host that you run yourself, such as your own tailnet node or an SSH relay into the environment.
+	 * T3 learns its HTTPS URL (`directEndpoints`) and the SSH host
 	 * editors open paths on (`remoteOpenTargets`: "Open in VS Code", file links). Read at each config read; on a change,
 	 * connected clients get a fresh config. Absent: none.
 	 */
@@ -194,9 +181,6 @@ export function mintPairingCode(stateDir: string): { readonly code: string } {
  * capabilities.md). */
 export async function attachT3(harness: Harness, options: AttachT3Options): Promise<T3Attachment> {
 	const log = options.log ?? nullLogger;
-	if (options.remoteAccess !== undefined && options.tailscaleServe !== undefined) {
-		throw new Error("attachT3: set remoteAccess or tailscaleServe, not both: each advertises how this host is reached");
-	}
 	// The bridge owns its dir: mode 0700, it holds the pairing store. A pre-existing dir is tightened.
 	mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
 	const registry = new ProjectRegistry(harness, { baseDir: options.stateDir });
@@ -248,16 +232,11 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
-		tailscaleServe:
-			options.tailscaleServe === undefined
-				? undefined
-				: { port: options.tailscaleServe.port ?? DEFAULT_TAILSCALE_SERVE_PORT },
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
 		...(options.routes === undefined ? {} : { routes: options.routes }),
 	};
-	const tailscale = makeTailscaleCli();
-	const facet = startFacet({ threads, models: options.models, catalog, log, config, tailscale });
+	const facet = startFacet({ threads, models: options.models, catalog, log, config });
 	// Resolve only once LISTENING and loaded: a bind failure (a port in use) or unreadable tasks reject here, after the
 	// facet is closed again.
 	try {
@@ -265,37 +244,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	} catch (error) {
 		await facet.close().catch(() => {});
 		throw error;
-	}
-	// Tailscale Serve, armed only once the listener is up. A failure is a warning, never a dead host (T3's rule for
-	// this path). Safety check first — a deliberate, safer-than-T3 deviation: only a free port, or one already pointed
-	// at this host's own loopback port (a stale mapping of ours), is armed. A mapping this host did not create is
-	// never taken over, and so never removed on close. A status read that fails (no CLI, logged out) is fail-closed.
-	const servePort = config.tailscaleServe?.port;
-	let serveArmed: number | undefined;
-	if (servePort !== undefined) {
-		const localPort = await facet.ready;
-		const isOwnTarget = (target: string) =>
-			target === `http://127.0.0.1:${String(localPort)}` || target === `http://localhost:${String(localPort)}`;
-		try {
-			const targets = await tailscale.readServeTargets({ servePort });
-			if (targets !== null && !targets.every(isOwnTarget)) {
-				log.warn(
-					`Tailscale Serve HTTPS port ${String(servePort)} already maps to ${targets.length > 0 ? targets.join(", ") : "a mapping this host cannot read"}; not arming. Pick another tailscale_serve_port.`,
-					{ servePort, localPort },
-				);
-			} else {
-				await tailscale.ensureServe({ localPort, servePort, localHost: "127.0.0.1" });
-				serveArmed = servePort;
-				log.info("Tailscale Serve configured", { localPort, servePort });
-			}
-		} catch (error) {
-			log.warn("Failed to configure Tailscale Serve", {
-				localPort,
-				servePort,
-				error: (error as Error).message || String(error),
-				...serveDiagnostic(error),
-			});
-		}
 	}
 	return {
 		closed: facet.closed,
@@ -315,27 +263,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 				},
 			}),
 		close: async () => {
-			// Release our own mapping first, so tailnet traffic stops before the listener does (T3's acquireRelease
-			// order). Only an armed port is released: the status check above guarantees an armed mapping is ours.
-			if (serveArmed !== undefined) {
-				try {
-					await tailscale.disableServe({ servePort: serveArmed });
-					log.info("Tailscale Serve disabled", { servePort: serveArmed });
-				} catch (error) {
-					log.warn("Failed to disable Tailscale Serve", {
-						servePort: serveArmed,
-						error: (error as Error).message || String(error),
-						...serveDiagnostic(error),
-					});
-				}
-			}
 			await facet.close();
 		},
 	};
-}
-
-/** The safe, named classification a `TailscaleCommandError` carries — warnings log it, never the stderr itself. */
-function serveDiagnostic(error: unknown): { diagnostic: string } | Record<string, never> {
-	const diagnostic = (error as TailscaleCommandError).stderrDiagnostic;
-	return diagnostic === undefined ? {} : { diagnostic };
 }

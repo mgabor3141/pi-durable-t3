@@ -45,7 +45,6 @@ import { ThreadOps } from "./thread-ops.ts";
 import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
-import type { TailscaleCli } from "./tailscale.ts";
 import type { PreviewSessions } from "./preview.ts";
 import { makePreviewStreamHandler } from "./preview-http.ts";
 import { McpOAuth } from "./mcp-oauth.ts";
@@ -228,14 +227,13 @@ export function makeServerLayer(deps: {
 	attachments: Attachments | undefined;
 	assets: WorkspaceAssets;
 	scheduledTasks: ScheduledTasks;
-	tailscale: TailscaleCli;
 	files: WorkspaceFiles;
 	preview: PreviewSessions | undefined;
 	secretRequests: SecretRequests;
 }) {
 	const { bridge, auth, log, httpServer, attachments, assets, preview } = deps;
 	const descriptor = makeDescriptor(bridge, auth, preview, attachments);
-	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, tailscale: deps.tailscale, preview, secretRequests: deps.secretRequests });
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, preview, secretRequests: deps.secretRequests });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);

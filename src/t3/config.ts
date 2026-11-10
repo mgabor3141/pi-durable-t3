@@ -33,11 +33,7 @@ export interface FacetConfig {
 	readonly corsOrigins: readonly string[];
 	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: none, as before. */
 	readonly staticDir: string | undefined;
-	/** Tailscale Serve: publish this host on the tailnet HTTPS name. Absent (the default) is off: the host runs no
-	 * `tailscale` command and advertises no tailnet endpoint. Optional, like `attachT3`'s option. */
-	readonly tailscaleServe?: { readonly port: number };
-	/** A route the integrator runs (its own tailnet node, an SSH relay), advertised to T3. Absent: none. Not with
-	 * `tailscaleServe`. */
+	/** A route the integrator runs (its own tailnet node, an SSH relay), advertised to T3. Absent: none. */
 	readonly remoteAccess?: RemoteAccess;
 	/** Title generation, delegated to the integrator. Absent: seeds and renames work, "Regenerate title" is refused. */
 	readonly titleThread?: TitleThread;

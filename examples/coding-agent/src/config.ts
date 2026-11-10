@@ -7,7 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { arr, bool, compile, int, obj, opt, type Static, str, type ValidationError } from "@earendil-works/pi-schema";
+import { arr, compile, int, obj, opt, type Static, str, type ValidationError } from "@earendil-works/pi-schema";
 import { ConfigError } from "../../../src/bridge.ts";
 
 export { ConfigError };
@@ -49,9 +49,6 @@ export type HostConfig = {
 	readonly attachmentsDir: string;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[] | undefined;
-	/** Tailscale Serve: publish the host on the tailnet HTTPS name (`tailscale serve`), and the HTTPS port to publish on. */
-	readonly tailscaleServe: boolean;
-	readonly tailscaleServePort: number;
 };
 
 // One flat schema for `config.toml`: the example host's own options, mostly passed straight to `attachT3`. Projects and
@@ -63,8 +60,6 @@ const HostTomlSchema = obj({
 	scratch_dir: opt(str({ minLength: 1 })),
 	token_ttl_days: int({ default: 90, minimum: 1 }),
 	cors_origins: opt(arr(str({ minLength: 1 }))),
-	tailscale_serve: bool({ default: false }),
-	tailscale_serve_port: int({ default: 443, minimum: 1, maximum: 65_535 }),
 });
 type HostToml = Static<typeof HostTomlSchema>;
 const validateHostToml = compile(HostTomlSchema);
@@ -104,8 +99,6 @@ export function parseConfigToml(text: string, dataDir: string, file = "config.to
 		attachmentsDir: join(dataDir, "attachments"),
 		tokenTtlSeconds: doc.token_ttl_days * 86_400,
 		corsOrigins: doc.cors_origins,
-		tailscaleServe: doc.tailscale_serve,
-		tailscaleServePort: doc.tailscale_serve_port,
 	};
 }
 

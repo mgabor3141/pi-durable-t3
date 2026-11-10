@@ -63,17 +63,3 @@ it("advertises the integrator's URL and SSH host, and pushes a snapshot when the
 		await t3.close();
 	}
 }, 60_000);
-
-it("refuses remoteAccess together with tailscaleServe", async () => {
-	const f = await makeThreads({ projects: [{ id: "p" }] });
-	await expect(
-		attachT3(f.harness, {
-			models: f.model.models,
-			stateDir: join(f.root, "t3-state"),
-			env: new NodeExecutionEnv({ cwd: f.root }),
-			listen: { host: "127.0.0.1", port: PORT + 1 },
-			tailscaleServe: {},
-			remoteAccess: { current: () => ({}), subscribe: () => () => {} },
-		}),
-	).rejects.toThrow(/remoteAccess or tailscaleServe, not both/);
-});

@@ -48,7 +48,6 @@ import { snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStrea
 import { projectTurnItemForDetail, RpcAuthorization } from "./t3-server.ts";
 import { PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
-import { resolveServedEndpoint, type ServedEndpoint, type TailscaleCli } from "./tailscale.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { Attachments } from "./attachments.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
@@ -96,7 +95,6 @@ interface RpcDeps {
 	readonly attachments: Attachments | undefined;
 	readonly assets: WorkspaceAssets;
 	readonly scheduledTasks: ScheduledTasks;
-	readonly tailscale: TailscaleCli;
 	readonly preview: PreviewSessions | undefined;
 	readonly secretRequests: SecretRequests;
 	readonly log: Logger;
@@ -108,7 +106,7 @@ function serverSettings(deps: RpcDeps) {
 	return deps.bridge.config.settings.current();
 }
 
-function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[]): ServerConfig {
+function serverConfig(deps: RpcDeps): ServerConfig {
 	const remote = deps.bridge.config.remoteAccess === undefined ? undefined : advertisedRemoteAccess(deps.bridge.config.remoteAccess.current());
 	return {
 		environment: deps.descriptor(),
@@ -129,10 +127,9 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[])
 			otlpLogsEnabled: false,
 		},
 		settings: serverSettings(deps),
-		// T3's `directEndpoints`, smaller: this host advertises only the tailnet Serve URL (no LAN addresses), read
-		// fresh on every config read — the served name is the machine's, not this process's, fact.
-		// With `remoteAccess`, the integrator's route instead: its URL, and the SSH host editors open paths on.
-		directEndpoints: remote?.directEndpoints ?? directEndpoints,
+		// T3's `directEndpoints` and `remoteOpenTargets`, from the integrator's route (`remoteAccess`): its URL, and the
+		// SSH host editors open paths on. No LAN addresses; without a route, none.
+		directEndpoints: remote?.directEndpoints ?? [],
 		...(remote?.remoteOpenTargets === undefined ? {} : { remoteOpenTargets: remote.remoteOpenTargets }),
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
@@ -143,16 +140,9 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[])
 	};
 }
 
-/** A config read: the static fields plus the served tailnet URL (bounded: a machine with no `tailscale` CLI answers
- * in milliseconds, not in timeouts). */
+/** A config read. */
 async function readServerConfig(deps: RpcDeps): Promise<ServerConfig> {
-	const served = deps.bridge.config.tailscaleServe === undefined
-		? null
-		: await resolveServedEndpoint({
-				servePort: deps.bridge.config.tailscaleServe.port,
-				tailscale: deps.tailscale,
-			});
-	return serverConfig(deps, served === null ? [] : [served]);
+	return serverConfig(deps);
 }
 
 /** A config read as the contract declares its failure: the settings error T3 raises when it cannot read its config. */

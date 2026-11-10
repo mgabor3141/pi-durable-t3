@@ -49,7 +49,7 @@ Open the link in a browser: it signs the browser in and opens T3 with the agent 
 desktop app instead, add a computer there and paste the same link.
 
 The agent is [`examples/coding-agent/`](examples/coding-agent/): pi-durable's coding-agent recipe with the
-bridge attached. Its README covers config, files and Tailscale. **It runs `bash` as your user, with no
+bridge attached. Its README covers config and files. **It runs `bash` as your user, with no
 approvals.**
 
 ## Attach it to your own agent
@@ -69,8 +69,7 @@ const t3 = await attachT3(harness, {
 	webApp,        // optional: another built T3 web app folder to serve at `/` (default: the one in the package)
 	scratchDir,    // optional: absolute path in `env` where "No project" threads run; omit to turn it off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
-	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
-	remoteAccess,  // optional: { current, subscribe } — a route you run (own tailnet node, SSH relay), advertised to T3; not with tailscaleServe
+	remoteAccess,  // optional: { current, subscribe } — a route you run (own tailnet node, SSH relay), advertised to T3
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
 	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
 	rpcLog,        // optional: { onSuccess, onFailure, onStubbed } per-call debug sink for the T3 wire
@@ -122,24 +121,19 @@ The bridge listens on loopback by default. Like T3, it checks no `Host` header: 
 descriptor and pairing needs a credential from pairing — a bearer token, or the web app's same-origin session
 cookie. Browsers on other origins may call only if listed in `corsOrigins` (default: T3's desktop app). What the agent may do is the Harness's business, not the bridge's.
 
-With `tailscaleServe` set, the host first reads `tailscale serve status` and arms its HTTPS port only when it is
-free (or already points at this host's own port): a port that maps elsewhere is refused with a warning, so the host
-never replaces — and never removes — a mapping it did not create (deliberately stricter than T3, which arms
-unconditionally). An armed port is released on shutdown.
-
-With `remoteAccess`, you run the route and the bridge only advertises it: `current()` answers the HTTPS URL a paired
+The bridge runs no Tailscale. To reach the host from elsewhere, run the route yourself (a reverse proxy, your own
+`tailscale serve`, or a tailnet node of your own as claw does) and, with `remoteAccess`, the bridge advertises it: `current()` answers the HTTPS URL a paired
 client may use (`directEndpoints`) and the SSH host editors open paths on (`remoteOpenTargets`, port 22, so "Open in VS
 Code", file links and the file preview work); `subscribe` reports changes, and connected clients get a fresh config.
-For hosts T3 cannot discover from, such as one in a container with its own tailnet node.
+T3's server discovers these on its own machine; this host is told.
 
 ## What works
 
 Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, archive, snooze, unread across devices, live order and status for threads nobody is looking at), inline HTML pages the agent publishes (`T3Attachment.htmlTools`: T3's `html_render`, and `html_preview` with `preview`), interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding, renaming, repointing and removing projects (an agent too, with T3's project tools), image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
 nests under its parent as a full thread; the example agent has them),
-and Connections (pairing links, paired devices, revoking), plus reaching the host over Tailscale Serve
-(`tailscaleServe`: HTTPS on the tailnet, the tailnet URL advertised to paired clients as the one `directEndpoint`,
-and the tailnet name in the link `pair` prints). T3's file panel works through the execution environment: browse, open, edit and save in any folder the agent can see (writes stay on a project root; the agent may edit the same file, last write wins), with quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
+and Connections (pairing links, paired devices, revoking), plus a route you run advertised to T3 (`remoteAccess`: the
+URL paired clients learn as the one `directEndpoint`, and the SSH host for "Open in VS Code" and file links). T3's file panel works through the execution environment: browse, open, edit and save in any folder the agent can see (writes stay on a project root; the agent may edit the same file, last write wins), with quick-open and content search. Search walks the environment; the native `@ff-labs/fff-node` index is kept for a later capability and is not used yet.
 Git and terminals are refused on purpose: the agent works in real folders with `bash`. Workspace images, HTML and
 PDFs preview through signed asset URLs served from the execution environment; audio and video files preview the same
 way, and an HTML page's relative CSS, scripts, fonts and images load under its token. T3's Browser panel is available
@@ -176,8 +170,6 @@ Known limitations:
   can lock out local pairing for that minute.
 - A page that rebinds a hostname to the port gets no credentials, but can read the public descriptor and spend the
   pairing rate limit.
-- `tailscale serve` config lives in Tailscale, not in this host. A host that is SIGKILLed leaves its mapping behind;
-  a graceful stop removes it. Clear a stale one with `tailscale serve --https=<port> off`.
 
 ## Tests
 

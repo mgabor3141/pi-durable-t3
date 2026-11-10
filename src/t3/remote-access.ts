@@ -1,7 +1,7 @@
-// How this host is reached from other machines when the integrator runs the route itself (its own tailnet node, an SSH
-// relay), instead of the bridge arming Tailscale Serve on the machine's own Tailscale (`tailscaleServe`). T3's server
-// discovers both facts on its own machine (`DirectEndpoints`, `RemoteOpenTargets`); a host behind a container cannot,
-// so the integrator states them and says when they change.
+// How this host is reached from other machines, when the integrator runs the route (its own tailnet node, an SSH
+// relay). T3's server discovers both facts on its own machine (`DirectEndpoints`, `RemoteOpenTargets`); this host does
+// not run Tailscale or probe anything, so the integrator states them and says when they change. Absent: this host is
+// reached only where it listens, and T3's editor links stay off.
 
 /** What this host advertises now. Either part may be absent: not set up yet, or not offered. */
 export interface RemoteAccessState {

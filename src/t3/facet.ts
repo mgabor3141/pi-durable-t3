@@ -26,12 +26,10 @@ import { threadToolsExtension } from "./thread-tools.ts";
 import { htmlToolsExtension } from "./html-tools.ts";
 import { Orchestration } from "./orchestration.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import type { TailscaleCli } from "./tailscale.ts";
 
 type FacetHandle = {
 	/** Resolves with the port the listener ACTUALLY got, once it is listening; rejects with the bind error (e.g.
-	 * `EADDRINUSE`). The bound port, not the configured one: with port 0 the two differ, and Tailscale Serve must be
-	 * pointed at the socket that is really open. */
+	 * `EADDRINUSE`). The bound port, not the configured one: with port 0 the two differ. */
 	readonly ready: Promise<number>;
 	/** Resolves when the server fiber ENDS on its own after `ready`; what to do about it is the integrator's policy —
 	 * the library never kills the process. */
@@ -58,7 +56,6 @@ export function startFacet(deps: {
 	catalog: ModelCatalog;
 	log: Logger;
 	config: BridgeConfig;
-	tailscale: TailscaleCli;
 }): FacetHandle {
 	const { catalog, log, config } = deps;
 	const auth = new AuthStore(config.stateDir, { tokenTtlSeconds: config.tokenTtlSeconds });
@@ -104,7 +101,7 @@ export function startFacet(deps: {
 	orchestration.start();
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, tailscale: deps.tailscale, files, preview, secretRequests })) as Effect.Effect<never>);
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, files, preview, secretRequests })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.

@@ -65,7 +65,6 @@ lists every key with its default. Most map straight onto `attachT3` options:
 | `scratch_dir` | `scratchDir` |
 | `token_ttl_days` | `tokenTtlSeconds` |
 | `cors_origins` | `corsOrigins` |
-| `tailscale_serve`, `tailscale_serve_port` | `tailscaleServe` (`{ port }`, 443 by default) |
 | `instructions` | none: the agent's system prompt, added to every thread |
 
 `--root <dir>` puts config and data in one directory instead of the XDG locations.
@@ -83,20 +82,3 @@ In `~/.local/share/pi-durable-t3/` (`$XDG_DATA_HOME`), or `<dir>` with `--root`:
 
 `t3/` pairs with `durable.db`: back up and move them together. A file that doesn't parse stops the host with
 a message naming it.
-
-## Over Tailscale
-
-Set `tailscale_serve = true` and restart. While the host runs it checks `tailscale serve status` and arms
-`tailscale serve --https=<tailscale_serve_port> --bg http://127.0.0.1:<listen port>` only when that port is free (a
-port already mapped to something else is refused with a warning — pick another `tailscale_serve_port`), and releases
-its own mapping when you stop it gracefully — so the app is HTTPS on your tailnet, on the machine's MagicDNS name.
-`pnpm start pair` prints the link for it (a browser opens it when the host serves the web app; the T3 desktop app
-parses the same link pasted into Add computer):
-
-```
-https://<machine>.<tailnet>.ts.net/pair#token=…      # port 8443 shows as `:8443`
-```
-
-Open it on any device in the tailnet: it pairs the browser and opens the app. (The
-plain-HTTP alternative: set `listen` to the machine's tailnet IP and open `http://<tailnet-ip>:3774/pair#token=…` —
-the tailnet is then the only boundary, with no TLS.)
