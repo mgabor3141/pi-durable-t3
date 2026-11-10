@@ -9,9 +9,10 @@ import { expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import type { MessageContext, MessageContextAnswer, MessageContextRequest } from "../src/t3/message-context.ts";
+import { DISPLAY_ONLY_RULE, messageContextData, type MessageContext, type MessageContextAnswer, type MessageContextRequest } from "../src/t3/message-context.ts";
 import { report } from "../src/t3/reports.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 type Msg = { role: string; content: unknown };
 type Block = { type: string; text?: string; hidden?: boolean };
@@ -44,25 +45,28 @@ async function setup(messageContext: MessageContext) {
 		const content = users.at(-1)!.content;
 		return typeof content === "string" ? [{ type: "text", text: content }] : (content as Block[]);
 	};
-	return { bridge, send, lastUser, warnings, thread };
+	return { bridge, send, lastUser, warnings, thread, harness: f.harness };
 }
 
 it("the model gets the context with the message; T3 shows the message, then the context as a tool row", { timeout: 30_000 }, async () => {
 	const asked: MessageContextRequest[] = [];
-	const { bridge, send, lastUser, thread } = await setup(async (request) => {
+	const { bridge, send, lastUser, thread, harness } = await setup(async (request) => {
 		asked.push(request);
-		return { text: "<memories>\n- The user prefers short answers.\n</memories>", shownAs: { name: "hindsight_recall", input: { query: request.text } } };
+		return { text: "<memories>\n- The user prefers short answers.\n</memories>", shownAs: { name: "hindsight_recall", input: { query: request.text }, details: "1  score 0.83" }, data: { ids: ["m1"] } };
 	});
 	await send("what do I like?");
 	expect(asked.map((request) => [request.threadId, request.conversationId, request.text])).toEqual([["t", thread.head, "what do I like?"]]);
 	const blocks = lastUser();
-	expect(blocks.filter((block) => block.hidden === true)).toEqual([{ type: "text", hidden: true, text: expect.stringContaining("The user prefers short answers."), shownAs: { name: "hindsight_recall", input: { query: "what do I like?" } } }]);
+	expect(blocks.filter((block) => block.hidden === true)).toEqual([{ type: "text", hidden: true, text: expect.stringContaining("The user prefers short answers."), shownAs: { name: "hindsight_recall", input: { query: "what do I like?" }, details: "1  score 0.83" }, data: { ids: ["m1"] } }]);
 	expect(blocks.some((block) => block.type === "text" && block.text === "what do I like?" && block.hidden !== true)).toBe(true);
 	const { projection } = await bridge.projection("t");
 	expect(projection.messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual(["what do I like?"]);
 	const items = projection.turnItems.map((item) => item as unknown as { type: string; toolName?: string; input?: unknown; output?: string; status: string });
 	expect(items.map((item) => item.type)).toEqual(["user_message", "dynamic_tool", "assistant_message"]);
-	expect(items[1]).toMatchObject({ toolName: "hindsight_recall", input: { query: "what do I like?" }, output: "<memories>\n- The user prefers short answers.\n</memories>", status: "completed" });
+	expect(items[1]).toMatchObject({ toolName: "hindsight_recall", input: { query: "what do I like?" }, output: `<memories>\n- The user prefers short answers.\n</memories>\n\n${DISPLAY_ONLY_RULE}\n1  score 0.83`, status: "completed" });
+	// The integrator reads its data back from the transcript.
+	const entries = await (await conversation(harness, thread.head)).entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT);
+	expect(entries.items.flatMap((entry) => messageContextData(entry))).toEqual([{ ids: ["m1"] }]);
 	// A tool row no tool call made: another thread's report does not count it.
 	expect(report(projection).toolCalls).toBe(0);
 });

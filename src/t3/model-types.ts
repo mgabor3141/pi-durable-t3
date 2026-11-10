@@ -38,7 +38,9 @@ export type ContentBlock =
 			/** Model-visible, but not shown as the message's text (an attachment path line). */
 			hidden?: boolean;
 			/** A message's context (`messageContext`): shown as this tool row after the message. */
-			shownAs?: { name: string; input: Record<string, unknown> };
+			shownAs?: { name: string; input: Record<string, unknown>; details?: string };
+			/** The integrator's own record of a message's context (`MessageContextAnswer.data`); never sent or shown. */
+			data?: unknown;
 	  }
 	| { type: "thinking"; thinking: string }
 	| { type: "image"; data: string; mimeType: string }

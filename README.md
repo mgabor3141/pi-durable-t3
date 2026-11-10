@@ -206,7 +206,10 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   such as memories recalled for it. The text is stored with the message, outside its text and thread search, so the
   prompt cache holds. T3 shows it as a tool row right after the message (`shownAs`: a name and the input it was looked
   up with, the text as output), so the user sees what the model was given; no tool ran, and `thread_read`'s
-  tool-call count leaves it out. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
+  tool-call count leaves it out. `shownAs.details` follow the text in the row under a "shown here only, not sent to
+  the model" rule (`DISPLAY_ONLY_RULE`). `data` is kept with the stored block, never sent or shown, and
+  `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
+  context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
 - `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
   tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every

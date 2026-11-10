@@ -1147,7 +1147,18 @@ export class Bridge {
 			const attachmentBlocks = this.#attachmentBlocks(state, kept);
 			// The integrator's context for this message (memories), stored with it: a note or an automatic message gets none.
 			const extra = input.note === true || input.automatic === true ? undefined : await this.#messageContext(input.threadId, head, input.text);
-			const contextBlocks: ContentBlock[] = extra === undefined ? [] : [{ type: "text", text: extra.text, hidden: true, shownAs: { name: extra.shownAs.name, input: { ...extra.shownAs.input } } }];
+			const contextBlocks: ContentBlock[] =
+				extra === undefined
+					? []
+					: [
+							{
+								type: "text",
+								text: extra.text,
+								hidden: true,
+								shownAs: { name: extra.shownAs.name, input: { ...extra.shownAs.input }, ...(extra.shownAs.details === undefined || extra.shownAs.details.trim() === "" ? {} : { details: extra.shownAs.details }) },
+								...(extra.data === undefined ? {} : { data: extra.data }),
+							},
+						];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,

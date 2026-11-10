@@ -28,6 +28,7 @@ import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
+import { DISPLAY_ONLY_RULE } from "./message-context.ts";
 
 /** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
 const CODEMODE_TOOL = "codemode";
@@ -567,7 +568,7 @@ export function projectThread(
 					type: "dynamic_tool",
 					toolName: block.shownAs.name,
 					input: block.shownAs.input,
-					output: block.text,
+					output: block.shownAs.details === undefined ? block.text : `${block.text}\n\n${DISPLAY_ONLY_RULE}\n${block.shownAs.details}`,
 				} as Any);
 			});
 			messages.push({
