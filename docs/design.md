@@ -81,10 +81,12 @@ The code shows what each operation does. These are the rules it cannot show on i
 - **Retries are answered from state.** A prompt's command id becomes pi-durable's request id, so a resent
   prompt runs once, even across a restart. A resent project create finds the entry it already wrote and
   answers with it.
-- **Undo forks just before the reverted message.** The thread's head moves to the fork; the old conversation
-  keeps every entry. The reverted runs stay in the projection marked rolled back; without that, T3 reads the
-  thread as busy. Nothing about them is stored but the undo itself (the head it moved to and the head it left): they
-  are the left heads' runs the current head no longer has, read back from those conversations.
+- **Undo forks just before the reverted message**, in transcript order: a compaction written before the message
+  stays, so the fork's context still starts from its summary. The thread's head moves to the fork; the old
+  conversation keeps every entry. The reverted runs stay in the projection marked rolled back; without that, T3 reads
+  the thread as busy. Nothing about them is stored but the undo itself (the head it moved to and the head it left):
+  they are the left heads' runs the current head no longer has, read back from those conversations, each projected
+  from its whole transcript as the live view projects a head, so a run keeps its id and ordinal.
 - **Undo of a head that already moved on adds a child thread** instead of failing.
 - **A delete wins.** Deleting a thread aborts its run, and the removal is recorded in the threads document.
   Promotion and undo skip removed threads, so a deleted thread stays deleted across restarts.

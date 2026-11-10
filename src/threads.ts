@@ -1226,9 +1226,13 @@ export class Threads {
 		if (target === undefined || !USER_ENTRY_KINDS.has(target.kind)) {
 			throw hostError("not_rewindable", `entry ${input.entryId} is not a user turn in the head's active context`);
 		}
-		// A fork is INCLUSIVE of its fork entry: fork one entry earlier to drop the reverted turn; a first entry has
-		// nothing before it, so baseline is a fresh conversation with the head's agent config (design.md, Invariants).
-		const forkAt: number | undefined = targetIndex > 0 ? active[targetIndex - 1]!.id : undefined;
+		// A fork is INCLUSIVE of its fork entry: fork at the entry just before the reverted turn in the TRANSCRIPT, so
+		// everything written before it stays — a compaction summary included. Not the active context's previous entry:
+		// a summary is written after the entries it keeps but leads the context, so that would cut it off and bring the
+		// compacted history back. A first entry has nothing before it, so baseline is a fresh conversation with the
+		// head's agent config (design.md, Invariants).
+		const before = await head.entries({ maxEntryId: (target.id - 1) as EntryId, order: "descending" }, 1, undefined, BACKGROUND_CONTEXT);
+		const forkAt: number | undefined = before.items[0]?.id;
 		const headAgent = forkAt === undefined ? await head.agent(BACKGROUND_CONTEXT) : undefined;
 		return this.#commit(async (tx, writes) => {
 			const thread = await writes.record(input.threadId);

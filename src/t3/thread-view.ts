@@ -91,6 +91,18 @@ const WHOLE_TRANSCRIPT = { min: 1_000_000_000, max: 2_000_000_000 };
  * The projection shows each summary there, as T3 shows any provider's compaction at the moment it happened; earlier
  * summaries stay in the history the same way.
  */
+/** A conversation's whole transcript, oldest first: the fork-aware history a watch over `WHOLE_TRANSCRIPT` shows. */
+async function wholeTranscript(conversation: Conversation): Promise<EntryRecord[]> {
+	const entries: EntryRecord[] = [];
+	let cursor: Parameters<Conversation["entries"]>[2];
+	do {
+		const page = await conversation.entries({ order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
+		entries.push(...(page.items as unknown as EntryRecord[]));
+		cursor = page.next;
+	} while (cursor !== undefined);
+	return entries;
+}
+
 export function splitTranscript(entries: readonly EntryRecord[]): { active: EntryRecord[]; history: EntryRecord[] } {
 	const marker = entries.findLast((entry) => entry.kind === "pi.compaction" && entry.head !== undefined);
 	if (marker === undefined) return { active: [...entries], history: [] };
@@ -331,9 +343,12 @@ export class ThreadView {
 		for (const from of chain.reverse()) {
 			const conversation = await this.#host.harness.conversation(from as ConversationId, BACKGROUND_CONTEXT).catch(() => undefined);
 			if (conversation === undefined) continue;
-			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
-			const view = { conversation: {}, entries, docs: {} } as unknown as ConversationView;
-			const { projection } = projectThread(this.#host.meta(this.threadId, this), view, { rolledBack: [] });
+			// Projected as the live view projects a head (`#setView`): its whole transcript, split at its last compaction, so
+			// a run keeps the id and ordinal the client already has. Its active context alone would start at the summary
+			// and turn the kept tail into a run of its own.
+			const { active, history } = splitTranscript(await wholeTranscript(conversation));
+			const view = { conversation: {}, entries: active, docs: {} } as unknown as ConversationView;
+			const { projection } = projectThread(this.#host.meta(this.threadId, this), view, { rolledBack: [], history });
 			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
 		}
 		return [...runs.values()];
