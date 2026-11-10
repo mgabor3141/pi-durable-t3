@@ -380,9 +380,18 @@ it("an agent reads, edits, cancels and promotes another thread's queued messages
 	expect(cancelled).toMatchObject({ sequence: expect.any(Number) });
 	expect(after.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);
 	expect(promoted).toMatchObject({ sequence: expect.any(Number) });
-	const steered = await bridge.waitFor(busy, (projection) => (projection.runs.every((run) => run.status !== "queued") ? projection : undefined), 10_000);
-	expect(steered, "the promoted message left the queue").toBeDefined();
+	// A steer waits for the turn's next boundary, and stays in the queue (editable, removable) until then.
+	const waiting = await ask("a", { name: "t3_queue", args: { threadId: busy, action: "list" } }).then(() => sawAll(2 + steps.length)).then((all) => all.at(-1));
+	expect(waiting.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);
 	gate("q1").release();
+	// Placed when the turn reaches a boundary: here the held answer ends the turn, so pi starts it as the next turn.
+	const steered = await bridge.waitFor(
+		busy,
+		(projection) =>
+			projection.runs.every((run) => run.status !== "queued") && projection.turnItems.some((item) => item.type === "user_message" && item.text === "first, edited") ? projection : undefined,
+		10_000,
+	);
+	expect(steered, "the promoted message left the queue when pi placed it, as edited").toBeDefined();
 });
 
 it("an agent runs a scheduled task now", { timeout: 60_000 }, async () => {

@@ -931,9 +931,13 @@ export function projectThread(
 		} as Any);
 	}
 
-	// Queued follow-ups live in pi's inbox until a boundary places them. T3's queue reads them as runs, so project each
-	// follow-up as a queued run now; it disappears from here when the inbox item is placed and a real run replaces it.
-	const queued = readQueuedInputs((view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items).filter((item) => item.mode === "followUp");
+	// Queued follow-ups and steers live in pi's inbox until a boundary places them: a steer at the running turn's next
+	// boundary (after the tool call in flight, which may be a long script), a follow-up when the turn ends. T3's queue
+	// reads them as runs, so project each as a queued run now, steers first, as pi places them: T3 offers edit and remove
+	// on a queued run, and nothing on a steer it believes delivered (a provider of its own steers at once). It disappears
+	// from here when the inbox item is placed: a steer then shows in the turn, a follow-up as its own run.
+	const inbox = readQueuedInputs((view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items);
+	const queued = [...inbox.filter((item) => item.mode === "steer"), ...inbox.filter((item) => item.mode === "followUp")];
 	queued.forEach((item, index) => {
 		const ordinal = drafts.length + index + 1;
 		const queuedRunId = `q${item.submissionId}`;

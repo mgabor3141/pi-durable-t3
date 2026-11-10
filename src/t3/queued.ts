@@ -1,8 +1,8 @@
-// The queue view over pi-durable's `pi.inbox`: queued follow-up submissions are T3's queued runs. The bridge reads
+// The queue view over pi-durable's `pi.inbox`: queued follow-up and steer submissions not yet placed are T3's queued runs. The bridge reads
 // the inbox for the projection and mutates the same items for T3's queued-message commands; no separate store.
 import type { UserAttachment } from "./runs.ts";
 
-/** One queued follow-up, with the inbox fields a queued-message edit or promotion changes. */
+/** One queued follow-up or steer, with the inbox fields a queued-message edit or promotion changes. */
 export interface QueuedInput {
 	readonly submissionId: number;
 	readonly mode: "steer" | "followUp";
@@ -42,7 +42,7 @@ const attachmentsOf = (entry: { readonly data?: Record<string, unknown> } | unde
 	});
 };
 
-/** Read the inbox items that T3 shows as queued runs: follow-ups only, in inbox order. */
+/** Read the inbox items that T3 shows as queued runs: follow-ups and steers, in inbox order. */
 export function readQueuedInputs(items: readonly unknown[] | undefined): QueuedInput[] {
 	return (items ?? []).flatMap((raw): QueuedInput[] => {
 		if (typeof raw !== "object" || raw === null) return [];

@@ -39,6 +39,31 @@ describe("queued messages", () => {
 		});
 	});
 
+	it("projects a steer not yet placed as a queued run too, before the follow-ups, so it can be edited or removed", () => {
+		const result = projectThread(
+			meta,
+			{
+				conversation: { id: 1 },
+				entries: [],
+				docs: {
+					"pi.inbox": {
+						items: [
+							{ id: 42, mode: "followUp", content: "later", entry: { kind: "app.user", data: { messageId: "m-later" } } },
+							{ id: 43, mode: "steer", content: "change course", entry: { kind: "app.user", data: { messageId: "m-steer" } } },
+						],
+					},
+				},
+			},
+			{ rolledBack: [] },
+		);
+		const queued = result.projection.runs.filter((run) => run.status === "queued");
+		expect(queued.map((run) => [run.id, run.queuePosition, run.userMessageId])).toEqual([
+			["q43", 1, "m-steer"],
+			["q42", 2, "m-later"],
+		]);
+		expect(result.projection.messages.find((message) => message.id === "m-steer")).toMatchObject({ role: "user", text: "change course", runId: "q43" });
+	});
+
 	it("reads a follow-up's text and preserves image blocks when editing", () => {
 		const [item] = readQueuedInputs([
 			{ id: 7, mode: "followUp", content: "old", entry: { kind: "app.user", data: { messageId: "m-7" } } },
