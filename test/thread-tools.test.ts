@@ -265,6 +265,56 @@ it("a report the parent collects with thread_wait is not posted into its thread 
 	expect(parent!.runs.filter((run) => run.status === "queued")).toEqual([]);
 });
 
+it("a busy parent is not interrupted by its children's reports; what it has not read arrives in one turn once it is idle", { timeout: 60_000 }, async () => {
+	const { bridge, orchestration, ask, sawAll, settled } = await setup();
+	for (const name of ["b1", "b2", "b3"]) await ask("a", { name: "thread_prompt", args: { new: { title: name }, message: `Hold on: ${name}`, wait: false } });
+	const children = (await sawAll(3)).map((entry) => entry.threadId as string);
+	// The parent is busy while all three finish.
+	await bridge.sendMessage({ threadId: "a", commandId: "busy", messageId: "m-busy", text: "Hold on: parent", mode: "queue" });
+	await bridge.waitFor("a", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	for (const name of ["b1", "b2", "b3"]) gate(name).release();
+	for (const child of children) await settled(child);
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	const during = (await bridge.projection("a")).projection;
+	expect(during.messages.filter((message) => message.text.startsWith("[Report from thread")), "nothing posted while busy").toEqual([]);
+	expect(during.runs.filter((run) => run.status === "queued"), "nothing queued while busy").toEqual([]);
+	// It reads one child itself while busy: that report is collected.
+	await orchestration.read("a", { threadId: children[0]! });
+	expect(bridge.threadRecord(children[0]!)!.notify ?? []).toEqual([]);
+	gate("parent").release();
+	const after = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
+	const posted = after!.messages.filter((message) => message.role === "user" && message.text.includes("[Report from thread"));
+	expect(posted, "one message for the two unread reports").toHaveLength(1);
+	expect(posted[0]!.text).not.toContain("released b1");
+	expect(posted[0]!.text).toContain("[AGENT]: released b2");
+	expect(posted[0]!.text).toContain("[AGENT]: released b3");
+	expect(posted[0]!.text.indexOf("released b2")).toBeLessThan(posted[0]!.text.indexOf("released b3"));
+	expect(after!.messages.filter((message) => message.text.startsWith("Got the report")), "one turn").toHaveLength(1);
+	for (const child of children) expect(bridge.threadRecord(child)!.notify ?? []).toEqual([]);
+});
+
+it("a batch the last process wrote before it stopped is sent once, as one message", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll, settled } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 2+3?" } });
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 4+5?" } });
+	const children = (await sawAll(2)).map((entry) => entry.threadId as string);
+	for (const [index, child] of children.entries()) {
+		const first = (await bridge.projection(child)).projection.messages.find((message) => message.role === "user")!.id as string;
+		await bridge.updateThreadRecord(child, (record) => {
+			record.notify = [{ id: `crash-${index}`, threadId: "a", messageId: first, createdAt: index, batch: "crash-batch" }];
+		});
+	}
+	const next = new Orchestration(bridge, log);
+	next.start();
+	onTestFinished(() => next.close());
+	const woke = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
+	const posted = woke!.messages.filter((message) => message.role === "user" && message.text.includes("[Report from thread"));
+	expect(posted).toHaveLength(1);
+	expect(posted[0]!.text).toContain("[AGENT]: 5");
+	expect(posted[0]!.text).toContain("[AGENT]: 9");
+	for (const child of children) expect(bridge.threadRecord(child)!.notify ?? []).toEqual([]);
+});
+
 it("a prompt that waits and also asked to be answered gets the report once", { timeout: 60_000 }, async () => {
 	const { bridge, ask, sawAll, settled } = await setup();
 	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 8+8?", notify: true } });
