@@ -3,6 +3,9 @@
 // and its iframe/`<img>` loads that URL without a bearer. This host keeps that shape, but every read goes through the
 // caller's ExecutionEnv: the environment is the boundary, exactly as it is for `projects.readFile`.
 //
+// A tool row's image (`tool-output-image`: the thread, the row and the image's index) is served from the transcript,
+// where the tool result holds it, through `toolImage`; its claims name the image, not a file.
+//
 // HTML/PDF assets carry their containing folder in the claims, so relative `<link>`, `<script>`, font and image URLs
 // resolve under the same signed token. Images are exact-file claims. Only the extensions T3 previews are served; a
 // text file goes through `projects.readFile` instead.
@@ -42,7 +45,11 @@ const mimeTypeOf = (path: string): string | null => MIME_BY_EXTENSION[extensionO
 type Claims =
 	| { readonly version: 1; readonly kind: "workspace-file"; readonly workspaceRoot: string; readonly baseRelativePath: string; readonly expiresAt: number }
 	| { readonly version: 1; readonly kind: "workspace-file-exact"; readonly workspaceRoot: string; readonly relativePath: string; readonly expiresAt: number }
-	| { readonly version: 1; readonly kind: "media-file-exact"; readonly filePath: string; readonly expiresAt: number };
+	| { readonly version: 1; readonly kind: "media-file-exact"; readonly filePath: string; readonly expiresAt: number }
+	| { readonly version: 1; readonly kind: "tool-output-image"; readonly threadId: string; readonly itemId: string; readonly index: number; readonly expiresAt: number };
+
+/** The image a tool row shows at `index`, base64 as the model was given it; null when there is none. */
+export type ToolImageLookup = (threadId: string, itemId: string, index: number) => Promise<{ readonly data: string; readonly mimeType: string } | null>;
 
 const decodeClaims = (payload: string): Claims | null => {
 	try {
@@ -51,6 +58,7 @@ const decodeClaims = (payload: string): Claims | null => {
 		if (value.kind === "workspace-file" && typeof value.workspaceRoot === "string" && typeof value.baseRelativePath === "string") return value as Claims;
 		if (value.kind === "workspace-file-exact" && typeof value.workspaceRoot === "string" && typeof value.relativePath === "string") return value as Claims;
 		if (value.kind === "media-file-exact" && typeof value.filePath === "string") return value as Claims;
+		if (value.kind === "tool-output-image" && typeof value.threadId === "string" && typeof value.itemId === "string" && Number.isSafeInteger(value.index)) return value as Claims;
 		return null;
 	} catch {
 		return null;
@@ -78,12 +86,14 @@ export class WorkspaceAssets {
 	readonly #context: Context;
 	readonly #roots: () => readonly string[];
 	readonly #signer: Signer;
+	readonly #toolImage: ToolImageLookup;
 
-	constructor(options: { readonly env: ExecutionEnv; readonly context?: Context; readonly roots: () => readonly string[]; readonly signer: Signer }) {
+	constructor(options: { readonly env: ExecutionEnv; readonly context?: Context; readonly roots: () => readonly string[]; readonly signer: Signer; readonly toolImage?: ToolImageLookup }) {
 		this.#env = options.env;
 		this.#context = options.context ?? BACKGROUND_CONTEXT;
 		this.#roots = options.roots;
 		this.#signer = options.signer;
+		this.#toolImage = options.toolImage ?? (async () => null);
 	}
 
 	async #canonical(path: string): Promise<string | null> {
@@ -123,7 +133,7 @@ export class WorkspaceAssets {
 		return info.value;
 	}
 
-	/** `assets.createUrl` for a file resource. Throws the contract's typed asset errors on refusal. */
+	/** `assets.createUrl` for a file resource or a tool row's image. Throws the contract's typed asset errors on refusal. */
 	async issue(resource: AssetResource): Promise<AssetCreateUrlResult> {
 		const expiresAt = Date.now() + ASSET_TOKEN_TTL_MS;
 		let claims: Claims;
@@ -146,6 +156,12 @@ export class WorkspaceAssets {
 			if (mimeTypeOf(targetPath.absolutePath) === null || !MEDIA_EXTENSIONS.has(extensionOf(targetPath.absolutePath))) throw new AssetPreviewTypeValidationError({ resource });
 			fileName = basename(targetPath.absolutePath);
 			claims = { version: 1, kind: "media-file-exact", filePath: targetPath.absolutePath, expiresAt };
+		} else if (resource._tag === "tool-output-image") {
+			const image = await this.#toolImage(resource.threadId, resource.itemId, resource.index);
+			if (image === null) throw new AssetWorkspaceAssetNotFoundError({ resource });
+			// T3's name for it (`AssetAccess`): the image's place in the row and its type.
+			fileName = `image-${resource.index + 1}.${image.mimeType.slice("image/".length)}`;
+			claims = { version: 1, kind: "tool-output-image", threadId: resource.threadId, itemId: resource.itemId, index: resource.index, expiresAt };
 		} else {
 			throw new AssetPreviewTypeValidationError({ resource });
 		}
@@ -178,6 +194,10 @@ export class WorkspaceAssets {
 		if (!this.#signer.verifySignature(payload, signature)) return null;
 		const claims = decodeClaims(payload);
 		if (claims === null || claims.expiresAt <= Date.now()) return null;
+		if (claims.kind === "tool-output-image") {
+			const image = await this.#toolImage(claims.threadId, claims.itemId, claims.index);
+			return image === null ? null : { bytes: Buffer.from(image.data, "base64"), mimeType: image.mimeType, fileName: `image-${claims.index + 1}.${image.mimeType.slice("image/".length)}` };
+		}
 		const decoded = decodeRelativePath(relativePath);
 		if (decoded === null || decoded.length === 0) return null;
 		const path = await this.#resolveClaimPath(claims, decoded);
@@ -190,7 +210,7 @@ export class WorkspaceAssets {
 		return mimeType === null ? null : { bytes: read.value, mimeType, fileName: basename(path) };
 	}
 
-	async #resolveClaimPath(claims: Claims, requested: string): Promise<string | null> {
+	async #resolveClaimPath(claims: Exclude<Claims, { kind: "tool-output-image" }>, requested: string): Promise<string | null> {
 		if (claims.kind === "media-file-exact") {
 			if (requested !== basename(claims.filePath)) return null;
 			const canonical = await this.#canonical(claims.filePath);

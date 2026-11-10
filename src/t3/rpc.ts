@@ -386,14 +386,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 			}),
 		"assets.createUrl": (input) => {
 			const resource = input.resource;
-						if (resource?._tag === "workspace-file" || resource?._tag === "media-file" || resource?._tag === "draft-workspace-file") {
+						if (resource?._tag === "workspace-file" || resource?._tag === "media-file" || resource?._tag === "draft-workspace-file" || resource?._tag === "tool-output-image") {
 				return Effect.tryPromise({
 					try: () => deps.assets.issue(resource),
 					// \`issue\` throws the contract's own asset errors; anything else (the environment failing) is a resolution failure.
 					catch: (error) => (isAssetAccessError(error) ? error : new AssetWorkspaceResolutionError({ resource, cause: error })),
 				});
 			}
-			// Favicon/tool-output/github resources are not served by this host: the file panel reads text through `projects.readFile`.
+			// Favicon/native-app-icon/github resources are not served by this host: the file panel reads text through `projects.readFile`.
 			if (resource?._tag !== "attachment") return Effect.fail(new AssetPreviewTypeValidationError({ resource }));
 			const attachments = deps.attachments;
 			if (attachments === undefined) return Effect.fail(new AssetAttachmentNotFoundError({ resource }));

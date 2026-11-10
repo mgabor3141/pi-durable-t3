@@ -31,7 +31,7 @@ import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { undoTarget } from "./undo.ts";
 
@@ -814,6 +814,14 @@ export class Bridge {
 		const { projection } = await this.projection(threadId);
 		const items = [...projection.turnItems, ...projection.visibleTurnItems.map((row) => row.item)];
 		return (items.find((item) => String(item.id) === itemId) as OrchestrationV2TurnItem | undefined) ?? null;
+	}
+
+	/** T3's `tool-output-image` asset: the `index`th image a tool row shows (its output's image markers, in order), as
+	 * the model was given it. `null`: the thread has no such row or image. */
+	async toolOutputImage(threadId: string, itemId: string, index: number): Promise<ToolImage | null> {
+		if (!this.hasThread(threadId)) return null;
+		const { toolImages } = await this.projection(threadId);
+		return toolImages.get(itemId)?.[index] ?? null;
 	}
 
 	/**

@@ -29,6 +29,7 @@ import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
+import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
 
 /** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
 const CODEMODE_TOOL = "codemode";
@@ -183,6 +184,36 @@ export interface ProjectionResult {
 	readonly runs: readonly ProjectedRun[];
 	/** Every run a client can fork from, including a synthetic run anchored by a compaction summary. */
 	readonly forkRuns: readonly ProjectedRun[];
+	/** The images of each tool row that shows some, by item id, in the order of the row's image markers: what T3's
+	 * `tool-output-image` asset serves. The projection itself carries only the markers. */
+	readonly toolImages: ReadonlyMap<string, readonly ToolImage[]>;
+}
+
+/** An image a tool returned, as the model was given it. */
+export interface ToolImage {
+	readonly data: string;
+	readonly mimeType: string;
+}
+
+/** The images of a tool result that T3 shows (`toolOutputImages`): a type it previews, within its size limit, at most
+ * MAX_TOOL_OUTPUT_IMAGES. Read with T3's own reader, so an index here is the client's index. */
+function toolImagesOf(content: ContentBlock[] | string | undefined): ToolImage[] {
+	if (!Array.isArray(content)) return [];
+	const images: ToolImage[] = [];
+	for (const block of content) {
+		const image = readToolOutputImage(block);
+		if (image?.data === undefined || image.data.length > MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH) continue;
+		images.push({ data: image.data, mimeType: image.mimeType });
+		if (images.length === MAX_TOOL_OUTPUT_IMAGES) break;
+	}
+	return images;
+}
+
+/** A tool row's output with its images: T3's content blocks, the text and then one marker per image, without the data
+ * (T3's own wire form, `omitToolOutputImageData`). Without images, the text as it was. */
+function withImageMarkers(output: string | undefined, images: readonly ToolImage[]): unknown {
+	if (images.length === 0) return output;
+	return [...(output === undefined || output === "" ? [] : [{ type: "text", text: output }]), ...images.map((image) => ({ type: "image", mimeType: image.mimeType }))];
 }
 
 const thinkingOf = (content: ContentBlock[]): string =>
@@ -272,6 +303,7 @@ export function projectThread(
 	const checkpoints: OrchestrationV2Checkpoint[] = [];
 	const projectedRuns: ProjectedRun[] = [];
 	const forkRuns: ProjectedRun[] = [];
+	const toolImages = new Map<string, readonly ToolImage[]>();
 	let lastActivity = meta.updatedAt;
 
 	// The baseline checkpoint (before the first turn) hangs off a synthetic system node.
@@ -639,6 +671,8 @@ export function projectThread(
 				const output =
 					resultMessage?.role === "toolResult" ? textOf(resultMessage.content) : (liveSlot?.output ?? undefined);
 				const failed = resultMessage?.role === "toolResult" && resultMessage.isError === true;
+				const images = resultMessage?.role === "toolResult" ? toolImagesOf(resultMessage.content) : [];
+				if (images.length > 0) toolImages.set(`ti-t${block.id}`, images);
 				const aborted = result !== undefined && isAbortedToolResult(result);
 				const itemStatus: OrchestrationV2TurnItem["status"] = aborted
 					? "interrupted"
@@ -689,7 +723,7 @@ export function projectThread(
 						type: "dynamic_tool",
 						toolName: T3_JAVASCRIPT_TOOL,
 						input: { code: block.arguments.code },
-						...(output === undefined ? {} : { output }),
+						...(output === undefined && images.length === 0 ? {} : { output: withImageMarkers(output, images) }),
 					} as Any);
 				} else {
 					// The model's own html_render call: its page is the `app.html-render` entry's item, so the call's output
@@ -701,7 +735,7 @@ export function projectThread(
 						type: "dynamic_tool",
 						toolName: block.name,
 						input: block.arguments,
-						...(shown === undefined ? {} : { output: shown }),
+						...(shown === undefined && images.length === 0 ? {} : { output: withImageMarkers(shown, images) }),
 					} as Any);
 				}
 			}
@@ -1161,7 +1195,7 @@ export function projectThread(
 		deletedAt: null,
 	} as Any;
 
-	return { projection, shell, runs: projectedRuns, forkRuns };
+	return { projection, shell, runs: projectedRuns, forkRuns, toolImages };
 }
 
 /** A compaction summary entry: shown as T3's compaction card where it landed. */

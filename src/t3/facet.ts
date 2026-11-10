@@ -100,7 +100,7 @@ export function startFacet(deps: {
 	const orchestration = new Orchestration(bridge, log);
 	orchestration.start();
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
-	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth });
+	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth, toolImage: (threadId, itemId, index) => bridge.toolOutputImage(threadId, itemId, index) });
 	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, files, preview, secretRequests })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
