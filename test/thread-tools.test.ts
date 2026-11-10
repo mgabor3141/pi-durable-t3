@@ -295,6 +295,49 @@ it("a busy parent gets its children's reports in its turn, joined into one messa
 	for (const child of children) expect(bridge.threadRecord(child)!.notify ?? []).toEqual([]);
 });
 
+it("a report the parent collects while it still waits in its queue is taken out, and a message left empty is cancelled", { timeout: 60_000 }, async () => {
+	const { bridge, orchestration, ask, sawAll, settled } = await setup();
+	for (const name of ["r1", "r2"]) await ask("a", { name: "thread_prompt", args: { new: { title: name }, message: `Hold on: ${name}`, wait: false } });
+	const [first, second] = (await sawAll(2)).map((entry) => entry.threadId as string);
+	await bridge.sendMessage({ threadId: "a", commandId: "busy", messageId: "m-busy", text: "Hold on: parent2", mode: "queue" });
+	await bridge.waitFor("a", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	gate("r1").release();
+	await settled(first!);
+	gate("r2").release();
+	await settled(second!);
+	const pendingMessage = () =>
+		bridge.projection("a").then(({ projection }) => {
+			const run = projection.runs.find((candidate) => candidate.status === "queued" && (candidate.userMessageId as string).startsWith("n-"));
+			return run === undefined ? undefined : projection.messages.find((message) => message.id === run.userMessageId);
+		});
+	await bridge.waitFor("a", (projection) => (projection.messages.some((message) => message.text.includes("released r2") && message.text.includes("released r1")) ? true : undefined), 10_000);
+	// The parent reads the first child itself: that report leaves the message; the other stays.
+	await orchestration.read("a", { threadId: first! });
+	const after = await pendingMessage();
+	expect(after?.text).not.toContain("released r1");
+	expect(after?.text).toContain("[AGENT]: released r2");
+	expect(after?.text.startsWith("[Report from thread")).toBe(true);
+	// It collects the second with thread_wait: the message is left with none, and cancelled.
+	await orchestration.wait("a", [second!], 5_000);
+	expect(await pendingMessage()).toBeUndefined();
+	gate("parent2").release();
+	const done = await settled("a", (projection) => projection.messages.some((message) => message.text === "released parent2"));
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	const final = (await bridge.projection("a")).projection;
+	expect(final.messages.filter((message) => message.role === "user" && message.text.includes("[Report from thread"))).toEqual([]);
+	expect(final.messages.filter((message) => message.text.startsWith("Got the report"))).toEqual([]);
+	void done;
+});
+
+it("a report message splits into its reports by their headers", async () => {
+	const { reportBlocks, reportChild } = await import("../src/t3/orchestration.ts");
+	const one = '[Report from thread "A \"quoted\" title" (t-a1), completed]\n[YOU]: go\n\n[AGENT]: done\n\nwith a blank line';
+	const two = '[Report from thread "B" (t-b2), failed]\n[AGENT]: [Report from thread "X" (t-x), completed] is quoted, not a header';
+	const blocks = reportBlocks(`${one}\n\n${two}`);
+	expect(blocks).toEqual([one, two]);
+	expect(blocks.map(reportChild)).toEqual(["t-a1", "t-b2"]);
+});
+
 it("a batch the last process wrote before it stopped is sent once, as one message", { timeout: 60_000 }, async () => {
 	const { bridge, ask, sawAll, settled } = await setup();
 	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 2+3?" } });

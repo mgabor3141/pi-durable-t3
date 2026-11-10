@@ -11,6 +11,8 @@
 // - Reports that settle while an earlier one waits in the caller's queue join that message: one message, one turn.
 // - A report the caller collects itself (`thread_wait`, `thread_read` of the child's latest exchange, or a prompt that
 //   waits) answers its requests, which are withdrawn; while the caller waits for a child, that child's report is held.
+//   One already in a report message still waiting in the caller's queue is taken out of it, and a message left with
+//   none is cancelled, as T3 acknowledges a task's result (`dispatchDelegatedTaskCompletionDeliveryResolution`).
 // The request is kept on the receiving thread's record until it is delivered; the message it goes into is written on it
 // first, so a restart finds that message and does not send it twice.
 import { createHash, randomUUID } from "node:crypto";
@@ -66,6 +68,19 @@ export interface ThreadSummaryRow {
 	readonly updatedAt: string;
 	readonly lastMessage: string | null;
 }
+
+/** One report in a report message: its header names the thread it is from, and the reports are separated by a blank
+ * line before the next header. */
+const reportHeader = (title: string, child: string, verdict: string) => `[Report from thread "${title}" (${child}), ${verdict}]`;
+const REPORT_HEADER = /^\[Report from thread ".*" \(([^()\s]+)\), (?:completed|failed|interrupted|active)\]$/m;
+const REPORT_SPLIT = /\n\n(?=\[Report from thread ".*" \([^()\s]+\), (?:completed|failed|interrupted|active)\]\n)/;
+/** A report message's reports, each from its header on. */
+export const reportBlocks = (text: string): string[] => text.split(REPORT_SPLIT);
+/** The thread a report is from, read from its header. */
+export const reportChild = (block: string): string | undefined => {
+	const header = block.split("\n", 1)[0] ?? "";
+	return REPORT_HEADER.exec(header)?.[1];
+};
 
 /** A report ready for its caller: the child it is from, the request it answers, and the report. */
 type OutboxItem = { readonly child: string; readonly request: NotifyRequest; readonly report: Report };
@@ -246,6 +261,28 @@ export class Orchestration {
 		return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
 	}
 
+	/** Take `child`'s reports out of the report messages still waiting in `caller`'s queue (a steer not placed yet, or a
+	 * queued follow-up); cancel a message left with none. One placed meanwhile stays, as T3 leaves a delivered notice. */
+	async #retract(caller: string, child: string): Promise<void> {
+		if (this.#bridge.threadRecord(caller) === undefined) return;
+		const projection = await this.#projection(caller);
+		for (const run of projection.runs) {
+			if (run.status !== "queued" || !(run.userMessageId as string).startsWith("n-")) continue;
+			const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+			if (message === undefined) continue;
+			const blocks = reportBlocks(message.text);
+			const kept = blocks.filter((block) => reportChild(block) !== child);
+			if (kept.length === blocks.length) continue;
+			try {
+				if (kept.length === 0) await this.#bridge.cancelQueued(caller, run.id as string);
+				else await this.#bridge.editQueued(caller, run.id as string, kept.join("\n\n"));
+				this.#log.info("thread report taken back", { from: child, to: caller, emptied: kept.length === 0 });
+			} catch {
+				// Placed meanwhile: the caller has it in its turn.
+			}
+		}
+	}
+
 	/** Run `work`, a wait of `caller` for `threadIds`: meanwhile their reports to it are held, as it is collecting them. */
 	async #awaiting<T>(caller: string | undefined, threadIds: readonly string[], work: () => Promise<T>): Promise<T> {
 		if (caller === undefined) return work();
@@ -266,8 +303,10 @@ export class Orchestration {
 		}
 	}
 
-	/** Withdraw `caller`'s requests on `threadId` whose activity has settled: the caller collected that report itself. */
+	/** Withdraw `caller`'s requests on `threadId` whose activity has settled: the caller collected that report itself.
+	 * A report of it already posted and still waiting in the caller's queue is taken back too. */
 	async #answered(threadId: string, caller: string): Promise<void> {
+		await this.#retract(caller, threadId);
 		const pending = (this.#bridge.threadRecord(threadId)?.notify ?? []).filter((request) => request.threadId === caller);
 		if (pending.length === 0) return;
 		const projection = await this.#projection(threadId);
@@ -525,7 +564,7 @@ export class Orchestration {
 		}
 		for (const [messageId, members] of unsent) await this.#send(caller, members, messageId, projection);
 		if (fresh.length > 0) {
-			const text = fresh.map(({ child, report }) => `[Report from thread "${report.title}" (${child}), ${report.verdict}]\n${report.text}`).join("\n\n");
+			const text = fresh.map(({ child, report }) => `${reportHeader(report.title, child, report.verdict)}\n${report.text}`).join("\n\n");
 			// T3 adds a sibling to its queued completion notice; ours is the newest report message still queued.
 			const pending = projection.runs
 				.filter((run) => run.status === "queued" && (run.userMessageId as string).startsWith("n-"))
@@ -551,7 +590,7 @@ export class Orchestration {
 	/** Send reports as a new message: steered into the caller's running turn when every one may wake it and the turn
 	 * takes a steer, else queued (a new turn when it is idle). The command id is the message's, so a resend is a no-op. */
 	async #send(caller: string, items: readonly OutboxItem[], messageId: string, projection: OrchestrationV2ThreadProjection): Promise<void> {
-		const text = items.map(({ child, report }) => `[Report from thread "${report.title}" (${child}), ${report.verdict}]\n${report.text}`).join("\n\n");
+		const text = items.map(({ child, report }) => `${reportHeader(report.title, child, report.verdict)}\n${report.text}`).join("\n\n");
 		const active = projection.runs.find((run) => run.status === "running");
 		const activeText = active === undefined ? undefined : projection.messages.find((message) => message.id === active.userMessageId)?.text;
 		// T3 steers a notice only for tasks that wake their parent while it works, and never into a compaction.
