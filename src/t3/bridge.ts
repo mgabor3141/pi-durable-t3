@@ -20,6 +20,7 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
+import type { PendingContext } from "../threads.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, ConversationId, EntryId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
@@ -32,6 +33,7 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { undoTarget } from "./undo.ts";
 
@@ -41,6 +43,8 @@ import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost }
 
 /** How long a message waits for the integrator's `messageContext` before it goes on without it. */
 export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
+/** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
+const ACTIVE_OR_QUEUED: ReadonlySet<string> = new Set(["preparing", "starting", "running", "waiting", "queued"]);
 
 export { CommandError, type StreamUpdate };
 
@@ -462,6 +466,7 @@ export class Bridge {
 						creationSource: thread.creationSource,
 						lineage: thread.lineage,
 						forkedFrom: thread.forkedFrom,
+						...(thread.forkEntryId === undefined ? {} : { forkEntryId: thread.forkEntryId }),
 						...(thread.linkOrigin === undefined ? {} : { linkOrigin: thread.linkOrigin }),
 						...(thread.delegatedFrom === undefined ? {} : { delegatedFrom: thread.delegatedFrom }),
 					}),
@@ -1138,7 +1143,9 @@ export class Bridge {
 			const compacting = (live?.compactions?.length ?? 0) > 0;
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();
-			const seeded = seed !== undefined && seed !== "" && !this.#hasMessages(state);
+			// A side chat's own rows start empty (its inherited history is not shown), so its first message seeds its title, as
+			// T3's side chat has no messages before it.
+			const seeded = seed !== undefined && seed !== "" && (!this.#hasMessages(state) || record?.pendingContext?.type === "side_chat");
 			const previousTitle = this.#summary(input.threadId)?.title ?? "";
 			if (seeded) {
 				this.#cancelTitle(input.threadId);
@@ -1155,18 +1162,29 @@ export class Bridge {
 			const attachmentBlocks = this.#attachmentBlocks(state, kept);
 			// The integrator's context for this message (memories), stored with it: a note or an automatic message gets none.
 			const extra = input.note === true || input.automatic === true ? undefined : await this.#messageContext(input.threadId, head, input.text);
-			const contextBlocks: ContentBlock[] =
-				extra === undefined
+			// A side chat's note or a fork brought back (T3's pending context transfer) goes with any message that is not a
+			// note, as T3 delivers it with the next turn that sends a prompt.
+			const transfer =
+				input.note === true
+					? undefined
+					: await this.#pendingContext(input.threadId).catch((error: unknown) => {
+							this.#log.warn("pending context could not be built; it waits for the next message", { threadId: input.threadId, error: String(error) });
+							return undefined;
+						});
+			const contextBlocks: ContentBlock[] = [
+				...(transfer?.block === undefined ? [] : [transfer.block]),
+				...(extra === undefined
 					? []
 					: [
 							{
-								type: "text",
+								type: "text" as const,
 								text: extra.text,
-								hidden: true,
+								hidden: true as const,
 								shownAs: { name: extra.shownAs.name, input: { ...extra.shownAs.input }, ...(extra.shownAs.details === undefined || extra.shownAs.details.trim() === "" ? {} : { details: extra.shownAs.details }) },
 								...(extra.data === undefined ? {} : { data: extra.data }),
 							},
-						];
+						]),
+			];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,
@@ -1196,6 +1214,13 @@ export class Bridge {
 				}
 				throw error;
 			});
+			if (transfer !== undefined) {
+				const sent = transfer.pending;
+				await this.#store.updateRecord(input.threadId, (current) => {
+					if (JSON.stringify(current.pendingContext) !== JSON.stringify(sent)) return false;
+					delete current.pendingContext;
+				});
+			}
 			if (seeded) this.#generateTitle(input.threadId, input.commandId, { reason: "first-message", messageId: input.messageId });
 		} finally {
 			release();
@@ -1711,16 +1736,33 @@ export class Bridge {
 		provenance?: Provenance;
 		/** A child that starts with its parent's history (`thread_prompt` with `fork`). */
 		child?: { readonly spawn: Spawn; readonly nodeId: string };
+		/** T3's side chat: hidden in lists, forked at the latest finished turn (or empty while the first one runs). */
+		sideChat?: boolean;
 	}): Promise<string> {
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
+		const sideChat = input.sideChat === true;
+		if (sideChat) {
+			// T3's ThreadForkService: side chats do not nest, and a subagent (or a task delegated here) starts none.
+			const record = this.#summary(input.sourceThreadId);
+			if (record === undefined) throw new CommandError(`Thread ${input.sourceThreadId} was deleted.`);
+			if (record.lineage.sideChat === true) throw new CommandError("A side chat cannot start another side chat.");
+			if (record.lineage.relationshipToParent === "subagent" || record.delegatedFrom !== undefined) throw new CommandError("A subagent cannot start a side chat.");
+		}
 		const source = await this.projection(input.sourceThreadId);
-		const run = input.runId === undefined ? source.forkRuns.at(-1) : source.forkRuns.find((candidate) => candidate.runId === input.runId);
-		if (run === undefined) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
+		// T3's `latest_stable` for a side chat is the newest completed run; one opened during the first turn has none.
+		const run =
+			input.runId !== undefined
+				? source.forkRuns.find((candidate) => candidate.runId === input.runId)
+				: sideChat
+					? source.forkRuns.findLast((candidate) => candidate.status === "completed")
+					: source.forkRuns.at(-1);
+		if (run === undefined && !(sideChat && input.runId === undefined)) throw new CommandError(`Unknown run ${input.runId ?? "latest_stable"} on thread ${input.sourceThreadId}.`);
 		await this.#store.fork({
 			sourceThreadId: input.sourceThreadId,
 			targetThreadId: input.targetThreadId,
-			entryId: run.lastEntryId,
-			runId: run.runId,
+			entryId: run?.lastEntryId,
+			...(run === undefined ? {} : { runId: run.runId }),
+			...(sideChat ? { sideChat: true } : {}),
 			provenance: input.provenance ?? USER_WEB,
 			...(input.title === undefined ? {} : { title: input.title }),
 			...(input.child === undefined ? {} : { child: input.child }),
@@ -1728,11 +1770,87 @@ export class Bridge {
 		return input.targetThreadId;
 	}
 
-	async deleteThread(threadId: string): Promise<void> {
+	/** T3's `thread.delete`: its side chats go with it. With `onlyIfUnused` (a side chat that failed to start) a
+	 * thread that has a run or a message of its own stays. */
+	async deleteThread(threadId: string, options: { readonly onlyIfUnused?: boolean } = {}): Promise<void> {
+		if (options.onlyIfUnused === true) {
+			const { projection } = await this.projection(threadId);
+			if (projection.runs.length > 0 || projection.messages.length > 0) return;
+		}
+		const sideChats = this.#directory.filter((thread) => thread.lineage.sideChat === true && thread.lineage.parentThreadId === threadId).map((thread) => thread.threadId);
 		this.#cancelTitle(threadId);
 		await this.#store.remove(threadId);
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
 		for (const listener of this.#deletedListeners) listener(threadId);
+		for (const sideChat of sideChats) if (this.hasThread(sideChat)) await this.deleteThread(sideChat);
+	}
+
+	/**
+	 * T3's `thread.merge_back` ("Bring back"): a fork's conversation through one of its finished runs goes to the thread
+	 * it forked from, with that thread's next message (`ThreadRecord.pendingContext`). T3's refusals: only into the
+	 * thread it forked from, not while that thread works or has a queue, and not over another fork's pending context; a
+	 * newer one from the same fork replaces it.
+	 */
+	async mergeBack(input: { sourceThreadId: string; targetThreadId: string; sourcePoint: { type: "latest_stable" } | { type: "run"; runId: string } | { type: "checkpoint"; checkpointId: string } }): Promise<void> {
+		const release = this.acquire(input.targetThreadId);
+		try {
+			const source = this.#summary(input.sourceThreadId);
+			if (source === undefined) throw new CommandError(`Unknown thread: ${input.sourceThreadId}`);
+			if (source.lineage.relationshipToParent !== "fork" || source.lineage.parentThreadId !== input.targetThreadId) {
+				throw new CommandError(`Thread ${input.sourceThreadId} is not a fork of ${input.targetThreadId}.`);
+			}
+			const target = this.#summary(input.targetThreadId);
+			if (target === undefined) throw new CommandError(`Unknown thread: ${input.targetThreadId}`);
+			const { projection: targetProjection } = await this.projection(input.targetThreadId);
+			if (targetProjection.runs.some((run) => ACTIVE_OR_QUEUED.has(run.status))) {
+				throw new CommandError("Finish or stop the target thread's active work and clear its queue before merging back.");
+			}
+			const pending = target.pendingContext;
+			if (pending !== undefined && !(pending.type === "merge_back" && pending.sourceThreadId === input.sourceThreadId)) {
+				throw new CommandError(`Thread ${input.targetThreadId} already has pending context from another side chat or fork. Send a message there first.`);
+			}
+			const { projection } = await this.projection(input.sourceThreadId);
+			const own = ownRuns(projection, source.forkedFrom?.type === "run" ? source.forkedFrom.runId : undefined);
+			const point = input.sourcePoint;
+			const run =
+				point.type === "run"
+					? own.find((candidate) => (candidate.id as string) === point.runId)
+					: point.type === "checkpoint"
+						? own.find((candidate) => candidate.id === projection.checkpoints.find((checkpoint) => (checkpoint.id as string) === point.checkpointId)?.runId)
+						: own.findLast((candidate) => candidate.status === "completed");
+			if (run === undefined) throw new CommandError(`No stable source run was found for merge-back source ${point.type}.`);
+			if (run.status !== "completed") throw new CommandError(`Merge-back source run ${run.id} is ${run.status}; only provider-finished runs are supported.`);
+			await this.#store.updateRecord(input.targetThreadId, (record) => {
+				record.pendingContext = { type: "merge_back", sourceThreadId: input.sourceThreadId, runId: run.id as string };
+			});
+			this.#log.info("fork brought back", { from: input.sourceThreadId, to: input.targetThreadId, runId: run.id });
+		} finally {
+			release();
+		}
+	}
+
+	/** The context a thread's pending transfer gives its next message, as a hidden block shown as a row, or nothing when
+	 * there is none. A fork brought back that is gone since gives nothing, and the transfer is dropped. */
+	async #pendingContext(threadId: string): Promise<{ readonly pending: PendingContext; readonly block: ContentBlock | undefined } | undefined> {
+		const record = this.#summary(threadId);
+		const pending = record?.pendingContext;
+		if (record === undefined || pending === undefined) return undefined;
+		const forkedFromRun = (thread: Thread) => (thread.forkedFrom?.type === "run" ? thread.forkedFrom.runId : undefined);
+		const block = (text: string, name: string, input: Record<string, string>): ContentBlock => ({ type: "text", text, hidden: true, shownAs: { name, input } });
+		if (pending.type === "side_chat") {
+			const parentId = record.lineage.parentThreadId;
+			if (parentId === null || !this.hasThread(parentId)) return { pending, block: undefined };
+			const { projection } = await this.projection(parentId);
+			return { pending, block: block(sideChatNote(parentId, projection, forkedFromRun(record)), SIDE_CHAT_ROW, { threadId: parentId, title: projection.thread.title }) };
+		}
+		const source = this.#summary(pending.sourceThreadId);
+		if (source === undefined || !this.hasThread(pending.sourceThreadId)) {
+			this.#log.warn("the fork brought back is gone; nothing is added", { threadId, from: pending.sourceThreadId });
+			return { pending, block: undefined };
+		}
+		const { projection } = await this.projection(pending.sourceThreadId);
+		const text = mergeBackContext({ threadId: source.threadId, title: source.title, sideChat: source.lineage.sideChat === true }, projection, forkedFromRun(source), pending.runId);
+		return { pending, block: block(text, MERGE_BACK_ROW, { threadId: source.threadId, title: source.title }) };
 	}
 
 	/** A thread was deleted (T3's `scheduled-tasks.cleanup` effect of a thread deletion hangs off this). */

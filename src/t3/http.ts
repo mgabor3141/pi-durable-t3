@@ -99,6 +99,8 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				threadSettlement: true,
 				// The thread menu's "Don't auto-settle" (`thread.auto-settle.set`), kept on the thread.
 				threadAutoSettleOptOut: true,
+				// T3's side chats: hidden `lineage.sideChat` forks, and "Bring back" (`thread.merge_back`).
+				sideChats: true,
 				// T3's one-time scheduled tasks (`{ type: "once", runAt }`).
 				oneTimeSchedules: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.

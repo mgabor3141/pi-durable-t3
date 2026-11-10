@@ -147,7 +147,7 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				});
 				break;
 			case "thread.delete":
-				await bridge.deleteThread(command.threadId);
+				await bridge.deleteThread(command.threadId, { onlyIfUnused: command.onlyIfUnused === true });
 				break;
 			case "thread.metadata.update":
 				await bridge.updateThreadMetadata(command);
@@ -157,14 +157,17 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				await bridge.applySelection(command.threadId, command.modelSelection);
 				break;
 			case "thread.fork":
-				if (command.sideChat === true) throw new CommandError("Side chats are not supported by pi-durable-t3 yet.");
 				await bridge.forkThread({
 					sourceThreadId: command.sourceThreadId,
 					targetThreadId: command.targetThreadId,
 					...(command.sourcePoint.type === "run" ? { runId: command.sourcePoint.runId } : {}),
 					...(command.title === undefined ? {} : { title: command.title }),
+					...(command.sideChat === true ? { sideChat: true } : {}),
 					provenance,
 				});
+				break;
+			case "thread.merge_back":
+				await bridge.mergeBack({ sourceThreadId: command.sourceThreadId, targetThreadId: command.targetThreadId, sourcePoint: command.sourcePoint });
 				break;
 			case "thread.runtime-mode.set":
 				if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");

@@ -1,7 +1,6 @@
 // The refusals the UI shows verbatim, for a `/ws` method or a dispatched command this host does not implement.
 
 const UNSUPPORTED: Record<string, string> = {
-	"thread.merge_back": "Merging a fork back is not supported by pi-durable-t3 yet.",
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
 	"subagent.stop": "Stopping one subagent card is not supported by pi-durable-t3: a child is a thread of its own, so stop that thread.",

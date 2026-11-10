@@ -227,6 +227,8 @@ export class ThreadOps {
 		const threads = this.#bridge
 			.shellSnapshot()
 			.threads.filter((shell) => projectId === null || shell.projectId === projectId)
+			// T3's ThreadManagementService: side chats are never listed.
+			.filter((shell) => shell.lineage.sideChat !== true)
 			.filter((shell) => input.includeSubagents !== false || shell.lineage.relationshipToParent !== "subagent")
 			.filter((shell) => statuses === null || statuses.has(shell.activityRunStatus ?? shell.status))
 			.filter((shell) => input.settled === undefined || (shell.settledOverride === "settled") === input.settled)

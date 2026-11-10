@@ -97,7 +97,7 @@ export interface ChildCard {
 export const childCardNodeId = (childThreadId: string): string => `nc-${childThreadId}`;
 
 /** The id prefix of a message's context row (`messageContext`): a tool row no tool call made. */
-const MESSAGE_CONTEXT_ITEM = "ti-x";
+export const MESSAGE_CONTEXT_ITEM = "ti-x";
 export const isMessageContextItem = (item: { readonly id: string }): boolean => item.id.startsWith(MESSAGE_CONTEXT_ITEM);
 
 export interface ThreadMeta {
@@ -121,7 +121,9 @@ export interface ThreadMeta {
 	/** The thread record's creation fields, lineage and origin (`threads.ts`); a subagent's thread derives its own. */
 	readonly createdBy?: "user" | "agent" | "system";
 	readonly creationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
-	readonly lineage?: { readonly parentThreadId: string | null; readonly relationshipToParent: "fork" | "subagent" | null; readonly rootThreadId: string };
+	readonly lineage?: { readonly parentThreadId: string | null; readonly relationshipToParent: "fork" | "subagent" | null; readonly rootThreadId: string; readonly sideChat?: true };
+	/** A side chat's fork entry: only the entries after it are shown (T3: a side chat shows only its own rows). */
+	readonly forkEntryId?: number;
 	readonly forkedFrom?: { readonly type: "run"; readonly threadId: string; readonly runId: string } | { readonly type: "node"; readonly nodeId: string } | null;
 	/** The threads this one started (`thread_prompt` with `new`), each shown as a card in the run that started it (T3's
 	 * app-owned subagent: a real thread that takes messages). */
@@ -277,7 +279,8 @@ export function projectThread(
 		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
 	};
 	const history = memory.history ?? [];
-	const transcript = [...history, ...(view?.entries ?? [])];
+	// A side chat shows only its own rows: what it inherited reaches the model, and T3 links the main thread instead.
+	const transcript = [...history, ...(view?.entries ?? [])].filter((entry) => meta.forkEntryId === undefined || entry.id > meta.forkEntryId);
 	const drafts = groupRuns(transcript);
 	const compactionTokens = compactionTokenCounts(transcript);
 	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
@@ -1053,6 +1056,7 @@ export function projectThread(
 		parentThreadId: meta.lineage?.parentThreadId == null ? null : id(meta.lineage.parentThreadId),
 		relationshipToParent: meta.lineage?.relationshipToParent ?? null,
 		rootThreadId: id(meta.lineage?.rootThreadId ?? threadId),
+		...(meta.lineage?.sideChat === true ? { sideChat: true } : {}),
 	});
 	const forkedFrom = () =>
 		meta.forkedFrom == null

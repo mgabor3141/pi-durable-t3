@@ -59,12 +59,17 @@ export type Provenance = { readonly createdBy: Actor; readonly creationSource: C
 /** What a write that names no provenance gets: a person in T3's web app, as T3's own server assumes. */
 export const USER_WEB: Provenance = { createdBy: "user", creationSource: "web" };
 
-/** T3's `OrchestrationV2AppThreadLineage`. */
+/** T3's `OrchestrationV2AppThreadLineage`. A side chat (`sideChat`) is a fork kept inside its parent's view, never in
+ * thread lists (T3's `isListedThreadLineage`). */
 export type ThreadLineage = {
 	parentThreadId: string | null;
 	relationshipToParent: "fork" | "subagent" | null;
 	rootThreadId: string;
+	sideChat?: true;
 };
+/** Context a thread's next message carries to the model (T3's pending context transfer), built when that message is
+ * sent: a side chat's note about its main thread, or a fork's conversation brought back (`thread.merge_back`). */
+export type PendingContext = { type: "side_chat" } | { type: "merge_back"; sourceThreadId: string; runId: string };
 /** T3's `OrchestrationV2LinkOrigin`: the linked environment's session whose agent started this work here. Set once. */
 export type LinkOrigin = { sessionId: string; label: string; access?: string };
 /** T3's `OrchestrationV2DelegatedFrom`: the thread in a linked environment that delegated this one. */
@@ -140,6 +145,10 @@ export type ThreadRecord = {
 	spawn?: Spawn;
 	/** Messages to this thread that asked to be answered, not yet answered. */
 	notify?: NotifyRequest[];
+	/** What the next message carries to the model, until it is sent. */
+	pendingContext?: PendingContext;
+	/** A side chat's fork entry: its rows are the entries after it (T3: a side chat shows only its own rows). */
+	forkEntryId?: number;
 	linkOrigin?: LinkOrigin;
 	delegatedFrom?: DelegatedFrom;
 	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
@@ -1293,13 +1302,25 @@ export class Threads {
 	async fork(input: {
 		sourceThreadId: string;
 		targetThreadId: string;
-		entryId: number;
+		/** The entry to fork at; none only for a side chat whose parent has no finished turn yet: it starts empty, with the
+		 * parent's agent config (T3's side chat without a source run). */
+		entryId: number | undefined;
 		runId?: string;
 		title?: string;
 		provenance?: Provenance;
 		/** A child started with its parent's history: a child's lineage, card node and parent run instead of a fork's. */
 		child?: { readonly spawn: Spawn; readonly nodeId: string };
+		/** A side chat (T3's `thread.fork` with `sideChat`): hidden in lists, showing only its own rows, its first message
+		 * carrying a note about the main thread. */
+		sideChat?: boolean;
 	}): Promise<ThreadRecord> {
+		if (input.entryId === undefined && input.sideChat !== true) throw hostError("not_rewindable", "a fork needs an entry to fork at");
+		let sourceAgent: Awaited<ReturnType<Conversation["agent"]>> | undefined;
+		if (input.entryId === undefined) {
+			const head = await this.#harness.conversation((await this.thread(input.sourceThreadId))?.head as ConversationId, BACKGROUND_CONTEXT);
+			if (head === undefined) throw hostError("unknown_thread", `no such thread: ${input.sourceThreadId}`);
+			sourceAgent = await head.agent(BACKGROUND_CONTEXT);
+		}
 		return this.#commit(async (tx, writes) => {
 			const existing = await writes.record(input.targetThreadId);
 			if (existing !== undefined) {
@@ -1307,7 +1328,10 @@ export class Threads {
 				return existing;
 			}
 			const source = await writes.live(input.sourceThreadId);
-			const fork = await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
+			const fork =
+				input.entryId === undefined
+					? await configureNewConversation(tx, sourceAgent!)
+					: await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
 			const projectId = await this.#projectForConversation(tx, fork.id);
 			if (projectId === undefined) throw hostError("unknown_project", `the fork of ${input.sourceThreadId} matches no registered project`);
 			// T3's `ThreadForkService`: the source's title with " fork" unless one is named, the source's root, and the run
@@ -1318,7 +1342,12 @@ export class Threads {
 				head: fork.id,
 				title: input.title ?? `${source.title} fork`,
 				provenance: input.provenance ?? USER_WEB,
-				lineage: { parentThreadId: source.threadId, relationshipToParent: input.child === undefined ? "fork" : "subagent", rootThreadId: source.lineage.rootThreadId },
+				lineage: {
+					parentThreadId: source.threadId,
+					relationshipToParent: input.child === undefined ? "fork" : "subagent",
+					rootThreadId: source.lineage.rootThreadId,
+					...(input.sideChat === true ? { sideChat: true as const } : {}),
+				},
 				forkedFrom:
 					input.child !== undefined
 						? { type: "node", nodeId: input.child.nodeId }
@@ -1328,6 +1357,10 @@ export class Threads {
 				...(input.child === undefined ? {} : { spawn: input.child.spawn }),
 				...(source.linkOrigin === undefined ? {} : { linkOrigin: source.linkOrigin }),
 			});
+			if (input.sideChat === true) {
+				record.pendingContext = { type: "side_chat" };
+				if (input.entryId !== undefined) record.forkEntryId = input.entryId;
+			}
 			await this.#addThread(writes, record);
 			return record;
 		});

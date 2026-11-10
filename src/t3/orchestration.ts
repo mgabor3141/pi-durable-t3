@@ -365,6 +365,8 @@ export class Orchestration {
 		const parent = filter.parent === "self" ? caller : filter.parent;
 		const rows: ThreadSummaryRow[] = [];
 		for (const thread of [...this.#bridge.threadRecords()].reverse()) {
+			// Side chats live inside their main thread's view, never in lists (T3's `isListedThreadLineage`).
+			if (thread.lineage.sideChat === true) continue;
 			if (parent !== undefined && thread.lineage.parentThreadId !== parent) continue;
 			if (filter.projectId !== undefined && thread.projectId !== filter.projectId) continue;
 			const active = this.#isActive(thread.threadId);
