@@ -74,9 +74,10 @@ export type DelegatedFrom = { environmentId: string; threadId: string; title: st
  * settles, the activity's report is posted into `threadId`, the sender's thread. Kept on the receiving thread's record
  * until it is delivered; the delivery's command id is `id`, so a retry after a crash is answered from its receipt.
  */
-/** A request to be answered with a thread's report: `threadId` is the caller. `batch`: the delivery it went out in,
- * written before the send (the send's command id), so a retry after a crash sends the same message. */
-export type NotifyRequest = { id: string; threadId: string; messageId: string; createdAt: number; batch?: string };
+/** A request to be answered with a thread's report: `threadId` is the caller. `wake`: T3's completionWake, `always` (a
+ * child started without waiting) or `settled_only` (asked when a wait ran out: not while `runId`, the caller's turn that
+ * asked, still runs). `batch`: the message it went into, written before the send, so a restart does not send it twice. */
+export type NotifyRequest = { id: string; threadId: string; messageId: string; createdAt: number; wake?: "always" | "settled_only"; runId?: string; batch?: string };
 /** How a child thread was started: the parent's run (where its card is), the message, and how its latest run ended
  * (written when it settles, so the card is right while the child's thread is closed). */
 export type Spawn = {

@@ -2,12 +2,17 @@
 // `thread_list` and `thread_cancel` (`thread-tools.ts`). One entity, the thread; a child is a thread with a parent link
 // (its card shows in the run that started it, and it nests under its parent in T3). A prompt waits for its activity to
 // settle and answers with the activity's report (`reports.ts`), or returns at once; a prompt that does not wait (or
-// whose wait ran out) asks to be answered: once the activity settles and the caller is idle, the report is posted into
-// the caller's thread, starting a turn there. A busy caller is not interrupted: it reads its children itself, and a
-// report it collects (`thread_wait`, `thread_read`, or a prompt that waits) answers its requests, which are withdrawn.
-// What is still owed when it goes idle arrives in one message, so it takes one turn, however many children finished.
-// The request is kept on the receiving thread's record until it is delivered, and a batch's id is written on its
-// requests before the send, whose command id it is, so a restart sends it once.
+// whose wait ran out) asks to be answered, and the report is posted into the caller's thread, as T3 delivers a delegated
+// task's completion (`Orchestrator.ts`, completionWake and the delegated-completion cohort):
+// - A child started without waiting wakes its caller when it settles (T3's `always`): into the caller's running turn as
+//   a steer (pi steers without interrupting tools, as T3 asks before it steers), or as a new turn when the caller is idle.
+//   It never interrupts or restarts a turn. A request made because a wait ran out (T3's `settled_only`) waits until the
+//   turn that made it has ended, and then queues.
+// - Reports that settle while an earlier one waits in the caller's queue join that message: one message, one turn.
+// - A report the caller collects itself (`thread_wait`, `thread_read` of the child's latest exchange, or a prompt that
+//   waits) answers its requests, which are withdrawn; while the caller waits for a child, that child's report is held.
+// The request is kept on the receiving thread's record until it is delivered; the message it goes into is written on it
+// first, so a restart finds that message and does not send it twice.
 import { createHash, randomUUID } from "node:crypto";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { NotifyRequest, Provenance, Thread } from "../threads.ts";
@@ -62,15 +67,20 @@ export interface ThreadSummaryRow {
 	readonly lastMessage: string | null;
 }
 
+/** A report ready for its caller: the child it is from, the request it answers, and the report. */
+type OutboxItem = { readonly child: string; readonly request: NotifyRequest; readonly report: Report };
+
 export class Orchestration {
 	readonly #bridge: Bridge;
 	readonly #log: Logger;
 	/** Reports ready for each caller, by request id, until its deliverer posts them. */
-	readonly #outbox = new Map<string, Map<string, { readonly child: string; readonly request: NotifyRequest; readonly report: Report }>>();
+	readonly #outbox = new Map<string, Map<string, OutboxItem>>();
 	/** Requests taken from an outbox and not yet dropped from their records: handed over, so not followed again. */
 	readonly #inFlight = new Set<string>();
-	/** The callers a deliverer is posting to, so each has one. */
-	readonly #delivering = new Set<string>();
+	/** The callers a deliverer is posting to, each with what wakes it from a wait (a new report, a wait ended). */
+	readonly #delivering = new Map<string, AbortController>();
+	/** Which callers are waiting for which children right now (`thread_wait`, a prompt's own wait), with a count. */
+	readonly #awaited = new Map<string, Map<string, number>>();
 	/** The threads a follower is watching, so each has one. */
 	readonly #following = new Set<string>();
 	#closed = false;
@@ -113,20 +123,23 @@ export class Orchestration {
 		let notify = input.notify ?? (!wait && caller !== undefined);
 		if (notify && caller === undefined) throw new ThreadToolError("notify needs a calling thread to answer to.");
 		// Asked before it is sent: a crash after the send still finds the request.
-		if (notify) await this.#ask(threadId, caller!, commandId, messageId);
+		if (notify) await this.#ask(threadId, caller!, commandId, messageId, "always");
 		if (mode === "steer") {
 			const projection = await this.#projection(threadId);
 			if (!isBusy(projection)) throw new ThreadToolError(`Thread ${threadId} is not working; send without mode steer to start it.`);
 		}
 		await this.#bridge.sendMessage({ threadId, commandId, messageId, text: input.message, mode: mode === "steer" ? "steer" : "queue", provenance });
 		if (!wait) return { threadId, messageId, notify };
-		const settled = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
-		// The caller has the report now: a request it also made (`notify: true`) is answered.
-		if (settled !== undefined && notify) await this.#answered(threadId, caller!);
+		const settled = await this.#awaiting(caller, [threadId], async () => {
+			const report = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
+			// The caller has the report now: a request it also made (`notify: true`) is answered.
+			if (report !== undefined && notify) await this.#answered(threadId, caller!);
+			return report;
+		});
 		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
 		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
 		if (!notify && caller !== undefined) {
-			await this.#ask(threadId, caller, commandId, messageId);
+			await this.#ask(threadId, caller, commandId, messageId, "settled_only");
 			notify = true;
 		}
 		return { threadId, messageId, report: this.#activeReport(await this.#projection(threadId), messageId, caller), notify };
@@ -203,13 +216,15 @@ export class Orchestration {
 		if (threadIds.length === 0) throw new ThreadToolError("Name at least one thread.");
 		for (const threadId of threadIds) this.#existing(threadId, caller);
 		const deadline = Date.now() + waitMs(timeoutMs);
-		const reports = await Promise.all(
-			threadIds.map(async (threadId) => {
-				const report = await this.#waitOne(threadId, caller, deadline, signal);
-				// Collected here: the caller's requests this report answers are withdrawn, so it is not posted again.
-				if (caller !== undefined && report.verdict !== "active") await this.#answered(threadId, caller);
-				return report;
-			}),
+		const reports = await this.#awaiting(caller, threadIds, () =>
+			Promise.all(
+				threadIds.map(async (threadId) => {
+					const report = await this.#waitOne(threadId, caller, deadline, signal);
+					// Collected here: the caller's requests this report answers are withdrawn, so it is not posted again.
+					if (caller !== undefined && report.verdict !== "active") await this.#answered(threadId, caller);
+					return report;
+				}),
+			),
 		);
 		return { reports, verdict: worstVerdict(reports.map((entry) => entry.verdict)) };
 	}
@@ -229,6 +244,26 @@ export class Orchestration {
 				throw error;
 			});
 		return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
+	}
+
+	/** Run `work`, a wait of `caller` for `threadIds`: meanwhile their reports to it are held, as it is collecting them. */
+	async #awaiting<T>(caller: string | undefined, threadIds: readonly string[], work: () => Promise<T>): Promise<T> {
+		if (caller === undefined) return work();
+		const children = this.#awaited.get(caller) ?? new Map<string, number>();
+		this.#awaited.set(caller, children);
+		for (const threadId of threadIds) children.set(threadId, (children.get(threadId) ?? 0) + 1);
+		try {
+			return await work();
+		} finally {
+			for (const threadId of threadIds) {
+				const count = (children.get(threadId) ?? 1) - 1;
+				if (count === 0) children.delete(threadId);
+				else children.set(threadId, count);
+			}
+			if (children.size === 0) this.#awaited.delete(caller);
+			// What it did not collect (a wait that ran out) goes out now.
+			this.#deliverTo(caller);
+		}
 	}
 
 	/** Withdraw `caller`'s requests on `threadId` whose activity has settled: the caller collected that report itself. */
@@ -343,11 +378,14 @@ export class Orchestration {
 
 	// ---- answering --------------------------------------------------------------------------------------------
 
-	async #ask(threadId: string, caller: string, id: string, messageId: string): Promise<void> {
+	/** Ask for `threadId`'s report on `messageId` to be posted to `caller`. `settled_only` (a wait that ran out) holds it
+	 * until the caller's turn that asked has ended, so its run is kept. */
+	async #ask(threadId: string, caller: string, id: string, messageId: string, wake: "always" | "settled_only"): Promise<void> {
+		const runId = wake === "settled_only" ? ((await this.#projection(caller)).runs.find(isActiveRun)?.id as string | undefined) : undefined;
 		await this.#bridge.updateThreadRecord(threadId, (record) => {
 			const notify = record.notify ?? [];
 			if (notify.some((request) => request.id === id)) return false;
-			record.notify = [...notify, { id, threadId: caller, messageId, createdAt: Date.now() } satisfies NotifyRequest];
+			record.notify = [...notify, { id, threadId: caller, messageId, createdAt: Date.now(), wake, ...(runId === undefined ? {} : { runId }) } satisfies NotifyRequest];
 		});
 		this.#follow(threadId);
 	}
@@ -383,88 +421,171 @@ export class Orchestration {
 		})();
 	}
 
-	/** Post a caller's ready reports once it is idle, all in one message, until its outbox is empty. One deliverer per
-	 * caller. A report withdrawn meanwhile (the caller collected it) is left out. */
+	/** Post a caller's ready reports as they may go, until its outbox is empty. One deliverer per caller; a new report or
+	 * a wait that ended wakes it when it is holding some back. */
 	#deliverTo(caller: string): void {
-		if (this.#closed || this.#delivering.has(caller)) return;
-		this.#delivering.add(caller);
+		if (this.#closed) return;
+		const running = this.#delivering.get(caller);
+		if (running !== undefined) return void running.abort();
+		this.#delivering.set(caller, new AbortController());
 		void (async () => {
 			try {
 				while (!this.#closed) {
 					const box = this.#outbox.get(caller);
 					if (box === undefined || box.size === 0) return;
-					if (this.#bridge.hasThread(caller)) {
-						const idle = await this.#bridge.waitFor(caller, (projection) => (isBusy(projection) ? undefined : true), FOLLOW_CHUNK_MS, this.#stop.signal).catch((error: unknown) => {
-							if (this.#closed) return undefined;
-							throw error;
-						});
-						if (idle === undefined) continue;
+					const callerGone = this.#bridge.threadRecord(caller) === undefined || !this.#bridge.hasThread(caller);
+					// Read before the outbox is: a report handed over meanwhile is then seen with the projection it is judged on.
+					const projection = callerGone ? undefined : await this.#projection(caller);
+					// As the records hold them now: withdrawn ones are gone, and a message written before a crash is kept.
+					const owed: OutboxItem[] = [];
+					for (const item of [...box.values()]) {
+						const request = (this.#bridge.threadRecord(item.child)?.notify ?? []).find((candidate) => candidate.id === item.request.id);
+						if (request === undefined) box.delete(item.request.id);
+						else owed.push({ ...item, request });
 					}
-					const taken = [...box.values()];
-					for (const item of taken) {
+					if (owed.length === 0) continue;
+					if (projection === undefined) {
+						// The caller is gone: nobody to answer.
+						for (const item of owed) box.delete(item.request.id);
+						await this.#drop(owed);
+						continue;
+					}
+					const ready = owed.filter((item) => this.#mayDeliver(caller, item, projection) && this.#batchComplete(caller, item, box, projection));
+					if (ready.length === 0) {
+						// Held: until the turn that asked ends, a wait ends, or another report arrives.
+						const wake = new AbortController();
+						this.#delivering.set(caller, wake);
+						await this.#bridge
+							.waitFor(caller, (next) => (owed.some((item) => this.#mayDeliver(caller, item, next) && this.#batchComplete(caller, item, box, next)) ? true : undefined), FOLLOW_CHUNK_MS, AbortSignal.any([this.#stop.signal, wake.signal]))
+							.catch((error: unknown) => {
+								if (this.#closed || wake.signal.aborted) return undefined;
+								throw error;
+							});
+						continue;
+					}
+					for (const item of ready) {
 						box.delete(item.request.id);
 						this.#inFlight.add(item.request.id);
 					}
-					if (box.size === 0) this.#outbox.delete(caller);
 					try {
-						// As the records hold them now: withdrawn ones are gone, and a batch written before a crash is kept.
-						const owed = taken.flatMap((item) => {
-							const request = (this.#bridge.threadRecord(item.child)?.notify ?? []).find((candidate) => candidate.id === item.request.id);
-							return request === undefined ? [] : [{ ...item, request }];
-						});
-						if (owed.length > 0) await this.#deliver(caller, owed);
+						await this.#deliver(caller, ready, projection);
 					} finally {
-						for (const item of taken) this.#inFlight.delete(item.request.id);
+						for (const item of ready) this.#inFlight.delete(item.request.id);
 					}
 				}
 			} catch (error) {
 				if (!this.#closed) this.#log.warn("thread report delivery stopped", { caller, error: error instanceof Error ? error.message : String(error) });
 			} finally {
 				this.#delivering.delete(caller);
+				if ((this.#outbox.get(caller)?.size ?? 0) === 0) this.#outbox.delete(caller);
 				// A report handed over after the last look waits for the next deliverer.
-				if (!this.#closed && (this.#outbox.get(caller)?.size ?? 0) > 0) this.#deliverTo(caller);
+				else if (!this.#closed) this.#deliverTo(caller);
 			}
 		})();
 	}
 
-	/** Post reports into the asking thread as one message, then drop their requests. Each batch's id is written on its
-	 * requests first and is the send's command id, so a send retried after a crash (with the same batch) is a no-op. */
-	async #deliver(caller: string, items: readonly { readonly child: string; readonly request: NotifyRequest; readonly report: Report }[]): Promise<void> {
-		const batches = new Map<string, (typeof items)[number][]>();
-		const fresh = items.filter((item) => item.request.batch === undefined);
-		const freshId = fresh.length === 1 ? fresh[0]!.request.id : hash(...fresh.map((item) => item.request.id).toSorted());
-		for (const item of items) {
-			const batch = item.request.batch ?? freshId;
-			batches.set(batch, [...(batches.get(batch) ?? []), item]);
+	/** A report a stopped process put in a message it had not sent yet goes when every report it put there is back. */
+	#batchComplete(caller: string, item: OutboxItem, box: ReadonlyMap<string, OutboxItem>, projection: OrchestrationV2ThreadProjection): boolean {
+		const batch = item.request.batch;
+		if (batch === undefined || projection.messages.some((message) => (message.id as string) === batch)) return true;
+		return this.#bridge.threadRecords().every((thread) => (thread.notify ?? []).every((request) => request.threadId !== caller || request.batch !== batch || box.has(request.id)));
+	}
+
+	/** Whether a report may go to `caller` now: not while it waits for that child (it is collecting it), and a
+	 * `settled_only` one not while the turn that asked is still running. */
+	#mayDeliver(caller: string, item: OutboxItem, projection: OrchestrationV2ThreadProjection): boolean {
+		if ((this.#awaited.get(caller)?.get(item.child) ?? 0) > 0) return false;
+		if (item.request.wake !== "settled_only" || item.request.runId === undefined) return true;
+		const run = projection.runs.find((candidate) => (candidate.id as string) === item.request.runId);
+		return run === undefined || !isActiveRun(run);
+	}
+
+	/** Post reports into the caller's thread: appended to a report message still waiting in its queue, or as a new
+	 * message, steered into its running turn when every report may wake it and the turn takes a steer, else queued
+	 * (a new turn when it is idle). The message's id is written on the requests first; a request whose message already
+	 * holds its report (sent before a crash) is only dropped. */
+	async #deliver(caller: string, items: readonly OutboxItem[], projection: OrchestrationV2ThreadProjection): Promise<void> {
+		const ordered = items.toSorted((left, right) => left.request.createdAt - right.request.createdAt);
+		const queuedReport = (messageId: string) => {
+			const message = projection.messages.find((candidate) => (candidate.id as string) === messageId);
+			const run = message === undefined ? undefined : projection.runs.find((candidate) => candidate.id === message.runId);
+			return message !== undefined && run?.status === "queued" && (run.userMessageId as string) === messageId ? { message, runId: run.id as string } : undefined;
+		};
+		const sent: OutboxItem[] = [];
+		const fresh: OutboxItem[] = [];
+		// Reports a stopped process put in a message it never sent: that message, sent now under its id.
+		const unsent = new Map<string, OutboxItem[]>();
+		for (const item of ordered) {
+			const batch = item.request.batch;
+			const message = batch === undefined ? undefined : projection.messages.find((candidate) => (candidate.id as string) === batch);
+			// Only a message that holds the report has delivered it.
+			if (message !== undefined && message.text.includes(`(${item.child})`)) sent.push(item);
+			else if (batch !== undefined && message === undefined) unsent.set(batch, [...(unsent.get(batch) ?? []), item]);
+			else fresh.push(item);
 		}
-		for (const item of fresh) {
+		for (const [messageId, members] of unsent) await this.#send(caller, members, messageId, projection);
+		if (fresh.length > 0) {
+			const text = fresh.map(({ child, report }) => `[Report from thread "${report.title}" (${child}), ${report.verdict}]\n${report.text}`).join("\n\n");
+			// T3 adds a sibling to its queued completion notice; ours is the newest report message still queued.
+			const pending = projection.runs
+				.filter((run) => run.status === "queued" && (run.userMessageId as string).startsWith("n-"))
+				.map((run) => queuedReport(run.userMessageId as string))
+				.findLast((candidate) => candidate !== undefined);
+			let delivered = false;
+			if (pending !== undefined) {
+				await this.#mark(fresh, pending.message.id as string);
+				delivered = await this.#bridge
+					.editQueued(caller, pending.runId, `${pending.message.text}\n\n${text}`)
+					.then(() => true)
+					.catch(() => false);
+			}
+			if (!delivered) {
+				const messageId = `n-${hash(...fresh.map((item) => item.request.id).toSorted())}`;
+				await this.#mark(fresh, messageId);
+				await this.#send(caller, fresh, messageId, projection);
+			} else this.#log.info("thread reports delivered", { to: caller, from: fresh.map((item) => item.child), joined: true });
+		}
+		await this.#drop([...sent, ...fresh, ...[...unsent.values()].flat()]);
+	}
+
+	/** Send reports as a new message: steered into the caller's running turn when every one may wake it and the turn
+	 * takes a steer, else queued (a new turn when it is idle). The command id is the message's, so a resend is a no-op. */
+	async #send(caller: string, items: readonly OutboxItem[], messageId: string, projection: OrchestrationV2ThreadProjection): Promise<void> {
+		const text = items.map(({ child, report }) => `[Report from thread "${report.title}" (${child}), ${report.verdict}]\n${report.text}`).join("\n\n");
+		const active = projection.runs.find((run) => run.status === "running");
+		const activeText = active === undefined ? undefined : projection.messages.find((message) => message.id === active.userMessageId)?.text;
+		// T3 steers a notice only for tasks that wake their parent while it works, and never into a compaction.
+		const steer = active !== undefined && items.every((item) => item.request.wake !== "settled_only") && !(activeText ?? "").startsWith("/compact");
+		const single = items.length === 1 ? items[0]!.child : undefined;
+		await this.#bridge.sendMessage({
+			threadId: caller,
+			commandId: `notify-${messageId}`,
+			messageId,
+			text,
+			mode: steer ? "steer" : "queue",
+			provenance: { createdBy: "agent", creationSource: "server", ...(single === undefined ? {} : { senderThreadId: single }) },
+			automatic: true,
+		});
+		this.#log.info("thread reports delivered", { to: caller, from: items.map((item) => item.child), verdicts: items.map((item) => item.report.verdict), steer });
+	}
+
+	/** Write the message a report goes into on its request, before it is sent. */
+	async #mark(items: readonly OutboxItem[], messageId: string): Promise<void> {
+		for (const item of items) {
 			await this.#bridge.updateThreadRecord(item.child, (record) => {
 				const request = (record.notify ?? []).find((candidate) => candidate.id === item.request.id);
-				if (request === undefined) return false;
-				request.batch = freshId;
+				if (request === undefined || request.batch === messageId) return false;
+				request.batch = messageId;
 			});
 		}
-		for (const [batch, members] of batches) {
-			const ordered = members.toSorted((left, right) => left.request.createdAt - right.request.createdAt);
-			if (this.#bridge.threadRecord(caller) !== undefined) {
-				const text = ordered.map(({ child, report }) => `[Report from thread "${report.title}" (${child}), ${report.verdict}]\n${report.text}`).join("\n\n");
-				const single = ordered.length === 1 ? ordered[0]!.child : undefined;
-				await this.#bridge.sendMessage({
-					threadId: caller,
-					commandId: `notify-${batch}`,
-					messageId: `n-${hash(batch)}`,
-					text,
-					mode: "queue",
-					provenance: { createdBy: "agent", creationSource: "server", ...(single === undefined ? {} : { senderThreadId: single }) },
-					automatic: true,
-				});
-				this.#log.info("thread reports delivered", { to: caller, from: ordered.map((item) => item.child), verdicts: ordered.map((item) => item.report.verdict) });
-			}
-			for (const { child, request } of ordered) {
-				await this.#bridge.updateThreadRecord(child, (record) => {
-					record.notify = (record.notify ?? []).filter((candidate) => candidate.id !== request.id);
-				});
-			}
+	}
+
+	/** Drop delivered (or unanswerable) requests from their records. */
+	async #drop(items: readonly OutboxItem[]): Promise<void> {
+		for (const { child, request } of items) {
+			await this.#bridge.updateThreadRecord(child, (record) => {
+				record.notify = (record.notify ?? []).filter((candidate) => candidate.id !== request.id);
+			});
 		}
 	}
 

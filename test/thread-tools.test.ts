@@ -265,30 +265,32 @@ it("a report the parent collects with thread_wait is not posted into its thread 
 	expect(parent!.runs.filter((run) => run.status === "queued")).toEqual([]);
 });
 
-it("a busy parent is not interrupted by its children's reports; what it has not read arrives in one turn once it is idle", { timeout: 60_000 }, async () => {
-	const { bridge, orchestration, ask, sawAll, settled } = await setup();
+it("a busy parent gets its children's reports in its turn, joined into one message while it waits there (T3's delegated completion)", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll, settled } = await setup();
 	for (const name of ["b1", "b2", "b3"]) await ask("a", { name: "thread_prompt", args: { new: { title: name }, message: `Hold on: ${name}`, wait: false } });
 	const children = (await sawAll(3)).map((entry) => entry.threadId as string);
-	// The parent is busy while all three finish.
+	// The parent is busy while all three finish: its request waits for an answer.
 	await bridge.sendMessage({ threadId: "a", commandId: "busy", messageId: "m-busy", text: "Hold on: parent", mode: "queue" });
 	await bridge.waitFor("a", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
-	for (const name of ["b1", "b2", "b3"]) gate(name).release();
-	for (const child of children) await settled(child);
-	await new Promise((resolve) => setTimeout(resolve, 300));
-	const during = (await bridge.projection("a")).projection;
-	expect(during.messages.filter((message) => message.text.startsWith("[Report from thread")), "nothing posted while busy").toEqual([]);
-	expect(during.runs.filter((run) => run.status === "queued"), "nothing queued while busy").toEqual([]);
-	// It reads one child itself while busy: that report is collected.
-	await orchestration.read("a", { threadId: children[0]! });
-	expect(bridge.threadRecord(children[0]!)!.notify ?? []).toEqual([]);
+	for (const name of ["b1", "b2", "b3"]) {
+		gate(name).release();
+		await settled(children[["b1", "b2", "b3"].indexOf(name)]!);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	// One message, steered at the running turn, which the next two joined; it waits for the turn's next boundary.
+	const during = await bridge.waitFor("a", (projection) => {
+		const queued = projection.runs.filter((run) => run.status === "queued");
+		const message = queued.length === 1 ? projection.messages.find((candidate) => candidate.id === queued[0]!.userMessageId) : undefined;
+		return message !== undefined && message.text.includes("released b3") ? { queued, message } : undefined;
+	}, 10_000);
+	expect(during, "one pending message holding all three").toBeDefined();
+	expect(during!.message.text).toContain("[AGENT]: released b1");
+	expect(during!.message.text).toContain("[AGENT]: released b2");
+	expect(during!.message.text.indexOf("released b1")).toBeLessThan(during!.message.text.indexOf("released b3"));
 	gate("parent").release();
 	const after = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
 	const posted = after!.messages.filter((message) => message.role === "user" && message.text.includes("[Report from thread"));
-	expect(posted, "one message for the two unread reports").toHaveLength(1);
-	expect(posted[0]!.text).not.toContain("released b1");
-	expect(posted[0]!.text).toContain("[AGENT]: released b2");
-	expect(posted[0]!.text).toContain("[AGENT]: released b3");
-	expect(posted[0]!.text.indexOf("released b2")).toBeLessThan(posted[0]!.text.indexOf("released b3"));
+	expect(posted, "one message for the three reports").toHaveLength(1);
 	expect(after!.messages.filter((message) => message.text.startsWith("Got the report")), "one turn").toHaveLength(1);
 	for (const child of children) expect(bridge.threadRecord(child)!.notify ?? []).toEqual([]);
 });
