@@ -4,7 +4,8 @@
 // settle and answers with the activity's report (`reports.ts`), or returns at once; a prompt that does not wait (or
 // whose wait ran out) asks to be answered: the report is posted into the caller's thread when the activity settles,
 // starting a turn there if it is idle. The request is kept on the receiving thread's record until it is delivered, and
-// its delivery is idempotent, so a restart delivers it once.
+// its delivery is idempotent, so a restart delivers it once. A report the caller collects itself (`thread_wait`, or a
+// prompt that waits) answers its requests: they are withdrawn, and nothing is posted.
 import { createHash, randomUUID } from "node:crypto";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { NotifyRequest, Provenance, Thread } from "../threads.ts";
@@ -62,6 +63,9 @@ export interface ThreadSummaryRow {
 export class Orchestration {
 	readonly #bridge: Bridge;
 	readonly #log: Logger;
+	/** Who is waiting for which thread right now (`thread_wait`, or a prompt's own wait): a follower holds a report back
+	 * from a caller waiting for it, until that wait ends and has withdrawn what it answered. Keyed by thread, then caller. */
+	readonly #waiting = new Map<string, Map<string, { count: number; done: Promise<void>; end: () => void }>>();
 	/** The threads a follower is delivering for, so each has one. */
 	readonly #following = new Set<string>();
 	#closed = false;
@@ -111,7 +115,12 @@ export class Orchestration {
 		}
 		await this.#bridge.sendMessage({ threadId, commandId, messageId, text: input.message, mode: mode === "steer" ? "steer" : "queue", provenance });
 		if (!wait) return { threadId, messageId, notify };
-		const settled = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
+		const settled = await this.#whileWaiting(threadId, caller, async () => {
+			const report = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
+			// The caller has the report now: a request it also made (`notify: true`) is answered.
+			if (report !== undefined && notify) await this.#answered(threadId, caller!);
+			return report;
+		});
 		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
 		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
 		if (!notify && caller !== undefined) {
@@ -193,23 +202,72 @@ export class Orchestration {
 		for (const threadId of threadIds) this.#existing(threadId, caller);
 		const deadline = Date.now() + waitMs(timeoutMs);
 		const reports = await Promise.all(
-			threadIds.map(async (threadId) => {
-				const before = await this.#projection(threadId);
-				const runs = before.runs.toSorted((left, right) => left.ordinal - right.ordinal);
-				const from = runs.find(isActiveRun) ?? runs.at(-1);
-				const options = { ...(caller === undefined ? {} : { reader: caller }), label: (id: string) => this.#label(id) };
-				if (!isBusy(before) || from === undefined) return report(before, { ...options, fromRunId: from?.id as string | undefined });
-				const combined = this.#signal(signal);
-				const settled = await this.#bridge
-					.waitFor(threadId, (projection) => (isBusy(projection) ? undefined : report(projection, { ...options, fromRunId: from.id as string })), Math.max(1, deadline - Date.now()), combined)
-					.catch((error: unknown) => {
-						if (combined.aborted) return undefined;
-						throw error;
-					});
-				return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
-			}),
+			threadIds.map((threadId) =>
+				this.#whileWaiting(threadId, caller, async () => {
+					const report = await this.#waitOne(threadId, caller, deadline, signal);
+					// Collected here: the caller's requests this report answers are withdrawn, so it is not posted again.
+					if (caller !== undefined && report.verdict !== "active") await this.#answered(threadId, caller);
+					return report;
+				}),
+			),
 		);
 		return { reports, verdict: worstVerdict(reports.map((entry) => entry.verdict)) };
+	}
+
+	/** One thread's report for `wait`: its current activity once it settles (or the deadline passes), or its latest. */
+	async #waitOne(threadId: string, caller: string | undefined, deadline: number, signal: AbortSignal | undefined): Promise<Report> {
+		const before = await this.#projection(threadId);
+		const runs = before.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+		const from = runs.find(isActiveRun) ?? runs.at(-1);
+		const options = { ...(caller === undefined ? {} : { reader: caller }), label: (id: string) => this.#label(id) };
+		if (!isBusy(before) || from === undefined) return report(before, { ...options, fromRunId: from?.id as string | undefined });
+		const combined = this.#signal(signal);
+		const settled = await this.#bridge
+			.waitFor(threadId, (projection) => (isBusy(projection) ? undefined : report(projection, { ...options, fromRunId: from.id as string })), Math.max(1, deadline - Date.now()), combined)
+			.catch((error: unknown) => {
+				if (combined.aborted) return undefined;
+				throw error;
+			});
+		return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
+	}
+
+	/** Run `work` (a wait of `caller` for `threadId`) registered as waiting, so the follower holds that report back. */
+	async #whileWaiting<T>(threadId: string, caller: string | undefined, work: () => Promise<T>): Promise<T> {
+		if (caller === undefined) return work();
+		const callers = this.#waiting.get(threadId) ?? new Map();
+		this.#waiting.set(threadId, callers);
+		let entry = callers.get(caller);
+		if (entry === undefined) {
+			let end = () => {};
+			const done = new Promise<void>((resolve) => {
+				end = resolve;
+			});
+			entry = { count: 0, done, end };
+			callers.set(caller, entry);
+		}
+		entry.count += 1;
+		try {
+			return await work();
+		} finally {
+			entry.count -= 1;
+			if (entry.count === 0) {
+				callers.delete(caller);
+				if (callers.size === 0) this.#waiting.delete(threadId);
+				entry.end();
+			}
+		}
+	}
+
+	/** Withdraw `caller`'s requests on `threadId` whose activity has settled: the caller collected that report itself. */
+	async #answered(threadId: string, caller: string): Promise<void> {
+		const pending = (this.#bridge.threadRecord(threadId)?.notify ?? []).filter((request) => request.threadId === caller);
+		if (pending.length === 0) return;
+		const projection = await this.#projection(threadId);
+		const answered = new Set(pending.filter((request) => settledReport(projection, request.messageId, this.#reportOptions(request.messageId, caller)) !== undefined).map((request) => request.id));
+		if (answered.size === 0) return;
+		await this.#bridge.updateThreadRecord(threadId, (record) => {
+			record.notify = (record.notify ?? []).filter((request) => !answered.has(request.id));
+		});
 	}
 
 	async #waitSettled(threadId: string, messageId: string, reader: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<Report | undefined> {
@@ -336,6 +394,12 @@ export class Orchestration {
 							throw error;
 						});
 					if (ready === undefined) continue;
+					// The caller is waiting for this report itself: hold it until that wait ends; the wait withdraws what it answered.
+					const waiting = this.#waiting.get(threadId)?.get(request.threadId);
+					if (waiting !== undefined) {
+						await waiting.done;
+						continue;
+					}
 					await this.#deliver(threadId, request, ready);
 				}
 			} catch (error) {

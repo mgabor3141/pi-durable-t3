@@ -239,6 +239,43 @@ it("thread_wait collects several children's reports with the worst verdict", { t
 	expect(waited.reports.map((entry: { report: string }) => entry.report.split("\n").at(-1))).toEqual(["[AGENT]: 3", "[AGENT]: 7"]);
 });
 
+it("a report the parent collects with thread_wait is not posted into its thread again", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll, settled } = await setup();
+	// Started without waiting (so each asks to be answered), held until the parent is waiting for them.
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "Hold on: fan1", wait: false } });
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "Hold on: fan2", wait: false } });
+	const started = await sawAll(2);
+	expect(started.map((entry) => entry.notify)).toEqual([true, true]);
+	// And one whose own wait ran out, which asks to be answered then.
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "Hold on: slow1", timeoutMs: 200 } });
+	const [, , ranOut] = await sawAll(3);
+	expect(ranOut).toMatchObject({ verdict: "active", notify: true });
+	const children = [...started.map((entry) => entry.threadId as string), ranOut.threadId as string];
+	await ask("a", { name: "thread_wait", args: { threadIds: children } });
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	for (const name of ["fan1", "fan2", "slow1"]) gate(name).release();
+	const [, , , waited] = await sawAll(4);
+	expect(waited.verdict).toBe("completed");
+	expect(waited.reports.map((entry: { report: string }) => entry.report.split("\n").at(-1))).toEqual(["[AGENT]: released fan1", "[AGENT]: released fan2", "[AGENT]: released slow1"]);
+	// Collected, so answered: no request left, and nothing posted or queued in the parent.
+	for (const child of children) expect(bridge.threadRecord(child)!.notify ?? []).toEqual([]);
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	const parent = await settled("a");
+	expect(parent!.messages.filter((message) => message.text.startsWith("[Report from thread"))).toEqual([]);
+	expect(parent!.runs.filter((run) => run.status === "queued")).toEqual([]);
+});
+
+it("a prompt that waits and also asked to be answered gets the report once", { timeout: 60_000 }, async () => {
+	const { bridge, ask, sawAll, settled } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 8+8?", notify: true } });
+	const [answered] = await sawAll(1);
+	expect(answered).toMatchObject({ verdict: "completed", notify: false });
+	expect(answered.report).toContain("[AGENT]: 16");
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	expect(bridge.threadRecord(answered.threadId)!.notify ?? []).toEqual([]);
+	expect((await settled("a"))!.messages.filter((message) => message.text.startsWith("[Report from thread"))).toEqual([]);
+});
+
 it("a forked child starts with its parent's history; children nest at most three deep", { timeout: 60_000 }, async () => {
 	const { bridge, ask, sawAll } = await setup();
 	await ask("a", { name: "thread_list", args: {} });
