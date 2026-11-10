@@ -94,6 +94,10 @@ export interface ChildCard {
 /** The node of a child's card in its parent; the child's `forkedFrom` names it. */
 export const childCardNodeId = (childThreadId: string): string => `nc-${childThreadId}`;
 
+/** The id prefix of a message's context row (`messageContext`): a tool row no tool call made. */
+const MESSAGE_CONTEXT_ITEM = "ti-x";
+export const isMessageContextItem = (item: { readonly id: string }): boolean => item.id.startsWith(MESSAGE_CONTEXT_ITEM);
+
 export interface ThreadMeta {
 	readonly threadId: string;
 	readonly projectId: string;
@@ -552,6 +556,20 @@ export function projectThread(
 				attachments,
 				...(context === undefined ? {} : { context }),
 			} as Any);
+			// The message's context (`messageContext`, such as recalled memories), shown as the tool row the integrator named,
+			// so the user sees what the model was given with the message. No tool ran.
+			const content = message.role === "user" && Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
+			content.forEach((block, index) => {
+				if (block.type !== "text" || block.shownAs === undefined) return;
+				turnItems.push({
+					...base(`${MESSAGE_CONTEXT_ITEM}${entry.id}.${index}`, at, "completed", true),
+					title: block.shownAs.name,
+					type: "dynamic_tool",
+					toolName: block.shownAs.name,
+					input: block.shownAs.input,
+					output: block.text,
+				} as Any);
+			});
 			messages.push({
 				...author,
 				...sender,

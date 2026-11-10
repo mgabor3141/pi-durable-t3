@@ -1,5 +1,6 @@
 // `attachT3`'s `messageContext`: context for the model about a message (memories recalled for it), stored with the
-// message as a hidden block, so the model sees it, T3's display and thread search do not, and the prompt cache holds.
+// message as a hidden block, so the model sees it, the message's text and thread search do not, and the prompt cache
+// holds. T3 shows it as the tool row the integrator names, right after the message.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,11 +9,13 @@ import { expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import type { MessageContext, MessageContextRequest } from "../src/t3/message-context.ts";
+import type { MessageContext, MessageContextAnswer, MessageContextRequest } from "../src/t3/message-context.ts";
+import { report } from "../src/t3/reports.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 type Msg = { role: string; content: unknown };
 type Block = { type: string; text?: string; hidden?: boolean };
+const recalled = (text: string): MessageContextAnswer => ({ text, shownAs: { name: "memory_recall", input: { query: "q" } } });
 
 async function setup(messageContext: MessageContext) {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
@@ -44,26 +47,31 @@ async function setup(messageContext: MessageContext) {
 	return { bridge, send, lastUser, warnings, thread };
 }
 
-it("the model gets the context with the message; T3 shows only the message", { timeout: 30_000 }, async () => {
+it("the model gets the context with the message; T3 shows the message, then the context as a tool row", { timeout: 30_000 }, async () => {
 	const asked: MessageContextRequest[] = [];
 	const { bridge, send, lastUser, thread } = await setup(async (request) => {
 		asked.push(request);
-		return "<memories>\n- The user prefers short answers.\n</memories>";
+		return { text: "<memories>\n- The user prefers short answers.\n</memories>", shownAs: { name: "hindsight_recall", input: { query: request.text } } };
 	});
 	await send("what do I like?");
 	expect(asked.map((request) => [request.threadId, request.conversationId, request.text])).toEqual([["t", thread.head, "what do I like?"]]);
 	const blocks = lastUser();
-	expect(blocks.filter((block) => block.hidden === true)).toEqual([{ type: "text", hidden: true, text: expect.stringContaining("The user prefers short answers.") }]);
+	expect(blocks.filter((block) => block.hidden === true)).toEqual([{ type: "text", hidden: true, text: expect.stringContaining("The user prefers short answers."), shownAs: { name: "hindsight_recall", input: { query: "what do I like?" } } }]);
 	expect(blocks.some((block) => block.type === "text" && block.text === "what do I like?" && block.hidden !== true)).toBe(true);
 	const { projection } = await bridge.projection("t");
 	expect(projection.messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual(["what do I like?"]);
+	const items = projection.turnItems.map((item) => item as unknown as { type: string; toolName?: string; input?: unknown; output?: string; status: string });
+	expect(items.map((item) => item.type)).toEqual(["user_message", "dynamic_tool", "assistant_message"]);
+	expect(items[1]).toMatchObject({ toolName: "hindsight_recall", input: { query: "what do I like?" }, output: "<memories>\n- The user prefers short answers.\n</memories>", status: "completed" });
+	// A tool row no tool call made: another thread's report does not count it.
+	expect(report(projection).toolCalls).toBe(0);
 });
 
 it("a note and an automatic message (a child's report) get no context", { timeout: 30_000 }, async () => {
 	const asked: string[] = [];
 	const { send } = await setup(async (request) => {
 		asked.push(request.text);
-		return "context";
+		return recalled("context");
 	});
 	await send("A child finished.", { automatic: true });
 	await send("fyi", { note: true });
@@ -72,14 +80,16 @@ it("a note and an automatic message (a child's report) get no context", { timeou
 });
 
 it("a context that fails, comes back empty or never comes: the message goes on without it, and a failure is logged", { timeout: 30_000 }, async () => {
-	let mode: "reject" | "empty" | "hang" = "reject";
+	let mode: "reject" | "empty" | "unnamed" | "hang" = "reject";
 	const { send, lastUser, warnings } = await setup(
 		(request) =>
 			mode === "reject"
 				? Promise.reject(new Error("memory is down"))
 				: mode === "empty"
-					? Promise.resolve("  ")
-					: new Promise((resolve) => request.signal.addEventListener("abort", () => resolve("too late"), { once: true })),
+					? Promise.resolve(recalled("  "))
+					: mode === "unnamed"
+						? Promise.resolve({ text: "context", shownAs: { name: "", input: {} } })
+						: new Promise((resolve) => request.signal.addEventListener("abort", () => resolve(recalled("too late")), { once: true })),
 	);
 	await send("first");
 	expect(lastUser().some((block) => block.hidden === true)).toBe(false);
@@ -87,10 +97,13 @@ it("a context that fails, comes back empty or never comes: the message goes on w
 	mode = "empty";
 	await send("second");
 	expect(lastUser().some((block) => block.hidden === true)).toBe(false);
+	mode = "unnamed";
+	await send("unnamed");
+	expect(lastUser().some((block) => block.hidden === true)).toBe(false);
 	mode = "hang";
 	const started = Date.now();
 	await send("third");
 	expect(Date.now() - started).toBeGreaterThanOrEqual(4_900);
 	expect(lastUser().some((block) => block.hidden === true)).toBe(false);
-	expect(warnings).toHaveLength(2);
+	expect(warnings).toHaveLength(3);
 });

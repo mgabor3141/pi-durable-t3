@@ -203,8 +203,10 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
   when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
 - `messageContext` (an `attachT3` option): context for the model about each message that starts or steers a turn,
-  such as memories recalled for it. The text is stored with the message, hidden in T3's display and thread search, so
-  the prompt cache holds. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
+  such as memories recalled for it. The text is stored with the message, outside its text and thread search, so the
+  prompt cache holds. T3 shows it as a tool row right after the message (`shownAs`: a name and the input it was looked
+  up with, the text as output), so the user sees what the model was given; no tool ran, and `thread_read`'s
+  tool-call count leaves it out. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
 - `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
   tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every

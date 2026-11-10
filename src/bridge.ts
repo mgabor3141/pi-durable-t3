@@ -32,7 +32,7 @@ import { ConfigError } from "./config.ts";
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
-export type { MessageContext, MessageContextRequest } from "./t3/message-context.ts";
+export type { MessageContext, MessageContextAnswer, MessageContextRequest } from "./t3/message-context.ts";
 export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";

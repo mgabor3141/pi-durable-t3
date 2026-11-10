@@ -4,6 +4,7 @@
 // [YOU]), how much tool work it took, and the final answer, in the order they happened: a note placed after the answer
 // is listed after it. The verdict is beside the report, never inside the prose.
 import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { isMessageContextItem } from "./projection.ts";
 
 /** How an activity ended: `active` when it has not (a wait that timed out, or a read of running work). */
 export type Verdict = "completed" | "interrupted" | "failed" | "active";
@@ -73,7 +74,7 @@ export function report(
 		const who = just || (sender !== undefined && sender === options.reader) ? "YOU" : sender !== undefined ? `THREAD ${options.label?.(sender) ?? sender}` : message.createdBy === "user" ? "USER" : "AGENT MESSAGE";
 		(answerIndex >= 0 && index > answerIndex ? late : lines).push(`[${who}]: ${clip(message.text.trim(), just ? OWN_PROMPT_CHARS : MESSAGE_BUDGET).text}`);
 	}
-	const toolCalls = projection.turnItems.filter((item) => item.runId !== null && ids.has(item.runId as string) && TOOL_ITEMS.has(item.type)).length;
+	const toolCalls = projection.turnItems.filter((item) => item.runId !== null && ids.has(item.runId as string) && TOOL_ITEMS.has(item.type) && !isMessageContextItem(item)).length;
 	if (toolCalls > 0) lines.push(verdict === "active" ? `[Agent working: ${toolCalls} tool calls so far]` : `[Agent made ${toolCalls} tool calls]`);
 	let truncated = false;
 	if (answer !== undefined && (verdict !== "active" || answer.runId === last.id)) {

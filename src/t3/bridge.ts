@@ -36,6 +36,7 @@ import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
+import type { MessageContextAnswer } from "./message-context.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
 /** How long a message waits for the integrator's `messageContext` before it goes on without it. */
@@ -1049,7 +1050,7 @@ export class Bridge {
 	}
 
 	/** The integrator's `messageContext` for a message: at most `MESSAGE_CONTEXT_TIMEOUT_MS`; a failure is logged, not fatal. */
-	async #messageContext(threadId: string, conversationId: number, text: string): Promise<string | undefined> {
+	async #messageContext(threadId: string, conversationId: number, text: string): Promise<MessageContextAnswer | undefined> {
 		const hook = this.config.messageContext;
 		if (hook === undefined) return undefined;
 		const signal = AbortSignal.timeout(MESSAGE_CONTEXT_TIMEOUT_MS);
@@ -1061,7 +1062,9 @@ export class Bridge {
 			]);
 			// An answer that settled as the wait ended (a hook resolving on its abort) is as late as none.
 			if (signal.aborted) throw late();
-			return answer === undefined || answer.trim() === "" ? undefined : answer;
+			if (answer === undefined || answer.text.trim() === "") return undefined;
+			if (typeof answer.shownAs?.name !== "string" || answer.shownAs.name.trim() === "") throw new Error("the answer names no shownAs.name");
+			return answer;
 		} catch (error) {
 			this.#log.warn("message context failed; the message goes on without it", { threadId, error: (error as Error).message });
 			return undefined;
@@ -1144,7 +1147,7 @@ export class Bridge {
 			const attachmentBlocks = this.#attachmentBlocks(state, kept);
 			// The integrator's context for this message (memories), stored with it: a note or an automatic message gets none.
 			const extra = input.note === true || input.automatic === true ? undefined : await this.#messageContext(input.threadId, head, input.text);
-			const contextBlocks: ContentBlock[] = extra === undefined ? [] : [{ type: "text", text: extra, hidden: true } as ContentBlock];
+			const contextBlocks: ContentBlock[] = extra === undefined ? [] : [{ type: "text", text: extra.text, hidden: true, shownAs: { name: extra.shownAs.name, input: { ...extra.shownAs.input } } }];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,
