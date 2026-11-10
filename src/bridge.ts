@@ -20,6 +20,7 @@ import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/host-route.ts";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { MessageContext } from "./t3/message-context.ts";
+import type { RemoteAccess } from "./t3/remote-access.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
@@ -33,6 +34,7 @@ export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 export type { MessageContext, MessageContextRequest } from "./t3/message-context.ts";
+export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
 
@@ -97,6 +99,13 @@ export type AttachT3Options = {
 	 * request reaches the same routes and the same credential check as any other.
 	 */
 	readonly tailscaleServe?: { readonly port?: number };
+	/**
+	 * A route to this host that you run yourself, such as your own tailnet node or an SSH relay into the environment,
+	 * instead of `tailscaleServe` (setting both is refused). T3 learns its HTTPS URL (`directEndpoints`) and the SSH host
+	 * editors open paths on (`remoteOpenTargets`: "Open in VS Code", file links). Read at each config read; on a change,
+	 * connected clients get a fresh config. Absent: none.
+	 */
+	readonly remoteAccess?: RemoteAccess;
 	/**
 	 * Title generation, delegated to you (T3's `ThreadTitleRegenerationService`). Called once a thread's first user
 	 * entry is committed (not after the reply) and on "Regenerate title"; resolve with a title, or `undefined` / "New
@@ -185,6 +194,9 @@ export function mintPairingCode(stateDir: string): { readonly code: string } {
  * capabilities.md). */
 export async function attachT3(harness: Harness, options: AttachT3Options): Promise<T3Attachment> {
 	const log = options.log ?? nullLogger;
+	if (options.remoteAccess !== undefined && options.tailscaleServe !== undefined) {
+		throw new Error("attachT3: set remoteAccess or tailscaleServe, not both: each advertises how this host is reached");
+	}
 	// The bridge owns its dir: mode 0700, it holds the pairing store. A pre-existing dir is tightened.
 	mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
 	const registry = new ProjectRegistry(harness, { baseDir: options.stateDir });
@@ -235,6 +247,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
+		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
 		tailscaleServe:
 			options.tailscaleServe === undefined
 				? undefined

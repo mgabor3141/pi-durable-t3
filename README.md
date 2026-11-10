@@ -70,6 +70,7 @@ const t3 = await attachT3(harness, {
 	scratchDir,    // optional: absolute path in `env` where "No project" threads run; omit to turn it off
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	tailscaleServe, // optional: { port } — publish the host over Tailscale Serve (HTTPS on your tailnet); absent = off
+	remoteAccess,  // optional: { current, subscribe } — a route you run (own tailnet node, SSH relay), advertised to T3; not with tailscaleServe
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
 	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
 	rpcLog,        // optional: { onSuccess, onFailure, onStubbed } per-call debug sink for the T3 wire
@@ -125,6 +126,11 @@ With `tailscaleServe` set, the host first reads `tailscale serve status` and arm
 free (or already points at this host's own port): a port that maps elsewhere is refused with a warning, so the host
 never replaces — and never removes — a mapping it did not create (deliberately stricter than T3, which arms
 unconditionally). An armed port is released on shutdown.
+
+With `remoteAccess`, you run the route and the bridge only advertises it: `current()` answers the HTTPS URL a paired
+client may use (`directEndpoints`) and the SSH host editors open paths on (`remoteOpenTargets`, port 22, so "Open in VS
+Code", file links and the file preview work); `subscribe` reports changes, and connected clients get a fresh config.
+For hosts T3 cannot discover from, such as one in a container with its own tailnet node.
 
 ## What works
 

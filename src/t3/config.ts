@@ -1,6 +1,7 @@
 // The T3 facet's configuration: the integrator-owned static fields from `attachT3`, the live project registry
 // (`../registry.ts`), and the live settings store over the state dir (`../settings.ts`). The facet reads them live.
 import type { Context } from "@earendil-works/chord/context";
+import type { RemoteAccess } from "./remote-access.ts";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
@@ -35,6 +36,9 @@ export interface FacetConfig {
 	/** Tailscale Serve: publish this host on the tailnet HTTPS name. Absent (the default) is off: the host runs no
 	 * `tailscale` command and advertises no tailnet endpoint. Optional, like `attachT3`'s option. */
 	readonly tailscaleServe?: { readonly port: number };
+	/** A route the integrator runs (its own tailnet node, an SSH relay), advertised to T3. Absent: none. Not with
+	 * `tailscaleServe`. */
+	readonly remoteAccess?: RemoteAccess;
 	/** Title generation, delegated to the integrator. Absent: seeds and renames work, "Regenerate title" is refused. */
 	readonly titleThread?: TitleThread;
 	/** Context for the model about each message that starts or steers a turn (memories). Absent: none. */

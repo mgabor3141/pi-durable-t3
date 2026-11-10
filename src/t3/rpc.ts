@@ -1,6 +1,7 @@
 // T3 `/ws` RPC handlers (Effect RPC over WsRpcGroup), behind T3's per-method scope check. Every method this host does
 // not implement is refused with a message the UI shows (`unsupported.ts`), streams included, and logged.
 import { basename } from "node:path";
+import { advertisedRemoteAccess } from "./remote-access.ts";
 import {
 	AssetAttachmentNotFoundError,
 	SecretRequestError,
@@ -108,6 +109,7 @@ function serverSettings(deps: RpcDeps) {
 }
 
 function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[]): ServerConfig {
+	const remote = deps.bridge.config.remoteAccess === undefined ? undefined : advertisedRemoteAccess(deps.bridge.config.remoteAccess.current());
 	return {
 		environment: deps.descriptor(),
 		auth: deps.authDescriptor,
@@ -129,7 +131,9 @@ function serverConfig(deps: RpcDeps, directEndpoints: readonly ServedEndpoint[])
 		settings: serverSettings(deps),
 		// T3's `directEndpoints`, smaller: this host advertises only the tailnet Serve URL (no LAN addresses), read
 		// fresh on every config read — the served name is the machine's, not this process's, fact.
-		directEndpoints,
+		// With `remoteAccess`, the integrator's route instead: its URL, and the SSH host editors open paths on.
+		directEndpoints: remote?.directEndpoints ?? directEndpoints,
+		...(remote?.remoteOpenTargets === undefined ? {} : { remoteOpenTargets: remote.remoteOpenTargets }),
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
 		// T3's client offers "New thread without a project" on an environment only when its config carries this folder
@@ -427,9 +431,18 @@ export function makeRpcLayer(deps: RpcDeps) {
 					const stopSettings = bridge.config.settings.subscribe(() =>
 						emit({ version: 1, type: "settingsUpdated", payload: { settings: serverSettings(deps) } }),
 					);
+					// A change of route (the tailnet came up, a name changed) is a fresh snapshot, as T3 sends one when its
+					// late discovery of endpoints or SSH targets lands.
+					const stopRemote = bridge.config.remoteAccess?.subscribe(() =>
+						void readServerConfig(deps).then(
+							(config) => emit({ version: 1, type: "snapshot", config }),
+							() => undefined,
+						),
+					);
 					return () => {
 						stopCatalog();
 						stopSettings();
+						stopRemote?.();
 					};
 				}),
 			),
