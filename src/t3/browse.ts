@@ -1,10 +1,10 @@
 // The read-only directory listing for T3's "Add project" picker: T3's own semantics, copied from
 // `apps/server/src/workspace/WorkspaceEntries.ts`, not forked (capabilities.md). It reads through the caller's
 // `ExecutionEnv`, writes nothing, and adds no trust surface beyond the `/ws` bearer token and loopback bind every
-// other call needs. T3 paths are absolute in the environment; a relative path resolves against the current project.
+// other call needs. `~` is the environment's home; a relative path resolves against the current project.
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { basename, dirname, extname, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 
 /** Mirror of `@t3tools/shared/path`'s `isWindowsAbsolutePath` (a Windows path is refused on a non-Windows server). */
 function isWindowsAbsolutePath(value: string): boolean {
@@ -35,14 +35,44 @@ export class BrowseReadDirectoryFailed extends Error {
 	}
 }
 
-/** Resolve a browse target, mirroring T3: absolute paths resolve directly, an explicit-relative one needs the current
- * project's `cwd`, and a Windows path on a non-Windows server is refused. `~` is not expanded: the environment has its
- * own home, and T3's picker works in absolute paths. */
-function resolveBrowseTarget(partialPath: string, cwd: string | undefined, platform: NodeJS.Platform): string {
-	if (platform !== "win32" && isWindowsAbsolutePath(partialPath)) throw new BrowseWindowsPathUnsupported();
-	if (!isExplicitRelativePath(partialPath)) return resolve(partialPath);
-	if (cwd === undefined || cwd === "") throw new BrowseCurrentProjectRequired();
-	return resolve(cwd, partialPath);
+/** The environment's home, asked of its shell (a remote environment's home is its own, not this host's). A failed
+ * answer is not kept, so the next call asks again. `undefined` when it cannot say. */
+const homes = new WeakMap<ExecutionEnv, Promise<string | undefined>>();
+function homeOf(env: ExecutionEnv, context: Context): Promise<string | undefined> {
+	let home = homes.get(env);
+	if (home === undefined) {
+		let stdout = "";
+		home = env
+			.exec("printf %s \"$HOME\"", { onOutput: (text, _context, info) => void (info.stream === "stdout" && (stdout += text)) }, context)
+			.then((result) => (result.ok && result.value.exitCode === 0 && stdout.startsWith("/") ? stdout : undefined))
+			.catch(() => undefined);
+		homes.set(env, home);
+		void home.then((found) => found === undefined && homes.delete(env));
+	}
+	return home;
+}
+
+/** T3's `expandHomePath` against the environment's home: `~`, `~/…` and `~\…` expand, anything else is returned as
+ * is. `undefined` when the path needs the home and the environment cannot say it. */
+export async function expandEnvHome(env: ExecutionEnv, value: string, context: Context): Promise<string | undefined> {
+	if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
+	const home = await homeOf(env, context);
+	return home === undefined ? undefined : value === "~" ? home : join(home, value.slice(2));
+}
+
+/** Resolve a browse target, mirroring T3's `resolveBrowseTarget`: `~` expands to the environment's home, absolute
+ * paths resolve directly, an explicit-relative one needs the current project's `cwd`, and a Windows path on a
+ * non-Windows server is refused. */
+async function resolveBrowseTarget(input: { readonly partialPath: string; readonly cwd?: string; readonly env: ExecutionEnv }, platform: NodeJS.Platform, context: Context): Promise<string> {
+	const expand = async (value: string) => {
+		const expanded = await expandEnvHome(input.env, value, context);
+		if (expanded === undefined) throw new BrowseReadDirectoryFailed(value, new Error("The environment did not say its home directory."));
+		return expanded;
+	};
+	if (platform !== "win32" && isWindowsAbsolutePath(input.partialPath)) throw new BrowseWindowsPathUnsupported();
+	if (!isExplicitRelativePath(input.partialPath)) return resolve(await expand(input.partialPath));
+	if (input.cwd === undefined || input.cwd === "") throw new BrowseCurrentProjectRequired();
+	return resolve(await expand(input.cwd), input.partialPath);
 }
 
 /** Browse one directory for the picker: reads the target's PARENT (a trailing separator means the target is the
@@ -56,8 +86,8 @@ export async function browseFilesystem(input: {
 }): Promise<BrowseResult> {
 	const platform = input.platform ?? process.platform;
 	const context = input.context ?? BACKGROUND_CONTEXT;
-	const resolved = resolveBrowseTarget(input.partialPath, input.cwd, platform);
-	const endsWithSeparator = /[\\/]$/.test(input.partialPath);
+	const resolved = await resolveBrowseTarget(input, platform, context);
+	const endsWithSeparator = /[\\/]$/.test(input.partialPath) || input.partialPath === "~";
 	const parentPath = endsWithSeparator ? resolved : dirname(resolved);
 	const prefix = endsWithSeparator ? "" : basename(resolved);
 
@@ -105,21 +135,6 @@ export function fileHeaderMimeType(bytes: Uint8Array): string | undefined {
 
 export type FileMetadata = { kind: "file"; byteLength: number; mimeType?: string } | { kind: "directory" } | { kind: "other" };
 
-/** The environment's home, for `~/` paths: asked of its shell once. `undefined` when it cannot say. */
-const homes = new WeakMap<ExecutionEnv, Promise<string | undefined>>();
-function homeOf(env: ExecutionEnv, context: Context): Promise<string | undefined> {
-	let home = homes.get(env);
-	if (home === undefined) {
-		let stdout = "";
-		home = env
-			.exec("printf %s \"$HOME\"", { onOutput: (text, _context, info) => void (info.stream === "stdout" && (stdout += text)) }, context)
-			.then((result) => (result.ok && result.value.exitCode === 0 && stdout.startsWith("/") ? stdout : undefined))
-			.catch(() => undefined);
-		homes.set(env, home);
-	}
-	return home;
-}
-
 /**
  * T3's `filesystem.getMetadata` (`WorkspaceFileSystem.getMetadata`), read through the environment: for each path a reply
  * mentions, whether it is a file (with its size, and the type its first bytes name when it has no extension), a
@@ -129,13 +144,8 @@ function homeOf(env: ExecutionEnv, context: Context): Promise<string | undefined
 export async function filesystemMetadata(env: ExecutionEnv, paths: readonly string[], context: Context): Promise<(FileMetadata | null)[]> {
 	const unique = [...new Set(paths)];
 	const read = async (requested: string): Promise<FileMetadata | null> => {
-		let path = requested;
-		if (path === "~" || path.startsWith("~/")) {
-			const home = await homeOf(env, context);
-			if (home === undefined) return null;
-			path = home + path.slice(1);
-		}
-		if (!path.startsWith("/")) return null;
+		const path = await expandEnvHome(env, requested, context);
+		if (path === undefined || !path.startsWith("/")) return null;
 		const info = await env.fileInfo(path, context);
 		if (!info.ok) return null;
 		if (info.value.kind === "directory") return { kind: "directory" };

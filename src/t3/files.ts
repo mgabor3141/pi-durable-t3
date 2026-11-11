@@ -96,14 +96,6 @@ const isGitMetadataName = (segment: string) => {
 /** Whether a path names a git metadata folder; writes never land there. */
 const inGitFolder = (path: string) => path.split(sep).some(isGitMetadataName);
 
-/** `expandHomePath`: `~` and `~/…` expand to the home directory. Kept for T3's picker semantics on a local host; the
- * browse path uses the environment, so a remote environment's home is its own. */
-function expandHome(value: string, home: string): string {
-	if (value === "~") return home;
-	if (value.startsWith("~/")) return resolve(home, value.slice(2));
-	return value;
-}
-
 type WalkOptions = { readonly maxEntries?: number; readonly skipGit?: boolean };
 
 /** One recursive walk over the environment, bounded like T3's index. Symbolic links are returned but never followed. */

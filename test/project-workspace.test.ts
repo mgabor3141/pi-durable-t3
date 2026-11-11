@@ -12,10 +12,12 @@ import { storedRegistry } from "./test-registry.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
-async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: ProjectRegistry }> {
+async function makeBridge(dataDir: string, env?: ExecutionEnv): Promise<{ bridge: Bridge; registry: ProjectRegistry }> {
 	const { registry } = await storedRegistry(dataDir);
 	const config: BridgeConfig = {
 		host: "127.0.0.1",
@@ -27,6 +29,7 @@ async function makeBridge(dataDir: string): Promise<{ bridge: Bridge; registry: 
 		settings: ServerSettingsStore.open(dataDir),
 		corsOrigins: [], staticDir: undefined,
 		registry,
+		...(env === undefined ? {} : { env }),
 	};
 	// create/update/delete never touch the host, so an unloaded one is enough to construct a Bridge.
 	return { bridge: new Bridge(config, log, unstartedStore(), createModels()), registry };
@@ -53,5 +56,28 @@ describe("a registered path that is a file (H1)", () => {
 		}
 	}, 30_000);
 
-
+	it("a root under ~/ is the environment's home, as T3's normalizeWorkspaceRoot expands it: create and update store the expanded path", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "pi-durable-t3-ws-home-"));
+		try {
+			const inner = new NodeExecutionEnv({ cwd: "/" });
+			// The workspace's shell names `dir` as $HOME (a remote workspace: its home is not this host's).
+			const env = new Proxy(inner, {
+				get(target, key, receiver) {
+					if (key !== "exec") return Reflect.get(target, key, receiver);
+					return async (_command: string, options: { onOutput?: (text: string, context: unknown, info: { stream: string }) => void }, context: unknown) => {
+						options.onOutput?.(dir, context, { stream: "stdout" });
+						return { ok: true, value: { exitCode: 0 } };
+					};
+				},
+			});
+			const { bridge, registry } = await makeBridge(join(dir, "state"), env);
+			await bridge.mutateProject({ type: "project.create", projectId: "p1", commandId: "c1", title: "proj", workspaceRoot: " ~/proj ", createWorkspaceRootIfMissing: true });
+			expect(registry.list().map((project) => project.cwd)).toEqual([join(dir, "proj")]);
+			await mkdir(join(dir, "moved"));
+			await bridge.mutateProject({ type: "project.update", projectId: "p1", commandId: "c2", workspaceRoot: "~/moved" });
+			expect(registry.list().map((project) => project.cwd)).toEqual([join(dir, "moved")]);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });

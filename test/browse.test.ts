@@ -14,6 +14,20 @@ import { browseFilesystem, BrowseCurrentProjectRequired, BrowseWindowsPathUnsupp
 let base = "";
 const names = (entries: readonly { name: string }[]): string[] => entries.map((entry) => entry.name);
 const env = () => new NodeExecutionEnv({ cwd: "/" });
+/** An environment whose shell names `home` as $HOME: a remote workspace, whose home is not this host's. */
+const envWithHome = (home: string) => {
+	const inner = env();
+	return new Proxy(inner, {
+		get(target, key, receiver) {
+			if (key !== "exec") return Reflect.get(target, key, receiver);
+			return async (command: string, options: { onOutput?: (text: string, context: unknown, info: { stream: string }) => void }, context: unknown) => {
+				if (command !== 'printf %s "$HOME"') throw new Error(`unexpected command: ${command}`);
+				options.onOutput?.(home, context, { stream: "stdout" });
+				return { ok: true, value: { exitCode: 0 } };
+			};
+		},
+	});
+};
 
 beforeAll(async () => {
 	base = await mkdtemp(join(tmpdir(), "pi-durable-t3-browse-"));
@@ -44,5 +58,15 @@ describe("browseFilesystem (the picker's directory listing)", () => {
 	it("an absolute directory lists its own subdirectories; a Windows path on a non-Windows server is refused", async () => {
 		expect((await browseFilesystem({ partialPath: `${base}/`, env: env(), platform: "linux" })).parentPath).toBe(base);
 		await expect(browseFilesystem({ partialPath: "C:\\Users\\me", env: env(), platform: "linux" })).rejects.toBeInstanceOf(BrowseWindowsPathUnsupported);
+	});
+
+	it("~ is the environment's home, not this host's: `~/` and `~` list it, `~/al` filters it (T3 opens the picker at ~/)", async () => {
+		const remote = envWithHome(base);
+		const listed = await browseFilesystem({ partialPath: "~/", env: remote, platform: "linux" });
+		expect(listed.parentPath).toBe(base);
+		expect(names(listed.entries)).toEqual([".hidden", "alpha", "beta", "gamma"]);
+		expect((await browseFilesystem({ partialPath: "~", env: remote, platform: "linux" })).parentPath).toBe(base);
+		expect(names((await browseFilesystem({ partialPath: "~/al", env: remote, platform: "linux" })).entries)).toEqual(["alpha"]);
+		expect(names((await browseFilesystem({ partialPath: "../be", cwd: "~/gamma", env: remote, platform: "linux" })).entries)).toEqual(["beta"]);
 	});
 });

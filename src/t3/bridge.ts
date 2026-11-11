@@ -2,6 +2,7 @@
 // and one `ThreadView` per open thread (`thread-view.ts`: its head watch, projection and stream). Commands land here.
 import { randomUUID } from "node:crypto";
 import { checkImageData, imageRefusal } from "./image-check.ts";
+import { expandEnvHome } from "./browse.ts";
 import { mkdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -306,17 +307,19 @@ export class Bridge {
 		switch (mutation.type) {
 			case "project.create": {
 				if (mutation.workspaceRoot === undefined) throw new CommandError("A project needs a workspace root (a folder path).");
-				await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), mutation.createWorkspaceRootIfMissing === true);
+				const root = await this.#workspaceRoot(mutation.workspaceRoot);
+				await this.#ensureWorkspaceRoot(root, mutation.createWorkspaceRootIfMissing === true);
 				// Honor the id the client minted; the registry derives from the normalized path for everything else (design.md, IDs).
-				const added = await this.#createProject(mutation.title, mutation.workspaceRoot, mutation.projectId);
+				const added = await this.#createProject(mutation.title, root, mutation.projectId);
 				return this.#projectResult(added, null);
 			}
 			case "project.update": {
 				// A move names a new root: T3 normalizes an update's root WITHOUT creating it (`ProjectService.update`).
-				if (mutation.workspaceRoot !== undefined) await this.#ensureWorkspaceRoot(this.config.registry.resolvePath(mutation.workspaceRoot), false);
+				const root = mutation.workspaceRoot === undefined ? undefined : await this.#workspaceRoot(mutation.workspaceRoot);
+				if (root !== undefined) await this.#ensureWorkspaceRoot(root, false);
 				const updated = await this.config.registry.update(mutation.projectId, {
 					...(mutation.title === undefined ? {} : { title: mutation.title }),
-					...(mutation.workspaceRoot === undefined ? {} : { path: mutation.workspaceRoot }),
+					...(root === undefined ? {} : { path: root }),
 				});
 				return this.#projectResult(updated, null);
 			}
@@ -359,6 +362,19 @@ export class Bridge {
 			if (stored === undefined) throw error;
 			return stored;
 		}
+	}
+
+	/**
+	 * A workspace root as T3's `normalizeWorkspaceRoot` reads it: trimmed, `~` expanded, resolved. With an execution
+	 * environment `~` is that environment's home (the picker's own `~/`), not this host's.
+	 */
+	async #workspaceRoot(path: string): Promise<string> {
+		const env = this.config.env;
+		const trimmed = path.trim();
+		if (env === undefined) return this.config.registry.resolvePath(trimmed);
+		const expanded = await expandEnvHome(env, trimmed, this.config.context ?? BACKGROUND_CONTEXT);
+		if (expanded === undefined) throw new CommandError(`Cannot expand ${trimmed}: the environment did not say its home directory.`);
+		return this.config.registry.resolvePath(expanded);
 	}
 
 	/**
