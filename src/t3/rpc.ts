@@ -256,7 +256,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 	const handlers: WsHandlers = {
 		"server.probe": () => Effect.succeed({}),
 		"server.getConfig": () => readConfigEffect(deps),
-		"server.refreshProviders": () => Effect.promise(() => deps.catalog.refresh()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
+		// Settings → Providers' Refresh asks `refreshModels` (T3 then drops its model caches): download the lists anew.
+		// Other callers (the composer's workspace snapshot) read what the source has.
+		"server.refreshProviders": (input) =>
+			Effect.promise(() => (input.refreshModels === true ? deps.catalog.update(true) : deps.catalog.refresh())).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
 		// agent's conversations live in pi-durable, not in a Codex/Claude home directory — so it is answered truthfully
 		// with an empty scan. The rest of `agentSessions.*` (import) stays refused (capabilities.md).

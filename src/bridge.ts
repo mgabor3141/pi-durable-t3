@@ -200,14 +200,19 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		throw new Error(`pi-durable-t3: cannot read the threads in this Harness's storage (${error instanceof Error ? error.message : String(error)}). A store written by an earlier version is migrated by hand.`, { cause: error });
 	}
 
-	const catalog = new ModelCatalog(async () => (await options.models.getAvailable()).map((model) => ({
-		provider: model.provider,
-		modelId: model.id,
-		name: model.name,
-		contextWindow: model.contextWindow,
-		// pi-ai's own rule for which thinking levels a model has — the picker declares exactly these (capabilities.md).
-		thinkingLevels: getSupportedThinkingLevels(model),
-	})));
+	const catalog = new ModelCatalog(
+		async () => (await options.models.getAvailable()).map((model) => ({
+			provider: model.provider,
+			modelId: model.id,
+			name: model.name,
+			contextWindow: model.contextWindow,
+			// pi-ai's own rule for which thinking levels a model has — the picker declares exactly these (capabilities.md).
+			thinkingLevels: getSupportedThinkingLevels(model),
+		})),
+		// pi's lists, downloaded as pi downloads them (its runtime keeps PI_OFFLINE: then nothing is downloaded).
+		({ force, signal }) => options.models.refresh({ force, signal }),
+		log,
+	);
 	await catalog.refresh();
 
 	const listen = options.listen ?? DEFAULT_LISTEN;
@@ -246,6 +251,9 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		await facet.close().catch(() => {});
 		throw error;
 	}
+	// New models (a release after this pi's) reach the picker without an update: pi.dev's lists, checked hourly.
+	const stopWatching = catalog.watch();
+	void facet.closed.finally(stopWatching);
 	return {
 		closed: facet.closed,
 		setTitle: (threadId, title) => facet.setTitle(threadId, title),
@@ -264,6 +272,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 				},
 			}),
 		close: async () => {
+			stopWatching();
 			await facet.close();
 		},
 	};
