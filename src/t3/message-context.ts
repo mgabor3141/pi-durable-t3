@@ -1,6 +1,6 @@
 // The `messageContext` hook: its types, and how an integrator reads back what it stored (`messageContextData`). Apart
 // from the facet config, so the published declarations reach no internals.
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import type { ConversationId } from "@earendil-works/pi-durable";
 
 /** A message about to start or steer a turn, as `attachT3`'s `messageContext` hook sees it. */

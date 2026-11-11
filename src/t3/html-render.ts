@@ -23,7 +23,7 @@ import {
 } from "@t3tools/shared/htmlRender";
 import { T3_CODE_DARK_THEME_COLORS, T3_CODE_LIGHT_THEME_COLORS } from "@t3tools/shared/themePalettes";
 import type { Browser, BrowserContext, Page } from "playwright-core";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 
 export { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
 export type { HtmlRenderReference };

@@ -30,7 +30,7 @@ import {
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Harness } from "@earendil-works/pi-durable";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";

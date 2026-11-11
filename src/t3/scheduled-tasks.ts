@@ -5,7 +5,7 @@
 // the task's thread — never the turn's completion.
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
 import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";

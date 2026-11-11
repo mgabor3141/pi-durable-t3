@@ -3,7 +3,7 @@
 // conversation is the head of. Writes are safe to replay after a crash: a call without a `clientRequestId` uses its own
 // call id, so a replay is answered with what the first run did.
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import * as Schema from "effect/Schema";
 import { OrchestratorToolkit, ProjectToolkit, ThreadToolkit } from "./mcp-toolkit.ts";

@@ -27,7 +27,7 @@ import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, ConversationId, EntryId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
 import { autoSettleAt, autoSettleDays, recordThreadOpen } from "./sidebar.ts";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";

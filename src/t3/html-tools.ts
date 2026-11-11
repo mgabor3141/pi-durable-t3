@@ -3,7 +3,7 @@
 // first. A call works wherever it is made — the model's own call or a script's: the page is kept as an attachment, and a
 // display-only entry (`app.html-render`) in the calling conversation is what the thread shows, so it is durable, and an
 // undo of its run removes it.
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { abortable } from "./abortable.ts";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
