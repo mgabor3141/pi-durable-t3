@@ -9,6 +9,10 @@ command -v tsdown >/dev/null || { echo "build: tsdown is missing: the build need
 tsdown -c build/tsdown.config.mjs
 # Declarations: tsc over src/, then keep only the files reachable from bridge.d.ts, with `.ts` specifiers rewritten
 # to `.js`. (tsc 7 does not rewrite them.) Any type error fails the build.
+# tsc writes a declaration for every export, also in files pruned below, and must name each inferred type. It cannot
+# name Effect's types when this package is built under a `node_modules` directory (TS2883), which is where a git
+# install builds it when pnpm's store is under one (pnpm/action-setup on GitHub runners: ~/setup-pnpm/node_modules).
+# Exports whose inferred type needs such a name are marked `@internal`, and `stripInternal` leaves them out.
 tsc -p build/tsconfig.build.json
 node build/prune-types.mjs
 {

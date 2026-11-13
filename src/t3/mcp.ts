@@ -86,6 +86,7 @@ const withAdvertisedSchemas = <A, E, R>(toolkit: Toolkit.Toolkit<Record<string, 
 		return yield* registration.pipe(Effect.provideService(McpServer.McpServer, advertising));
 	});
 
+/** @internal */
 export function makeMcpLayer(deps: McpDeps) {
 	const { ops, log } = deps;
 

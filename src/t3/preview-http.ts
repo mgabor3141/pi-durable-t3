@@ -41,6 +41,7 @@ const mediaSession = (auth: AuthStore, resolveSession: (request: HttpServerReque
 		return { request, url, session };
 	});
 
+/** @internal */
 export const makePreviewStreamHandler = (deps: {
 	readonly auth: AuthStore;
 	readonly preview: PreviewSessions;

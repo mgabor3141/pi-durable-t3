@@ -21,6 +21,7 @@ const MESSAGE_BUDGET = 2_000;
 const OWN_PROMPT_CHARS = 120;
 
 export const isActiveRun = (run: OrchestrationV2Run) => ACTIVE_RUN.has(run.status);
+/** @internal */
 export const byOrdinal = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => left.ordinal - right.ordinal);
 
 /** Is the thread doing anything (a live or queued run)? */

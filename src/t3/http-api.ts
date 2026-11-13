@@ -114,6 +114,7 @@ const noStore = HttpEffect.appendPreResponseHandler((_request, response) => Effe
 const requireScope = (scope: AuthEnvironmentScope) =>
 	Effect.flatMap(EnvironmentAuthenticatedPrincipal, (principal) => (principal.scopes.has(scope) ? Effect.succeed(principal) : scopeRequired(scope)));
 
+/** @internal */
 export function makeHttpApiLayer(deps: HttpApiDeps) {
 	const { bridge, auth, log } = deps;
 

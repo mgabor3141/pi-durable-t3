@@ -302,7 +302,7 @@ export function snapshotItem(sequence: number, projection: Projection, options: 
 	return { kind: "snapshot", snapshotSequence: sequence, projection: options.dedupeBodies ? dedupeSnapshotBodies(wire) : wire } as ThreadStreamItem;
 }
 
-/** T3's bounded HTTP snapshot (`/api/orchestration/threads/:threadId/bounded`). */
+/** T3's bounded HTTP snapshot (`/api/orchestration/threads/:threadId/bounded`). @internal */
 export function boundedSnapshot(sequence: number, projection: Projection, options: Omit<ThreadStreamOptions, "bounded">) {
 	const bounded = buildBoundedThreadProjection({
 		snapshotSequence: sequence,
@@ -334,6 +334,7 @@ export function subscriberFilter(options: Pick<ThreadStreamOptions, "dedupeBodie
  * T3's history page (`ProjectionStore.getThreadHistoryPage`) over the whole projection: the page before `cursor` (or
  * the work rows a deferred row stands for, with `view: "work"`), bounded by T3's page policy, with the interrupt
  * requests its rows need. Throws T3's `InvalidThreadHistoryCursorError` for a cursor it did not make.
+ * @internal
  */
 export function historyPage(input: {
 	readonly projection: Projection;
