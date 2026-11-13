@@ -107,11 +107,11 @@ try {
 	const localFolder = page.getByRole("option", { name: /local folder/i }).first();
 	await localFolder.waitFor({ state: "visible", timeout: 8000 });
 	await localFolder.click();
-	// The path field (fed by `filesystem.browse`). Type the absolute target and press Enter to add it.
+	// The path field (fed by `filesystem.browse`). It opens at `~/` (the environment's home): replace that with the
+	// absolute target, since a path typed after it would be under the home, and press Enter to add it.
 	const pathField = page.locator('input[placeholder^="Enter path" i]').first();
 	await pathField.waitFor({ state: "visible", timeout: 8000 });
-	await pathField.click();
-	await page.keyboard.type(pickTarget);
+	await pathField.fill(pickTarget);
 	// The picker browses the filesystem for the path. (Its `filesystem.browse` ran over the pairing WS; the DOM-driven
 	// navigation is the assertion that the picker reached the target — the add's effect is confirmed against the server.)
 	// A single Enter adds the project at the typed path (`projects.mutate` project.create); poll the server for it.

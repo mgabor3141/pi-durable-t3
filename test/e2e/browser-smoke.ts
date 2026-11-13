@@ -177,10 +177,14 @@ try {
 	// 5. The thinking control. T3 renders it from the capabilities the host declares (pi's ladder, for the levels the
 	//    model supports), and a level picked on the composer rides the next message to the conversation — which the
 	//    projection then reports back. No control, no pass-through: this step fails the smoke.
-	const traits = page.getByRole("button", { name: "Off", exact: true }).first();
-	await traits.waitFor({ state: "visible", timeout: 15000 });
-	await traits.click();
-	await page.getByRole("menuitemradio", { name: "High", exact: true }).click();
+	//    The levels are a column of the model picker (T3 v0.1.7), under the header naming the control.
+	await page.locator("[data-chat-provider-model-picker]").first().click();
+	const levels = page.locator("[data-model-picker-effort]");
+	await levels.waitFor({ state: "visible", timeout: 15000 });
+	if (!(await levels.getByRole("radio").allTextContents()).map((label) => label.trim()).join(",").startsWith("Off,Minimal,Low,Medium,High"))
+		throw new Error(`the picker lists pi's ladder: ${JSON.stringify(await levels.getByRole("radio").allTextContents())}`);
+	await levels.getByRole("radio", { name: "High", exact: true }).click();
+	await page.keyboard.press("Escape");
 	const thinking = `smoke thinking ${Date.now()}`;
 	await send(thinking);
 	await until<unknown>("the chosen thinking level reached the conversation", Date.now() + launchTimeout, async () => {

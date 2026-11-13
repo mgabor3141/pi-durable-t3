@@ -16,6 +16,8 @@ trap cleanup EXIT
 
 PEERS="$(node -p 'const p=require(process.argv[1]).devDependencies;["chord","pi-ai","pi-durable"].map((n)=>"@earendil-works/"+n+"@"+p["@earendil-works/"+n]).join(" ")' "$here/package.json")"
 PW="playwright-core@$(node -p 'require(process.argv[1]).devDependencies["playwright-core"]' "$here/package.json")"
+# The consumer installs with this repo's pnpm, whatever pnpm the machine has (a newer one refuses what this one warns of).
+PM="$(node -p 'require(process.argv[1]).packageManager' "$here/package.json")"
 
 # The package as a tarball.
 mkdir -p "$T/tarball"
@@ -69,7 +71,7 @@ consumer() { # $1 = name, $2 = spec to install; the pnpm consumer's pnpm-workspa
   local name="$1" spec="$2" shot="$3"
   echo "== $name: pnpm"
   mkdir -p "$T/$name-pnpm" && cd "$T/$name-pnpm"
-  echo '{ "name": "consumer", "private": true, "type": "module" }' > package.json
+  echo "{ \"name\": \"consumer\", \"private\": true, \"type\": \"module\", \"packageManager\": \"$PM\" }" > package.json
   printf '%s' "${PNPM_WORKSPACE:-}" > pnpm-workspace.yaml
   pnpm add "$spec" $PEERS "$PW" 2>&1 | tail -15
   one_effect_pnpm

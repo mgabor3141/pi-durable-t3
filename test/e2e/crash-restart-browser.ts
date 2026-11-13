@@ -148,6 +148,9 @@ try {
 		if (Date.now() > screenDeadline) throw new Error(`the crash message was not on screen exactly once before the kill: dom=${onScreen}`);
 		await sleep(250);
 	}
+	// The app moves from the draft's route to the thread's once the server has the thread. Wait for that: the draft's
+	// route, reopened below after a restart, is an empty composer and not this thread.
+	await page.waitForURL((url) => url.pathname.endsWith(`/${threadId}`), { timeout: launchTimeout });
 	const threadUrl = `${webAppUrl}${new URL(page.url()).pathname}`; // the thread's route, for reopening it below
 	await writeMarker(sentFile, "sent");
 	console.log("message is durably placed (one user turn) and on screen once; the shell will now kill the host");

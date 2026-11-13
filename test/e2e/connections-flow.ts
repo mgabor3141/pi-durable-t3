@@ -1,5 +1,5 @@
-// The Connections check over the web app served from the facet origin: after pairing via `/pair`, the pi host is the
-// primary environment ("This machine"), Settings → Connections shows its authorized clients, the browser mints a
+// The access check over the web app served from the facet origin: after pairing via `/pair`, the pi host is the
+// primary environment ("This machine"), Settings → Sharing & access shows its authorized clients, the browser mints a
 // pairing link in the UI, and the device list shows this browser's own session. Run via dev/browser-smoke.sh, which
 // sets T3_WEB (the facet origin, which now serves the app), PAIR2 (this browser's single-use pairing code), CHROMIUM.
 
@@ -29,8 +29,9 @@ try {
 	);
 	await page.waitForSelector("[contenteditable]", { timeout: 30000 });
 
-	// Open Settings → Connections directly (the SPA route, served by the facet's static fallback).
-	await page.goto(`${webAppUrl}/settings/connections`, { waitUntil: "domcontentloaded", });
+	// Open Settings → Sharing & access directly (the SPA route, served by the facet's static fallback). In T3 v0.1.7
+	// this page is the host's own; Settings → Environments (`/settings/connections`) lists the other ones.
+	await page.goto(`${webAppUrl}/settings/access`, { waitUntil: "domcontentloaded", });
 
 	// The pi host is the primary environment: its section is titled by the descriptor's label, and the authorized-clients
 	// section (gated on the access scopes this browser's session holds) is present.

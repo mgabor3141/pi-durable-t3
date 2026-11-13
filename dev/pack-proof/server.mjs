@@ -1,6 +1,7 @@
 // An outside integrator in ~15 lines: a faux-model Harness, attachT3, a pairing link. Run from the consumer dir.
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { attachT3, mintPairingCode } from "@mgabor3141/pi-durable-t3";
@@ -18,7 +19,8 @@ const storage = await openNodeSqliteStorage(join(dir, "durable.db"));
 const harness = await Harness.open(storage, { models, registry: createRegistry(), env: () => { throw new Error("no tools"); } }, BACKGROUND_CONTEXT);
 const stateDir = join(dir, "t3");
 mkdirSync(join(dir, "alpha"), { recursive: true });
-const t3 = await attachT3(harness, { models, stateDir, scratchDir: join(dir, "scratch"), listen: { host: "127.0.0.1", port } });
+// The environment T3 reads, writes and runs in (required): this machine, paths from the root.
+const t3 = await attachT3(harness, { models, env: new NodeExecutionEnv({ cwd: "/" }), stateDir, scratchDir: join(dir, "scratch"), listen: { host: "127.0.0.1", port } });
 await harness.resume();
 // One project (T3 shows its first-run wizard without any), added as a T3 client adds it: pair, then `project.create`.
 const base = `http://127.0.0.1:${port}`;

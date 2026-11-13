@@ -86,7 +86,7 @@ it("browser-session: exchange a credential, then ride the cookie across the guar
 	expect(state.authenticated).toBe(true);
 	expect(state.sessionMethod).toBe("browser-session-cookie");
 
-	// Connections (the web app's Settings → Connections) authorize on the cookie: mint a link.
+	// Connections (the web app's Settings → Sharing & access) authorize on the cookie: mint a link.
 	const mint = await fetch(`${base}/api/auth/pairing-token`, { method: "POST", headers: { "content-type": "application/json", cookie, ...ORIGIN }, body: JSON.stringify({ label: "from the web app" }), });
 	expect(mint.status).toBe(200);
 	expect( String(((await mint.json()) as { credential: string }).credential).length, ).toBeGreaterThan(0);

@@ -1,4 +1,4 @@
-// T3's Settings → Connections, server side, end to end over a real host: mint a pairing link, exchange it for a
+// T3's Settings → Sharing & access, server side, end to end over a real host: mint a pairing link, exchange it for a
 // client session, list the devices, revoke them, and watch the `subscribeAuthAccess` stream. Every response is
 // checked against the contract's schema (the web app's HttpApi client decodes the same bytes). One flow per host.
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
