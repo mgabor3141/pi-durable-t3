@@ -155,3 +155,44 @@ it("Stop ends a run whose tasks ended outside pi-durable, and the thread takes m
 	const answered = await reopened.waitFor("t", (projection) => (projection.messages.some((message) => message.text === "second answer") && projection.runs.every((run) => run.status !== "running") ? projection : undefined), 10_000);
 	expect(answered!.runs.at(-1)!.status).toBe("completed");
 });
+
+// pi-durable's abort withdraws every queued input. T3 keeps the queue across a Stop and a restart: after a Stop the
+// queued messages are held (nothing starts them) and Resume (`queue.resume`) starts the first; a restart's message
+// runs now and the queued ones follow it.
+type QueueRun = { id: string; status: string; userMessageId: string; queueHeld?: boolean };
+const runsOf = async (bridge: Bridge) => (await bridge.projection("t")).projection.runs as unknown as QueueRun[];
+
+it("Stop keeps the messages queued behind the run, held until Resume", { timeout: 60_000 }, async () => {
+	const { f, thread, bridge } = await setup([defineExtension({ name: "deaf", tools: [abortable(deaf("slow", 30_000))] })]);
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("to the queued one"), fauxAssistantMessage("to the last"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });
+	await toolRunning("slow");
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "then this", mode: "queue" });
+	await bridge.sendMessage({ threadId: "t", commandId: "c3", messageId: "m3", text: "and this", mode: "queue" });
+	expect((await runsOf(bridge)).map((run) => [run.userMessageId, run.status, run.queueHeld])).toEqual([["m1", "running", undefined], ["m2", "queued", undefined], ["m3", "queued", undefined]]);
+
+	await bridge.interrupt("t");
+	await idle(f.harness, thread.head);
+	const stopped = await bridge.waitFor("t", (projection) => (projection.runs[0]!.status === "interrupted" ? (projection.runs as unknown as QueueRun[]) : undefined), 5_000);
+	expect(stopped!.map((run) => [run.userMessageId, run.status, run.queueHeld]), "both still queued, in order, and held").toEqual([["m1", "interrupted", undefined], ["m2", "queued", true], ["m3", "queued", true]]);
+
+	// Resume starts the first; the other follows it as a queued message does.
+	await bridge.startQueued("t", undefined, "resume-1");
+	await idle(f.harness, thread.head);
+	const resumed = await bridge.waitFor("t", (projection) => (projection.runs.length === 3 && projection.runs.every((run) => run.status !== "queued" && run.status !== "running") ? (projection.runs as unknown as QueueRun[]) : undefined), 5_000);
+	expect(resumed!.map((run) => [run.userMessageId, run.status])).toEqual([["m1", "interrupted"], ["m2", "completed"], ["m3", "completed"]]);
+	const answers = (await bridge.projection("t")).projection.messages.filter((message) => message.role === "assistant").map((message) => message.text);
+	expect(answers).toEqual(["to the queued one", "to the last"]);
+});
+
+it("a restart keeps the queue: its message runs now and the queued one follows", { timeout: 60_000 }, async () => {
+	const { f, thread, bridge } = await setup([defineExtension({ name: "deaf", tools: [abortable(deaf("slow", 30_000))] })]);
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("to the restart"), fauxAssistantMessage("to the queued one"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });
+	await toolRunning("slow");
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "queued", mode: "queue" });
+	await bridge.sendMessage({ threadId: "t", commandId: "c3", messageId: "m3", text: "no, do this", mode: "restart" });
+	await idle(f.harness, thread.head);
+	const ended = await bridge.waitFor("t", (projection) => (projection.runs.length === 3 && projection.runs.every((run) => run.status !== "queued" && run.status !== "running") ? (projection.runs as unknown as QueueRun[]) : undefined), 5_000);
+	expect(ended!.map((run) => [run.userMessageId, run.status])).toEqual([["m1", "interrupted"], ["m3", "completed"], ["m2", "completed"]]);
+});

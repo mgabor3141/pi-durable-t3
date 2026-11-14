@@ -1219,7 +1219,11 @@ export class Bridge {
 			// become a follow-up. Each is one submission, keyed by the commandId for wire idempotency.
 			await (async () => {
 				if (input.note === true) return void (await this.#store.submit({ ...request, note: true }, undefined));
-				if (input.mode === "restart" && busy) await this.#store.abort({ threadId: input.threadId, conversationId: head });
+				if (input.mode === "restart" && busy) {
+					// The run ends and this message runs now; what was queued behind the run follows it.
+					await this.#store.abort({ threadId: input.threadId, conversationId: head });
+					return void (await this.#store.submitFirst(request));
+				}
 				if (input.mode === "steer") await this.#store.submit(request, "steer");
 				else if ((busy || compacting) && input.mode !== "restart") await this.#store.submit(request, "followUp");
 				else await this.#store.submit(request, undefined);

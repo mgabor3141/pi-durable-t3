@@ -942,7 +942,7 @@ export class Threads {
 			if (target === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
 			const [input] = readQueuedInputs([target]);
 			if (input === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is not a user message`);
-			const rest = candidates.filter((item) => item.id !== target.id).map((item) => structuredClone(item));
+			const rest = candidates.filter((item) => item.id !== target.id).map((item) => copy(item));
 			// The selected submission becomes the new run; the others keep their queued submissions while they wait.
 			tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
@@ -1166,11 +1166,69 @@ export class Threads {
 		}, BACKGROUND_CONTEXT);
 	}
 
-	/** Aborts the named conversation; never promotes. */
+	/**
+	 * The queued messages, taken out of the inbox for what `between` does and returned to it right after: each keeps its
+	 * queued submission, so it is the same queued message when it is back. `between` runs once it has asked for its own
+	 * commit (the Session admits commits in the order they are asked for, so the commit that returns the messages
+	 * follows it), and `settled` is awaited last. A host that dies before they are back loses them.
+	 */
+	async #aroundQueue<T>(conversationId: ConversationId, between: () => Promise<T>, settled: (result: T) => Promise<void> = async () => {}): Promise<T> {
+		const held = await this.#harness.commit(async (tx) => {
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const queued = inbox.items.filter((item) => item.mode !== "write").map((item) => copy(item));
+			for (let index = inbox.items.length - 1; index >= 0; index--) {
+				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
+			}
+			return queued;
+		}, BACKGROUND_CONTEXT);
+		const giveBack = async () => {
+			if (held.length === 0) return;
+			await this.#harness.commit(async (tx) => {
+				// Ahead of anything queued since: they were queued first.
+				(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
+			}, BACKGROUND_CONTEXT);
+		};
+		let result: T;
+		try {
+			result = await between();
+		} catch (error) {
+			await giveBack();
+			throw error;
+		}
+		await giveBack();
+		await settled(result);
+		return result;
+	}
+
+	/**
+	 * Aborts the named conversation; never promotes. The messages queued behind the run stay queued, as T3's Stop and
+	 * restart keep them: pi-durable's abort withdraws every queued input in the commit that admits it, so they are out
+	 * of the inbox for that commit. They are back before the run has ended (the abort resolves only then).
+	 */
 	async abort(input: { threadId: string; conversationId: number }): Promise<void> {
-		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
+		const conversationId = input.conversationId as ConversationId;
+		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		await conversation.abort(BACKGROUND_CONTEXT);
+		await this.#aroundQueue(
+			conversationId,
+			// Asked for, not awaited: the abort's commit is in line, and its end is awaited once the queue is back.
+			async () => {
+				const ended = conversation.abort(BACKGROUND_CONTEXT);
+				// Its failure is thrown where it is awaited, below; until then it must not count as unhandled.
+				ended.catch(() => {});
+				return { ended };
+			},
+			({ ended }) => ended,
+		);
+	}
+
+	/**
+	 * A message that runs now, ahead of the messages queued: they follow it, as T3 puts a restart's message first in its
+	 * queue. pi-durable starts an idle conversation's next run with what is queued, so they are out of the inbox while
+	 * this message starts its run.
+	 */
+	async submitFirst(input: MessageInput): Promise<Submission> {
+		return this.#aroundQueue(input.conversationId as ConversationId, () => this.submit(input, undefined));
 	}
 
 	/**

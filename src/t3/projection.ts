@@ -996,6 +996,9 @@ export function projectThread(
 			activeAttemptId: null,
 			status: "queued",
 			queuePosition: index + 1,
+			// Nothing runs, so nothing will start it: pi keeps a message queued behind a run that was stopped or failed until
+			// the next message. T3 calls that a held queue and offers Resume (`queue.resume`).
+			...(busy ? {} : { queueHeld: true }),
 			requestedAt: time(requestedAt),
 			startedAt: null,
 			completedAt: null,
