@@ -2,6 +2,7 @@
 // projects follows docs/design.md's north star: the bridge computes no defaults of its own. Everything an integrator
 // needs comes from this file.
 import { HostUpdateWatch } from "./t3/host-updates.ts";
+import { SERVER_VERSION } from "./t3/http.ts";
 import type { HostUpdates } from "./t3/updates-config.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -236,6 +237,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	);
 	// The integrator's own updates are T3's provider update: its version advisory, and the Update button.
 	if (options.updates !== undefined) catalog.hostUpdates = new HostUpdateWatch(options.updates, () => catalog.changed(), log);
+	catalog.platform = `${catalog.platform}, t3 ${SERVER_VERSION}`;
 	await catalog.refresh();
 
 	const listen = options.listen ?? DEFAULT_LISTEN;

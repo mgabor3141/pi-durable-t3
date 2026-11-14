@@ -3,7 +3,7 @@
 // The lists themselves are pi's: the models a pi release ships with, plus the newer lists it downloads (pi.dev's
 // catalog). The bridge asks for that download now and then, as pi's own model selector does, and on Settings' Refresh.
 import type { HostUpdateWatch } from "./host-updates.ts";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { type ModelThinkingLevel, PI_AI_VERSION } from "@earendil-works/pi-ai";
 import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
 import type { Logger } from "./logging.ts";
@@ -73,6 +73,13 @@ export class ModelCatalog {
 	/** The host's own version and updates, when the integrator has them: the provider's version advisory and its Update. */
 	hostUpdates: HostUpdateWatch | undefined;
 
+	/**
+	 * What this host is built on, in the provider's version: the pi release, and the T3 release `attachT3` adds. The
+	 * integrator's own version comes first when it has updates, "claw 680f25f, pi 1.5.2, t3 0.1.9": it is the part
+	 * that changes, and T3's provider list shows about a dozen characters of a version.
+	 */
+	platform = `pi ${PI_AI_VERSION}`;
+
 	/** The provider's snapshot changed for a reason other than its models (its version, an update under way). */
 	changed(): void {
 		for (const listener of this.#listeners) listener();
@@ -140,7 +147,7 @@ export class ModelCatalog {
 	}
 
 	providers(): ServerProvider[] {
-		const version = this.hostUpdates?.snapshot();
+		const { label, ...version } = this.hostUpdates?.snapshot() ?? {};
 		return [
 			{
 				instanceId: PROVIDER_INSTANCE_ID,
@@ -152,8 +159,9 @@ export class ModelCatalog {
 				reportsContextWindow: true,
 				enabled: true,
 				installed: true,
-				version: "1.1.0",
-				// The integrator's own version, what is newest, and an update under way (`host-updates.ts`).
+				// T3 shows a version that starts with a letter as it is.
+				version: label === undefined ? this.platform : `${label}, ${this.platform}`,
+				// What is newest, and an update under way (`host-updates.ts`).
 				...version,
 				status: "ready",
 				auth: { status: "authenticated" },

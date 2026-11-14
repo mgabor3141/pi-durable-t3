@@ -22,6 +22,7 @@ function host(over: Partial<HostUpdates> = {}) {
 		},
 		restart: () => void state.restarts++,
 		command: "docker compose exec harness claw update",
+		name: "claw",
 		...over,
 	};
 	const catalog = new ModelCatalog(async () => []);
@@ -35,13 +36,14 @@ function host(over: Partial<HostUpdates> = {}) {
 it("the provider's snapshot says the version that runs and the newest; a newer one is T3's update candidate", async () => {
 	vi.useFakeTimers();
 	const { state, catalog, provider, announced } = host();
-	// Before the first answer nothing is claimed.
+	// Before the first answer nothing is claimed of the host: the version is what it is built on.
 	expect(provider().versionAdvisory).toBeUndefined();
+	expect(provider().version).toMatch(/^pi \d+\.\d+\.\d+$/);
 
 	const stop = catalog.watch();
 	await vi.advanceTimersByTimeAsync(0);
+	expect(provider().version, "the host's own version, then the pi release").toMatch(/^claw aaa111, pi \d+\.\d+\.\d+$/);
 	expect(provider()).toMatchObject({
-		version: "aaa111",
 		versionAdvisory: { status: "current", currentVersion: "aaa111", latestVersion: "aaa111", updateCommand: "docker compose exec harness claw update", canUpdate: true, message: null },
 	});
 	expect(provider().updateState).toBeUndefined();
@@ -89,6 +91,8 @@ it("Update installs, answers, and only then restarts; nothing newer restarts not
 	await first;
 	const done = slow.provider().updateState!;
 	expect(done).toMatchObject({ status: "succeeded", message: "Version bbb222 is installed. Restarting into it." });
+	// In the moment before the restart the provider already names the version it restarts into.
+	expect(slow.provider().version).toMatch(/^claw bbb222, /);
 	expect(done.output).toHaveLength(10_000);
 	expect(done.output!.endsWith("tail")).toBe(true);
 	// T3 has its answer; the host restarts a moment later.
@@ -156,6 +160,7 @@ it("over /ws: the provider carries the advisory, Update answers T3's provider pa
 			install: async () => ({ version: state.latest, output: "installed bbb222\n" }),
 			restart: () => void state.restarts++,
 			command: "claw update",
+			name: "claw",
 		},
 	});
 	try {
@@ -169,7 +174,9 @@ it("over /ws: the provider carries the advisory, Update answers T3's provider pa
 				await sleep(50);
 			}
 			expect(() => Schema.decodeUnknownSync(ServerConfig)(config)).not.toThrow();
-			expect(config!.providers[0]).toMatchObject({ version: "aaa111", versionAdvisory: { status: "behind_latest", latestVersion: "bbb222" } });
+			expect(config!.providers[0]).toMatchObject({ versionAdvisory: { status: "behind_latest", currentVersion: "aaa111", latestVersion: "bbb222" } });
+			// The integrator's version, then what the host is built on: pi's release and the pinned T3 release.
+			expect(config!.providers[0]!.version).toMatch(/^claw aaa111, pi \d+\.\d+\.\d+, t3 \d+\.\d+\.\d+$/);
 
 			const stream = await ws.open("subscribeServerConfig", {});
 			const seen = () => ws.chunks(stream).flatMap((frame) => (frame.values ?? []) as { type: string; payload?: { providers: Provider[] } }[]);

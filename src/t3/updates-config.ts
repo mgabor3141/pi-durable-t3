@@ -18,4 +18,6 @@ export type HostUpdates = {
 	restart(): void;
 	/** The command a person would run instead; T3 shows it beside its button. */
 	readonly command: string;
+	/** Your host's name, said before its version on the provider: `claw` gives "claw 680f25f, pi 1.5.2, t3 0.1.9". */
+	readonly name: string;
 };

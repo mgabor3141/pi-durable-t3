@@ -20,7 +20,8 @@ const OUTPUT_LIMIT = 10_000;
 
 type Advisory = NonNullable<ServerProvider["versionAdvisory"]>;
 type UpdateState = NonNullable<ServerProvider["updateState"]>;
-export type ProviderVersion = { readonly version: string; readonly versionAdvisory: Advisory; readonly updateState?: UpdateState };
+/** `label`: the host's name and the version that runs, for the end of the provider's version. */
+export type ProviderVersion = { readonly label: string; readonly versionAdvisory: Advisory; readonly updateState?: UpdateState };
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error)).trim() || "It failed without saying why.";
 
@@ -48,7 +49,7 @@ export class HostUpdateWatch {
 		if (this.#current === undefined) return undefined;
 		const behind = this.#latest !== undefined && this.#latest !== this.#current;
 		return {
-			version: this.#current,
+			label: `${this.#updates.name} ${this.#current}`,
 			versionAdvisory: {
 				status: behind ? "behind_latest" : this.#checkError === null ? "current" : "unknown",
 				currentVersion: this.#current,
@@ -100,6 +101,8 @@ export class HostUpdateWatch {
 				const installed = await this.#updates.install();
 				if (installed.version === this.#current) return end("unchanged", `Version ${installed.version} is the newest.`, installed.output);
 				this.#log?.info("host update installed; restarting", { from: this.#current, to: installed.version });
+				// T3 names the provider's version when it says "updated", in the moment before the restart.
+				this.#current = installed.version;
 				end("succeeded", `Version ${installed.version} is installed. Restarting into it.`, installed.output);
 				setTimeout(() => this.#updates.restart(), RESTART_AFTER_MS);
 			} catch (error) {
