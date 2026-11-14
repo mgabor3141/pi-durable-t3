@@ -8,6 +8,7 @@ export const TEXT_GENERATORS_UNSUPPORTED =
 const UNSUPPORTED: Record<string, string> = {
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
+	"server.updateProvider": "This host does not update itself from T3: update it where it is installed.",
 	"subagent.stop": "Stopping one subagent card is not supported by pi-durable-t3: a child is a thread of its own, so stop that thread.",
 	// Self-update RPCs. The descriptor advertises no `serverSelfUpdate` capability, so a client offers a manual
 	// relaunch command and never sends these; if one arrives (a hand-built client, a future default), refuse it

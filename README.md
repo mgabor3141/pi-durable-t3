@@ -211,6 +211,11 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
   context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
+- `updates` (an `attachT3` option): your host's own versions and how it moves between them (`check`, `install`,
+  `restart`, and the `command` a person would run). T3 then shows the `pi` provider with your version, says when a
+  newer one is available, and offers Update, in the web app and the desktop app: on this host the provider is your
+  agent, and T3's provider update is the one update button both apps have. `install` resolves before any restart;
+  the bridge answers T3 and then calls `restart`. A `note` from `check` is shown where T3 says an update is available.
 - `hiddenModels()` (on the attachment): the models the user hid from T3's model picker, as `provider/model` slugs,
   read at each call. For an integrator that lists models to its agent (pi-durable's codemode does, with `models.*`)
   and wants that list to be the picker's. Nothing refuses a thread that names a hidden model.

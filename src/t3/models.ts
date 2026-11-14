@@ -2,6 +2,7 @@
 // ladder for the levels pi-ai says it supports (capabilities.md). The bridge selects nothing and remembers no default.
 // The lists themselves are pi's: the models a pi release ships with, plus the newer lists it downloads (pi.dev's
 // catalog). The bridge asks for that download now and then, as pi's own model selector does, and on Settings' Refresh.
+import type { HostUpdateWatch } from "./host-updates.ts";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
@@ -69,6 +70,14 @@ export class ModelCatalog {
 		this.#log = log;
 	}
 
+	/** The host's own version and updates, when the integrator has them: the provider's version advisory and its Update. */
+	hostUpdates: HostUpdateWatch | undefined;
+
+	/** The provider's snapshot changed for a reason other than its models (its version, an update under way). */
+	changed(): void {
+		for (const listener of this.#listeners) listener();
+	}
+
 	/** Read the source again: what it has now (a list it downloaded, a changed models.json, a new credential). */
 	async refresh(): Promise<void> {
 		try {
@@ -112,7 +121,11 @@ export class ModelCatalog {
 		void this.update();
 		const timer = setInterval(() => void this.update(), MODEL_LIST_CHECK_MS);
 		timer.unref();
-		return () => clearInterval(timer);
+		const stopUpdates = this.hostUpdates?.watch();
+		return () => {
+			clearInterval(timer);
+			stopUpdates?.();
+		};
 	}
 
 	#set(models: CatalogModel[]): void {
@@ -127,6 +140,7 @@ export class ModelCatalog {
 	}
 
 	providers(): ServerProvider[] {
+		const version = this.hostUpdates?.snapshot();
 		return [
 			{
 				instanceId: PROVIDER_INSTANCE_ID,
@@ -139,6 +153,8 @@ export class ModelCatalog {
 				enabled: true,
 				installed: true,
 				version: "1.1.0",
+				// The integrator's own version, what is newest, and an update under way (`host-updates.ts`).
+				...version,
 				status: "ready",
 				auth: { status: "authenticated" },
 				checkedAt: this.#checkedAt,

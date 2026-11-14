@@ -1,6 +1,8 @@
 // The bridge's one entry point: attach a T3 Code facet to a caller-owned pi-durable Harness. Ownership of models and
 // projects follows docs/design.md's north star: the bridge computes no defaults of its own. Everything an integrator
 // needs comes from this file.
+import { HostUpdateWatch } from "./t3/host-updates.ts";
+import type { HostUpdates } from "./t3/updates-config.ts";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +36,7 @@ export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 export type { MessageContext, MessageContextAnswer, MessageContextRequest } from "./t3/message-context.ts";
 export { DISPLAY_ONLY_RULE, messageContextData } from "./t3/message-context.ts";
+export type { HostUpdates } from "./t3/updates-config.ts";
 export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
@@ -115,6 +118,12 @@ export type AttachT3Options = {
 	 * shows the count alone. The bridge only shows this number: the Harness's settings decide what is retried.
 	 */
 	readonly maxRetries?: number;
+	/**
+	 * Your host's own versions and how it updates: what runs, the newest there is, an install, a restart. T3 then shows
+	 * them as the `pi` provider's version and its update, in Settings → Providers, the sidebar and "Update everything",
+	 * in the web app and the desktop app: on this host the provider is your agent. Absent: T3's Update is refused.
+	 */
+	readonly updates?: HostUpdates;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
@@ -225,6 +234,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		({ force, signal }) => options.models.refresh({ force, signal }),
 		log,
 	);
+	// The integrator's own updates are T3's provider update: its version advisory, and the Update button.
+	if (options.updates !== undefined) catalog.hostUpdates = new HostUpdateWatch(options.updates, () => catalog.changed(), log);
 	await catalog.refresh();
 
 	const listen = options.listen ?? DEFAULT_LISTEN;
@@ -264,7 +275,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		await facet.close().catch(() => {});
 		throw error;
 	}
-	// New models (a release after this pi's) reach the picker without an update: pi.dev's lists, checked hourly.
+	// New models (a release after this pi's) reach the picker without an update: pi.dev's lists, checked hourly. A newer
+	// version of the host, when the integrator has updates, is looked for as often.
 	const stopWatching = catalog.watch();
 	void facet.closed.finally(stopWatching);
 	return {

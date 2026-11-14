@@ -46,7 +46,7 @@ import type { Logger } from "./logging.ts";
 import type { ModelCatalog } from "./models.ts";
 import { snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "./thread-stream.ts";
 import { projectTurnItemForDetail, RpcAuthorization } from "./t3-server.ts";
-import { PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { CurrentAuthSession } from "./session-context.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { Attachments } from "./attachments.ts";
@@ -273,7 +273,18 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.refreshProviders": (input) =>
 			input.modelCatalogOnly === true
 				? Effect.promise(() => deps.catalog.updateForPicker()).pipe(Effect.as({ providers: [] }))
-				: Effect.promise(() => (input.refreshModels === true ? deps.catalog.update(true) : deps.catalog.refresh())).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
+				: Effect.promise(() =>
+						// Settings' Refresh also looks for a newer version of the host, as T3's refresh checks a provider's.
+						Promise.all([input.refreshModels === true ? deps.catalog.update(true) : deps.catalog.refresh(), input.refreshModels === true ? deps.catalog.hostUpdates?.check() : undefined]),
+					).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
+		// T3's Update on a provider. Here the provider is the integrator's agent, so this updates the host
+		// (`host-updates.ts`): the answer carries how it went in the provider's update state, as T3's does, and a host
+		// that installed a newer version restarts a moment later. Without the integrator's `updates` it is refused.
+		"server.updateProvider": (input) => {
+			const updates = deps.catalog.hostUpdates;
+			if (updates === undefined || input.provider !== PROVIDER_DRIVER) return Effect.die(new CommandError(unsupportedMessage("server.updateProvider")));
+			return Effect.promise(() => updates.update()).pipe(Effect.map(() => ({ providers: deps.catalog.providers() })));
+		},
 		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
 		// agent's conversations live in pi-durable, not in a Codex/Claude home directory — so it is answered truthfully
 		// with an empty scan. The rest of `agentSessions.*` (import) stays refused (capabilities.md).
