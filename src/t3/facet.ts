@@ -1,7 +1,9 @@
 // Boot the T3 facet: the auth store, model catalog and bridge (over the threads layer), then the Effect HTTP/`/ws` server.
 import { createServer } from "node:http";
 import { join } from "node:path";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import type { Models } from "@earendil-works/pi-ai";
@@ -107,9 +109,10 @@ export function startFacet(deps: {
 	// call, never the library's.
 	const closed = new Promise<void>((resolve) => {
 		void ready.then(() =>
-			void Effect.runPromise(Fiber.await(serverFiber) as Effect.Effect<unknown>).then(() => {
+			void Effect.runPromise(Fiber.await(serverFiber)).then((exit) => {
 				if (closing) return;
-				log.warn("t3 facet stopped; the host cannot serve");
+				// Why it stopped, in full: without it the host only says that it cannot serve.
+				log.warn("t3 facet stopped; the host cannot serve", Exit.isFailure(exit) ? { cause: Cause.pretty(exit.cause) } : {});
 				resolve();
 			}),
 		);
