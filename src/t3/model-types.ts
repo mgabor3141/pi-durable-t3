@@ -113,7 +113,8 @@ interface ToolSlot {
 
 export interface LiveDoc {
 	run?: { taskId: number; inputs: number[] };
-	generation?: { attempt: number; message?: DurableMessage };
+	/** `retry`: the wait before the next request, after one that failed. */
+	generation?: { attempt: number; message?: DurableMessage; retry?: { at: number; error: string } };
 	tools?: ToolSlot[];
 }
 

@@ -473,6 +473,7 @@ export class Bridge {
 			updatedAt: thread?.summary?.updatedAt ?? thread?.createdAt ?? Date.now(),
 			...(thread?.summary === undefined ? {} : { summary: thread.summary }),
 			model,
+			...(this.config.maxRetries === undefined ? {} : { maxRetries: this.config.maxRetries }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
 			...(thread === undefined

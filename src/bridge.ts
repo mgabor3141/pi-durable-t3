@@ -109,6 +109,12 @@ export type AttachT3Options = {
 	 * timeout is logged as a warning and the message goes on without it. Absent: none.
 	 */
 	readonly messageContext?: MessageContext;
+	/**
+	 * How many times your Harness sends a failed model request again: its `settings.retry.maxRetries` (pi-durable's
+	 * default is 3). T3 shows the requests that failed in a row as one row, "Retrying provider (3/64)"; absent, the row
+	 * shows the count alone. The bridge only shows this number: the Harness's settings decide what is retried.
+	 */
+	readonly maxRetries?: number;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
@@ -237,6 +243,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
+		...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),

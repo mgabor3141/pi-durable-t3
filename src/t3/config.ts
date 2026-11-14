@@ -39,6 +39,8 @@ export interface FacetConfig {
 	readonly titleThread?: TitleThread;
 	/** Context for the model about each message that starts or steers a turn (memories). Absent: none. */
 	readonly messageContext?: MessageContext;
+	/** The Harness's `settings.retry.maxRetries`, for the retry row's "3/64". */
+	readonly maxRetries?: number;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	readonly routes?: readonly HostRoute[];

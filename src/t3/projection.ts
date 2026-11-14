@@ -64,6 +64,12 @@ const id = (value: string): Any => value;
 /** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
 const endOf = (message: { role?: string; timestamp?: number; durationMs?: number } | undefined, fallback: number): number =>
 	(message?.timestamp ?? fallback) + (message?.role === "assistant" ? (message.durationMs ?? 0) : 0);
+/**
+ * T3's class for a failed request, from pi's error text. A 429 is T3's `usage_limit` (its Claude adapter classes every
+ * 429 so): T3 shows it as a warning, "Usage limit reached".
+ */
+const failureClass = (message: string): "usage_limit" | "provider_error" =>
+	/(?<![a-z0-9])429(?![a-z0-9])|rate.?limit|usage.?limit|too many requests/i.test(message) ? "usage_limit" : "provider_error";
 /** A DateTime is immutable, and a thread's instants repeat on every projection: one per instant. */
 const instants = new Map<number, DateTime.Utc>();
 const time = (ms: number | undefined): DateTime.Utc => {
@@ -114,6 +120,9 @@ export interface ThreadMeta {
 	readonly summary?: ThreadSummary;
 	/** The Session's model, for the thread's model selection. */
 	readonly model: ModelRef | null;
+	/** How many times the harness sends a failed request again (its `settings.retry.maxRetries`), for the retry row's
+	 * "3/64". Absent, the row shows the count alone. */
+	readonly maxRetries?: number;
 	/** The Session's thinking level, reported back as the selection's `thinking` option. */
 	readonly thinkingLevel?: string;
 	/** The selected model's context window, for T3's context meter. */
@@ -744,18 +753,33 @@ export function projectThread(
 					} as Any);
 				}
 			}
-			if (message.stopReason === "error" && !streaming) {
-				turnItems.push({
-					...base(`ti-e${key}`, at, "failed", true),
-					type: "error",
-					failure: {
-						class: "provider_error",
-						message: (message.errorMessage ?? "The model request failed.").slice(0, 4000) || "The model request failed.",
-						code: null,
-						retryable: null,
-					},
-				} as Any);
-			}
+		};
+		// Requests that failed one after another are one row, as T3 shows a provider's retries: it stands where the first
+		// failed, says the last one's error, and counts. pi-durable records every failed request as an entry of its own.
+		let failures: { readonly key: string; readonly at: number; readonly count: number; readonly last: Extract<DurableMessage, { role: "assistant" }> } | undefined;
+		const pushFailures = (outcome: "retrying" | "recovered" | "stopped" | "failed", endedAt?: number) => {
+			if (failures === undefined) return;
+			const { key, at, count, last } = failures;
+			failures = undefined;
+			// The request that ended the run was not sent again.
+			const retries = outcome === "failed" ? count - 1 : count;
+			const message = (last.errorMessage ?? "").trim().slice(0, 4000).trim() || "The model request failed.";
+			const wait = outcome === "retrying" ? live?.generation?.retry : undefined;
+			const status = ({ retrying: "running", recovered: "completed", stopped: "interrupted", failed: "failed" } as const)[outcome];
+			turnItems.push({
+				...base(`ti-e${key}`, at, status, outcome !== "retrying", endedAt ?? endOf(last, at)),
+				type: "error",
+				failure: { class: failureClass(message), message, code: null, retryable: retries > 0 ? true : null },
+				...(retries === 0
+					? {}
+					: {
+							retry: {
+								attempt: retries,
+								maxAttempts: meta.maxRetries !== undefined && meta.maxRetries >= 1 ? meta.maxRetries : null,
+								retryDelayMs: wait === undefined ? null : Math.max(0, Math.round(wait.at - (last.timestamp ?? wait.at))),
+							},
+						}),
+			} as Any);
 		};
 
 		// A synthetic run has no prompt to show: the card at the cut is its start. Emitting the summary as a
@@ -866,11 +890,23 @@ export function projectThread(
 			if (m?.role !== "assistant") return;
 			pushCards(m.timestamp ?? requestedAt);
 			const key = `${u.id}.${assistantIndex++}`;
+			const at = m.timestamp ?? requestedAt;
+			const answeredAgain = draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
+			if (m.stopReason === "error") {
+				failures = { key: failures?.key ?? key, at: failures?.at ?? at, count: (failures?.count ?? 0) + 1, last: m };
+				// What a failed request left is superseded by the request sent again, and one that waits to be sent again
+				// will be. The request that ended the run keeps what it left.
+				if (answeredAgain || running) return;
+				pushAssistant(key, m, at, false, toolResults, liveTools);
+				pushFailures("failed");
+				return;
+			}
+			pushFailures(m.stopReason === "aborted" && !answeredAgain ? "stopped" : "recovered", at);
 			// A partial interrupted by a crash is superseded by the resumed answer.
-			const superseded = m.stopReason === "aborted" && draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
-			if (superseded) return;
-			pushAssistant(key, m, m.timestamp ?? requestedAt, false, toolResults, liveTools);
+			if (m.stopReason === "aborted" && answeredAgain) return;
+			pushAssistant(key, m, at, false, toolResults, liveTools);
 		});
+		pushFailures("retrying");
 		const partial = running ? live?.generation?.message : undefined;
 		if (partial?.role === "assistant") pushCards(partial.timestamp ?? Date.now());
 		pushCards(Infinity);

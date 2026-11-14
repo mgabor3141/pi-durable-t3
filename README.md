@@ -211,6 +211,12 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
   context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
+- `maxRetries` (an `attachT3` option): your Harness's `settings.retry.maxRetries`. pi-durable sends a failed model
+  request again after a growing wait and records each failure in the transcript; T3 shows the failures in a row as one
+  row that counts ("Retrying provider (3/64)", then "Provider recovered" or the error "after 64/64 retries"), and
+  what a failed request left is not shown once the request is sent again. A 429 is shown as T3's usage limit: a
+  warning, and once the run has given up, T3's banner with Resume. The bridge only shows the number you pass; without
+  it the row counts alone.
 - `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
   tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every
   later request fail. Install it on the Harness's registry.

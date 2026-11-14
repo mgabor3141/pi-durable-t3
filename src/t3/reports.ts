@@ -86,8 +86,8 @@ export function report(
 	}
 	if (verdict === "interrupted") lines.push("[Agent interrupted]");
 	if (verdict === "failed") {
-		const error = projection.turnItems.filter((item) => item.runId === last.id && item.type === "error").at(-1) as { message?: string } | undefined;
-		lines.push(`[Agent failed${error?.message === undefined ? "" : `: ${error.message}`}]`);
+		const error = projection.turnItems.filter((item) => item.runId === last.id && item.type === "error").at(-1) as { failure?: { message?: string } } | undefined;
+		lines.push(`[Agent failed${error?.failure?.message === undefined ? "" : `: ${error.failure.message}`}]`);
 	}
 	lines.push(...late);
 	return { threadId, title, runId: start.id as string, verdict, toolCalls, text: lines.join("\n"), truncated };
