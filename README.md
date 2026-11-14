@@ -211,6 +211,9 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
   context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
+- `hiddenModels()` (on the attachment): the models the user hid from T3's model picker, as `provider/model` slugs,
+  read at each call. For an integrator that lists models to its agent (pi-durable's codemode does, with `models.*`)
+  and wants that list to be the picker's. Nothing refuses a thread that names a hidden model.
 - `maxRetries` (an `attachT3` option): your Harness's `settings.retry.maxRetries`. pi-durable sends a failed model
   request again after a growing wait and records each failure in the transcript; T3 shows the failures in a row as one
   row that counts ("Retrying provider (3/64)", then "Provider recovered" or the error "after 64/64 retries"), and

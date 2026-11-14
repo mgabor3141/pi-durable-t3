@@ -167,6 +167,12 @@ export type T3Attachment = {
 	 */
 	textGenerationModel(): TextGenerationModel | undefined;
 	/**
+	 * The models the user hid from T3's model picker (Settings → Providers), as `provider/model` slugs, read at each
+	 * call: for an integrator that lists models to its agent and wants the list to be the picker's. T3 hides a model
+	 * from the picker only; nothing here refuses a thread that names one.
+	 */
+	hiddenModels(): ReadonlySet<string>;
+	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
 	 */
@@ -268,6 +274,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		htmlTools: (toolOptions) => facet.htmlTools(toolOptions),
 		secretRequests: (sink) => facet.secretRequests(sink),
 		textGenerationModel: () => facet.textGenerationModel(),
+		hiddenModels: () => facet.hiddenModels(),
 		...(facet.preview === undefined
 			? {}
 			: {

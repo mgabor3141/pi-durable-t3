@@ -48,6 +48,8 @@ type FacetHandle = {
 	readonly orchestration: Orchestration;
 	/** T3's text-generation model, when it names one of this host's (`Bridge.textGenerationModel`). */
 	textGenerationModel(): TextGenerationModel | undefined;
+	/** The models hidden from T3's model picker (`Bridge.hiddenModels`). */
+	hiddenModels(): ReadonlySet<string>;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -146,6 +148,7 @@ export function startFacet(deps: {
 		},
 		orchestration,
 		textGenerationModel: () => bridge.textGenerationModel(),
+		hiddenModels: () => bridge.hiddenModels(),
 		close: async () => {
 			closing = true;
 			orchestration.close();

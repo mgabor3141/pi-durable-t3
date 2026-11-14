@@ -1314,6 +1314,15 @@ export class Bridge {
 		return { provider: ref.provider, modelId: ref.modelId, ...(thinkingLevel === undefined ? {} : { thinkingLevel }) };
 	}
 
+	/**
+	 * The models hidden from T3's model picker (Settings → Providers, a model's eye), as `provider/model` slugs, read at
+	 * each use. T3 hides them from its picker only: a thread may still run on one.
+	 */
+	hiddenModels(): ReadonlySet<string> {
+		const preferences = this.config.settings.current().providerModelPreferences as { readonly [instance: string]: { readonly hiddenModels?: readonly string[] } } | null | undefined;
+		return new Set(preferences?.[PROVIDER_INSTANCE_ID]?.hiddenModels ?? []);
+	}
+
 	#generateTitle(threadId: string, requestId: string, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }): void {
 		const hook = this.config.titleThread;
 		const pending = this.#titleRequests.get(threadId);

@@ -271,6 +271,13 @@ it("hands the title hook T3's text-generation model (when it names one of this h
 	bridge.config.settings.update({ threadTitleInstructions: "  Use sentence case.  " } as never);
 	expect(bridge.textGenerationModel()).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
 
+	// The picker's hidden models, for an integrator that lists models to its agent: this host's provider only.
+	expect([...bridge.hiddenModels()]).toEqual([]);
+	bridge.config.settings.update({ setModelsHidden: [{ provider: "pi", model: "faux/faux-2", hidden: true }, { provider: "codex", model: "gpt-x", hidden: true }] } as never);
+	expect([...bridge.hiddenModels()]).toEqual(["faux/faux-2"]);
+	bridge.config.settings.update({ setModelsHidden: [{ provider: "pi", model: "faux/faux-2", hidden: false }] } as never);
+	expect([...bridge.hiddenModels()]).toEqual([]);
+
 	const threadId = await newThread(bridge);
 	await send(bridge, threadId, 1, "Seed");
 	await until("the hook call", () => calls.length === 1);
