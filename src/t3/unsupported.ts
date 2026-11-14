@@ -1,5 +1,10 @@
 // The refusals the UI shows verbatim, for a `/ws` method or a dispatched command this host does not implement.
 
+/** T3 0.1.9's text generators: a model API named in T3's settings, for titles and other short texts. This host generates
+ * those with one of pi's models, so one saved here would be picked in the UI and never used. */
+export const TEXT_GENERATORS_UNSUPPORTED =
+	"Text generators are not supported by pi-durable-t3. Add the model to pi (its models.json) and pick it as the text generation model.";
+
 const UNSUPPORTED: Record<string, string> = {
 	"runtime-request.respond": "pi runs without approvals; there is nothing to answer.",
 	"provider.switch": "pi is the only provider.",
@@ -10,6 +15,11 @@ const UNSUPPORTED: Record<string, string> = {
 	"server.updateServer": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
 	"server.updateServerWithProgress": "pi-durable-t3 does not self-update. Update pi-durable-t3 and re-run `pnpm setup:t3` on the host.",
 	"server.commitDesktopUpdate": "This server is not supervised by the T3 Code desktop app; there is no desktop update to commit.",
+	// T3 0.1.9.
+	"server.listTextGeneratorModels": TEXT_GENERATORS_UNSUPPORTED,
+	"orchestration.subscribePromptSuggestion": "Prompt suggestions come from Claude and Codex sessions; pi has none.",
+	"server.reclaimDatabaseSpace": "pi-durable-t3 keeps no T3 database; its storage is pi-durable's.",
+	"provider.auth.removeMethod": "pi's credentials are managed on the host, not from T3.",
 };
 
 /**

@@ -74,6 +74,14 @@ it("searches a thread's committed message text and answers T3's shape", async ()
 		expect(match!.snippet).toContain("pangolin");
 		expect(match!.messageCreatedAt, "an ISO timestamp").toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
+		// T3 0.1.9's thread links: the titles (and projects) of the threads named that exist; an unknown id is absent.
+		expect(exitValue(await ws.call("orchestration.getThreadTitles", { threadIds: ["t-search", "t-nothing", "t-unknown"] }), "getThreadTitles")).toEqual({ "t-search": "Search", "t-nothing": "Nothing" });
+		expect(exitValue(await ws.call("orchestration.getThreadLinkMetadata", { threadIds: ["t-search", "t-unknown"] }), "getThreadLinkMetadata")).toEqual({ "t-search": { title: "Search", projectId: "p-alpha" } });
+		const config = exitValue(await ws.call("server.getConfig", {}), "getConfig") as { threadLinkMetadata?: boolean; environment: { capabilities: { modelCatalogRefresh?: boolean } } };
+		expect([config.threadLinkMetadata, config.environment.capabilities.modelCatalogRefresh]).toEqual([true, true]);
+		// A model picker that opens: the lists are refreshed, the answer is empty and the config stream carries any change.
+		expect(exitValue(await ws.call("server.refreshProviders", { modelCatalogOnly: true }), "refreshProviders for a picker")).toEqual({ providers: [] });
+
 		// A query nothing matches returns an empty list, not an error.
 		expect((exitValue(await ws.call("orchestration.searchThreads", { query: "nonexistentterm" }), "searchThreads: empty") as Result).matches).toEqual([]);
 	} finally {

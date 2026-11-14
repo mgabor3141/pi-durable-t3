@@ -20,6 +20,8 @@ export type ModelListUpdate = (options: { force: boolean; signal: AbortSignal })
 export const MODEL_LIST_CHECK_MS = 60 * 60 * 1000;
 /** pi's own bound on a model list download (`pi update --models`, its model selector). */
 const MODEL_LIST_TIMEOUT_MS = 15_000;
+/** A model picker that opens downloads the lists again unless they were downloaded this recently (T3: "a few minutes"). */
+export const MODEL_LIST_FRESH_MS = 5 * 60 * 1000;
 
 const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
 	off: "Off",
@@ -53,6 +55,8 @@ export class ModelCatalog {
 	readonly #update: ModelListUpdate | undefined;
 	readonly #log: Logger | undefined;
 	#updating: Promise<void> = Promise.resolve();
+	/** When a download was last asked for, whatever pi's own freshness rule would have said. */
+	#downloadAskedAt = 0;
 	#checkedAt = new Date().toISOString();
 
 	/**
@@ -81,6 +85,7 @@ export class ModelCatalog {
 	update(force = false): Promise<void> {
 		const update = this.#update;
 		if (update === undefined) return this.refresh();
+		if (force) this.#downloadAskedAt = Date.now();
 		const next = this.#updating.then(async () => {
 			try {
 				const { errors } = await update({ force, signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS) });
@@ -92,6 +97,14 @@ export class ModelCatalog {
 		});
 		this.#updating = next;
 		return next;
+	}
+
+	/**
+	 * A model picker opened (T3's `modelCatalogOnly`): download the lists, unless one was asked for in the last
+	 * `MODEL_LIST_FRESH_MS`. So a model released an hour ago is there when the user next looks for it.
+	 */
+	updateForPicker(): Promise<void> {
+		return Date.now() - this.#downloadAskedAt < MODEL_LIST_FRESH_MS ? this.#updating : this.update(true);
 	}
 
 	/** Update the lists now and every `MODEL_LIST_CHECK_MS`, in the background; the returned function stops it. */

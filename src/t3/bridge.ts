@@ -1466,6 +1466,16 @@ export class Bridge {
 		});
 	}
 
+	/** T3's wake on a saved secret (`secret_request.record`, 0.1.9): a snoozed thread whose agent just got what it
+	 * waited for shows again. Only the snooze is cleared: no wake stamp, and a settle override stays. */
+	async wakeForSavedSecret(threadId: string): Promise<void> {
+		if (this.threadRecord(threadId)?.snoozedUntil === undefined) return;
+		await this.#store.updateRecord(threadId, (record) => {
+			delete record.snoozedUntil;
+			delete record.snoozedAt;
+		});
+	}
+
 	/** T3's `thread.unsnooze`: awake now, stamped unless it already was. */
 	async unsnoozeThread(threadId: string): Promise<void> {
 		const now = Date.now();
@@ -1572,7 +1582,7 @@ export class Bridge {
 
 	/**
 	 * T3's settlement sweep (`ThreadSettlementService`): settle every thread that has been quiet for longer than its
-	 * project's `sidebarAutoSettleAfterDays` (T3's default: 3 days; `null` turns it off), as of when it went quiet. Pinned
+	 * project's `sidebarAutoSettleAfterDays` (T3's default: 7 days; `null` turns it off), as of when it went quiet. Pinned
 	 * threads, threads kept active, threads with automatic settlement turned off, and running threads stay.
 	 */
 	async sweepSettlement(now = Date.now()): Promise<void> {

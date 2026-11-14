@@ -19,6 +19,7 @@ import {
 	authScopeResponse,
 	type AuthEnvironmentScope,
 	EnvironmentAuthenticatedAuth,
+	EnvironmentVoiceBodyLimit,
 	EnvironmentAuthenticatedPrincipal,
 	EnvironmentAuthInvalidError,
 	EnvironmentHttpApi,
@@ -79,9 +80,6 @@ export interface HttpApiDeps {
 	/** The browser session cookie for a session token. */
 	readonly sessionCookie: (token: string, expiresAtMs: number) => string;
 	readonly sessionCookieName: string;
-	/** The same-origin browser session cookie's session alone (T3's `authenticateBrowserSession`): what may approve an
-	 * MCP client with one click. */
-	readonly resolveBrowserSession: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
 	readonly mcpOAuth: McpOAuth;
 }
 
@@ -235,6 +233,13 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 			.handle("pairingCredential", ({ payload }) =>
 				Effect.gen(function* () {
 					const principal = yield* requireScope(AuthAccessWriteScope);
+					// T3 0.1.9's app approval codes (`AUTO-…`): a code that approves one agent sign-in at one level. This host
+					// mints none (the descriptor does not advertise `mcpApprovalCodes`, so T3 does not ask), and a plain pairing
+					// code in its place would pair a whole client: refused, with the contract's nearest reason.
+					if (payload.access !== undefined) {
+						log.warn("refused a pairing code bound to an agent sign-in: `access` is not supported", { access: payload.access });
+						return yield* invalidRequest("invalid_scope");
+					}
 					const delegated = payload.scopes ?? AuthStandardClientScopes;
 					if (delegated.length === 0 || new Set<string>(delegated).size !== delegated.length) return yield* invalidRequest("invalid_scope");
 					for (const scope of delegated) if (!principal.scopes.has(scope)) return yield* scopeRequired(scope);
@@ -406,7 +411,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 					const resolved = yield* forwardedAuthorization(payload);
 					if ("redirectTo" in resolved) return resolved;
 					const { issuer } = yield* urls;
-					const session = oauth.approvingBrowserSession(deps.resolveBrowserSession(request), resolved);
+					const session = oauth.approvingSession(deps.resolveSession(request), resolved);
 					yield* noStore;
 					return {
 						clientName: resolved.client.name,
@@ -432,7 +437,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 						return { redirectTo: oauth.deny(resolved) };
 					}
 					try {
-						const redirectTo = oauth.approve({ browserSession: deps.resolveBrowserSession(request), authorization: resolved, decision });
+						const redirectTo = oauth.approve({ session: deps.resolveSession(request), authorization: resolved, decision });
 						log.info("MCP client sign-in approved", { client: resolved.client.name, access: decision.access, method: decision._tag });
 						return { redirectTo };
 					} catch (error) {
@@ -475,6 +480,28 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 			.handleRaw("health", () => unsupported("connect.health"))
 			.handleRaw("t3MintCredential", () => unsupported("connect.t3MintCredential")),
 	);
+	// Voice input (T3 0.1.9): transcription on this machine or through a cloud key. The descriptor advertises neither
+	// `voiceTranscription` nor `cloudVoiceTranscription`, so T3 does not offer this environment as where audio goes
+	// (its composer shows the microphone all the same, to set one up); the endpoints answer 404.
+	const voice = HttpApiBuilder.group(EnvironmentHttpApi, "voice", (handlers) =>
+		handlers
+			.handleRaw("cloudKeys", () => unsupported("voice.cloudKeys"))
+			.handleRaw("setCloudKey", () => unsupported("voice.setCloudKey"))
+			.handleRaw("cloudModels", () => unsupported("voice.cloudModels"))
+			.handleRaw("transcribeCloud", () => unsupported("voice.transcribeCloud"))
+			.handleRaw("status", () => unsupported("voice.status"))
+			.handleRaw("prepareModel", () => unsupported("voice.prepareModel"))
+			.handleRaw("models", () => unsupported("voice.models"))
+			.handleRaw("downloadModel", () => unsupported("voice.downloadModel"))
+			.handleRaw("selectModel", () => unsupported("voice.selectModel"))
+			.handleRaw("cancelModelDownload", () => unsupported("voice.cancelModelDownload"))
+			.handleRaw("removeModel", () => unsupported("voice.removeModel"))
+			.handleRaw("linkModels", () => unsupported("voice.linkModels"))
+			.handleRaw("updateAcceleration", () => unsupported("voice.updateAcceleration"))
+			.handleRaw("updateModelUnloadTimeout", () => unsupported("voice.updateModelUnloadTimeout"))
+			.handleRaw("transcribe", () => unsupported("voice.transcribe"))
+			.handleRaw("postProcess", () => unsupported("voice.postProcess")),
+	);
 	const webhooks = HttpApiBuilder.group(EnvironmentHttpApi, "webhooks", (handlers) =>
 		handlers
 			.handleRaw("webhookPost", () => unsupported("webhooks.webhookPost"))
@@ -484,7 +511,9 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 	);
 
 	return HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
-		Layer.provide([metadata, authGroup, orchestration, projects, pullRequests, mcpOAuth, connect, webhooks]),
+		Layer.provide([metadata, authGroup, orchestration, projects, pullRequests, mcpOAuth, voice, connect, webhooks]),
+		// T3 caps the size of an audio upload with this middleware. No audio is read here, so it passes requests on.
+		Layer.provide(Layer.succeed(EnvironmentVoiceBodyLimit, (httpEffect) => httpEffect)),
 		Layer.provide(authenticatedAuth),
 	);
 }

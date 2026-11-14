@@ -60,6 +60,10 @@ describe("browseFilesystem (the picker's directory listing)", () => {
 		await expect(browseFilesystem({ partialPath: "C:\\Users\\me", env: env(), platform: "linux" })).rejects.toBeInstanceOf(BrowseWindowsPathUnsupported);
 	});
 
+	it("a directory that does not exist fails as missing, so a client can offer to create it (T3 0.1.9)", async () => {
+		await expect(browseFilesystem({ partialPath: "/no/such/directory/", env: env(), platform: "linux" })).rejects.toMatchObject({ name: "BrowseReadDirectoryFailed", parentPath: "/no/such/directory", pathMissing: true });
+	});
+
 	it("~ is the environment's home, not this host's: `~/` and `~` list it, `~/al` filters it (T3 opens the picker at ~/)", async () => {
 		const remote = envWithHome(base);
 		const listed = await browseFilesystem({ partialPath: "~/", env: remote, platform: "linux" });

@@ -542,9 +542,9 @@ it("an agent schedules, lists, changes and deletes a task with T3's tools", { ti
 	const { ask, sawAll, tasks } = await setup();
 	await ask("a", { name: "schedule_task", args: { prompt: "Check the build\nand report", schedule: { type: "interval", everyMs: 3_600_000 } } });
 	const [created] = await sawAll(1);
-	expect(created).toMatchObject({ title: "Check the build", enabled: true, projectId: "p", boundThreadId: "a", schedule: { type: "interval", everyMs: 3_600_000 }, lastRunStatus: "never" });
+	expect(created).toMatchObject({ title: "Check the build", enabled: true, projectId: "p", boundThreadId: "a", freshSession: false, schedule: { type: "interval", everyMs: 3_600_000 }, lastRunStatus: "never" });
 	const stored = tasks().list().tasks.find((task) => task.id === created.scheduledTaskId)!;
-	expect(stored).toMatchObject({ threadId: "a", runtimeMode: "full-access", createdBy: "agent", creationSource: "mcp", workspaceStrategy: { type: "root" } });
+	expect(stored).toMatchObject({ threadId: "a", threadMode: "continue", runtimeMode: "full-access", createdBy: "agent", creationSource: "mcp", workspaceStrategy: { type: "root" } });
 
 	await ask("a", { name: "schedule_task", args: { scheduledTaskId: created.scheduledTaskId, enabled: false, bindToCurrentThread: false } });
 	await ask("a", { name: "list_scheduled_tasks", args: {} });
@@ -558,4 +558,11 @@ it("an agent schedules, lists, changes and deletes a task with T3's tools", { ti
 	expect(deleted).toEqual({ scheduledTaskId: created.scheduledTaskId, deleted: true });
 	expect(again.error).toBe(`task_not_found: Scheduled task ${created.scheduledTaskId} was not found.`);
 	expect(tasks().list().tasks).toEqual([]);
+
+	// T3 0.1.9's thread modes: unbound is a new thread each run; a fresh session each run is refused by name.
+	await ask("a", { name: "schedule_task", args: { prompt: "Elsewhere", schedule: { type: "interval", everyMs: 3_600_000 }, bindToCurrentThread: false } });
+	await ask("a", { name: "schedule_task", args: { prompt: "Afresh", schedule: { type: "interval", everyMs: 3_600_000 }, freshSession: true } });
+	const [unbound, fresh] = (await sawAll(8)).slice(-2);
+	expect(tasks().list().tasks.find((task) => task.id === unbound.scheduledTaskId)).toMatchObject({ threadId: null, threadMode: "new_thread" });
+	expect(fresh.error).toMatch(/^invalid_request: freshSession: A fresh session each run is not supported/);
 });

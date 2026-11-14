@@ -58,7 +58,7 @@ const isAssetAccessError = Schema.is(AssetAccessError);
 import type { PreviewSessions } from "./preview.ts";
 import type { WsHandlers, WsItem, WsPayload, WsSuccess } from "./ws-types.ts";
 import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
-import { unsupportedMessage } from "./unsupported.ts";
+import { TEXT_GENERATORS_UNSUPPORTED, unsupportedMessage } from "./unsupported.ts";
 import type { SecretRequests } from "./secret-requests.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
@@ -106,6 +106,14 @@ function serverSettings(deps: RpcDeps) {
 	return deps.bridge.config.settings.current();
 }
 
+/** The live threads among `threadIds`, as their shell names them (an untitled thread is "New thread"). */
+function namedThreads(bridge: Bridge, threadIds: readonly string[]): { threadId: string; title: string; projectId: string }[] {
+	return threadIds.flatMap((threadId) => {
+		const thread = bridge.threadRecord(threadId);
+		return thread === undefined ? [] : [{ threadId, title: thread.title || "New thread", projectId: thread.projectId }];
+	});
+}
+
 function serverConfig(deps: RpcDeps): ServerConfig {
 	const remote = deps.bridge.config.remoteAccess === undefined ? undefined : advertisedRemoteAccess(deps.bridge.config.remoteAccess.current());
 	return {
@@ -133,6 +141,8 @@ function serverConfig(deps: RpcDeps): ServerConfig {
 		...(remote?.remoteOpenTargets === undefined ? {} : { remoteOpenTargets: remote.remoteOpenTargets }),
 		shellResumeCompletionMarker: true,
 		threadResumeCompletionMarker: true,
+		// `orchestration.getThreadLinkMetadata` is answered (a thread link's title and project in one call).
+		threadLinkMetadata: true,
 		// T3's client offers "New thread without a project" on an environment only when its config carries this folder
 		// (`availableScratchWorkspaceRoot`), and the same config answers `projects.ensureScratch` for it (rpc.ts). A host
 		// with no scratch dir advertises nothing, and the client offers no such thread.
@@ -257,9 +267,13 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"server.probe": () => Effect.succeed({}),
 		"server.getConfig": () => readConfigEffect(deps),
 		// Settings → Providers' Refresh asks `refreshModels` (T3 then drops its model caches): download the lists anew.
+		// A model picker that opens asks `modelCatalogOnly` (T3 0.1.9): the lists are downloaded if the last download
+		// is a few minutes old, and, as in T3, the answer is empty and the config stream carries what changed.
 		// Other callers (the composer's workspace snapshot) read what the source has.
 		"server.refreshProviders": (input) =>
-			Effect.promise(() => (input.refreshModels === true ? deps.catalog.update(true) : deps.catalog.refresh())).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
+			input.modelCatalogOnly === true
+				? Effect.promise(() => deps.catalog.updateForPicker()).pipe(Effect.as({ providers: [] }))
+				: Effect.promise(() => (input.refreshModels === true ? deps.catalog.update(true) : deps.catalog.refresh())).pipe(Effect.map(() => ({ providers: deps.catalog.providers() }))),
 		// Onboarding step 3 scans each environment for importable agent sessions. This host has none to import — the
 		// agent's conversations live in pi-durable, not in a Codex/Claude home directory — so it is answered truthfully
 		// with an empty scan. The rest of `agentSessions.*` (import) stays refused (capabilities.md).
@@ -271,6 +285,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 				try: () => {
 					const settings = deps.bridge.config.settings;
 					const patch = input?.patch ?? {};
+					// Saved, a text generator would be offered as the text generation model and never run (unsupported.ts).
+					if (Object.keys(patch.textGenerators ?? {}).length > 0) throw new Error(TEXT_GENERATORS_UNSUPPORTED);
 					return input?.providerInstanceMutation === undefined ? settings.update(patch) : settings.updateProviderInstance(input.providerInstanceMutation, patch);
 				},
 				// Build the contract's own class: `settingsPath` and `operation` are required, so a hand-rolled literal fails
@@ -338,7 +354,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 								: error instanceof BrowseCurrentProjectRequired
 									? "current_project_required"
 									: "read_directory_failed",
-						...(error instanceof BrowseReadDirectoryFailed ? { parentPath: error.parentPath } : {}),
+						...(error instanceof BrowseReadDirectoryFailed ? { parentPath: error.parentPath, ...(error.pathMissing ? { pathMissing: true } : {}) } : {}),
 					}),
 			}),
 		// T3's file panel and quick-open (`files.ts`, replicated from `apps/server/src/workspace`). The `cwd` must be a root this
@@ -461,6 +477,14 @@ export function makeRpcLayer(deps: RpcDeps) {
 						fromListener<WsItem<"subscribeAuthAccess">>((emit) => deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }))),
 					);
 				}),
+			),
+		// T3's thread links and relationship rows (`ProjectionStore.getThreadTitles`, `getThreadLinkMetadata`): the
+		// requested threads that exist, archived ones and side chats included; a deleted or unknown id is absent.
+		[`orchestration.getThreadTitles`]: (input) =>
+			Effect.sync(() => Object.fromEntries(namedThreads(bridge, input.threadIds).map((thread) => [thread.threadId, thread.title])) as WsSuccess<"orchestration.getThreadTitles">),
+		[`orchestration.getThreadLinkMetadata`]: (input) =>
+			Effect.sync(
+				() => Object.fromEntries(namedThreads(bridge, input.threadIds).map((thread) => [thread.threadId, { title: thread.title, projectId: thread.projectId }])) as WsSuccess<"orchestration.getThreadLinkMetadata">,
 			),
 		[`orchestration.getArchivedShellSnapshot`]: () => Effect.sync(() => bridge.archivedShellSnapshot() as unknown as WsSuccess<"orchestration.getArchivedShellSnapshot">),
 		[`orchestration.subscribeShell`]: (input) =>

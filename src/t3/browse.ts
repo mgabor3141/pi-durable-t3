@@ -29,9 +29,12 @@ export class BrowseCurrentProjectRequired extends Error {
 export class BrowseReadDirectoryFailed extends Error {
 	readonly name = "BrowseReadDirectoryFailed";
 	readonly parentPath: string;
+	/** The directory does not exist (T3 0.1.9: its mobile app then offers to create it). */
+	readonly pathMissing: boolean;
 	constructor(parentPath: string, cause?: unknown) {
 		super(`Failed to read workspace directory '${parentPath}'.`, { cause });
 		this.parentPath = parentPath;
+		this.pathMissing = (cause as { code?: unknown } | undefined)?.code === "not_found";
 	}
 }
 

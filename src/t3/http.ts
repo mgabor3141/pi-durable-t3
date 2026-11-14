@@ -30,6 +30,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Mime from "effect/http/Mime";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
 import * as RpcServer from "effect/rpc/RpcServer";
+import { SOCKET_FRAME_PARTS_QUERY_PARAM, splitLargeSocketFrames } from "@t3tools/shared/socketFrameParts";
 import { WsRpcGroup } from "@t3tools/contracts";
 import { type AuthStore, PairingRateLimit } from "./auth.ts";
 import { ATTACHMENT_UPLOAD_ROUTE_PREFIX, type Attachments } from "./attachments.ts";
@@ -75,7 +76,7 @@ export function assetResponse(mimeType: string): { contentType: string; headers:
 	return { contentType: mimeType, headers };
 }
 
-export const SERVER_VERSION = "0.1.7";
+export const SERVER_VERSION = "0.1.9";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;
@@ -103,6 +104,11 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 				sideChats: true,
 				// T3's one-time scheduled tasks (`{ type: "once", runAt }`).
 				oneTimeSchedules: true,
+				// A model picker that opens asks for newly released models (`server.refreshProviders`'s `modelCatalogOnly`).
+				modelCatalogRefresh: true,
+				// T3's scheduled task thread modes: a new thread each run, or one thread that continues. A fresh session
+				// each run is refused on save (`scheduled-tasks.ts`).
+				scheduledTaskThreadModes: true,
 				// T3's preview panel uses the server browser when this is true; the stream route is below.
 				serverBrowser: preview !== undefined,
 				// Attachments only where they can be kept (`attachT3`'s `attachmentsDir`).
@@ -287,16 +293,9 @@ export function makeServerLayer(deps: {
 		return resolveSession(request);
 	};
 
-	// The browser session cookie alone (same-origin): what may approve an MCP client with one click.
-	const resolveBrowserSession = (request: HttpServerRequest.HttpServerRequest) => {
-		const cookie = request.cookies[SESSION_COOKIE_NAME];
-		if (cookie === undefined || !cookieOriginAllowed(request)) return undefined;
-		return auth.verifySessionToken(cookie);
-	};
 	const mcpOAuth = new McpOAuth(auth, { linksEnabled: () => bridge.config.settings.current().linkedEnvironmentsEnabled === true });
 
 	const apiLayer = makeHttpApiLayer({
-		resolveBrowserSession,
 		mcpOAuth,
 		bridge,
 		auth,
@@ -439,7 +438,18 @@ export function makeServerLayer(deps: {
 								while (auth.isTokenActive(tokenHash)) yield* Effect.sleep("2 seconds");
 								log.info("token no longer active; closing WebSocket");
 							});
-							return yield* Effect.raceFirst(httpEffect, revoked.pipe(Effect.as(HttpServerResponse.empty({ status: 401 }))));
+							// T3 0.1.9: a client asks (`?frameParts`) for large frames in parts small enough to arrive on a slow link
+							// before its liveness timeout runs out; it joins them again. The RPC server upgrades the request itself, so
+							// its socket is wrapped through the request it reads (T3's `ws.ts`, with its `splitLargeSocketFrames`).
+							const framed = url.searchParams.has(SOCKET_FRAME_PARTS_QUERY_PARAM)
+								? httpEffect.pipe(
+										Effect.provideService(
+											HttpServerRequest.HttpServerRequest,
+											Object.create(request, { upgrade: { value: Effect.map(request.upgrade, splitLargeSocketFrames) } }) as HttpServerRequest.HttpServerRequest,
+										),
+									)
+								: httpEffect;
+							return yield* Effect.raceFirst(framed, revoked.pipe(Effect.as(HttpServerResponse.empty({ status: 401 }))));
 						}),
 					() => Effect.sync(() => {
 						auth.markDisconnected(tokenHash);

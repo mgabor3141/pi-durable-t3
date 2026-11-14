@@ -4,6 +4,7 @@
 // the environment, as the agent sees its files), T3's bootstrap injected (theme, live height, links and shortcuts), and
 // heights measured in a browser at T3's widths when one is configured. The page is stored as an attachment
 // (`<thread>-<uuid>-html.html` in `attachmentsDir`), served by the asset route like any other.
+import { posix, win32 } from "node:path";
 import { type ExecutionEnv } from "@earendil-works/pi-durable/env";
 import {
 	clampHtmlRenderHeight,
@@ -124,6 +125,32 @@ const isImageBytes = (bytes: Uint8Array) => {
 	}
 	return hasSvgRoot(new TextDecoder().decode(bytes.subarray(0, 4096)));
 };
+
+const HTML_FILE_EXTENSION = /\.html?$/i;
+/** As T3 judges it, by the bytes: a renamed .env or key does not start like a page. */
+const HTML_DOCUMENT_START = /^\s*<(?:!doctype\s+html|html)[\s>]/i;
+
+/**
+ * The page a call names: inline `html`, or (T3 0.1.9) the `path` of an .html file in the environment, exactly one of
+ * them (T3's `pageSource` and `readPageFile`). The file is judged as resolved, so a link named .html does not stand
+ * for another file. T3 also refuses its own server's files and hard links, for callers it sandboxes; an agent here
+ * already reads every file in its environment.
+ */
+export async function pageSource(env: ExecutionEnv, input: { readonly html?: string | undefined; readonly path?: string | undefined }, context: Context): Promise<string> {
+	if (input.html !== undefined && input.path === undefined) return input.html;
+	if (input.path === undefined || input.html !== undefined) throw new HtmlPageError("Pass exactly one of html or path.");
+	const path = input.path;
+	const unreadable = new HtmlPageError(`${path} is not a readable HTML document. Pass an absolute path to a regular .html file that starts with <!doctype html> or <html>, or pass html instead.`);
+	if (!posix.isAbsolute(path) && !win32.isAbsolute(path)) throw unreadable;
+	const real = await env.canonicalPath(path, context);
+	if (!real.ok || !HTML_FILE_EXTENSION.test(real.value)) throw unreadable;
+	const info = await env.fileInfo(real.value, context);
+	if (!info.ok || info.value.kind !== "file") throw unreadable;
+	if (info.value.size > MAX_PAGE_BYTES) throw new HtmlPageError(`${path} is ${formatMib(info.value.size)}; a page must be at most ${formatMib(MAX_PAGE_BYTES)}.`);
+	const read = await env.readTextFile(real.value, context);
+	if (!read.ok || !HTML_DOCUMENT_START.test(read.value)) throw unreadable;
+	return read.value;
+}
 
 /** T3's `inlineLocalImages`: every local image the page names by absolute path, as a data URI. `missing`: paths that are
  * not readable image files. */
@@ -293,10 +320,10 @@ export type HtmlPreview = {
 	screenshot: { mimeType: "image/png"; data: string; width: number; height: number };
 };
 
-export async function previewHtml(env: ExecutionEnv, browser: Browser, input: { html: string; width?: number; appearance?: "dark" | "light" }, context: Context): Promise<HtmlPreview> {
+export async function previewHtml(env: ExecutionEnv, browser: Browser, input: { html?: string; path?: string; width?: number; appearance?: "dark" | "light" }, context: Context): Promise<HtmlPreview> {
 	const width = Math.min(MAX_PREVIEW_WIDTH, Math.max(MIN_PREVIEW_WIDTH, Math.round(input.width ?? HTML_RENDER_COLUMN_WIDTH)));
 	const appearance = input.appearance ?? "dark";
-	const page = await preparePage(env, input.html, context);
+	const page = await preparePage(env, await pageSource(env, input, context), context);
 	const theme = htmlRenderTheme(appearance === "light" ? T3_CODE_LIGHT_THEME_COLORS : T3_CODE_DARK_THEME_COLORS, appearance, HTML_RENDER_MEASURE_FONTS);
 	const opened = await withTimeout(openPage(browser, width, appearance), CAPTURE_TIMEOUT_MS, "opening the preview page");
 	try {
@@ -354,11 +381,11 @@ export async function measureHtml(browser: Browser, html: string): Promise<[numb
 /** T3's `html_render`: the prepared page, its reference (clamped height, measured heights when a browser measured it). */
 export async function preparePublish(
 	env: ExecutionEnv,
-	input: { html: string; title: string; height: number },
+	input: { html?: string; path?: string; title: string; height: number },
 	browser: (() => Promise<Browser>) | undefined,
 	context: Context,
 ): Promise<{ html: string; title: string; height: number; heights?: [number, number][] }> {
-	const page = await preparePage(env, input.html, context);
+	const page = await preparePage(env, await pageSource(env, input, context), context);
 	if (page.missing.length > 0) throw new HtmlPageError(`These local images could not be read: ${page.missing.join(", ")}. Use absolute paths to existing image files, or remove them.`);
 	let heights: [number, number][] | undefined;
 	if (browser !== undefined) {
@@ -378,10 +405,10 @@ export async function preparePublish(
 
 // ---- tool descriptions (T3's, `mcp/toolkits/html/tools.ts`) --------------------------------------------------
 
-const PAGE_RULES = "Inline <style> and <script>. Local images as absolute paths are inlined. Remote URLs load as-is.";
+const PAGE_RULES = "Self-contained: inline <style> and <script>. Local images as absolute paths are inlined. Remote URLs load as-is.";
 /** T3's agent guidance for visuals (`orchestrationInstructions.ts`), carried by the tool so it travels with it. */
 const WHEN_TO_USE =
-	"Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass its HTML to html_preview, then html_render. If the visual is a file, pass that file's HTML. A screenshot on disk or a text description does not show it. Never start a server for it. Asked for an image to post, send, or use elsewhere: a .png file and its path, never html_render.";
+	"Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass the path to an HTML file, or inline HTML to html_preview, then html_render. A screenshot on disk or a text description does not show it. Never start a server for it. Asked for an image to post, send, or use elsewhere: a .png file and its path, never html_render.";
 
 export const HTML_PREVIEW_DESCRIPTION = `Check an HTML page before html_render. Returns PNG, contentHeight, and console output. ${PAGE_RULES} Theme and layout rules are in html_render.`;
 export const HTML_RENDER_DESCRIPTION = `Show a finished HTML page (chart, diagram, mockup) inline in this thread, above your final reply. Do not announce or restate the page. Frame fits height to ${HTML_RENDER_MAX_FIT_HEIGHT}px. On mobile, content past the given height scrolls. ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE} ${WHEN_TO_USE}`;

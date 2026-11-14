@@ -40,6 +40,10 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 	return bridge.receipted(command.commandId, async () => {
 		switch (command.type) {
 			case "message.dispatch": {
+				// T3 0.1.9's "start a new provider session without the thread's earlier context" (its /clear). The descriptor
+				// does not advertise `freshContext`, so T3's client does not send it; a caller that does is told, since
+				// sending the message with the old context would be the opposite of what it asked.
+				if (command.freshContext === true) throw new CommandError("freshContext is not supported by pi-durable-t3: a thread keeps its context. Start a new thread instead.");
 				await bridge.applySelection(command.threadId, command.modelSelection);
 				// With serverResolvedCommandContext the client sends start_immediately plus a deliveryIntent
 				// (steer/restart/auto); queued sends are queue_after_active. Older clients name the mode directly.
@@ -87,6 +91,13 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				await bridge.startQueued(command.threadId, undefined, command.commandId);
 				break;
 			case "thread.settle":
+				// T3's guard (`Orchestrator`, 0.1.9): a settle that names the run it saw last is refused when another has
+				// started since, so a settle decided on a finished run never hides a thread that is working again.
+				if (command.expectedLatestRunId !== undefined) {
+					const { projection } = await bridge.projection(command.threadId);
+					const latest = projection.runs.reduce<(typeof projection.runs)[number] | undefined>((found, run) => (found === undefined || run.ordinal > found.ordinal ? run : found), undefined);
+					if (latest?.id !== command.expectedLatestRunId) throw new CommandError("The thread received another run before settlement.");
+				}
 				await bridge.settleThread(command.threadId);
 				break;
 			case "thread.unsettle":

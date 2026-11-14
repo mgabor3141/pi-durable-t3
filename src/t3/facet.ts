@@ -97,7 +97,7 @@ export function startFacet(deps: {
 		httpServer.once("error", (error) => reject(error));
 	});
 	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
-	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId));
+	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId), { onSaved: (threadId) => bridge.wakeForSavedSecret(threadId) });
 	// Threads that drive threads (`thread_prompt` and the rest); its followers deliver the reports the last process owed.
 	const orchestration = new Orchestration(bridge, log);
 	orchestration.start();

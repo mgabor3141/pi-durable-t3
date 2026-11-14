@@ -262,22 +262,23 @@ export class McpOAuth {
 		return { client, redirectUri, codeChallenge, state, resource: urls.resource, issuer: urls.issuer };
 	}
 
-	/** One-click approval for a signed-in browser: its CSRF token and scopes, if its session may approve at all
-	 * (approving manages access, and a session may only hand out scopes it holds). */
-	approvingBrowserSession(session: StoredToken | undefined, authorization: AuthorizationRequest): { csrfToken: string; scopes: readonly string[] } | undefined {
-		if (session === undefined || session.method !== "browser-session-cookie") return undefined;
+	/** One-click approval for a signed-in client (T3's `approvingSession`; until 0.1.9 the browser cookie's session
+	 * only): its CSRF token and scopes, if its session may approve at all (approving manages access, and a session may
+	 * only hand out scopes it holds). */
+	approvingSession(session: StoredToken | undefined, authorization: AuthorizationRequest): { csrfToken: string; scopes: readonly string[] } | undefined {
+		if (session === undefined) return undefined;
 		if (!session.scopes.includes(AuthAccessWriteScope) || !session.scopes.includes(AuthOrchestrationReadScope)) return undefined;
 		return { csrfToken: this.#csrfToken(session.id, authorization), scopes: session.scopes };
 	}
 
 	/** The redirect that carries a fresh code. Throws `McpOAuthPageError` with the message to show. */
-	approve(input: { browserSession: StoredToken | undefined; authorization: AuthorizationRequest; decision: ApprovalDecision }): string {
+	approve(input: { session: StoredToken | undefined; authorization: AuthorizationRequest; decision: ApprovalDecision }): string {
 		const { decision, authorization } = input;
 		if (decision._tag === "pairing-code") {
 			const refused = this.#auth.consumeMcpApprovalCode(decision.code, decision.access);
 			if (refused !== undefined) throw new McpOAuthPageError(APPROVAL_CODE_MESSAGES[refused]);
 		} else {
-			const session = this.approvingBrowserSession(input.browserSession, authorization);
+			const session = this.approvingSession(input.session, authorization);
 			const expected = session === undefined ? undefined : Buffer.from(session.csrfToken);
 			const given = Buffer.from(decision.csrfToken);
 			if (

@@ -1,4 +1,4 @@
-// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.7), copied as it is so the
+// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.9), copied as it is so the
 // tool names, descriptions, schemas and annotations an agent sees are T3's. Removed: the server services each tool
 // depends on in T3 (`mcp.ts` supplies the handlers), the three linked-environment tools, which T3 hides while links
 // are off and this host has none, and `orchestrator_capabilities` (the provider and model menu for `delegate_task`,
@@ -55,7 +55,7 @@ import * as Struct from "effect/Struct";
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`.",
+    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -159,14 +159,16 @@ const DeleteScheduledTaskTool = Tool.make("delete_scheduled_task", {
 
 const RequestSecretTool = Tool.make("request_secret", {
   description:
-    'Ask the user to enter a secret in a private card and wait. You never see the value. Returns a one-use `secretRef` for a tool that accepts it, or with `delivery: "file"` a private file path to read inside a shell command. Asked how to provide a secret: call this now, do not explain instead.',
+    'Ask for one secret per single-line card; never combine values. Open it, don\'t offer it. Returns one-use `secretRef`, or `delivery: "file"` a file read only in its command, e.g. `adb pair <ip:port> "$(cat <file>)"`. Asked how: call now. Sign-in link: `url`. Pasted secret for child/script: `value`. Never from an old thread.',
   parameters: OrchestratorMcpRequestSecretInput,
   success: OrchestratorMcpRequestSecretResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
 })
   .annotate(Tool.Title, "Request a secret from the user")
-  .annotate(Tool.Destructive, false);
+  .annotate(Tool.Destructive, false)
+  // Claude Code defers MCP tools behind ToolSearch; agents that never load this one ask in chat.
+  .annotate(Tool.Meta, { "anthropic/alwaysLoad": true });
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
@@ -281,7 +283,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadInterruptTool,
 );
 
-// T3's project toolkit (apps/server/src/mcp/toolkits/project/tools.ts at v0.1.7), the same way: T3's names,
+// T3's project toolkit (apps/server/src/mcp/toolkits/project/tools.ts at v0.1.9), the same way: T3's names,
 // descriptions, schemas and annotations, its server dependencies removed. Left out: `t3_project_clone` (a git clone;
 // this host has no git) and `t3_thread_launch` (`create_threads` starts threads here).
 const projectShared = {
@@ -346,7 +348,7 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 
 export const ProjectToolkit = Toolkit.make(ProjectListTool, ProjectReadTool, ProjectCreateTool, ProjectUpdateTool, ProjectDeleteTool);
 
-// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.7), the same way: the three tools this
+// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.9), the same way: the three tools this
 // host does, `t3_thread_organize`, `t3_queue` and `run_scheduled_task_now`. Left out: `t3_thread_search` (an agent
 // here has `thread_search`), `t3_thread_configure` (its values come from `orchestrator_capabilities`, not served),
 // `t3_thread_transfer` (fork and merge-back) and `t3_pending_request` (no user questions here).

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthAccessReadScope, AuthFilesystemReadScope, AuthFilesystemWriteScope, AuthOrchestrationOperateScope, AuthOrchestrationReadScope, AuthTerminalOperateScope } from "@t3tools/contracts";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { connectWs, exitError, exitValue, pair, postJson, waitListening } from "./ws-rpc.ts";
+import { connectWs, exitError, exitValue, pair, postJson, waitListening, wsTicket } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 
 const PORT = 5141;
@@ -71,6 +71,45 @@ it("serves the file panel's calls to a full-scope client, with typed refusals", 
 		ws.close();
 	}
 }, 60_000);
+
+it("a client that asks for frame parts gets a large answer in parts that join back whole (T3 0.1.9)", async () => {
+	const big = "é".repeat(120_000); // 240 KB on the wire: several 48 KiB parts.
+	await writeFile(join(project, "big.txt"), big);
+	const token = await pair(PORT, pairCode(root));
+	const read = async (query: string): Promise<{ raw: string[]; contents: string }> => {
+		const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(await wsTicket(PORT, token))}${query}`);
+		const raw: string[] = [];
+		try {
+			await new Promise<void>((resolve, reject) => {
+				ws.addEventListener("open", () => resolve());
+				ws.addEventListener("error", () => reject(new Error("websocket connect failed")));
+			});
+			const answered = new Promise<string>((resolve) => {
+				let pending = "";
+				ws.addEventListener("message", (event) => {
+					const frame = String(event.data);
+					raw.push(frame);
+					// T3's `joinSocketFrameParts`: a record separator marks every part but the last.
+					if (frame.startsWith("\u001e")) pending += frame.slice(1);
+					else if (`${pending}${frame}`.includes('"Exit"')) resolve(`${pending}${frame}`);
+				});
+			});
+			ws.send(JSON.stringify({ _tag: "Request", id: 1, tag: "projects.readFile", payload: { cwd: project, relativePath: "big.txt" }, headers: [] }));
+			const exit = JSON.parse(await answered) as { exit: { value: { contents: string } } };
+			return { raw, contents: exit.exit.value.contents };
+		} finally {
+			ws.close();
+		}
+	};
+	const parts = await read("&frameParts=1");
+	expect(parts.contents).toBe(big);
+	expect(parts.raw.length, "more than one frame").toBeGreaterThan(3);
+	expect(parts.raw.slice(0, -1).every((frame) => frame.startsWith("\u001e") && Buffer.byteLength(frame) <= 48 * 1024)).toBe(true);
+	// A client that does not ask gets the answer whole, as before.
+	const whole = await read("");
+	expect(whole.contents).toBe(big);
+	expect(whole.raw).toHaveLength(1);
+});
 
 it("splits read from write by the session's scopes, as T3's RPC authorization does", async () => {
 	const full = await pair(PORT, pairCode(root));

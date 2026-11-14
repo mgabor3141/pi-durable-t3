@@ -38,13 +38,17 @@ export interface HtmlToolsDeps {
 	readonly browser?: () => Promise<Browser>;
 }
 
-const html = str({ minLength: 1, maxLength: 512_000, description: "A complete, self-contained HTML document." });
+// T3's parameters: the page inline, or (0.1.9) as a file. Exactly one of the two (`pageSource`).
+const html = opt(str({ minLength: 1, maxLength: 512_000, description: "Inline HTML." }));
+const path = opt(str({ minLength: 1, description: "Absolute .html file path." }));
 const renderParameters = object({
+	path,
 	html,
 	title: str({ minLength: 1, maxLength: 200 }),
 	height: int({ description: HTML_RENDER_HEIGHT_DESCRIPTION }),
 });
 const previewParameters = object({
+	path,
 	html,
 	width: opt(int({ description: HTML_PREVIEW_WIDTH_DESCRIPTION })),
 	appearance: opt(union([literal("dark"), literal("light")], { description: "Default dark." })),
@@ -72,7 +76,7 @@ export function htmlToolsExtension(deps: HtmlToolsDeps, options: { readonly call
 		callers,
 		// The page's id and the entry's request id come from the call, so a replay writes the same file and entry once.
 		replay: "safe",
-		async execute(args: { html: string; title: string; height: number }, api: Api) {
+		async execute(args: { html?: string; path?: string; title: string; height: number }, api: Api) {
 			const threadId = await deps.threadIdOf(api.conversationId);
 			if (threadId === undefined) return failure("html_render shows a page in a T3 thread, and this conversation is not one.");
 			const key = `html-render:${String(api.taskId)}:${api.callId}`;
@@ -102,7 +106,7 @@ export function htmlToolsExtension(deps: HtmlToolsDeps, options: { readonly call
 			structuredOutputSchema: PREVIEW_RESULT_SCHEMA,
 			callers,
 			replay: "safe",
-			async execute(args: { html: string; width?: number; appearance?: "dark" | "light" }) {
+			async execute(args: { html?: string; path?: string; width?: number; appearance?: "dark" | "light" }) {
 				let result: Awaited<ReturnType<typeof previewHtml>>;
 				try {
 					result = await previewHtml(deps.env, await browser(), args, deps.context);

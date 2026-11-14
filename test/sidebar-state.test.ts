@@ -126,6 +126,26 @@ it("a thread with no completed run cannot be marked unread", async () => {
 	await expect(dispatch(bridge, { type: "thread.mark-unread", threadId: "t" })).rejects.toThrow(/no completed run/);
 });
 
+it("a settle that names the run it saw is refused once another run exists; a message asking for a fresh context is refused by name", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	await f.create({ threadId: "off", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	f.model.respond(fauxAssistantMessage("pong"));
+	await bridge.sendMessage({ threadId: "off", commandId: "c-off", messageId: "m-off", text: "hi", mode: "start" });
+	await until("it replies", () => bridge.threadShell("off").status === "completed");
+	// T3 0.1.9: a settle that names the run it saw last is refused when that is no longer the latest run.
+	const { projection } = await bridge.projection("off");
+	const latest = projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0]!.id;
+	await expect(dispatch(bridge, { type: "thread.settle", threadId: "off", expectedLatestRunId: "r-some-earlier-run" })).rejects.toThrow("The thread received another run before settlement.");
+	expect(bridge.threadShell("off").settledOverride).toBeNull();
+	await dispatch(bridge, { type: "thread.settle", threadId: "off", expectedLatestRunId: latest });
+	expect(bridge.threadShell("off").settledOverride).toBe("settled");
+	// And a message that asks for a fresh context is refused by name, not sent with the old one.
+	await expect(dispatch(bridge, { type: "message.dispatch", threadId: "off", messageId: "m-fresh", text: "start over", attachments: [], freshContext: true })).rejects.toThrow(/freshContext is not supported/);
+});
+
 it("the settlement sweep settles quiet threads as of when they went quiet, and leaves pinned, switched-off and recent ones", { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	for (const threadId of ["quiet", "pinned", "off", "recent"]) await f.create({ threadId, projectId: "p" });
@@ -143,16 +163,17 @@ it("the settlement sweep settles quiet threads as of when they went quiet, and l
 	const wentQuiet = Math.max(...[quiet.latestUserMessageAt, quiet.latestRunRequestedAt, quiet.latestRunStartedAt, quiet.latestRunCompletedAt].map((value) => DateTime.toEpochMillis(value!)));
 	const day = 24 * 60 * 60 * 1000;
 
-	// T3's default is three days.
-	await bridge.sweepSettlement(Date.now() + 2 * day);
+	// T3's default is seven days (three until 0.1.9).
+	await bridge.sweepSettlement(Date.now() + 6 * day);
 	expect(bridge.threadShell("quiet").settledOverride).toBeNull();
-	await bridge.sweepSettlement(wentQuiet + 3 * day + 1);
+	await bridge.sweepSettlement(wentQuiet + 7 * day + 1);
 	expect(bridge.threadShell("quiet").settledOverride).toBe("settled");
 	expect(DateTime.toEpochMillis(bridge.threadShell("quiet").settledAt!)).toBe(wentQuiet);
 	expect(bridge.threadShell("pinned").settledOverride).toBeNull();
 	expect(bridge.threadShell("off").settledOverride).toBeNull();
 	// A thread that never ran counts from its creation.
 	expect(bridge.threadShell("recent").settledOverride).toBe("settled");
+
 
 	// Off for the server, on for the project.
 	await dispatch(bridge, { type: "thread.unsettle", threadId: "quiet" });

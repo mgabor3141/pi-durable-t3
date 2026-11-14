@@ -700,6 +700,8 @@ export function projectThread(
 						type: "secret_request",
 						label,
 						reason: typeof block.arguments["reason"] === "string" ? block.arguments["reason"] : "",
+						// The card's button (T3 0.1.9): the page to get the value from.
+						...(typeof block.arguments["url"] === "string" && block.arguments["url"].trim() !== "" ? { url: block.arguments["url"].trim() } : {}),
 						...(typeof block.arguments["placeholder"] === "string" ? { placeholder: block.arguments["placeholder"] } : {}),
 						// T3's `file` delivery, for its note: the agent's commands can read the value, as they can here.
 						delivery: "file",

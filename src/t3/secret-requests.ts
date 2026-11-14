@@ -25,6 +25,21 @@ const ARRIVAL_MS = 5_000;
 /** The outcome a call reports in its details, for the card. T3's statuses, plus `timed_out` (shown as ended). */
 export type SecretRequestStatus = "saved" | "declined" | "cancelled" | "timed_out";
 
+/** What the agent reads when its card ends without a secret (T3's `SECRET_REQUEST_UNSAVED_NOTE`, without its retry key,
+ * which this tool does not have: a new call is a new card). */
+export const UNSAVED_NOTE: Record<Exclude<SecretRequestStatus, "saved">, string> = {
+	declined: "The user declined. Don't ask for it in chat or another way; say what's blocked and go on without it.",
+	cancelled: "The card closed with the run. Ask again only if the secret is still needed.",
+	timed_out: "No answer in time. Don't ask in chat; ask again only if it is still needed.",
+};
+
+/** T3's `secretRequestPageUrl`: the http(s) page a secret card may open. */
+const isPageUrl = (value: string): boolean => {
+	if (!URL.canParse(value)) return false;
+	const url = new URL(value);
+	return (url.protocol === "https:" || url.protocol === "http:") && url.host !== "";
+};
+
 type Pending = {
 	readonly name: string;
 	readonly sink: SecretSink;
@@ -42,10 +57,13 @@ export class SecretRequests {
 	/** Which thread a conversation is shown as, to check an answer comes from the thread that asked. */
 	readonly #threadOf: (conversationId: number) => Promise<string | undefined>;
 	readonly #arrivalMs: number;
+	readonly #onSaved: ((threadId: string) => Promise<void>) | undefined;
 
-	constructor(threadOf: (conversationId: number) => Promise<string | undefined>, options: { readonly arrivalMs?: number } = {}) {
+	/** `onSaved`: told the thread of each secret saved, after the store took it (T3 wakes a snoozed thread then). */
+	constructor(threadOf: (conversationId: number) => Promise<string | undefined>, options: { readonly arrivalMs?: number; readonly onSaved?: (threadId: string) => Promise<void> } = {}) {
 		this.#threadOf = threadOf;
 		this.#arrivalMs = options.arrivalMs ?? ARRIVAL_MS;
+		this.#onSaved = options.onSaved;
 	}
 
 	/** The answer to the card `turnItemId` in `threadId`: saved into the asking tool's store, or declined. */
@@ -61,12 +79,17 @@ export class SecretRequests {
 			pending.settle({ status: "declined" });
 			return;
 		}
+		// T3 0.1.9's answer from a secret provider (1Password and the like). This host configures none and does not
+		// advertise `secretRequestReferences`, so its clients do not offer it; one that sends it anyway is told.
+		if (input.answer.type === "reference") throw new SecretRequestError({ reason: "reference_unreadable", provider: input.answer.reference.provider });
 		try {
 			await pending.sink.save(pending.name, input.answer.secret);
 		} catch (error) {
 			throw new SecretRequestError({ reason: "store_failed", cause: error });
 		}
 		pending.settle({ status: "saved" });
+		// The secret is saved and the call has its answer; what follows must not turn that into a failure.
+		await this.#onSaved?.(input.threadId).catch(() => {});
 	}
 
 	/** The `request_secret` tool, saving answers into `sink`. Model-facing: the card is the call itself. */
@@ -82,7 +105,8 @@ export class SecretRequests {
 					parameters: object({
 						name: str({ pattern: SECRET_NAME.source, description: "The name to save it under, like an environment variable: GITHUB_TOKEN. An existing secret of that name is replaced." }),
 						label: str({ minLength: 1, description: "Card title, such as 'GitHub token'." }),
-						reason: str({ minLength: 1, description: "What it is for and where to get it." }),
+						reason: str({ minLength: 1, description: "What it is for and where to get it. A link goes in `url`." }),
+						url: opt(str({ minLength: 1, description: "Sign-in or setup page for the value (http or https). Shown as a button." })),
 						placeholder: opt(str()),
 						timeoutMs: opt(int({ minimum: 1000, maximum: MAX_TIMEOUT_MS, description: "Default 10 min." })),
 					}),
@@ -90,8 +114,10 @@ export class SecretRequests {
 					// A rerun after a crash shows the same card (its turn item is the call) and waits again.
 					replay: "safe",
 					async execute(args, api, context) {
+						// Refused before the card waits: T3's schema refuses the same at the call.
+						if (args.url !== undefined && !isPageUrl(args.url.trim())) throw new Error("url must be an http(s) URL");
 						const outcome = await requests.#wait(api.callId, args.name, sink, api.conversationId, args.timeoutMs ?? DEFAULT_TIMEOUT_MS, context.abortSignal);
-						const result = outcome === "saved" ? { status: outcome, name: args.name } : { status: outcome };
+						const result = outcome === "saved" ? { status: outcome, name: args.name } : { status: outcome, note: UNSAVED_NOTE[outcome] };
 						return { output: [{ type: "text", text: JSON.stringify(result) }], details: { secretRequest: { status: outcome } } };
 					},
 				}),

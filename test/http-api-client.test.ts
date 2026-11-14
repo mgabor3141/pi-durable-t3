@@ -72,7 +72,7 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 
 	// metadata and auth
 	const descriptor = await run(client.metadata.descriptor());
-	expect(descriptor.serverVersion).toBe("0.1.7");
+	expect(descriptor.serverVersion).toBe("0.1.9");
 	expect((await run(client.auth.session({ headers: {} }))).authenticated).toBe(false);
 	const session = await run(client.auth.session({ headers: bearer }));
 	expect(session).toMatchObject({ authenticated: true, sessionMethod: "bearer-access-token" });
@@ -147,18 +147,18 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 		code_challenge_method: "S256",
 		state: Redacted.make("s1"),
 	};
-	const details = await run(client.mcpOAuth.approval({ payload: authorization }));
+	const details = await run(client.mcpOAuth.approval({ headers: {}, payload: authorization }));
 	expect(details).toEqual({ clientName: "Api agent", redirectHost: "127.0.0.1:9", environmentHost: `127.0.0.1:${PORT}` });
-	expect(await run(client.mcpOAuth.approval({ payload: { ...authorization, code_challenge_method: "plain" } })), "a verified client hears of its own mistakes").toMatchObject({
+	expect(await run(client.mcpOAuth.approval({ headers: {}, payload: { ...authorization, code_challenge_method: "plain" } })), "a verified client hears of its own mistakes").toMatchObject({
 		redirectTo: expect.stringContaining("error=invalid_request"),
 	});
-	expect(await failure(client.mcpOAuth.approval({ payload: { ...authorization, client_id: "forged.sig" } }))).toMatchObject({ _tag: "AuthMcpApprovalError", message: expect.stringContaining("unknown app") });
+	expect(await failure(client.mcpOAuth.approval({ headers: {}, payload: { ...authorization, client_id: "forged.sig" } }))).toMatchObject({ _tag: "AuthMcpApprovalError", message: expect.stringContaining("unknown app") });
 	const page = await fetch(`${origin}/oauth/mcp/authorize?client_id=forged.sig`, { redirect: "manual" });
 	expect(page.status, "an unknown client sees a page, not a redirect").toBe(400);
 	expect(await page.text()).toContain("This sign-in cannot continue");
 	expect((await fetch(`${origin}/oauth/mcp/authorize?${new URLSearchParams({ ...authorization, state: "s1" })}`, { redirect: "manual" })).headers.get("location")).toMatch(/^\/connect-agent\?/);
 	expect(await failure(client.mcpOAuth.register({ payload: { software_id: "t3code-peer-link", redirect_uris: ["http://127.0.0.1:9/cb"] } })), "peer links wait for the setting").toMatchObject({ error: "invalid_client_metadata" });
-	const decide = (decision: Any) => client.mcpOAuth.decision({ payload: { authorization, decision } });
+	const decide = (decision: Any) => client.mcpOAuth.decision({ headers: {}, payload: { authorization, decision } });
 	expect(await failure(decide({ _tag: "pairing-code", access: "read-only", code: "nope" }))).toMatchObject({ _tag: "AuthMcpApprovalError", message: "That pairing code is unknown, expired, or already used." });
 	expect((await run(decide({ _tag: "deny" }))).redirectTo).toBe("http://127.0.0.1:9/cb?error=access_denied&state=s1&iss=" + encodeURIComponent(origin));
 	const approved = new URL((await run(decide({ _tag: "pairing-code", access: "read-only", code: pairCode(root) }))).redirectTo);
@@ -184,6 +184,10 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 		}).then((response) => response.json()) as Promise<Any>;
 	expect(await click("forged")).toMatchObject({ message: "Your session cannot approve this request. Enter a pairing code instead." });
 	expect((await click(withCookie.csrfToken)).redirectTo).toContain("code=");
+	// T3 0.1.9: a session that sends its bearer token may approve too (until then, only the browser's cookie session).
+	const withBearer = await run(client.mcpOAuth.approval({ headers: bearer, payload: authorization }));
+	expect(withBearer.oneClickAccess).toEqual(["read-only", "approval-required", "auto-accept-edits", "auto", "full-access"]);
+	expect((await run(client.mcpOAuth.decision({ headers: bearer, payload: { authorization, decision: { _tag: "browser-session", access: "auto", csrfToken: withBearer.csrfToken } } }))).redirectTo).toContain("code=");
 
 	// The web app's trace upload: authenticated, then dropped (T3 with no OTLP endpoint configured).
 	const traces = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${PORT}/api/observability/v1/traces`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: "{}" });

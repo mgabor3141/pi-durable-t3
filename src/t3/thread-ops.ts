@@ -32,12 +32,12 @@ import {
 	type ThreadMetadataMcpUpdateResult,
 } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
-import type { AuthMcpClientAccess, RuntimeMode } from "@t3tools/contracts";
+import { type AuthMcpClientAccess, type RuntimeMode, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
 import { CommandError } from "./errors.ts";
-import type { ScheduledTasks } from "./scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, type ScheduledTasks } from "./scheduled-tasks.ts";
 import { ProjectConflict, ProjectNotFound } from "../registry.ts";
 import type { ProjectMutation } from "./bridge.ts";
 import type {
@@ -89,6 +89,29 @@ const isTerminal = (run: OrchestrationV2Run) => ["completed", "failed", "cancell
 const byOrdinalDesc = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => right.ordinal - left.ordinal);
 const latestRun = (projection: Pick<OrchestrationV2ThreadProjection, "runs">) => byOrdinalDesc(projection.runs)[0];
 const latestActiveRun = (projection: Pick<OrchestrationV2ThreadProjection, "runs">) => byOrdinalDesc(projection.runs.filter(isActive))[0];
+
+/** A run a subagent's report started, not a person or another agent's message (`orchestration.ts` mints the ids). T3
+ * calls these automatic: its notification and delegated-completion messages. */
+const isReportRun = (run: OrchestrationV2Run) => (run.userMessageId as string).startsWith("n-");
+
+/**
+ * T3's `settleAfterRun` decision (0.1.9), for a thread whose own agent asked to settle it during the completed run at
+ * `ordinal`: what the runs after that one say.
+ * - A run or message that is not a report: someone wrote to the thread, so it stays active (`"leave"`).
+ * - A report's run still working: wait (`undefined`).
+ * - A report's run that ended other than completed: the thread stays active.
+ * - Otherwise settle, naming the latest run, so a run that starts before the settle lands refuses it.
+ */
+export function settleVerdict(projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">, ordinal: number): { latestRunId: string } | "leave" | undefined {
+	const following = projection.runs.filter((candidate) => candidate.ordinal > ordinal);
+	const followingIds = new Set(following.map((candidate) => candidate.id as string));
+	const written = projection.messages.some((message) => message.role === "user" && followingIds.has(message.runId as string) && !(message.id as string).startsWith("n-"));
+	if (written || following.some((candidate) => !isReportRun(candidate))) return "leave";
+	if (following.some(isActive)) return undefined;
+	if (following.some((candidate) => candidate.status !== "queued" && candidate.status !== "completed")) return "leave";
+	const latest = byOrdinalDesc(projection.runs)[0];
+	return latest === undefined ? "leave" : { latestRunId: latest.id as string };
+}
 
 /** An id for one operation of one request, stable across a retry with the same `clientRequestId` (T3's `stableCommandId`). */
 const stableId = (...parts: readonly (string | number | undefined)[]) =>
@@ -353,6 +376,8 @@ export class ThreadOps {
 	 */
 	async send(caller: Caller, input: OrchestratorMcpThreadSendInput): Promise<OrchestratorMcpThreadSendResult> {
 		this.#mayWrite(caller, input.threadId);
+		// T3 0.1.9's "start a new provider session without the thread's earlier context": no thread here can (dispatch.ts).
+		if (input.freshContext === true) fail("invalid_request", "freshContext is not supported by pi-durable-t3: a thread keeps its context. Start a new thread instead.");
 		const before = await this.#projection(input.threadId);
 		const mode = input.mode ?? "auto";
 		const running = before.runs.find((run) => run.status === "running");
@@ -385,7 +410,10 @@ export class ThreadOps {
 			15_000,
 		);
 		if (found === undefined) return fail("orchestration_error", `The message to thread ${input.threadId} was sent, but its run did not appear.`);
-		const delivery = found.run.status === "queued" || found.intent === "queued_turn" ? "queued" : found.intent === "turn_start" ? "started" : mode === "restart" ? "restarted" : "steered";
+		// T3's `restartedAsNextTurn` (0.1.9): a restart that stopped the turn and ran the message as the next one is a
+		// restart, not a start. Here every restart is that: the running turn is aborted and the message starts a new run.
+		const restartedAsNextTurn = mode === "restart" && found.run.id !== running?.id;
+		const delivery = restartedAsNextTurn ? "restarted" : found.run.status === "queued" || found.intent === "queued_turn" ? "queued" : found.intent === "turn_start" ? "started" : mode === "restart" ? "restarted" : "steered";
 		return {
 			threadId: input.threadId as never,
 			link: this.#link(caller, input.threadId),
@@ -512,6 +540,8 @@ export class ThreadOps {
 			enabled: task.enabled,
 			projectId: task.projectId,
 			boundThreadId: task.threadId,
+			// Never true here: a task that asks for it is refused on save (`FRESH_SESSION_UNSUPPORTED`).
+			freshSession: scheduledTaskThreadMode(task) === "fresh_session",
 			schedule: task.schedule,
 			nextRunAt: task.nextRunAt,
 			lastRunStatus: task.lastRunStatus,
@@ -537,6 +567,7 @@ export class ThreadOps {
 		const parent = await this.#liveParent(caller);
 		const notInThread = "bindToCurrentThread needs an agent running inside a T3 thread.";
 		const otherProject = "bindToCurrentThread binds to this thread, which belongs to a different project.";
+		if (input.freshSession === true) fail("invalid_request", `freshSession: ${FRESH_SESSION_UNSUPPORTED}`);
 		if (input.scheduledTaskId !== undefined) {
 			const existing = await this.#ownedTask(caller, input.scheduledTaskId);
 			if (input.bindToCurrentThread === true && (parent === undefined || parent.projectId !== existing.projectId)) fail("invalid_request", parent === undefined ? notInThread : otherProject);
@@ -550,6 +581,14 @@ export class ThreadOps {
 					schedule: input.schedule ?? existing.schedule,
 					projectId: existing.projectId,
 					threadId,
+					// T3's rule, without its fresh sessions: an edit that names no binding keeps the mode; unbinding, or a
+					// task that already made a thread per run, runs in new threads; anything else continues one thread.
+					threadMode:
+						input.freshSession === undefined && input.bindToCurrentThread === undefined
+							? scheduledTaskThreadMode(existing)
+							: threadId === null && (input.bindToCurrentThread === false || scheduledTaskThreadMode(existing) === "new_thread")
+								? "new_thread"
+								: "continue",
 					workspaceStrategy: { type: "root" },
 					modelSelection: existing.modelSelection,
 					runtimeMode: existing.runtimeMode,
@@ -577,6 +616,7 @@ export class ThreadOps {
 				schedule: input.schedule!,
 				projectId,
 				threadId: bind && parent !== undefined ? parent.id : null,
+				threadMode: bind ? "continue" : "new_thread",
 				workspaceStrategy: { type: "root" },
 				modelSelection,
 				runtimeMode: this.#limits(caller),
@@ -727,19 +767,37 @@ export class ThreadOps {
 		}
 	}
 
-	/** Settle `threadId` once run `runId` has ended, if it completed (T3's `settleAfterRun`, waiting as long). Not kept
-	 * across a restart, as T3's is not. */
+	/**
+	 * Settle `threadId` once run `runId` has ended, if it completed (T3's `settleAfterRun`, waiting as long). Since T3
+	 * 0.1.9 it looks at what came after the run (`settleVerdict`), and names the latest run it saw in the settle, which
+	 * is refused when another started meanwhile: then it looks again. Not kept across a restart, as T3's is not.
+	 */
 	#settleAfterRun(threadId: string, runId: string): void {
-		void this.#bridge
-			.waitFor(threadId, (projection) => {
-				const run = projection.runs.find((candidate) => (candidate.id as string) === runId);
-				return run !== undefined && !isActive(run) ? run : undefined;
-			}, SETTLE_AFTER_RUN_WAIT_MS)
-			.then(async (run) => {
-				if (run?.status !== "completed") return;
-				await dispatchCommand(this.#bridge, { type: "thread.settle", commandId: `server:settle-after-run:${runId}`, threadId } as unknown as DispatchCommand, { createdBy: "agent", creationSource: "mcp" }, this.#log);
-			})
-			.catch((error: unknown) => this.#log.warn("settling a thread after its turn failed", { threadId, runId, error: (error as Error).message }));
+		const deadline = Date.now() + SETTLE_AFTER_RUN_WAIT_MS;
+		const provenance = { createdBy: "agent", creationSource: "mcp" } as const;
+		void (async () => {
+			const run = await this.#bridge.waitFor(
+				threadId,
+				(projection) => {
+					const found = projection.runs.find((candidate) => (candidate.id as string) === runId);
+					return found !== undefined && !isActive(found) ? found : undefined;
+				},
+				SETTLE_AFTER_RUN_WAIT_MS,
+			);
+			if (run?.status !== "completed") return;
+			for (let attempt = 0; Date.now() < deadline; attempt++) {
+				const verdict = await this.#bridge.waitFor(threadId, (projection) => settleVerdict(projection, run.ordinal), deadline - Date.now());
+				if (verdict === undefined || verdict === "leave") return;
+				try {
+					await dispatchCommand(this.#bridge, { type: "thread.settle", commandId: `server:settle-after-run:${runId}:${attempt}`, threadId, expectedLatestRunId: verdict.latestRunId } as unknown as DispatchCommand, provenance, this.#log);
+					return;
+				} catch (error) {
+					if (!(error instanceof CommandError)) throw error;
+					// A report can start a run between the look and the settle: wait until that run shows, then look again.
+					await this.#bridge.waitFor(threadId, (projection) => (byOrdinalDesc(projection.runs)[0]?.id !== verdict.latestRunId ? true : undefined), deadline - Date.now());
+				}
+			}
+		})().catch((error: unknown) => this.#log.warn("settling a thread after its turn failed", { threadId, runId, error: (error as Error).message }));
 	}
 
 	/** `t3_queue`: a thread's queued messages, in send order. `reorder` is refused: the queue is pi-durable's inbox, whose

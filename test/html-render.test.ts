@@ -1,7 +1,7 @@
 // T3's inline HTML: html_render keeps a page as an attachment and shows it in the caller's thread as T3's html_render
 // tool item (which T3's timeline renders inline), html_preview renders it in the host's browser first. The page rules are
 // T3's. The browser tests run where Chromium can be launched and are skipped elsewhere.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -18,7 +18,7 @@ import { AuthStore } from "../src/t3/auth.ts";
 import { Attachments } from "../src/t3/attachments.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { assetResponse } from "../src/t3/http.ts";
-import { HtmlPageError, inlineLocalImages, measureHtml, preparePublish, previewHtml, rejectViewportHeight } from "../src/t3/html-render.ts";
+import { HtmlPageError, inlineLocalImages, measureHtml, pageSource, preparePublish, previewHtml, rejectViewportHeight } from "../src/t3/html-render.ts";
 import { htmlToolsExtension } from "../src/t3/html-tools.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
@@ -180,6 +180,27 @@ it("html_render outside a T3 thread, and a page T3 refuses, answer the agent wit
 	expect(await render.execute({ html: "<style>.a{height:100vh}</style>", title: "x", height: 100 }, api)).toMatchObject({ isError: true, output: [{ text: expect.stringMatching(/viewport height/) }] });
 	// Without a browser there is no html_preview.
 	expect((extension as unknown as { tools: { name: string }[] }).tools.map((tool) => tool.name)).toEqual(["html_render"]);
+});
+
+it("a page is given inline or as an .html file in the environment, exactly one of the two (T3 0.1.9)", async () => {
+	const dir = await scratch();
+	const page = "<!doctype html><html><body><p>from a file</p></body></html>";
+	await writeFile(join(dir, "chart.html"), page);
+	await writeFile(join(dir, "notes.txt"), page);
+	await writeFile(join(dir, "secret.html"), "API_KEY=abc");
+	await symlink(join(dir, "notes.txt"), join(dir, "link.html"));
+	const source = (input: { html?: string; path?: string }) => pageSource(env, input, BACKGROUND_CONTEXT);
+	expect(await source({ html: "<p>inline</p>" })).toBe("<p>inline</p>");
+	expect(await source({ path: join(dir, "chart.html") })).toBe(page);
+	await expect(source({})).rejects.toThrow("Pass exactly one of html or path.");
+	await expect(source({ html: "<p>x</p>", path: join(dir, "chart.html") })).rejects.toThrow("Pass exactly one of html or path.");
+	const unreadable = /is not a readable HTML document/;
+	await expect(source({ path: "chart.html" }), "a relative path").rejects.toThrow(unreadable);
+	await expect(source({ path: join(dir, "missing.html") })).rejects.toThrow(unreadable);
+	await expect(source({ path: join(dir, "notes.txt") }), "not an .html file").rejects.toThrow(unreadable);
+	await expect(source({ path: join(dir, "link.html") }), "a link named .html to another file").rejects.toThrow(unreadable);
+	await expect(source({ path: join(dir, "secret.html") }), "an .html file that is not a page").rejects.toThrow(unreadable);
+	await expect(source({ path: dir }), "a folder").rejects.toThrow(unreadable);
 });
 
 const browser: Browser | undefined = await chromium.launch({ headless: true }).catch(() => undefined);

@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
-import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
+import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskThreadMode, type ScheduledTaskUpsertInput, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
 import type { Provenance } from "../threads.ts";
@@ -20,6 +20,7 @@ export const WEBHOOKS_UNSUPPORTED = "Webhook triggers are not supported by pi-du
 export const FULL_ACCESS_ONLY = "pi runs tools without approvals; full-access is the only mode.";
 export const NO_PLAN_MODE = "Plan mode is not supported by pi-durable-t3.";
 export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-t3: choose "Use the project checkout" as the workspace.';
+export const FRESH_SESSION_UNSUPPORTED = "A fresh session each run is not supported by pi-durable-t3: a thread keeps its context. Choose a new thread each run, or one thread that continues.";
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 /** T3's Scheduler cadence. */
 export const POLL_INTERVAL_MS = 5_000;
@@ -32,6 +33,18 @@ export interface ScheduledTaskDispatch {
 	queue(input: { commandId: string; messageId: string; projectId: string; threadId: string; text: string; provenance: Provenance }): Promise<void>;
 	/** T3's `ManagedProjectFolders.isScratchProject`. */
 	isScratchProject(projectId: string): boolean;
+	/** A live thread's project and whether it is archived (T3's `threadManagement.getThreadShell`); none when it is gone. */
+	thread(threadId: string): Promise<{ projectId: string; archived: boolean } | undefined>;
+}
+
+/**
+ * T3's `resolveThreadMode`: clients that predate thread modes send none, and may send a thread loaded before the first
+ * run bound one. An edit keeps the stored mode; binding a thread to a new-thread task continues it.
+ */
+function resolveThreadMode(input: Pick<ScheduledTaskUpsertInput, "threadId" | "threadMode">, existing: Pick<Task, "threadId" | "threadMode"> | undefined): ScheduledTaskThreadMode {
+	if (input.threadMode !== undefined) return input.threadMode;
+	const stored = existing === undefined ? "new_thread" : scheduledTaskThreadMode(existing);
+	return stored === "new_thread" && input.threadId != null ? "continue" : stored;
 }
 
 /** The message id T3 mints for a fire; the projection reads the task id back out of it. */
@@ -205,6 +218,8 @@ export class ScheduledTasks {
 					// A run carries the task's provenance, as T3's `ScheduledTaskService` dispatches it.
 					const launched = await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 					threadId = typeof launched === "string" ? launched : null;
+					// A one-thread task keeps the thread its first run made (T3's `bindThread`).
+					if (threadId !== null && scheduledTaskThreadMode(active) !== "new_thread") await this.#bindThread(active, threadId);
 				} else {
 					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 					threadId = active.threadId;
@@ -246,6 +261,31 @@ export class ScheduledTasks {
 		}
 	}
 
+	/**
+	 * T3's `bindThread`: the task as it is now takes `threadId`, unless it was replaced, moved to another project,
+	 * bound, or switched to new threads meanwhile. The run already started the thread, so a failed write only costs
+	 * the binding. A thread deleted before the binding landed already ran its task cleanup, so that cleanup runs here.
+	 */
+	async #bindThread(task: Task, threadId: string): Promise<void> {
+		try {
+			const current = this.#tasks.get(task.id);
+			if (current !== undefined && current.createdAt === task.createdAt && current.projectId === task.projectId && current.threadId === null && scheduledTaskThreadMode(current) !== "new_thread") {
+				await this.#write({ ...current, threadId: threadId as Task["threadId"] });
+			}
+			if ((await this.#dispatch.thread(threadId)) === undefined) await this.deleteForThread(threadId);
+		} catch (error) {
+			this.#log?.warn("could not bind a scheduled task to its first thread", { taskId: task.id, threadId, error: errorMessage(error) });
+		}
+	}
+
+	/** T3's `requireDestinationThread`: a task is pointed only at a live, unarchived thread of its project. */
+	async #requireDestinationThread(threadId: string, projectId: string, taskId: string): Promise<void> {
+		const thread = await this.#dispatch.thread(threadId);
+		if (thread === undefined) throw taskError("That thread no longer exists.", taskId);
+		if (thread.archived) throw taskError("That thread is archived. Unarchive it or pick another destination.", taskId);
+		if (thread.projectId !== projectId) throw taskError("That thread belongs to a different project.", taskId);
+	}
+
 	// ---- the RPCs ---------------------------------------------------------------------------------------------
 
 	/** T3's order: most recently updated first, then id. */
@@ -273,6 +313,16 @@ export class ScheduledTasks {
 		const id = input.id ?? `scheduled-task:${input.commandId ?? randomUUID()}`;
 		const existing = this.#tasks.get(id);
 		if (input.requireExisting === true && existing === undefined) throw taskError("Schedule task not found.", id);
+		// T3's thread modes (0.1.9). `fresh_session` starts each run without the thread's earlier context, which no
+		// thread here can do (`freshContext`, dispatch.ts): refused on save, not run as something else.
+		const threadMode = resolveThreadMode(input, existing);
+		if (threadMode === "fresh_session") throw taskError(FRESH_SESSION_UNSUPPORTED, id);
+		const keptThreadId = input.threadId ?? existing?.threadId ?? null;
+		// A bound thread belongs to its project, so moving the task leaves it for a new one.
+		const movedOffThread = existing !== undefined && existing.projectId !== input.projectId && keptThreadId === existing.threadId;
+		const threadId = threadMode === "new_thread" || movedOffThread ? null : keptThreadId;
+		// An unchanged destination is not rechecked, so a task on an archived thread stays editable.
+		if (threadId !== null && threadId !== existing?.threadId) await this.#requireDestinationThread(threadId, input.projectId, id);
 		// A one-time run's time is stored as UTC ISO, as T3 stores it.
 		const schedule: Task["schedule"] = input.schedule.type === "once" ? { type: "once", runAt: new Date(Date.parse(input.schedule.runAt)).toISOString() } : input.schedule;
 		// Editing a title or prompt must not postpone (or resurrect) a due run: only schedule/enabled changes restart it.
@@ -285,7 +335,8 @@ export class ScheduledTasks {
 			enabled: input.enabled,
 			schedule,
 			projectId: input.projectId,
-			threadId: input.threadId ?? null,
+			threadId,
+			threadMode,
 			workspaceStrategy,
 			modelSelection: input.modelSelection,
 			runtimeMode: input.runtimeMode,
@@ -425,5 +476,10 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			await bridge.sendMessage({ threadId: input.threadId, commandId: input.commandId, messageId: input.messageId, text: input.text, mode: "queue", provenance: input.provenance });
 		},
 		isScratchProject: (projectId) => bridge.isScratchProject(projectId),
+		thread: async (threadId) => {
+			await bridge.loaded();
+			const thread = bridge.threadRecord(threadId);
+			return thread === undefined ? undefined : { projectId: thread.projectId, archived: thread.archivedAt !== undefined };
+		},
 	};
 }

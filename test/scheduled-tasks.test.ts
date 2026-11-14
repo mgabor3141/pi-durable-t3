@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -77,6 +77,8 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 		launch: options.dispatch?.launch ?? (async (input) => void calls.push({ kind: "launch", ...input })),
 		queue: options.dispatch?.queue ?? (async (input) => void calls.push({ kind: "queue", ...input })),
 		isScratchProject: options.dispatch?.isScratchProject ?? ((projectId) => projectId === "scratch"),
+		// Every thread a test names exists in project "p", unarchived, unless the test says otherwise.
+		thread: options.dispatch?.thread ?? (async () => ({ projectId: "p", archived: false })),
 	};
 	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 	harnesses.push(harness);
@@ -105,6 +107,59 @@ const input = (overrides: Partial<ScheduledTaskUpsertInput> = {}): ScheduledTask
 	}) as ScheduledTaskUpsertInput;
 
 describe("scheduled tasks (T3's ScheduledTaskService)", () => {
+	it("thread modes (T3 0.1.9): a one-thread task keeps the thread its first run made; a fresh session each run is refused", async () => {
+		const launched: string[] = [];
+		const threads = new Map<string, { projectId: string; archived: boolean }>([["t-made", { projectId: "p", archived: false }]]);
+		const { tasks, advance, calls } = await fixture({
+			dispatch: {
+				launch: async (launch) => {
+					launched.push(launch.commandId);
+					return "t-made";
+				},
+				thread: async (threadId) => threads.get(threadId),
+			},
+		});
+		// No mode named, no thread: a new thread each run, as before thread modes.
+		const each = (await tasks.upsert(input({ commandId: "each" as never }))).task;
+		expect(each).toMatchObject({ threadMode: "new_thread", threadId: null });
+		// One thread, continuing, with no thread yet: the first run makes it and the task keeps it.
+		const one = (await tasks.upsert(input({ commandId: "one" as never, threadMode: "continue" }))).task;
+		expect(one).toMatchObject({ threadMode: "continue", threadId: null });
+		advance(60_000);
+		await tasks.tick();
+		expect(launched).toHaveLength(2);
+		const byId = () => Object.fromEntries(tasks.list().tasks.map((task) => [task.id, task]));
+		expect(byId()[one.id]).toMatchObject({ threadId: "t-made", threadMode: "continue", runCount: 1 });
+		expect(byId()[each.id], "a task of new threads stays unbound").toMatchObject({ threadId: null, runCount: 1 });
+		// Its next run goes to that thread, and an edit that names no thread keeps it (an older client may not have it yet).
+		advance(60_000);
+		await tasks.tick();
+		expect(calls.filter((call) => call.kind === "queue").map((call) => call.threadId)).toEqual(["t-made"]);
+		expect((await tasks.upsert(input({ id: one.id, requireExisting: true, title: "Renamed" }))).task).toMatchObject({ threadId: "t-made", threadMode: "continue" });
+		// Switching to new threads unbinds it; naming a thread on such a task continues that thread.
+		expect((await tasks.upsert(input({ id: one.id, requireExisting: true, threadMode: "new_thread" }))).task).toMatchObject({ threadId: null, threadMode: "new_thread" });
+		expect((await tasks.upsert(input({ id: one.id, requireExisting: true, threadId: "t-made" as never }))).task).toMatchObject({ threadId: "t-made", threadMode: "continue" });
+
+		// A destination must be a live, unarchived thread of the task's project (T3's `requireDestinationThread`).
+		threads.set("t-archived", { projectId: "p", archived: true });
+		threads.set("t-other", { projectId: "q", archived: false });
+		await expect(tasks.upsert(input({ threadId: "t-gone" as never }))).rejects.toThrow("That thread no longer exists.");
+		await expect(tasks.upsert(input({ threadId: "t-archived" as never }))).rejects.toThrow("That thread is archived.");
+		await expect(tasks.upsert(input({ threadId: "t-other" as never }))).rejects.toThrow("That thread belongs to a different project.");
+		// An unchanged destination is not rechecked: a task on a thread archived since stays editable.
+		threads.set("t-made", { projectId: "p", archived: true });
+		expect((await tasks.upsert(input({ id: one.id, requireExisting: true, threadId: "t-made" as never, title: "Still editable" }))).task.title).toBe("Still editable");
+
+		// A fresh session each run needs a thread that can drop its context, which none here can: refused on save.
+		await expect(tasks.upsert(input({ threadMode: "fresh_session" }))).rejects.toThrow(FRESH_SESSION_UNSUPPORTED);
+		// A thread deleted before its binding landed takes the task with it, as a later deletion would.
+		threads.delete("t-made");
+		const late = (await tasks.upsert(input({ commandId: "late" as never, threadMode: "continue" }))).task;
+		advance(60_000);
+		await tasks.tick();
+		expect(tasks.list().tasks.map((task) => task.id)).not.toContain(late.id);
+	});
+
 	it("upsert: a commandId replay is the same task with its run history; a title edit keeps nextRunAt, a schedule edit moves it", async () => {
 		const { tasks, advance } = await fixture();
 		const first = (await tasks.upsert(input({ commandId: "cmd-1" as never }))).task;
