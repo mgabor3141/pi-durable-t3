@@ -96,6 +96,14 @@ it("a /continue after the run failed is not a retry: the failed row stays failed
 		["ti-e1.0", "error", "failed", 2],
 		["ti-a1.3", "assistant_message", "completed", undefined],
 	]);
+	// T3's Resume leaves the same mark without a text: nothing is shown for it, and the rows are the same.
+	const resumed = { id: 13, kind: "app.continue", data: { timestamp: 13 } } as unknown as EntryRecord;
+	const viaResume = projectThread(meta, { conversation: { id: 1 }, entries: [user(1, "go"), failed(10), failed(11), failed(12), resumed, assistant(14, "done", "stop")], docs: {} } as unknown as ConversationView, { rolledBack: [] }).projection;
+	expect((viaResume.turnItems as unknown as Row[]).map((item) => [item.id, item.type, item.status])).toEqual([
+		["ti-u1", "user_message", "completed"],
+		["ti-e1.0", "error", "failed"],
+		["ti-a1.3", "assistant_message", "completed"],
+	]);
 	// Failing again after it: a second row, counting from one.
 	const again = rows([...before, failed(14)], { ...RUNNING, generation: { attempt: 1, retry: { at: 14 + 2_000, error: LIMIT } } });
 	expect(again.items.map((item) => [item.id, item.status, item.retry?.attempt])).toEqual([

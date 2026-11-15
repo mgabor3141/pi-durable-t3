@@ -12,6 +12,7 @@ import { expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { abortable } from "../src/t3/abortable.ts";
 import { Bridge } from "../src/t3/bridge.ts";
+import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { object } from "../src/t3/schema.ts";
 import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
 
@@ -144,4 +145,42 @@ it("/continue after a failed run sends the request again, in the same run", { ti
 	const after = await runs(["completed"]);
 	expect(after.runs[0]!.id).toBe(failed.runs[0]!.id);
 	expect(after.items.map((item) => [item.type, item.text ?? null])).toEqual([["user_message", "go"], ["error", null], ["user_message", "/continue"], ["assistant_message", "the answer"]]);
+});
+
+// T3's Resume sends a turn that names the run it continues, with the text "Continue where you left off.". The run goes
+// on as after `/continue`: that text is not written, the model is not sent it, and no bubble is shown. The message
+// queued behind the stopped run follows, and the `queue.resume` T3 sends right after finds a run and does nothing.
+it("T3's Resume continues the stopped run without its message: nothing is written for the model, nothing is shown", { timeout: 60_000 }, async () => {
+	const { f, bridge, send, settled, context, runs } = await setup();
+	const seen: string[] = [];
+	f.model.respond(
+		fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }),
+		(request) => {
+			seen.push(JSON.stringify(request.messages));
+			return fauxAssistantMessage("went on");
+		},
+		fauxAssistantMessage("to the queued one"),
+	);
+	await send("go");
+	await bridge.waitFor("t", (projection) => ((projection.turnItems as unknown as Item[]).some((item) => item.type === "dynamic_tool") ? true : undefined), 10_000);
+	await send("then this", "queue");
+	await bridge.interrupt("t");
+	const stopped = await runs(["interrupted", "queued"]);
+	const user = { createdBy: "user", creationSource: "web" } as const;
+	const log = { info: () => {}, warn: () => {} };
+	const resume = (commandId: string, runId: string) =>
+		dispatchCommand(bridge, { type: "message.dispatch", commandId, threadId: "t", messageId: `resume-${commandId}`, text: "Continue where you left off.", attachments: [], manualContinuationOfRunId: runId, dispatchMode: { type: "start_immediately" } } as never, user, log);
+	// A run that is not the thread's last is refused, as T3 refuses it.
+	await expect(resume("r0", "r-other")).rejects.toThrow("This thread can no longer be resumed from that run.");
+	await resume("r1", stopped.runs[0]!.id);
+	await dispatchCommand(bridge, { type: "queue.resume", commandId: "r2", threadId: "t" } as never, user, log);
+	await settled();
+	const ended = await runs(["completed", "completed"]);
+	expect(ended.runs.map((run) => run.id === stopped.runs[0]!.id)).toEqual([true, false]);
+	expect(seen).toHaveLength(1);
+	expect(seen[0]).not.toContain("Continue where you left off");
+	expect(seen[0]).not.toContain("then this");
+	expect((await context()).join("\n")).not.toContain("Continue where you left off");
+	expect(ended.items.filter((item) => item.type === "user_message").map((item) => item.text)).toEqual(["go", "then this"]);
+	expect(ended.items.filter((item) => item.type === "assistant_message").map((item) => item.text)).toEqual(["went on", "to the queued one"]);
 });

@@ -922,9 +922,9 @@ export function projectThread(
 		};
 		draft.steps.forEach((step, stepIndex) => {
 			pushShown(step.id);
+			// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
+			if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 			if (isUserEntry(step) || isNoteEntry(step)) {
-				// A `/continue` is not a retry: the requests that failed before it are a row that failed, and the count starts over.
-				if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 				pushUser(step, "steer");
 				return;
 			}

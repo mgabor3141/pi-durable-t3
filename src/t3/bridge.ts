@@ -1133,6 +1133,9 @@ export class Bridge {
 		note?: boolean;
 		/** Sent by the host on its own (a child's report), not by someone: it does not end a snooze (T3's automatic wake). */
 		automatic?: boolean;
+		/** T3's Resume (`manualContinuationOfRunId`): the run it continues. The run goes on with no new message, as after
+		 * `/continue`; the text T3 sends with it ("Continue where you left off.") is not written and not shown. */
+		continuationOf?: string;
 	}): Promise<void> {
 		const release = this.acquire(input.threadId);
 		try {
@@ -1145,6 +1148,10 @@ export class Bridge {
 			if (record?.settledOverride !== undefined || snooze) {
 				await this.#store.wake(input.threadId, snooze);
 						this.#titleChanged(input.threadId);
+			}
+			if (input.continuationOf !== undefined) {
+				await this.#continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
+				return;
 			}
 			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
 			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
@@ -1175,7 +1182,7 @@ export class Bridge {
 			}
 			// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
 			if (input.text.trim() === "/continue") {
-				await this.#continue(input.threadId, input.messageId, head);
+				await this.#continue(input.threadId, `continue:${input.messageId}`, head, { messageId: input.messageId });
 				return;
 			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
@@ -1774,11 +1781,17 @@ export class Bridge {
 	/**
 	 * `/continue`: a run on the context as it is (`Threads.continue`): after a stop, a failed run or an undone step the
 	 * agent goes on without a message written to say so. The typed command is shown where it was sent and the run it
-	 * continues is the same run to T3, running again.
+	 * continues is the same run to T3, running again. `resumed`: T3's Resume, which names the run it continues and is
+	 * refused as T3 refuses it when that is no longer the thread's last run, stopped or failed.
 	 */
-	async #continue(threadId: string, messageId: string, head: number): Promise<void> {
+	async #continue(threadId: string, requestId: string, head: number, by: { readonly messageId: string } | { readonly resumed: { readonly state: ThreadView; readonly runId: string } }): Promise<void> {
+		if ("resumed" in by) {
+			const { projection } = await by.resumed.state.projection(30_000);
+			const latest = projection.runs.findLast((run) => run.status !== "queued" && run.status !== "rolled_back");
+			if (latest?.id !== by.resumed.runId || (latest.status !== "interrupted" && latest.status !== "failed")) throw new CommandError("This thread can no longer be resumed from that run.");
+		}
 		try {
-			await this.#store.continue({ threadId, conversationId: head, messageId });
+			await this.#store.continue({ threadId, conversationId: head, requestId, ...("messageId" in by ? { messageId: by.messageId } : {}) });
 		} catch (error) {
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("The agent is working already.");
 			if (error instanceof HostError && error.code === "nothing_to_continue") {

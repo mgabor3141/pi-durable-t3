@@ -942,6 +942,8 @@ export class Threads {
 			// A read of the live run first: a Send now while a turn is live would only queue the message again.
 			const live = await tx.doc(LiveDoc, conversationId);
 			const inbox = await tx.doc(InboxDoc, conversationId);
+			// `queue.resume` behind a live run (T3 sends it after its Resume continued the run): the queue follows that run.
+			if (live.run !== undefined && runId === undefined) return undefined;
 			if (live.run !== undefined) throw hostError("turn_running", "a turn is running");
 			const candidates = inbox.items.filter((item) => item.mode !== "write");
 			if (candidates.length === 0) {
@@ -1240,14 +1242,15 @@ export class Threads {
 	 * or a manual compaction does (pi-durable sees no run in one and would start a turn beside the summary).
 	 *
 	 * One commit: the messages queued stay queued and follow the run, as they follow a restart's message (pi-durable
-	 * places what is queued in a continue's run, so they are out of the inbox while it is admitted); and the typed
-	 * command is written where it was sent, display-only (`APP_CONTINUE_ENTRY`), so the model never sees it.
+	 * places what is queued in a continue's run, so they are out of the inbox while it is admitted); and where the run
+	 * was sent on is written, display-only (`APP_CONTINUE_ENTRY`), so the model never sees it. `messageId`: a typed
+	 * `/continue`, shown where it was sent; without one (T3's Resume) nothing is shown.
 	 */
-	async continue(input: { readonly threadId: string; readonly conversationId: number; readonly messageId: string }): Promise<void> {
+	async continue(input: { readonly threadId: string; readonly conversationId: number; readonly requestId: string; readonly messageId?: string }): Promise<void> {
 		const conversationId = input.conversationId as ConversationId;
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		const requestId = `continue:${input.messageId}`;
+		const { requestId } = input;
 		const last = (await conversation.context(BACKGROUND_CONTEXT)).messages.findLast((message) => message.role !== "system");
 		await this.#watermark(input.threadId);
 		await this.#harness.commit(async (tx) => {
@@ -1262,7 +1265,7 @@ export class Threads {
 			}
 			await conversation.submit(tx, { type: "continue", requestId });
 			(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
-			await tx.appendEntry(conversationId, { kind: APP_CONTINUE_ENTRY, data: { messageId: input.messageId, text: "/continue", timestamp: Date.now() } });
+			await tx.appendEntry(conversationId, { kind: APP_CONTINUE_ENTRY, data: { ...(input.messageId === undefined ? {} : { messageId: input.messageId, text: "/continue" }), timestamp: Date.now() } });
 		}, BACKGROUND_CONTEXT);
 	}
 

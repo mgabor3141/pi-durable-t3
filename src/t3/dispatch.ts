@@ -68,6 +68,7 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 					...(typeof command.titleSeed === "string" ? { titleSeed: command.titleSeed } : {}),
 					...(attachments === undefined ? {} : { attachments }),
 					...(command.context === undefined ? {} : { context: command.context }),
+					...(command.manualContinuationOfRunId === undefined ? {} : { continuationOf: command.manualContinuationOfRunId }),
 				});
 				break;
 			}

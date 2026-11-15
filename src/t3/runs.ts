@@ -21,7 +21,8 @@ export const APP_COMPACT_ENTRY = "app.compact";
 /** A display-only `/reload` command (`Threads.reload`): shown where it was typed, like a note, but never in the model's
  * context. */
 export const APP_RELOAD_ENTRY = "app.reload";
-/** A display-only `/continue` command (`Threads.continue`): shown where it was typed, in the run it sent on. */
+/** Where a run was sent on with no new message (`Threads.continue`), display-only. A typed `/continue` carries its
+ * text and is shown where it was typed, in the run it sent on; T3's Resume carries none and is not shown. */
 export const APP_CONTINUE_ENTRY = "app.continue";
 /** The display-only commands that are shown as a note is, in the run they land in. */
 const COMMAND_NOTE_KINDS: ReadonlySet<string> = new Set([APP_RELOAD_ENTRY, APP_CONTINUE_ENTRY]);
@@ -202,6 +203,11 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
 			pendingCard = undefined;
 			steerable = false;
+			continue;
+		}
+		// A continue is a step of the run it sends on, shown or not.
+		if (entry.kind === APP_CONTINUE_ENTRY && runs.length > 0) {
+			runs.at(-1)!.steps.push(entry);
 			continue;
 		}
 		if (isUserEntry(entry)) {
