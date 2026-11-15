@@ -180,6 +180,7 @@ export class ModelCatalog {
 					{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
 					{ name: "undo", description: "Take back your last message and what the agent did for it", input: { hint: "n, or: step [n] for the agent's last steps only" } },
 					{ name: "redo", description: "Bring back what the last undo took, while nothing new was written" },
+					{ name: "continue", description: "Let the agent go on from where the conversation stands, with no new message" },
 				],
 				skills: [],
 			} as unknown as ServerProvider,

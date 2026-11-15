@@ -23,7 +23,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, stopReason, authorOf } from "./runs.ts";
+import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
@@ -903,8 +903,28 @@ export function projectThread(
 				} as Any);
 			}
 		};
+		// What the host answered itself while this was the latest run (`ShownExchange`), where it was answered: after the
+		// items of the entries there were then and before those of any written since (a run goes on after a `/continue`,
+		// and one that runs was asked `/context`). T3 numbers items in this order.
+		const shownHere = [...(shownIn.get(draft) ?? [])];
+		const pushShown = (before: number) => {
+			for (const shown of shownHere.splice(0)) {
+				if (shown.after >= before) {
+					shownHere.push(shown);
+					continue;
+				}
+				const author = { createdBy: "user", creationSource: "web" } as const;
+				turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
+				messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
+				shownIds.add(shown.messageId);
+				shownAnswer(shown, ordinal);
+			}
+		};
 		draft.steps.forEach((step, stepIndex) => {
+			pushShown(step.id);
 			if (isUserEntry(step) || isNoteEntry(step)) {
+				// A `/continue` is not a retry: the requests that failed before it are a row that failed, and the count starts over.
+				if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 				pushUser(step, "steer");
 				return;
 			}
@@ -963,15 +983,7 @@ export function projectThread(
 				liveTools,
 			);
 		}
-		// What the host answered itself while this was the latest run (`ShownExchange`). After the run's own items, so
-		// that everything a later run adds comes after them: T3 numbers items in this order.
-		for (const shown of shownIn.get(draft) ?? []) {
-			const author = { createdBy: "user", creationSource: "web" } as const;
-			turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
-			messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
-			shownIds.add(shown.messageId);
-			shownAnswer(shown, ordinal);
-		}
+		pushShown(Infinity);
 		// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
 		const stop = running ? meta.stop : undefined;
 		if (stop !== undefined) {

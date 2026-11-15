@@ -85,3 +85,21 @@ it("a Stop while a request is out again ends the row as stopped; two streaks in 
 		["ti-e12.0", "completed", 2],
 	]);
 });
+
+it("a /continue after the run failed is not a retry: the failed row stays failed and the count starts over", () => {
+	const command = { id: 13, kind: "app.continue", data: { messageId: "c13", text: "/continue", timestamp: 13 } } as unknown as EntryRecord;
+	const before = [user(1, "go"), failed(10), failed(11), failed(12), command];
+	// Sent on and answered: the three failures are the row that failed (two of them were sent again), then the answer.
+	const answered = rows([...before, assistant(14, "done", "stop")]);
+	expect(answered.run).toBe("completed");
+	expect(answered.items.map((item) => [item.id, item.type, item.status, item.retry?.attempt])).toEqual([
+		["ti-e1.0", "error", "failed", 2],
+		["ti-a1.3", "assistant_message", "completed", undefined],
+	]);
+	// Failing again after it: a second row, counting from one.
+	const again = rows([...before, failed(14)], { ...RUNNING, generation: { attempt: 1, retry: { at: 14 + 2_000, error: LIMIT } } });
+	expect(again.items.map((item) => [item.id, item.status, item.retry?.attempt])).toEqual([
+		["ti-e1.0", "failed", 2],
+		["ti-e1.3", "running", 1],
+	]);
+});

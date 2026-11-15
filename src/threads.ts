@@ -35,7 +35,7 @@ import { hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
-import { APP_COMPACT_ENTRY, APP_NOTE_ENTRY, APP_RELOAD_ENTRY } from "./t3/runs.ts";
+import { APP_COMPACT_ENTRY, APP_CONTINUE_ENTRY, APP_NOTE_ENTRY, APP_RELOAD_ENTRY } from "./t3/runs.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
@@ -1231,6 +1231,39 @@ export class Threads {
 			},
 			({ ended }) => ended,
 		);
+	}
+
+	/**
+	 * `/continue`: a run on the context as it is, with no new message (pi-durable's continue). The model owes an answer
+	 * only to a context that ends in a user's message or in tool results (after a stop, a failed run, an undone step);
+	 * any other is refused here, by name, where pi-durable would start a run and fail it. Refused too while a turn runs
+	 * or a manual compaction does (pi-durable sees no run in one and would start a turn beside the summary).
+	 *
+	 * One commit: the messages queued stay queued and follow the run, as they follow a restart's message (pi-durable
+	 * places what is queued in a continue's run, so they are out of the inbox while it is admitted); and the typed
+	 * command is written where it was sent, display-only (`APP_CONTINUE_ENTRY`), so the model never sees it.
+	 */
+	async continue(input: { readonly threadId: string; readonly conversationId: number; readonly messageId: string }): Promise<void> {
+		const conversationId = input.conversationId as ConversationId;
+		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
+		const requestId = `continue:${input.messageId}`;
+		const last = (await conversation.context(BACKGROUND_CONTEXT)).messages.findLast((message) => message.role !== "system");
+		await this.#watermark(input.threadId);
+		await this.#harness.commit(async (tx) => {
+			if ((await tx.submissionByRequest(conversationId, requestId)) !== undefined) return;
+			const live = await tx.doc(LiveDoc, conversationId);
+			if (live.run !== undefined || (live.compactions?.length ?? 0) > 0) throw hostError("turn_running", "a turn is running");
+			if (last?.role !== "user" && last?.role !== "toolResult") throw hostError("nothing_to_continue", last === undefined ? "nothing was asked yet" : "the conversation ends with an answer");
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const held = inbox.items.filter((item) => item.mode !== "write").map((item) => copy(item));
+			for (let index = inbox.items.length - 1; index >= 0; index--) {
+				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
+			}
+			await conversation.submit(tx, { type: "continue", requestId });
+			(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
+			await tx.appendEntry(conversationId, { kind: APP_CONTINUE_ENTRY, data: { messageId: input.messageId, text: "/continue", timestamp: Date.now() } });
+		}, BACKGROUND_CONTEXT);
 	}
 
 	/**

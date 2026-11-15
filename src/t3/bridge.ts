@@ -1173,6 +1173,11 @@ export class Bridge {
 				await this.#redo(input.threadId, input.messageId, state, head);
 				return;
 			}
+			// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
+			if (input.text.trim() === "/continue") {
+				await this.#continue(input.threadId, input.messageId, head);
+				return;
+			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
@@ -1745,7 +1750,7 @@ export class Bridge {
 				throw new CommandError(responses.length === 0 ? "The agent has taken no step in the last turn; /undo takes back your message." : `The last turn has ${responses.length} step${responses.length === 1 ? "" : "s"}; /undo takes back the whole turn.`);
 			}
 			entryId = target.id;
-			said = `Took back the agent's last ${last(count, "step")}.`;
+			said = `Took back the agent's last ${last(count, "step")}. \`/continue\` lets it go on from there, or send a message to steer it.`;
 		} else {
 			const target = turns.at(-count);
 			if (target === undefined) throw new CommandError(turns.length === 0 ? "There is nothing to undo." : `There ${turns.length === 1 ? "is 1 turn" : `are ${turns.length} turns`} to undo.`);
@@ -1764,6 +1769,24 @@ export class Bridge {
 		}
 		this.#log.info("undid", { threadId, steps, count });
 		this.#show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\nFiles and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
+	}
+
+	/**
+	 * `/continue`: a run on the context as it is (`Threads.continue`): after a stop, a failed run or an undone step the
+	 * agent goes on without a message written to say so. The typed command is shown where it was sent and the run it
+	 * continues is the same run to T3, running again.
+	 */
+	async #continue(threadId: string, messageId: string, head: number): Promise<void> {
+		try {
+			await this.#store.continue({ threadId, conversationId: head, messageId });
+		} catch (error) {
+			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("The agent is working already.");
+			if (error instanceof HostError && error.code === "nothing_to_continue") {
+				throw new CommandError(error.message === "nothing was asked yet" ? "There is nothing to continue: send a message first." : "There is nothing to continue: the conversation ends with the agent's answer. Send a message to go on.");
+			}
+			throw error;
+		}
+		this.#log.info("continued", { threadId });
 	}
 
 	/** `/redo`: take the last undo back (`Threads.redo`), T3's Revert included. */
