@@ -23,12 +23,14 @@ afterEach(() => void (Bridge.limitResumeMarginMs = 30_000));
 const limit = (seconds: number) =>
 	fauxAssistantMessage("", { stopReason: "error", errorMessage: `Server requested ${seconds}s retry delay (max: 60s). 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}` });
 
-async function setup() {
+async function setup(settings: { autoResumeLimitedThreads?: boolean } = {}) {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-limit-"));
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: () => {}, warn: () => {} }, f.threads, f.model.models);
+	const store = ServerSettingsStore.open(scratch);
+	if (Object.keys(settings).length > 0) store.update(settings);
+	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: store, corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: () => {}, warn: () => {} }, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();
@@ -116,4 +118,13 @@ it("a limit that resets in more than five hours ends the run and is not waited f
 	await send("try again");
 	const after = await shown(["failed", "completed"]);
 	expect(after.recovery).toBeNull();
+});
+
+it("T3's setting \"Auto-resume limited threads\" waits for a reset however far it is", { timeout: 60_000 }, async () => {
+	const { f, send, shown } = await setup({ autoResumeLimitedThreads: true });
+	f.model.respond(limit(6 * 3600));
+	await send("go");
+	const waiting = await shown(["failed"]);
+	expect(waiting.recovery).toMatchObject({ autoResume: true });
+	expect(isBusy(waiting.projection)).toBe(true);
 });

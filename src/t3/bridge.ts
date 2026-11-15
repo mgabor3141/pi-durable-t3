@@ -765,7 +765,8 @@ export class Bridge {
 		const release = this.acquire(threadId);
 		void (async () => {
 			// Recorded first, so the run ends as one that is waited for: nobody is told in between that it failed.
-			const autoResume = resetAt - Date.now() < LIMIT_AUTO_RESUME_WITHIN_MS;
+			// T3's setting "Auto-resume limited threads" waits for any reset, however far; without it, a near one only.
+			const autoResume = this.config.settings.current().autoResumeLimitedThreads === true || resetAt - Date.now() < LIMIT_AUTO_RESUME_WITHIN_MS;
 			await this.#store.limitReached({ threadId, conversationId: head, runId: run.id as string, resetAt, autoResume });
 			// The messages queued behind the run stay queued (`Threads.abort`): they follow it when it is continued.
 			await this.#store.abort({ threadId, conversationId: head });
