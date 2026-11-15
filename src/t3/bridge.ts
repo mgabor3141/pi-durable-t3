@@ -36,7 +36,8 @@ import { contextReport, type ContextReportView } from "./context-report.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
-import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
+import { attachmentsOf, isAssistantEntry, isUserEntry, stopReason, USER_ENTRY_KINDS } from "./runs.ts";
+import { HostError } from "../host-errors.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
@@ -1162,6 +1163,16 @@ export class Bridge {
 				await this.#showContext(input.threadId, input.messageId, state, head);
 				return;
 			}
+			// `/undo` and `/redo`: the thread's head moves back to before a turn or a step, and forward again.
+			const undo = /^\/undo(?:\s+(.*))?$/.exec(input.text.trim());
+			if (undo !== null) {
+				await this.#undo(input.threadId, input.messageId, state, head, undo[1]?.trim() ?? "");
+				return;
+			}
+			if (input.text.trim() === "/redo") {
+				await this.#redo(input.threadId, input.messageId, state, head);
+				return;
+			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
@@ -1688,9 +1699,86 @@ export class Bridge {
 			...(meta.contextWindow === undefined ? {} : { window: meta.contextWindow }),
 			...(meta.model === null ? {} : { model: modelSlug(meta.model) }),
 		});
-		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== messageId), { messageId, command: "/context", answer, at: Date.now(), runId: run.id as string }];
+		this.#show(threadId, state, { messageId, command: "/context", answer });
+	}
+
+	/** Show a command the host answered itself (`ShownExchange`); one sent again replaces its earlier answer. */
+	#show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "command" | "answer">): void {
+		const exchange: ShownExchange = { ...said, at: Date.now(), after: state.transcript.at(-1)?.id ?? -1 };
+		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== exchange.messageId), exchange];
 		this.#shown.set(threadId, shown.slice(-MAX_SHOWN));
 		state.recompute();
+	}
+
+	/**
+	 * `/undo [n]` takes back the user's last message (or last `n`) with everything the agent did for it; `/undo step
+	 * [n]` only the agent's last response (or last `n`) with its tool calls and their results, so the user's message
+	 * stands unanswered. Like T3's Revert, it moves the thread's head to a fork that ends before what is taken back
+	 * (`Threads.rewind`): the conversation it leaves keeps everything, which is what `/redo` returns to. The model's
+	 * context is what changes; files and anything done outside the conversation stay as they are. The command and its
+	 * answer are shown only (`ShownExchange`): written to the head, they would be the first thing a redo loses.
+	 */
+	async #undo(threadId: string, messageId: string, state: ThreadView, head: number, argument: string): Promise<void> {
+		const parsed = /^(step)?\s*(\d+)?$/.exec(argument);
+		const count = parsed?.[2] === undefined ? 1 : Number(parsed[2]);
+		if (parsed === null || count < 1) throw new CommandError("Usage: /undo [n] takes back your last n messages; /undo step [n] the agent's last n steps.");
+		const steps = parsed[1] !== undefined;
+		const { projection, runs } = await state.projection(30_000);
+		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before undoing.");
+		if (projection.runs.some((run) => run.status === "queued")) throw new CommandError("Send or remove the queued messages before undoing.");
+		const entries = new Map(state.transcript.map((entry) => [entry.id, entry]));
+		// The turns a user's message began: a `/compact` or a note that opened a run is not a turn to take back.
+		const turns = runs.filter((run) => {
+			const entry = entries.get(run.userEntryId);
+			return entry !== undefined && isUserEntry(entry);
+		});
+		const last = (n: number, word: string) => (n === 1 ? word : `${n} ${word}s`);
+		let entryId: number;
+		let said: string;
+		if (steps) {
+			const turn = turns.at(-1);
+			if (turn === undefined) throw new CommandError("There is nothing to undo.");
+			// A step is a response the model was given back: a request that failed or was cut off is not one.
+			const responses = state.transcript.filter((entry) => entry.id > turn.userEntryId && isAssistantEntry(entry) && ["stop", "length", "toolUse"].includes(stopReason(entry) ?? ""));
+			const target = responses.at(-count);
+			if (target === undefined) {
+				throw new CommandError(responses.length === 0 ? "The agent has taken no step in the last turn; /undo takes back your message." : `The last turn has ${responses.length} step${responses.length === 1 ? "" : "s"}; /undo takes back the whole turn.`);
+			}
+			entryId = target.id;
+			said = `Took back the agent's last ${last(count, "step")}.`;
+		} else {
+			const target = turns.at(-count);
+			if (target === undefined) throw new CommandError(turns.length === 0 ? "There is nothing to undo." : `There ${turns.length === 1 ? "is 1 turn" : `are ${turns.length} turns`} to undo.`);
+			entryId = target.userEntryId;
+			said = `Took back your last ${last(count, "message")} and what the agent did for ${count === 1 ? "it" : "them"}.`;
+		}
+		try {
+			const fork = await this.#store.rewind({ threadId, expectedHead: head, entryId, requestId: `undo:${messageId}`, ...(steps ? { step: true as const } : {}) });
+			// A head that moved meanwhile is left alone, and the fork became a thread of its own (`Threads.rewind`).
+			if ((await this.#store.thread(threadId))?.head !== fork) throw new CommandError("The thread changed while it was being undone; what was asked for is a new thread beside it.");
+			await state.shows(fork);
+		} catch (error) {
+			if (error instanceof HostError && error.code === "not_rewindable") throw new CommandError("That is before a compaction, which cannot be undone past.");
+			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Stop the current turn before undoing.");
+			throw error;
+		}
+		this.#log.info("undid", { threadId, steps, count });
+		this.#show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\nFiles and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
+	}
+
+	/** `/redo`: take the last undo back (`Threads.redo`), T3's Revert included. */
+	async #redo(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
+		const { projection } = await state.projection(30_000);
+		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before redoing.");
+		try {
+			await state.shows(await this.#store.redo({ threadId, expectedHead: head }));
+		} catch (error) {
+			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back." : "There is no undo to take back.");
+			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Send or remove the queued messages before redoing.");
+			throw error;
+		}
+		this.#log.info("redid", { threadId });
+		this.#show(threadId, state, { messageId, command: "/redo", answer: "Brought back what the last undo took. Shown here only: not sent to the model, not saved." });
 	}
 
 	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
@@ -1788,7 +1876,9 @@ export class Bridge {
 			if ("nothing" in target) return "Nothing to revert.";
 			const expectedHead = await state.head();
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
-			await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
+			const fork = await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
+			// Shown before it is answered, so a message sent next is not given the conversation the thread just left.
+			if ((await this.#store.thread(input.threadId))?.head === fork) await state.shows(fork);
 			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
 			return null;
 		})().catch((error: unknown) => (error as Error).message || "Rewind failed.");

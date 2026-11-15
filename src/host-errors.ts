@@ -1,5 +1,5 @@
 // The threads layer's stable error codes: a caller switches on the code, so renaming one is a breaking change.
-type HostErrorCode = "unknown_project" | "unknown_thread" | "unknown_queued_message" | "turn_running" | "not_rewindable";
+type HostErrorCode = "unknown_project" | "unknown_thread" | "unknown_queued_message" | "turn_running" | "not_rewindable" | "nothing_to_redo";
 
 export class HostError extends Error {
 	readonly code: HostErrorCode;

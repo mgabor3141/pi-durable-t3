@@ -178,6 +178,8 @@ export class ModelCatalog {
 					{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } },
 					{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
 					{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
+					{ name: "undo", description: "Take back your last message and what the agent did for it", input: { hint: "n, or: step [n] for the agent's last steps only" } },
+					{ name: "redo", description: "Bring back what the last undo took, while nothing new was written" },
 				],
 				skills: [],
 			} as unknown as ServerProvider,

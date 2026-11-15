@@ -196,6 +196,15 @@ export class ThreadView {
 		if (this.#follower !== undefined && this.#follower.head !== head) void this.#follow(head);
 	}
 
+	/**
+	 * The head moved to `head`: resolves once this view shows that conversation. Whoever moved it waits here before it
+	 * answers, so that the next command is not given the conversation the thread just left.
+	 */
+	shows(head: number, timeoutMs = 15_000): Promise<number> {
+		this.moved(head);
+		return this.waitFor(() => (this.#conversationId === head && this.#loaded ? head : undefined), timeoutMs, () => new CommandError(`The thread ${this.threadId} is still loading; send again in a moment.`));
+	}
+
 	/** Stop following (idle release, shutdown); the result and transcript are dropped and re-read on the next open.
 	 * Keeping `view.entries` and the history here would retain every opened transcript for the life of the process. */
 	release(): void {
@@ -348,7 +357,9 @@ export class ThreadView {
 			// and turn the kept tail into a run of its own.
 			const { active, history } = splitTranscript(await wholeTranscript(conversation));
 			const view = { conversation: {}, entries: active, docs: {} } as unknown as ConversationView;
-			const { projection } = projectThread(this.#host.meta(this.threadId, this), view, { rolledBack: [], history });
+			// Without what is shown only (`ShownExchange`): that stands in the head's own runs, not in the ones it left.
+			const { shown: _shown, ...meta } = this.#host.meta(this.threadId, this);
+			const { projection } = projectThread(meta, view, { rolledBack: [], history });
 			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
 		}
 		return [...runs.values()];

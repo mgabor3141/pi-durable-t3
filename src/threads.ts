@@ -116,7 +116,16 @@ const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, la
 /** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
 /** An undo this thread applied: the head it moved to and the head it left. The runs the left head has and the new one
  * does not are the undo's rolled-back runs (`undoneHeads`): nothing about them is stored but this pair. */
-export type AppliedUndo = { requestId: string; head: number; from: number };
+export type AppliedUndo = {
+	requestId: string;
+	head: number;
+	from: number;
+	/** The newest entry `head` had when the undo made it (`null`: it started empty). While it is still the newest,
+	 * nothing was written since, and the undo can be taken back (`Threads.redo`). */
+	at?: number | null;
+	/** Taken back by a redo: the thread is on `from` again. */
+	redone?: true;
+};
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
 
@@ -277,6 +286,8 @@ type RewindInput = {
 	readonly expectedHead: number;
 	readonly entryId: number;
 	readonly requestId: string;
+	/** The entry is one of the agent's responses, not a user turn: it and what follows go, the user's message stays. */
+	readonly step?: true;
 };
 
 /**
@@ -1293,8 +1304,8 @@ export class Threads {
 		const active = (await head.context(BACKGROUND_CONTEXT)).entries;
 		const targetIndex = active.findIndex((entry) => entry.id === input.entryId);
 		const target = targetIndex < 0 ? undefined : active[targetIndex]!;
-		if (target === undefined || !USER_ENTRY_KINDS.has(target.kind)) {
-			throw hostError("not_rewindable", `entry ${input.entryId} is not a user turn in the head's active context`);
+		if (target === undefined || !(input.step === true ? target.kind === "pi.assistant" : USER_ENTRY_KINDS.has(target.kind))) {
+			throw hostError("not_rewindable", `entry ${input.entryId} is not ${input.step === true ? "a response of the agent" : "a user turn"} in the head's active context`);
 		}
 		// A fork is INCLUSIVE of its fork entry: fork at the entry just before the reverted turn in the TRANSCRIPT, so
 		// everything written before it stays — a compaction summary included. Not the active context's previous entry:
@@ -1313,7 +1324,7 @@ export class Threads {
 					? await configureNewConversation(tx, headAgent!)
 					: await tx.forkConversation(expectedHead, forkAt as EntryId, { ownership: { kind: "ownerless" } });
 			const receipt = (record: ThreadRecord): void => {
-				record.undos = [...record.undos, { requestId: input.requestId, head: fork.id, from: input.expectedHead }].slice(-MAX_UNDOS);
+				record.undos = [...record.undos, { requestId: input.requestId, head: fork.id, from: input.expectedHead, at: forkAt ?? null }].slice(-MAX_UNDOS);
 			};
 			if (thread === undefined) {
 				this.#onWarn(`not promoting the undo fork ${fork.id}: thread ${input.threadId} does not exist; the fork stays ownerless`, undefined);
@@ -1350,6 +1361,32 @@ export class Threads {
 			receipt(thread);
 			await writes.putRecord(thread);
 			return fork.id;
+		});
+	}
+
+	/**
+	 * Take the thread's last undo back: its head returns to the conversation the undo left, which still holds everything
+	 * the undo removed. Only while nothing was written since: the head the undo made must still end where it was made
+	 * (`AppliedUndo.at`), and owe no turn. One redo per undo, newest first; anything written after an undo ends the
+	 * chance to take it back, as in an editor. Returns the head the thread is on again.
+	 */
+	async redo(input: { readonly threadId: string; readonly expectedHead: number }): Promise<number> {
+		const head = await this.#harness.conversation(input.expectedHead as ConversationId, BACKGROUND_CONTEXT);
+		if (head === undefined) throw hostError("unknown_thread", `no such conversation: ${input.expectedHead}`);
+		const newest = (await head.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)).items[0]?.id ?? null;
+		return this.#commit(async (tx, writes) => {
+			const thread = await writes.live(input.threadId);
+			const undo = thread.undos.findLast((candidate) => candidate.redone !== true && candidate.head === thread.head);
+			if (thread.head !== input.expectedHead || undo === undefined || undo.at === undefined) throw hostError("nothing_to_redo", "there is no undo to take back");
+			if (newest !== undo.at) throw hostError("nothing_to_redo", "the thread has gone on since the undo");
+			if (await owedIn(tx, input.expectedHead as ConversationId)) throw hostError("turn_running", "a turn is running");
+			undo.redone = true;
+			thread.head = undo.from;
+			await writes.putRecord(thread);
+			const directory = await writes.readDirectory();
+			directory.heads[String(undo.from)] = thread.threadId;
+			await writes.putDirectory(directory);
+			return undo.from;
 		});
 	}
 

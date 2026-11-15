@@ -110,16 +110,18 @@ export const isMessageContextItem = (item: { readonly id: string }): boolean => 
  * A command the host answered itself, shown in the thread and nowhere else: not an entry of the conversation, so the
  * model is never sent it, and gone when the host restarts. The command is the user's message as T3 sent it; T3 keeps
  * its own copy of a sent message on screen until the server shows that message, so it must be shown. It stands in the
- * run that was the latest when it was sent, as a note does (T3 has no place for a user's message outside a run). The
- * answer is a message of no run, which T3 shows as a reply where its time puts it. A reverted run takes them with it.
+ * latest of the thread's runs that had begun when it was answered, as a note does (T3 has no place for a user's message
+ * outside a run): found by the newest entry there was then, so that an undo, which changes the runs, leaves it
+ * standing in a run that is still there. With no such run (an undo that emptied the thread) only the answer is shown.
+ * The answer is a message of no run, which T3 shows as a reply where its time puts it.
  */
 export interface ShownExchange {
 	readonly messageId: string;
 	readonly command: string;
 	readonly answer: string;
 	readonly at: number;
-	/** The run the command stands in. */
-	readonly runId: string;
+	/** The newest entry the thread had when the command was answered; none: -1. */
+	readonly after: number;
 }
 
 /** The id prefix of a shown exchange's answer: a message no entry holds. */
@@ -417,6 +419,24 @@ export function projectThread(
 			...(tokens?.after === undefined ? {} : { afterTokenCount: tokens.after }),
 		} as Any);
 	};
+
+	// Where each answered command stands (`ShownExchange`): the latest run a user's message began, begun by then.
+	const shownAnswer = (shown: ShownExchange, ordinal: number): void => {
+		const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
+		const at = shown.at + 1;
+		turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
+		messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
+		shownIds.add(answerId);
+		// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
+		lastActivity = Math.max(lastActivity, at);
+	};
+	const shownIn = new Map<RunDraft, ShownExchange[]>();
+	const shownAlone: ShownExchange[] = [];
+	for (const shown of meta.shown ?? []) {
+		const draft = drafts.findLast((candidate) => candidate.synthetic !== true && isUserEntry(candidate.userEntry) && candidate.userEntry.id <= shown.after);
+		if (draft === undefined) shownAlone.push(shown);
+		else shownIn.set(draft, [...(shownIn.get(draft) ?? []), shown]);
+	}
 
 	drafts.forEach((draft, index) => {
 		const ordinal = index + 1;
@@ -945,17 +965,12 @@ export function projectThread(
 		}
 		// What the host answered itself while this was the latest run (`ShownExchange`). After the run's own items, so
 		// that everything a later run adds comes after them: T3 numbers items in this order.
-		for (const shown of meta.shown ?? []) {
-			if (shown.runId !== runId) continue;
+		for (const shown of shownIn.get(draft) ?? []) {
 			const author = { createdBy: "user", creationSource: "web" } as const;
 			turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
 			messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
-			const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
-			turnItems.push({ ...base(`ti-shown-a${shown.messageId}`, shown.at + 1, "completed", true), runId: null, nodeId: null, providerTurnId: null, type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
-			messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(shown.at + 1), updatedAt: time(shown.at + 1) } as Any);
-			shownIds.add(shown.messageId).add(answerId);
-			// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
-			lastActivity = Math.max(lastActivity, shown.at + 1);
+			shownIds.add(shown.messageId);
+			shownAnswer(shown, ordinal);
 		}
 		// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
 		const stop = running ? meta.stop : undefined;
@@ -970,6 +985,9 @@ export function projectThread(
 			} as Any);
 		}
 	});
+
+	// Answers with no run to stand by: an undo's, on a thread it emptied.
+	for (const shown of shownAlone) shownAnswer(shown, drafts.length + 1);
 
 	markModelSwitches(runs, turnItems, drafts);
 
