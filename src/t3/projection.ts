@@ -70,6 +70,20 @@ const endOf = (message: { role?: string; timestamp?: number; durationMs?: number
  */
 const failureClass = (message: string): "usage_limit" | "provider_error" =>
 	/(?<![a-z0-9])429(?![a-z0-9])|rate.?limit|usage.?limit|too many requests/i.test(message) ? "usage_limit" : "provider_error";
+/**
+ * How long a provider asked to wait before a request is sent again, when pi would not wait that long inside the
+ * request: pi-ai then fails the request and says so in its error ("Server requested 6514s retry delay (max: 60s). …").
+ * The only place the provider's `retry-after` reaches us.
+ */
+export const requestedRetryDelayMs = (error: string | undefined): number | undefined => {
+	const seconds = /Server requested (\d+)s retry delay/u.exec(error ?? "")?.[1];
+	return seconds === undefined ? undefined : Number(seconds) * 1_000;
+};
+/** When the provider's limit resets, by a failed request's own account: its time plus the wait the provider asked for. */
+export const limitResetAt = (message: { readonly errorMessage?: string; readonly timestamp?: number }): number | undefined => {
+	const delay = requestedRetryDelayMs(message.errorMessage);
+	return delay === undefined || message.timestamp === undefined ? undefined : message.timestamp + delay;
+};
 /** A DateTime is immutable, and a thread's instants repeat on every projection: one per instant. */
 const instants = new Map<number, DateTime.Utc>();
 const time = (ms: number | undefined): DateTime.Utc => {
@@ -186,6 +200,9 @@ export interface ThreadMeta {
 	readonly stop?: { readonly requestedAt: number; readonly unresponsiveAt?: number };
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
+	/** T3's limit recovery, from the thread record: the run a provider's limit ended, when the limit resets, and whether
+	 * the host continues the run then. Shown while that run is still the thread's last. */
+	readonly limitRecovery?: { readonly runId: string; readonly resetAt: number; readonly autoResume: boolean; readonly snooze?: boolean };
 	/** Commands answered on the spot (`/context`): shown in the thread, in memory only (`ShownExchange`). */
 	readonly shown?: readonly ShownExchange[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
@@ -813,7 +830,7 @@ export function projectThread(
 			turnItems.push({
 				...base(`ti-e${key}`, at, status, outcome !== "retrying", endedAt ?? endOf(last, at)),
 				type: "error",
-				failure: { class: failureClass(message), message, code: null, retryable: retries > 0 ? true : null },
+				failure: { class: failureClass(message), message, code: null, retryable: retries > 0 ? true : null, ...(outcome === "failed" && limitResetAt(last) !== undefined ? { resetAt: new Date(limitResetAt(last)!).toISOString() } : {}) },
 				...(retries === 0
 					? {}
 					: {
@@ -1176,8 +1193,12 @@ export function projectThread(
 				? { type: "node", nodeId: id(meta.forkedFrom.nodeId) }
 				: { type: "run", threadId: id(meta.forkedFrom.threadId), runId: id(meta.forkedFrom.runId) };
 	const author = { createdBy: meta.createdBy ?? "user", creationSource: meta.creationSource ?? "web" };
+	// T3's limit recovery stands while the run the limit ended is still the last one that ran, and failed.
+	const limited = runs.findLast((run) => run.status !== "queued" && run.status !== "rolled_back");
+	const recovery = meta.limitRecovery !== undefined && limited?.status === "failed" && (limited.id as string) === meta.limitRecovery.runId ? meta.limitRecovery : undefined;
 	// T3's sidebar state, on the thread and its shell alike.
 	const sidebar = {
+		limitRecovery: recovery === undefined ? null : { runId: id(recovery.runId), resetAt: new Date(recovery.resetAt).toISOString(), autoResume: recovery.autoResume, snooze: recovery.snooze === true },
 		pinnedAt: meta.pinnedAt === undefined ? null : time(meta.pinnedAt),
 		pinOrderKey: meta.pinOrderKey ?? null,
 		activeOrderKey: meta.activeOrderKey ?? null,
@@ -1245,7 +1266,9 @@ export function projectThread(
 	};
 
 	const liveRuns = runs.filter((run) => run.status !== "rolled_back");
-	const latestRun = liveRuns.at(-1);
+	// T3's `latestUnheldRun`: the newest run that is not waiting in a held queue, so a thread whose run stopped or
+	// reached a limit shows that, and not "queued", while messages wait behind it.
+	const latestRun = liveRuns.findLast((run) => !(run.status === "queued" && (run as { queueHeld?: boolean }).queueHeld === true));
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
 	// The thread's own messages: a command the host answered on the spot is not the thread's latest message.
 	const durable = shownIds.size === 0 ? messages : messages.filter((message) => !shownIds.has(message.id as string));
@@ -1278,6 +1301,13 @@ export function projectThread(
 		activityRunStatus: activeRun === undefined ? null : "running",
 		// T3's shell status is the latest run's status, and "idle" only for a thread that never ran (ProjectionStore.ts).
 		status: busy ? "running" : (latestRun?.status ?? keptRun?.status ?? "idle"),
+		// T3's `threadErrorSummary`: what the latest run failed with, for the sidebar ("limited" for a provider's limit).
+		...(() => {
+			const failed = busy || latestRun?.status !== "failed" ? undefined : (turnItems.findLast((item) => item.type === "error" && item.status === "failed" && item.runId === latestRun.id) as { failure?: { class: string; message: string; resetAt?: string } } | undefined)?.failure;
+			if (failed !== undefined) return { lastError: failed.message, lastErrorClass: failed.class, lastErrorCode: null, usageLimitResetAt: failed.class === "usage_limit" ? (failed.resetAt ?? null) : null };
+			if (latestRun === undefined && keptRun?.status === "failed" && keptRun.errorClass !== undefined) return { lastErrorClass: keptRun.errorClass, usageLimitResetAt: keptRun.resetAt ?? null };
+			return {};
+		})(),
 		pendingRuntimeRequest: null,
 		latestVisibleMessage:
 			lastVisibleMessage === undefined

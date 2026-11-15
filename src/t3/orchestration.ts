@@ -22,7 +22,7 @@ import type { Bridge } from "./bridge.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import { childCardNodeId } from "./projection.ts";
-import { exchanges, isActiveRun, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
+import { exchanges, isActiveIn, isActiveRun, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
 import { subagentThreadTitle } from "./child-title.ts";
 
 /** A refusal the tool returns to the agent as its error (no stack, no retry advice beyond the message). */
@@ -248,7 +248,7 @@ export class Orchestration {
 	async #waitOne(threadId: string, caller: string | undefined, deadline: number, signal: AbortSignal | undefined): Promise<Report> {
 		const before = await this.#projection(threadId);
 		const runs = before.runs.toSorted((left, right) => left.ordinal - right.ordinal);
-		const from = runs.find(isActiveRun) ?? runs.at(-1);
+		const from = runs.find(isActiveIn(before)) ?? runs.at(-1);
 		const options = { ...(caller === undefined ? {} : { reader: caller }), label: (id: string) => this.#label(id) };
 		if (!isBusy(before) || from === undefined) return report(before, { ...options, fromRunId: from?.id as string | undefined });
 		const combined = this.#signal(signal);
@@ -538,7 +538,7 @@ export class Orchestration {
 		if ((this.#awaited.get(caller)?.get(item.child) ?? 0) > 0) return false;
 		if (item.request.wake !== "settled_only" || item.request.runId === undefined) return true;
 		const run = projection.runs.find((candidate) => (candidate.id as string) === item.request.runId);
-		return run === undefined || !isActiveRun(run);
+		return run === undefined || !isActiveIn(projection)(run);
 	}
 
 	/** Post reports into the caller's thread: appended to a report message still waiting in its queue, or as a new

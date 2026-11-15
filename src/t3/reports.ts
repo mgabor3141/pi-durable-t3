@@ -21,14 +21,23 @@ const MESSAGE_BUDGET = 2_000;
 const OWN_PROMPT_CHARS = 120;
 
 export const isActiveRun = (run: OrchestrationV2Run) => ACTIVE_RUN.has(run.status);
+/**
+ * Is `run` still the thread's work? A run that a provider's limit ended and that the host continues when the limit
+ * resets (T3's limit recovery with `autoResume`) is: whoever waits for the thread waits for that, and is not told it
+ * failed.
+ */
+export const isActiveIn = (projection: Pick<OrchestrationV2ThreadProjection, "thread">) => {
+	const recovery = (projection.thread as { limitRecovery?: { runId: string; autoResume: boolean } | null }).limitRecovery;
+	return (run: OrchestrationV2Run): boolean => isActiveRun(run) || (run.status === "failed" && recovery?.autoResume === true && recovery.runId === (run.id as string));
+};
 /** @internal */
 export const byOrdinal = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => left.ordinal - right.ordinal);
 
 /** Is the thread doing anything (a live or queued run)? */
-export const isBusy = (projection: OrchestrationV2ThreadProjection) => projection.runs.some(isActiveRun);
+export const isBusy = (projection: OrchestrationV2ThreadProjection) => projection.runs.some(isActiveIn(projection));
 
-const verdictOf = (run: OrchestrationV2Run): Verdict =>
-	isActiveRun(run) ? "active" : run.status === "completed" ? "completed" : run.status === "failed" ? "failed" : "interrupted";
+const verdictOf = (run: OrchestrationV2Run, projection: OrchestrationV2ThreadProjection): Verdict =>
+	isActiveIn(projection)(run) ? "active" : run.status === "completed" ? "completed" : run.status === "failed" ? "failed" : "interrupted";
 
 export interface Report {
 	readonly threadId: string;
@@ -61,7 +70,7 @@ export function report(
 	const activity = runs.filter((run) => run.ordinal >= start.ordinal);
 	const ids = new Set(activity.map((run) => run.id as string));
 	const last = activity.at(-1)!;
-	const verdict = verdictOf(last);
+	const verdict = verdictOf(last, projection);
 	const inActivity = (message: (typeof projection.messages)[number]) => message.runId !== null && ids.has(message.runId as string);
 	const answer = projection.messages.filter((message) => message.role === "assistant" && inActivity(message) && message.text.trim() !== "").at(-1);
 	// The projection lists messages in the order they happened: one after the answer (a note) is listed after it.

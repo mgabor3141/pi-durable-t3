@@ -31,7 +31,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { Harness } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord/json";
-import { hostError } from "./host-errors.ts";
+import { HostError, hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
@@ -92,7 +92,16 @@ export type Spawn = {
 };
 
 /** A thread's latest run as the sidebar shows it: T3's shell fields `latestRunId`, `status` and the run's times. */
-export type SummaryRun = { id: string; status: string; requestedAt: number; startedAt: number | null; completedAt: number | null };
+export type SummaryRun = {
+	id: string;
+	status: string;
+	requestedAt: number;
+	startedAt: number | null;
+	completedAt: number | null;
+	/** A failed run's kind of failure and, for a provider's limit, when it resets: T3's sidebar says "limited", not "failed". */
+	errorClass?: string;
+	resetAt?: string;
+};
 
 /** The sidebar's durable snapshot of a thread: its latest visible message and its latest run, so an unopened thread
  * still sorts, previews and shows its state as an open one does, after a restart too. Updated on prompts, on a load,
@@ -128,6 +137,12 @@ export type AppliedUndo = {
 	/** What the integrator handed back when it was told of the undo (`UndoHooks.undone`), for the redo. */
 	kept?: JsonValue;
 };
+/**
+ * T3's limit recovery: a provider's limit ended the run `runId` and resets at `resetAt`. With `autoResume` the host
+ * continues the run then (`Threads.resumeAfterLimit`), provided the thread is still where the limit left it: on `head`,
+ * with `at` its newest entry. Messages sent meanwhile wait in the queue.
+ */
+export type LimitRecovery = { runId: string; head: number; at: number | null; resetAt: number; autoResume: boolean; snooze?: boolean };
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
 
@@ -168,6 +183,8 @@ export type ThreadRecord = {
 	unsettledAt?: number;
 	deletedAt: number | null;
 	undos: AppliedUndo[];
+	/** A provider's limit ended this thread's last run and said when it resets (`LimitRecovery`). */
+	limitRecovery?: LimitRecovery;
 	/** The last rollback asked of this thread, and why it failed (`null`: it did not), as T3 keeps it on the thread. */
 	rollback?: { requestId: string; failure: string | null };
 	/** T3's sidebar state, kept on the thread as T3 keeps it on its row (`OrchestrationV2AppThread`): a pin and its place
@@ -749,7 +766,7 @@ export class Threads {
 	}
 
 	/** A prompt: submit to the named conversation (deduped by `requestId`), then promote it. `whenBusy` is steer/followUp. */
-	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission> {
+	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined, waits = false): Promise<Submission> {
 		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
 		// Text-only keeps a plain-string content (unchanged prompt-cache shape); an image appends its block after the
@@ -783,12 +800,15 @@ export class Threads {
 		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
 		const live = await this.#harness.snapshot(LiveDoc, input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		const compacting = (live?.compactions?.length ?? 0) > 0;
-		if (compacting) {
+		// `waits`: the thread waits for a provider's limit to reset (`LimitRecovery`). Nothing runs, and the message is
+		// queued as it would be behind a run: a steer joins the run when it is continued, the others follow it.
+		if (compacting || (waits && live?.run === undefined)) {
 			const queued = await this.#enqueueInput(
 				input.conversationId as ConversationId,
 				input.requestId,
 				content,
 				Object.keys(data).length === 0 ? undefined : { kind: APP_USER_ENTRY, data },
+				waits && !compacting && whenBusy === "steer" ? "steer" : "followUp",
 			);
 			await this.#rememberInput(input);
 			return queued;
@@ -845,6 +865,7 @@ export class Threads {
 		requestId: string,
 		content: UserInput,
 		entry: { kind: string; data: Record<string, JsonValue> } | undefined,
+		mode: "steer" | "followUp" = "followUp",
 	): Promise<Submission> {
 		return this.#harness.commit(async (tx) => {
 			const existing = await tx.submissionByRequest(conversationId, requestId);
@@ -853,7 +874,7 @@ export class Threads {
 			const inbox = await tx.doc(InboxDoc, conversationId);
 			inbox.items.push({
 				id: created.id,
-				mode: "followUp",
+				mode,
 				content: structuredClone(content) as never,
 				...(entry === undefined ? {} : { entry: { kind: entry.kind, data: structuredClone(entry.data) } }),
 			});
@@ -1269,6 +1290,50 @@ export class Threads {
 			(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
 			await tx.appendEntry(conversationId, { kind: APP_CONTINUE_ENTRY, data: { ...(input.messageId === undefined ? {} : { messageId: input.messageId, text: "/continue" }), timestamp: Date.now() } });
 		}, BACKGROUND_CONTEXT);
+	}
+
+	/**
+	 * A provider's limit ended the head's run: record when it resets and whether the run is continued then
+	 * (`LimitRecovery`), with where the thread stands now.
+	 */
+	async limitReached(input: { readonly threadId: string; readonly conversationId: number; readonly runId: string; readonly resetAt: number; readonly autoResume: boolean }): Promise<void> {
+		const head = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
+		if (head === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
+		const at = (await head.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)).items[0]?.id ?? null;
+		await this.updateRecord(input.threadId, (record) => {
+			if (record.head !== input.conversationId) return false;
+			record.limitRecovery = { runId: input.runId, head: input.conversationId, at, resetAt: input.resetAt, autoResume: input.autoResume };
+		});
+	}
+
+	/**
+	 * The limit has reset: continue the run it ended, if the thread is still where the limit left it (nothing written
+	 * since, nothing running). Otherwise someone went on already; what is still queued then starts, as nothing else
+	 * would start it. The recovery is over either way. Returns what was done.
+	 */
+	async resumeAfterLimit(threadId: string): Promise<"continued" | "queue" | "nothing"> {
+		const recovery = this.#records.get(threadId)?.limitRecovery;
+		if (recovery === undefined) return "nothing";
+		const head = await this.#harness.conversation(recovery.head as ConversationId, BACKGROUND_CONTEXT);
+		const newest = head === undefined ? undefined : ((await head.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)).items[0]?.id ?? null);
+		const record = await this.updateRecord(threadId, (current) => {
+			if (current.limitRecovery === undefined) return false;
+			delete current.limitRecovery;
+		});
+		if (record.deletedAt !== null) return "nothing";
+		if (record.head === recovery.head && newest === recovery.at) {
+			try {
+				await this.continue({ threadId, conversationId: recovery.head, requestId: `limit-recovery:${recovery.runId}:${recovery.resetAt}` });
+				return "continued";
+			} catch (error) {
+				// Running already, or nothing left to answer: there is nothing to continue.
+				if (!(error instanceof HostError)) throw error;
+			}
+		}
+		await this.startQueued(threadId, undefined, randomUUID()).catch((error: unknown) => {
+			if (!(error instanceof HostError)) throw error;
+		});
+		return "queue";
 	}
 
 	/**

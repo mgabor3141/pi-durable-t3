@@ -35,7 +35,7 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
 import { contextReport, type ContextReportView } from "./context-report.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, limitResetAt, projectThread, requestedRetryDelayMs, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { attachmentsOf, isAssistantEntry, isUserEntry, stopReason, USER_ENTRY_KINDS } from "./runs.ts";
 import { HostError } from "../host-errors.ts";
@@ -45,6 +45,13 @@ import { CommandError } from "./errors.ts";
 import type { MessageContextAnswer } from "./message-context.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
+/** A provider's limit that resets within this long is waited for: the run is continued then. A longer one ends the run,
+ * and the user may ask for the same (T3's "Resume at reset"). */
+const LIMIT_AUTO_RESUME_WITHIN_MS = 5 * 60 * 60_000;
+/** T3's `OrchestrationV2LimitRecoveryUpdate`. */
+type RecoveryUpdate = { readonly runId: string; readonly resetAt: string; readonly autoResume?: boolean; readonly snooze?: boolean };
+/** The longest a timer runs (Node's limit is 2^31-1 ms); a later reset is waited for in turns. */
+const TIMER_MAX_MS = 2 ** 31 - 1;
 /** How long an undo or a redo waits for the integrator's `undo` hooks. */
 const UNDO_HOOK_TIMEOUT_MS = 30_000;
 /** How many answered commands a thread shows (`ShownExchange`). */
@@ -214,10 +221,12 @@ export class Bridge {
 		if (this.#closed) return;
 		this.#directory = this.#store.snapshot();
 		const touched = new Set(changed ?? this.#directory.map((thread) => thread.threadId));
+		const live = new Map(this.#directory.map((thread) => [thread.threadId, thread]));
 		for (const thread of this.#directory) {
 			if (!touched.has(thread.threadId)) continue;
 			this.#views.get(thread.threadId)?.moved(thread.head);
 		}
+		for (const threadId of touched) this.#armRecovery(threadId, live.get(threadId));
 		this.#refreshShells(touched);
 		if (!this.#directoryBooted) {
 			this.#directoryBooted = true;
@@ -509,6 +518,7 @@ export class Bridge {
 			...(thread?.snoozedAt === undefined ? {} : { snoozedAt: thread.snoozedAt }),
 			...(thread?.lastSnoozeWakeAt === undefined ? {} : { lastSnoozeWakeAt: thread.lastSnoozeWakeAt }),
 			...(thread?.rollback === undefined ? {} : { rollback: thread.rollback }),
+			...(thread?.limitRecovery === undefined ? {} : { limitRecovery: thread.limitRecovery }),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			...(this.#stopOf(threadId, state) === undefined ? {} : { stop: this.#stopOf(threadId, state) }),
@@ -723,7 +733,99 @@ export class Bridge {
 		const stop = this.#stops.get(view.threadId);
 		if (stop !== undefined && view.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) this.#clearStop(view.threadId);
 		this.#holdWhileRunning(view);
+		this.#limitReached(view);
 		this.#publishShell(view.threadId);
+	}
+
+	// ---- a provider's limit (T3's limit recovery) --------------------------------------------------------------
+
+	/** How long after the reset a run is continued: a request on the very second is one the provider may still refuse. */
+	static limitResumeMarginMs = 30_000;
+	/** Threads whose run is being ended for a limit, and the timers of the ones that are continued at the reset. */
+	readonly #limiting = new Set<string>();
+	readonly #recoveryTimers = new Map<string, NodeJS.Timeout>();
+
+	/**
+	 * A request failed and the provider said how long to wait (`requestedRetryDelayMs`): the run is not sent again on
+	 * the harness's own backoff, which knows nothing of that wait and would fail every time until it is over. The run
+	 * ends here, the thread records when the limit resets (`Threads.limitReached`), and a reset that is near enough is
+	 * waited for (`#armRecovery`). T3 shows it as its usage limit: "Resumes 9:40 PM", or "Resets …" for a later one.
+	 */
+	#limitReached(view: ThreadView): void {
+		const threadId = view.threadId;
+		const live = view.view?.docs["pi.live"];
+		if (this.#closed || this.#limiting.has(threadId) || live?.run === undefined || requestedRetryDelayMs(live.generation?.retry?.error) === undefined) return;
+		const head = this.#summary(threadId)?.head;
+		const run = view.result?.projection.runs.findLast((candidate) => candidate.status === "running");
+		const failed = view.transcript.findLast((entry) => isAssistantEntry(entry) && stopReason(entry) === "error");
+		const message = failed?.model?.[0];
+		const resetAt = message?.role === "assistant" ? limitResetAt(message) : undefined;
+		if (head === undefined || run === undefined || resetAt === undefined) return;
+		this.#limiting.add(threadId);
+		const release = this.acquire(threadId);
+		void (async () => {
+			// Recorded first, so the run ends as one that is waited for: nobody is told in between that it failed.
+			const autoResume = resetAt - Date.now() < LIMIT_AUTO_RESUME_WITHIN_MS;
+			await this.#store.limitReached({ threadId, conversationId: head, runId: run.id as string, resetAt, autoResume });
+			// The messages queued behind the run stay queued (`Threads.abort`): they follow it when it is continued.
+			await this.#store.abort({ threadId, conversationId: head });
+			this.#log.info("a provider's limit ended a run", { threadId, resetAt: new Date(resetAt).toISOString(), autoResume });
+		})()
+			.catch((error: unknown) => this.#log.warn("a run that reached a provider's limit was not ended; it goes on retrying", { threadId, error: String(error) }))
+			.finally(() => {
+				this.#limiting.delete(threadId);
+				release();
+			});
+	}
+
+	/** Set, or clear, the timer that continues a thread's run when its limit has reset (`LimitRecovery.autoResume`). */
+	#armRecovery(threadId: string, thread: Thread | undefined): void {
+		clearTimeout(this.#recoveryTimers.get(threadId));
+		this.#recoveryTimers.delete(threadId);
+		const recovery = thread?.limitRecovery;
+		if (this.#closed || recovery === undefined || !recovery.autoResume) return;
+		const wait = recovery.resetAt + Bridge.limitResumeMarginMs - Date.now();
+		const timer = setTimeout(
+			() => {
+				this.#recoveryTimers.delete(threadId);
+				if (wait > TIMER_MAX_MS) return this.#armRecovery(threadId, this.#summary(threadId));
+				const release = this.acquire(threadId);
+				void this.#store
+					.resumeAfterLimit(threadId)
+					.then((did) => this.#log.info("a provider's limit has reset", { threadId, did }))
+					.catch((error: unknown) => this.#log.warn("a run was not continued when its provider's limit reset", { threadId, error: String(error) }))
+					.finally(release);
+			},
+			Math.min(Math.max(wait, 0), TIMER_MAX_MS),
+		);
+		timer.unref();
+		this.#recoveryTimers.set(threadId, timer);
+	}
+
+	/**
+	 * T3's `thread.metadata.update` with `limitRecovery`: "Resume at reset" and "Cancel auto-resume" set `autoResume`,
+	 * the snooze beside them hides the thread until the reset. Refused, in T3's words, when the limit it names is not
+	 * the one the thread stands at.
+	 */
+	async #configureRecovery(threadId: string, update: RecoveryUpdate | null): Promise<void> {
+		const recovery = this.#summary(threadId)?.limitRecovery;
+		if (update === null) {
+			if (recovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
+			return;
+		}
+		const resetAt = Date.parse(update.resetAt);
+		if (update.snooze === true && resetAt <= Date.now()) throw new CommandError("The reset time has passed. Retry the thread manually.");
+		if (recovery === undefined || recovery.runId !== update.runId || recovery.resetAt !== resetAt || this.#summary(threadId)?.settledOverride === "settled") {
+			throw new CommandError("The provider limit changed before recovery could be configured.");
+		}
+		const snoozed = recovery.snooze === true;
+		await this.#store.updateRecord(threadId, (record) => {
+			if (record.limitRecovery === undefined) return false;
+			if (update.autoResume !== undefined) record.limitRecovery.autoResume = update.autoResume;
+			if (update.snooze !== undefined) record.limitRecovery.snooze = update.snooze;
+		});
+		if (update.snooze === true) await this.snoozeThread(threadId, update.resetAt);
+		else if (update.snooze === false && snoozed) await this.unsnoozeThread(threadId);
 	}
 
 	/** The latest run as the summary keeps it, from an open thread's shell: `null` with no run, `undefined` while one runs
@@ -739,6 +841,8 @@ export class Bridge {
 			requestedAt: ms(shell.latestRunRequestedAt) ?? DateTime.toEpochMillis(shell.createdAt),
 			startedAt: ms(shell.latestRunStartedAt),
 			completedAt: ms(shell.latestRunCompletedAt),
+			...(shell.lastErrorClass == null ? {} : { errorClass: shell.lastErrorClass }),
+			...(shell.usageLimitResetAt == null ? {} : { resetAt: shell.usageLimitResetAt }),
 		};
 	}
 
@@ -1259,8 +1363,11 @@ export class Bridge {
 					await this.#store.abort({ threadId: input.threadId, conversationId: head });
 					return void (await this.#store.submitFirst(request));
 				}
-				if (input.mode === "steer") await this.#store.submit(request, "steer");
-				else if ((busy || compacting) && input.mode !== "restart") await this.#store.submit(request, "followUp");
+				// A thread that waits for a provider's limit to reset takes messages as a working one does: they wait their
+				// turn, a steer for the run that is continued and the others behind it.
+				const waits = !busy && record?.limitRecovery?.autoResume === true && record.limitRecovery.head === head;
+				if (input.mode === "steer") await this.#store.submit(request, "steer", waits);
+				else if ((busy || compacting || waits) && input.mode !== "restart") await this.#store.submit(request, "followUp", waits);
 				else await this.#store.submit(request, undefined);
 			})().catch((error: unknown) => {
 				if (seeded) {
@@ -1415,18 +1522,19 @@ export class Bridge {
 	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
 	 * no `titleThread` hook), `false` clears it. Fields this host has no backend for are refused. */
 	async updateThreadMetadata(command: { commandId: string; threadId: string; title?: string; regenerateTitle?: boolean } & Record<string, unknown>): Promise<void> {
-		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty", "limitRecovery"].filter((field) => command[field] !== undefined);
+		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty"].filter((field) => command[field] !== undefined);
 		if (refused.length > 0) {
 			throw new CommandError(
 				refused.includes("linkedPullRequest")
 					? "Linking pull requests is not supported by pi-durable-t3."
-					: `Updating ${refused.join(", ")} is not supported by pi-durable-t3 (no git or limit recovery here).`,
+					: `Updating ${refused.join(", ")} is not supported by pi-durable-t3 (no git here).`,
 			);
 		}
 		if (command.regenerateTitle === true && this.config.titleThread === undefined) {
 			throw new CommandError("Regenerating titles is not supported by this host (it has no title generator).");
 		}
 		if (!this.hasThread(command.threadId)) throw new CommandError(`Unknown thread: ${command.threadId}`);
+		if (command.limitRecovery !== undefined) await this.#configureRecovery(command.threadId, command.limitRecovery as RecoveryUpdate | null);
 		if (command.title !== undefined) await this.renameThread(command.threadId, command.title);
 		if (command.regenerateTitle === true) {
 			this.#beginTitle(command.threadId, command.commandId);
@@ -1805,6 +1913,8 @@ export class Bridge {
 			}
 			throw error;
 		}
+		// Continued by hand: a limit that was waited for is waited for no longer.
+		if (this.#summary(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
 		this.#log.info("continued", { threadId });
 	}
 
@@ -1937,6 +2047,8 @@ export class Bridge {
 		const release = this.acquire(threadId);
 		try {
 			await this.#store.startQueued(threadId, runId, requestId);
+			// The queue was started by hand: the thread no longer waits for a limit to reset.
+			if (this.#summary(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
 		} finally {
 			release();
 		}
@@ -2139,6 +2251,8 @@ export class Bridge {
 		for (const threadId of [...this.#stops.keys()]) this.#clearStop(threadId);
 		this.#closed = true;
 		if (this.#settleTimer !== undefined) clearInterval(this.#settleTimer);
+		for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
+		this.#recoveryTimers.clear();
 		this.#settingsStop?.();
 		await this.#taskWatch?.stop().catch(() => {});
 		this.#runHolds.clear();
