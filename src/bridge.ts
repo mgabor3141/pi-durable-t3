@@ -10,13 +10,13 @@ import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
-import type { Extension, Harness } from "@earendil-works/pi-durable";
+import type { ConversationId, Extension, Harness } from "@earendil-works/pi-durable";
 import type { SecretSink } from "./t3/secret-sink.ts";
 export type { SecretSink } from "./t3/secret-sink.ts";
 export type { HostRoute } from "./t3/host-route.ts";
 import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
-import { Threads } from "./threads.ts";
+import { type ThreadOrigin, Threads } from "./threads.ts";
 import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
@@ -36,6 +36,7 @@ import { ConfigError } from "./config.ts";
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
+export type { ThreadOrigin } from "./threads.ts";
 export type { MessageContext, MessageContextAnswer, MessageContextRequest } from "./t3/message-context.ts";
 export { DISPLAY_ONLY_RULE, messageContextData } from "./t3/message-context.ts";
 export type { RedoneTurns, UndoHookAnswer, UndoHooks, UndoneTurns } from "./t3/undo-hooks.ts";
@@ -193,6 +194,13 @@ export type T3Attachment = {
 	 */
 	hiddenModels(): ReadonlySet<string>;
 	/**
+	 * The thread a conversation is the head of, and where that thread came from (a person, an agent's `thread_prompt`,
+	 * a scheduled task; its parent; a side chat): for an integrator that treats its conversations differently by that,
+	 * such as a longer prompt cache for the threads a person works in. `undefined` for a conversation that is no
+	 * thread's head (one an undo left, or the integrator's own) and until the threads are read at startup.
+	 */
+	threadOf(conversationId: ConversationId): ThreadOrigin | undefined;
+	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
 	 */
@@ -300,6 +308,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		secretRequests: (sink) => facet.secretRequests(sink),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
+		threadOf: (conversationId) => facet.threadOf(conversationId),
 		...(facet.preview === undefined
 			? {}
 			: {

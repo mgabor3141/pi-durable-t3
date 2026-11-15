@@ -21,7 +21,7 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
-import type { AppliedUndo, PendingContext } from "../threads.ts";
+import type { AppliedUndo, PendingContext, ThreadOrigin } from "../threads.ts";
 import type { UndoHookAnswer } from "./undo-hooks.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
@@ -1455,6 +1455,14 @@ export class Bridge {
 		if (ref === undefined || this.#models.getModel(ref.provider, ref.modelId) === undefined) return undefined;
 		const thinkingLevel = thinkingOf(selection.options);
 		return { provider: ref.provider, modelId: ref.modelId, ...(thinkingLevel === undefined ? {} : { thinkingLevel }) };
+	}
+
+	/** The thread whose conversation this is now (its head), and where that thread came from. */
+	threadOf(conversationId: number): ThreadOrigin | undefined {
+		const thread = this.#directory.find((candidate) => candidate.head === conversationId && candidate.deletedAt === null);
+		if (thread === undefined) return undefined;
+		const { parentThreadId, relationshipToParent, sideChat } = thread.lineage;
+		return { threadId: thread.threadId, createdBy: thread.createdBy, creationSource: thread.creationSource, parentThreadId, relationshipToParent, sideChat: sideChat === true };
 	}
 
 	/**

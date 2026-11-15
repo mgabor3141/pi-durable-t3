@@ -8,7 +8,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import type { Models } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
-import type { Threads } from "../threads.ts";
+import type { ThreadOrigin, Threads } from "../threads.ts";
 import { AuthStore } from "./auth.ts";
 import { Attachments } from "./attachments.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -50,6 +50,8 @@ type FacetHandle = {
 	textGenerationModel(): TextGenerationModel | undefined;
 	/** The models hidden from T3's model picker (`Bridge.hiddenModels`). */
 	hiddenModels(): ReadonlySet<string>;
+	/** The thread a conversation belongs to (`Bridge.threadOf`). */
+	threadOf(conversationId: number): ThreadOrigin | undefined;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -149,6 +151,7 @@ export function startFacet(deps: {
 		orchestration,
 		textGenerationModel: () => bridge.textGenerationModel(),
 		hiddenModels: () => bridge.hiddenModels(),
+		threadOf: (conversationId) => bridge.threadOf(conversationId),
 		close: async () => {
 			closing = true;
 			orchestration.close();

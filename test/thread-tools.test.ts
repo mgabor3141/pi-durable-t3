@@ -115,6 +115,10 @@ it("a parent starts a child, waits for its report, and follows up on it", { time
 	// The child is a thread of its own, linked to the run that started it, and shown as a card there.
 	const child = bridge.threadRecord(result.threadId)!;
 	expect(child.lineage).toEqual({ parentThreadId: "a", relationshipToParent: "subagent", rootThreadId: "a" });
+	// An integrator is told whose a conversation is, to treat an agent's thread differently from a person's.
+	expect(bridge.threadOf(child.head)).toMatchObject({ threadId: child.threadId, createdBy: "agent", parentThreadId: "a", relationshipToParent: "subagent", sideChat: false });
+	expect(bridge.threadOf(bridge.threadRecords().find((thread) => thread.threadId === "a")!.head)).toMatchObject({ threadId: "a", createdBy: "user", parentThreadId: null });
+	expect(bridge.threadOf(999_999)).toBeUndefined();
 	expect(child.forkedFrom).toEqual({ type: "node", nodeId: childCardNodeId(result.threadId) });
 	expect(child.spawn).toMatchObject({ prompt: "What is 2+2?", parentRunId: parent!.runs[0]!.id });
 	const card = parent!.subagents.find((subagent) => (subagent.childThreadId as string | null) === result.threadId);

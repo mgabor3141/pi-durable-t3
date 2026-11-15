@@ -215,6 +215,17 @@ export type ThreadOpens = { openedAt: number; score: number; picks: { query: str
 /** One live thread as the bridge reads it: its record and, once it has one, its sidebar summary. */
 export type Thread = ThreadRecord & { summary?: ThreadSummary };
 
+/** Whose a conversation is, for an integrator that treats threads differently by where they came from. */
+export type ThreadOrigin = {
+	readonly threadId: string;
+	/** Who started the thread: a person (`user`), an agent's `thread_prompt` (`agent`), or the host, as a scheduled task does (`system`). */
+	readonly createdBy: Actor;
+	readonly creationSource: CreationSource;
+	readonly parentThreadId: string | null;
+	readonly relationshipToParent: "fork" | "subagent" | null;
+	readonly sideChat: boolean;
+};
+
 /** Every thread's record, keyed by thread id. Checkpointed on every write: one stored row per thread. */
 const ThreadRecordDoc = defineDocFamily<ThreadRecord, ThreadRecord>({
 	kind: "pi-durable-t3.thread",
