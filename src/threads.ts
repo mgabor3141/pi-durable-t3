@@ -1137,10 +1137,10 @@ export class Threads {
 		);
 	}
 
-	async compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void> {
+	async compact(threadId: string, guidance: string | undefined, messageId?: string, idle?: true): Promise<void> {
 		const running = this.#compacting.get(threadId);
 		if (running !== undefined) return running;
-		const pending = this.#compactConversation(threadId, guidance, messageId);
+		const pending = this.#compactConversation(threadId, guidance, messageId, idle);
 		this.#compacting.set(threadId, pending);
 		try {
 			await pending;
@@ -1149,7 +1149,7 @@ export class Threads {
 		}
 	}
 
-	async #compactConversation(threadId: string, guidance: string | undefined, messageId: string | undefined): Promise<void> {
+	async #compactConversation(threadId: string, guidance: string | undefined, messageId: string | undefined, idle?: true): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: `);
@@ -1166,7 +1166,8 @@ export class Threads {
 			await this.#harness.commit(async (tx) => {
 				await tx.appendEntry(conversationId, {
 					kind: APP_COMPACT_ENTRY,
-					data: { messageId, compact: true, text, timestamp: Date.now() },
+					// One the host sent by itself before the prompt cache expired says so, as T3's does (`idle-compaction.ts`).
+					data: { messageId, compact: true, text, timestamp: Date.now(), ...(idle === true ? { idleCompaction: "beforeCacheExpires", createdBy: "agent", creationSource: "server" } : {}) },
 				});
 			}, BACKGROUND_CONTEXT);
 		}

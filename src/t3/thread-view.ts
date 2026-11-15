@@ -23,7 +23,14 @@ export type StreamUpdate =
 export type StreamState = { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection };
 
 /** A model the host offers, with what it accepts. */
-export type CatalogEntry = { provider: string; modelId: string; input: string[]; contextWindow: number };
+export type CatalogEntry = {
+	provider: string;
+	modelId: string;
+	input: string[];
+	contextWindow: number;
+	/** How long the provider keeps a prompt cache entry, in seconds, by retention (pi-ai's `Model.promptCache`). */
+	promptCache?: { readonly short?: number; readonly long?: number };
+};
 
 /** The head conversation's model and thinking level. */
 export type Configuration = { model: ModelRef | null; thinkingLevel: string };

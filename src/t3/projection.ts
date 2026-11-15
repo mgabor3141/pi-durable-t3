@@ -62,6 +62,17 @@ const USER_STOP_REASON = "Stopped by user";
 type Any = any;
 const id = (value: string): Any => value;
 /** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
+/**
+ * When the prompt cache a request wrote expires (T3's `promptCacheTtlMs` and `promptCacheExpiresAt`): the provider
+ * says which lifetime it wrote (Anthropic's one-hour tokens, or the short default), the model how long each is, and the
+ * lifetime starts with the request. A request that wrote nothing reports none.
+ */
+function promptCacheOf(usage: { cacheWrite?: number; cacheWrite1h?: number }, requestedAt: number | undefined, lifetimes: { readonly short?: number; readonly long?: number } | undefined): { promptCacheTtlMs?: number; promptCacheExpiresAt?: string } {
+	const seconds = (usage.cacheWrite1h ?? 0) > 0 ? lifetimes?.long : (usage.cacheWrite ?? 0) > 0 ? lifetimes?.short : undefined;
+	if (seconds === undefined || seconds <= 0) return {};
+	return { promptCacheTtlMs: seconds * 1000, ...(requestedAt === undefined ? {} : { promptCacheExpiresAt: new Date(requestedAt + seconds * 1000).toISOString() }) };
+}
+
 const endOf = (message: { role?: string; timestamp?: number; durationMs?: number } | undefined, fallback: number): number =>
 	(message?.timestamp ?? fallback) + (message?.role === "assistant" ? (message.durationMs ?? 0) : 0);
 /**
@@ -163,6 +174,8 @@ export interface ThreadMeta {
 	readonly thinkingLevel?: string;
 	/** The selected model's context window, for T3's context meter. */
 	readonly contextWindow?: number;
+	/** How long the selected model's provider keeps a prompt cache entry, in seconds (`CatalogEntry.promptCache`). */
+	readonly promptCache?: { readonly short?: number; readonly long?: number };
 	/** The thread record's creation fields, lineage and origin (`threads.ts`); a subagent's thread derives its own. */
 	readonly createdBy?: "user" | "agent" | "system";
 	readonly creationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
@@ -575,6 +588,7 @@ export function projectThread(
 				cachedInputTokens: usage.cacheRead,
 				outputTokens: usage.output,
 				...(usage.reasoning === undefined ? {} : { reasoningOutputTokens: usage.reasoning }),
+				...promptCacheOf(usage, lastAssistantMessage?.timestamp, meta.promptCache),
 				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
 			} }),
 		});
@@ -649,6 +663,8 @@ export function projectThread(
 			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
 			// The thread a message came from (`thread_prompt`, a child's report): recorded on the entry with its author.
 			const { senderThreadId, ...author } = authorOf(entry.data);
+			// T3 marks the `/compact` it sent by itself (`idle-compaction.ts`), and says so on the compaction's row.
+			const idle = isCompactCommandEntry(entry) && (entry.data as { idleCompaction?: unknown } | undefined)?.idleCompaction === "beforeCacheExpires" ? { idleCompaction: "beforeCacheExpires" as const } : {};
 			const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
 			turnItems.push({
 				...base(`ti-u${entry.id}`, at, "completed", true),
@@ -680,6 +696,7 @@ export function projectThread(
 				...author,
 				...sender,
 				...scheduled,
+				...idle,
 				id: id(messageId),
 				threadId: id(threadId),
 				runId: id(runId),

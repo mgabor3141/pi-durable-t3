@@ -31,7 +31,8 @@ import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { globalIdleCompaction, ProjectId, ThreadId } from "@t3tools/contracts";
+import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS, idleCompactionWindow, type IdleCompactionWindow } from "./idle-compaction.ts";
 import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
 import { contextReport, type ContextReportView } from "./context-report.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
@@ -185,7 +186,7 @@ export class Bridge {
 			log,
 			head: (threadId) => this.#summary(threadId)?.head,
 			undos: (threadId) => this.#summary(threadId)?.undos ?? [],
-			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow })),
+			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow, ...(model.promptCache === undefined ? {} : { promptCache: model.promptCache }) })),
 			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
 			nextSequence: () => bridge.nextSequence(),
 			projected: (view, change) => this.#projected(view, change),
@@ -492,6 +493,7 @@ export class Bridge {
 			...(this.config.maxRetries === undefined ? {} : { maxRetries: this.config.maxRetries }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
+			...(model === null ? {} : { promptCache: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.promptCache }),
 			...(thread === undefined
 				? {}
 				: {
@@ -730,11 +732,61 @@ export class Bridge {
 		const runChanged = run !== undefined && JSON.stringify(run) !== JSON.stringify(kept ?? null);
 		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
+		if (change.settled) this.#armIdleCompaction(view.threadId);
 		const stop = this.#stops.get(view.threadId);
 		if (stop !== undefined && view.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) this.#clearStop(view.threadId);
 		this.#holdWhileRunning(view);
 		this.#limitReached(view);
 		this.#publishShell(view.threadId);
+	}
+
+	// ---- idle compaction (T3's "Before the cache expires") ----------------------------------------------------
+
+	/** One timer a thread, set when a run of it settles and replaced by the next (in memory, as T3's: a restart skips them). */
+	readonly #idleTimers = new Map<string, { timer?: NodeJS.Timeout }>();
+	/** T3's floor and lead (`idle-compaction.ts`). */
+	static idleCompaction = { minTokens: IDLE_COMPACTION_MIN_TOKENS, leadMs: IDLE_COMPACTION_LEAD_MS };
+
+	#idleCompactionOn(): boolean {
+		return globalIdleCompaction(this.config.settings.current()) === "beforeCacheExpires";
+	}
+
+	async #idleWindow(threadId: string): Promise<IdleCompactionWindow> {
+		const thread = this.#summary(threadId);
+		if (thread === undefined) return { skip: "the thread is gone" };
+		const { projection } = await this.projection(threadId);
+		const childrenWorking = this.#directory.some((child) => child.deletedAt === null && child.lineage.parentThreadId === threadId && child.spawn !== undefined && child.spawn.outcome === undefined);
+		return idleCompactionWindow(projection, { mergeBackPending: thread.pendingContext?.type === "merge_back", childrenWorking }, Date.now(), Bridge.idleCompaction);
+	}
+
+	/**
+	 * A run settled: if the thread is one to compact while idle (`idleCompactionWindow`), wait until shortly before its
+	 * prompt cache expires, look again, and send `/compact` as T3 does. Anything that happens meanwhile (a message, a
+	 * snooze, the setting) is seen by the second look or replaces the timer.
+	 */
+	#armIdleCompaction(threadId: string): void {
+		clearTimeout(this.#idleTimers.get(threadId)?.timer);
+		this.#idleTimers.delete(threadId);
+		if (!this.#idleCompactionOn()) return;
+		const armed: { timer?: NodeJS.Timeout } = {};
+		this.#idleTimers.set(threadId, armed);
+		const current = () => this.#idleTimers.get(threadId) === armed;
+		void (async () => {
+			const window = await this.#idleWindow(threadId);
+			if (!current()) return;
+			if ("skip" in window) return void this.#idleTimers.delete(threadId);
+			armed.timer = setTimeout(() => {
+				void (async () => {
+					if (!current()) return;
+					this.#idleTimers.delete(threadId);
+					if (!this.#idleCompactionOn()) return;
+					const due = await this.#idleWindow(threadId);
+					if ("skip" in due || due.runId !== window.runId) return this.#log.info("an idle thread is not compacted after all", { threadId, why: "skip" in due ? due.skip : "the thread went on" });
+					this.#log.info("compacting an idle thread before its prompt cache expires", { threadId, expiresAt: new Date(due.endMs).toISOString() });
+					await this.#store.compact(threadId, undefined, `idle-compact:${threadId}:${due.runId}`, true);
+				})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: error instanceof Error ? error.message : String(error) }));
+			}, Math.max(0, window.startMs - Date.now()));
+		})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: error instanceof Error ? error.message : String(error) }));
 	}
 
 	// ---- a provider's limit (T3's limit recovery) --------------------------------------------------------------
@@ -2260,6 +2312,8 @@ export class Bridge {
 		for (const threadId of [...this.#stops.keys()]) this.#clearStop(threadId);
 		this.#closed = true;
 		if (this.#settleTimer !== undefined) clearInterval(this.#settleTimer);
+		for (const armed of this.#idleTimers.values()) clearTimeout(armed.timer);
+		this.#idleTimers.clear();
 		for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
 		this.#recoveryTimers.clear();
 		this.#settingsStop?.();
