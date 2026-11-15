@@ -177,6 +177,7 @@ export class ModelCatalog {
 				slashCommands: [
 					{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } },
 					{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
+					{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
 				],
 				skills: [],
 			} as unknown as ServerProvider,

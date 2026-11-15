@@ -31,9 +31,10 @@ import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
-import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
+import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
+import { contextReport, type ContextReportView } from "./context-report.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { attachmentsOf, USER_ENTRY_KINDS } from "./runs.ts";
 import { undoTarget } from "./undo.ts";
@@ -42,6 +43,8 @@ import { CommandError } from "./errors.ts";
 import type { MessageContextAnswer } from "./message-context.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
+/** How many answered commands a thread shows (`ShownExchange`). */
+const MAX_SHOWN = 20;
 /** How long a message waits for the integrator's `messageContext` before it goes on without it. */
 export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
 /** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
@@ -505,6 +508,7 @@ export class Bridge {
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			...(this.#stopOf(threadId, state) === undefined ? {} : { stop: this.#stopOf(threadId, state) }),
+			...(this.#shown.has(threadId) ? { shown: this.#shown.get(threadId)! } : {}),
 			titleRegeneration: this.#titleRequests.has(threadId)
 				? { requestId: this.#titleRequests.get(threadId)!.requestId, startedAt: this.#titleRequests.get(threadId)!.startedAt }
 				: null,
@@ -1153,6 +1157,11 @@ export class Bridge {
 				await this.#store.reload(input.threadId, input.messageId);
 				return;
 			}
+			// `/context`: what fills the context, answered here and shown only (`#showContext`).
+			if (input.text.trim() === "/context") {
+				await this.#showContext(input.threadId, input.messageId, state, head);
+				return;
+			}
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
@@ -1658,6 +1667,32 @@ export class Bridge {
 		}
 	}
 
+	/** Commands answered on the spot, by thread (`ShownExchange`): in memory, the newest `MAX_SHOWN`. */
+	readonly #shown = new Map<string, ShownExchange[]>();
+
+	/**
+	 * `/context`: a few rows on what fills the model's context (`context-report.ts`), shown in the thread and kept
+	 * nowhere: no entry is written, so the model is never sent it and a restart forgets it. A thread that has not run
+	 * has nothing in its context yet, and no run for the command to stand in.
+	 */
+	async #showContext(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
+		const { projection } = await state.projection(30_000);
+		const run = projection.runs.findLast((candidate) => candidate.status !== "queued" && candidate.status !== "rolled_back");
+		if (run === undefined) throw new CommandError("Nothing is in the context yet: send a message first.");
+		const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw new CommandError(`Unknown thread: ${threadId}`);
+		const view = await conversation.context(BACKGROUND_CONTEXT);
+		const meta = this.#meta(threadId, this.#summary(threadId), state);
+		const answer = contextReport({
+			view: view as unknown as ContextReportView,
+			...(meta.contextWindow === undefined ? {} : { window: meta.contextWindow }),
+			...(meta.model === null ? {} : { model: modelSlug(meta.model) }),
+		});
+		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== messageId), { messageId, command: "/context", answer, at: Date.now(), runId: run.id as string }];
+		this.#shown.set(threadId, shown.slice(-MAX_SHOWN));
+		state.recompute();
+	}
+
 	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
 	#stops = new Map<string, { readonly taskId: number; readonly requestedAt: number; unresponsiveAt?: number; readonly timer: ReturnType<typeof setTimeout> }>();
 
@@ -1821,6 +1856,7 @@ export class Bridge {
 		this.#cancelTitle(threadId);
 		await this.#store.remove(threadId);
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
+		this.#shown.delete(threadId);
 		for (const listener of this.#deletedListeners) listener(threadId);
 		for (const sideChat of sideChats) if (this.hasThread(sideChat)) await this.deleteThread(sideChat);
 	}

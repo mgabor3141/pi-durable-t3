@@ -106,6 +106,25 @@ export const childCardNodeId = (childThreadId: string): string => `nc-${childThr
 export const MESSAGE_CONTEXT_ITEM = "ti-x";
 export const isMessageContextItem = (item: { readonly id: string }): boolean => item.id.startsWith(MESSAGE_CONTEXT_ITEM);
 
+/**
+ * A command the host answered itself, shown in the thread and nowhere else: not an entry of the conversation, so the
+ * model is never sent it, and gone when the host restarts. The command is the user's message as T3 sent it; T3 keeps
+ * its own copy of a sent message on screen until the server shows that message, so it must be shown. It stands in the
+ * run that was the latest when it was sent, as a note does (T3 has no place for a user's message outside a run). The
+ * answer is a message of no run, which T3 shows as a reply where its time puts it. A reverted run takes them with it.
+ */
+export interface ShownExchange {
+	readonly messageId: string;
+	readonly command: string;
+	readonly answer: string;
+	readonly at: number;
+	/** The run the command stands in. */
+	readonly runId: string;
+}
+
+/** The id prefix of a shown exchange's answer: a message no entry holds. */
+export const SHOWN_MESSAGE = "shown-";
+
 export interface ThreadMeta {
 	readonly threadId: string;
 	readonly projectId: string;
@@ -164,6 +183,8 @@ export interface ThreadMeta {
 	readonly stop?: { readonly requestedAt: number; readonly unresponsiveAt?: number };
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
+	/** Commands answered on the spot (`/context`): shown in the thread, in memory only (`ShownExchange`). */
+	readonly shown?: readonly ShownExchange[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -310,6 +331,8 @@ export function projectThread(
 	const providerTurns: OrchestrationV2ProviderTurn[] = [];
 	const messages: OrchestrationV2ConversationMessage[] = [];
 	const turnItems: OrchestrationV2TurnItem[] = [];
+	/** Messages of commands the host answered itself (`ShownExchange`): shown, and not the thread's own. */
+	const shownIds = new Set<string>();
 	const subagents: OrchestrationV2Subagent[] = [];
 	const checkpointScopes: OrchestrationV2CheckpointScope[] = [];
 	const checkpoints: OrchestrationV2Checkpoint[] = [];
@@ -920,6 +943,20 @@ export function projectThread(
 				liveTools,
 			);
 		}
+		// What the host answered itself while this was the latest run (`ShownExchange`). After the run's own items, so
+		// that everything a later run adds comes after them: T3 numbers items in this order.
+		for (const shown of meta.shown ?? []) {
+			if (shown.runId !== runId) continue;
+			const author = { createdBy: "user", creationSource: "web" } as const;
+			turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
+			messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
+			const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
+			turnItems.push({ ...base(`ti-shown-a${shown.messageId}`, shown.at + 1, "completed", true), runId: null, nodeId: null, providerTurnId: null, type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
+			messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(shown.at + 1), updatedAt: time(shown.at + 1) } as Any);
+			shownIds.add(shown.messageId).add(answerId);
+			// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
+			lastActivity = Math.max(lastActivity, shown.at + 1);
+		}
 		// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
 		const stop = running ? meta.stop : undefined;
 		if (stop !== undefined) {
@@ -1177,9 +1214,11 @@ export function projectThread(
 	const liveRuns = runs.filter((run) => run.status !== "rolled_back");
 	const latestRun = liveRuns.at(-1);
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
-	const lastVisibleMessage = messages.at(-1);
-	const lastUser = messages.findLast((message) => message.role === "user");
-	const lastUserAuthored = messages.findLast((message) => message.role === "user" && ((message as Any).createdBy ?? "user") === "user");
+	// The thread's own messages: a command the host answered on the spot is not the thread's latest message.
+	const durable = shownIds.size === 0 ? messages : messages.filter((message) => !shownIds.has(message.id as string));
+	const lastVisibleMessage = durable.at(-1);
+	const lastUser = durable.findLast((message) => message.role === "user");
+	const lastUserAuthored = durable.findLast((message) => message.role === "user" && ((message as Any).createdBy ?? "user") === "user");
 	// Not loaded: the latest run the summary kept, so a closed thread sorts and shows its state as an open one does.
 	const keptRun = view === undefined ? (meta.summary?.latestRun ?? null) : null;
 	const shell: OrchestrationV2ThreadShell = {
