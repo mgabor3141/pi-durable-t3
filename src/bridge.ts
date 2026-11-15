@@ -23,6 +23,7 @@ import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/host-route.ts";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { MessageContext } from "./t3/message-context.ts";
+import type { UndoHooks } from "./t3/undo-hooks.ts";
 import type { RemoteAccess } from "./t3/remote-access.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
@@ -37,6 +38,7 @@ export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
 export type { MessageContext, MessageContextAnswer, MessageContextRequest } from "./t3/message-context.ts";
 export { DISPLAY_ONLY_RULE, messageContextData } from "./t3/message-context.ts";
+export type { RedoneTurns, UndoHookAnswer, UndoHooks, UndoneTurns } from "./t3/undo-hooks.ts";
 export type { HostUpdates } from "./t3/updates-config.ts";
 export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
 export { abortable, abortableExtension } from "./t3/abortable.ts";
@@ -113,6 +115,14 @@ export type AttachT3Options = {
 	 * timeout is logged as a warning and the message goes on without it. Absent: none.
 	 */
 	readonly messageContext?: MessageContext;
+	/**
+	 * What you keep of turns outside the conversation (memories written from them) follows an undo: `undone` is called
+	 * after `/undo` or T3's Revert moved a thread back, `redone` after `/redo` returned what that undo took. Each may
+	 * resolve with a `note` for the user, shown with the command's answer, so that it is plain what happened to what
+	 * you keep. The bridge waits at most 30 seconds; a rejection or a timeout is logged as a warning and the user is told
+	 * that it did not happen. The undo itself stands either way. Absent: an undo changes the conversation only.
+	 */
+	readonly undo?: UndoHooks;
 	/**
 	 * How many times your Harness sends a failed model request again: its `settings.retry.maxRetries` (pi-durable's
 	 * default is 3). T3 shows the requests that failed in a row as one row, "Retrying provider (3/64)"; absent, the row
@@ -262,6 +272,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
+		...(options.undo === undefined ? {} : { undo: options.undo }),
 		...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
 		...(options.preview === undefined ? {} : { preview: options.preview }),

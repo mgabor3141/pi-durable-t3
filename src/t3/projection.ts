@@ -113,11 +113,12 @@ export const isMessageContextItem = (item: { readonly id: string }): boolean => 
  * latest of the thread's runs that had begun when it was answered, as a note does (T3 has no place for a user's message
  * outside a run): found by the newest entry there was then, so that an undo, which changes the runs, leaves it
  * standing in a run that is still there. With no such run (an undo that emptied the thread) only the answer is shown.
- * The answer is a message of no run, which T3 shows as a reply where its time puts it.
+ * The answer is a message of no run, which T3 shows as a reply where its time puts it. Without a `command` (what the
+ * host has to say after T3's own Revert, which sends no message) there is only the answer.
  */
 export interface ShownExchange {
 	readonly messageId: string;
-	readonly command: string;
+	readonly command?: string;
 	readonly answer: string;
 	readonly at: number;
 	/** The newest entry the thread had when the command was answered; none: -1. */
@@ -913,10 +914,12 @@ export function projectThread(
 					shownHere.push(shown);
 					continue;
 				}
-				const author = { createdBy: "user", creationSource: "web" } as const;
-				turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
-				messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
-				shownIds.add(shown.messageId);
+				if (shown.command !== undefined) {
+					const author = { createdBy: "user", creationSource: "web" } as const;
+					turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
+					messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
+					shownIds.add(shown.messageId);
+				}
 				shownAnswer(shown, ordinal);
 			}
 		};

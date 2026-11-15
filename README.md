@@ -211,6 +211,12 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
   context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
+- `undo` (an `attachT3` option): what you keep of turns outside the conversation, such as memories written from them,
+  follows an undo. `undone` is called after `/undo` or T3's Revert moved a thread back, with the thread's own
+  conversations (every head it has had: what its turns ran in) and the entry everything was taken back from; what it
+  resolves with as `kept` is stored with the undo and handed to `redone` when `/redo` returns the turns. Each may
+  resolve with a `note`, shown to the user with the command's answer, so it is plain what happened to what you keep.
+  The bridge waits at most 30 seconds; a failure does not undo the undo, and the user is told what did not follow.
 - `updates` (an `attachT3` option): your host's own versions and how it moves between them (`check`, `install`,
   `restart`, the `command` a person would run, and your host's `name`). T3 then shows the `pi` provider's version
   as "claw 680f25f, pi 1.5.2, t3 0.1.9" (your name and version, then what the host is built on), says when a newer

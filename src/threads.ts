@@ -125,6 +125,8 @@ export type AppliedUndo = {
 	at?: number | null;
 	/** Taken back by a redo: the thread is on `from` again. */
 	redone?: true;
+	/** What the integrator handed back when it was told of the undo (`UndoHooks.undone`), for the redo. */
+	kept?: JsonValue;
 };
 /** Undos kept per thread: a retry arrives within seconds, not after fifty more undos. */
 const MAX_UNDOS = 50;
@@ -1406,7 +1408,7 @@ export class Threads {
 	 * (`AppliedUndo.at`), and owe no turn. One redo per undo, newest first; anything written after an undo ends the
 	 * chance to take it back, as in an editor. Returns the head the thread is on again.
 	 */
-	async redo(input: { readonly threadId: string; readonly expectedHead: number }): Promise<number> {
+	async redo(input: { readonly threadId: string; readonly expectedHead: number }): Promise<{ readonly head: number; readonly kept: JsonValue | undefined }> {
 		const head = await this.#harness.conversation(input.expectedHead as ConversationId, BACKGROUND_CONTEXT);
 		if (head === undefined) throw hostError("unknown_thread", `no such conversation: ${input.expectedHead}`);
 		const newest = (await head.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)).items[0]?.id ?? null;
@@ -1422,7 +1424,16 @@ export class Threads {
 			const directory = await writes.readDirectory();
 			directory.heads[String(undo.from)] = thread.threadId;
 			await writes.putDirectory(directory);
-			return undo.from;
+			return { head: undo.from, kept: undo.kept };
+		});
+	}
+
+	/** Keep with an applied undo what the integrator handed back for its redo (`AppliedUndo.kept`). */
+	async keepWithUndo(threadId: string, requestId: string, kept: JsonValue): Promise<void> {
+		await this.updateRecord(threadId, (record) => {
+			const undo = record.undos.find((candidate) => candidate.requestId === requestId);
+			if (undo === undefined) return false;
+			undo.kept = kept;
 		});
 	}
 

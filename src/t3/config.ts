@@ -7,6 +7,7 @@ import type { ProjectRegistry } from "../registry.ts";
 import type { ServerSettingsStore } from "../settings.ts";
 import type { TitleThread } from "./title-thread.ts";
 import type { MessageContext } from "./message-context.ts";
+import type { UndoHooks } from "./undo-hooks.ts";
 import type { PreviewBrowserConfig } from "./preview-config.ts";
 import type { RpcLog } from "./logging.ts";
 import type { HostRoute } from "./host-route.ts";
@@ -39,6 +40,8 @@ export interface FacetConfig {
 	readonly titleThread?: TitleThread;
 	/** Context for the model about each message that starts or steers a turn (memories). Absent: none. */
 	readonly messageContext?: MessageContext;
+	/** What the integrator keeps of turns outside the conversation follows an undo and a redo. Absent: nothing does. */
+	readonly undo?: UndoHooks;
 	/** The Harness's `settings.retry.maxRetries`, for the retry row's "3/64". */
 	readonly maxRetries?: number;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */

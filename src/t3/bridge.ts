@@ -21,7 +21,8 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
-import type { PendingContext } from "../threads.ts";
+import type { AppliedUndo, PendingContext } from "../threads.ts";
+import type { UndoHookAnswer } from "./undo-hooks.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
 import type { AgentChange, ConversationId, EntryId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
@@ -44,6 +45,8 @@ import { CommandError } from "./errors.ts";
 import type { MessageContextAnswer } from "./message-context.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
+/** How long an undo or a redo waits for the integrator's `undo` hooks. */
+const UNDO_HOOK_TIMEOUT_MS = 30_000;
 /** How many answered commands a thread shows (`ShownExchange`). */
 const MAX_SHOWN = 20;
 /** How long a message waits for the integrator's `messageContext` before it goes on without it. */
@@ -1715,7 +1718,7 @@ export class Bridge {
 	}
 
 	/** Show a command the host answered itself (`ShownExchange`); one sent again replaces its earlier answer. */
-	#show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "command" | "answer">): void {
+	#show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "answer"> & { readonly command?: string }): void {
 		const exchange: ShownExchange = { ...said, at: Date.now(), after: state.transcript.at(-1)?.id ?? -1 };
 		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== exchange.messageId), exchange];
 		this.#shown.set(threadId, shown.slice(-MAX_SHOWN));
@@ -1739,6 +1742,8 @@ export class Bridge {
 		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before undoing.");
 		if (projection.runs.some((run) => run.status === "queued")) throw new CommandError("Send or remove the queued messages before undoing.");
 		const entries = new Map(state.transcript.map((entry) => [entry.id, entry]));
+		const before = this.#summary(threadId)?.undos ?? [];
+		let kept: string | undefined;
 		// The turns a user's message began: a `/compact` or a note that opened a run is not a turn to take back.
 		const turns = runs.filter((run) => {
 			const entry = entries.get(run.userEntryId);
@@ -1769,13 +1774,14 @@ export class Bridge {
 			// A head that moved meanwhile is left alone, and the fork became a thread of its own (`Threads.rewind`).
 			if ((await this.#store.thread(threadId))?.head !== fork) throw new CommandError("The thread changed while it was being undone; what was asked for is a new thread beside it.");
 			await state.shows(fork);
+			kept = await this.#undone(threadId, `undo:${messageId}`, before, head, entryId);
 		} catch (error) {
 			if (error instanceof HostError && error.code === "not_rewindable") throw new CommandError("That is before a compaction, which cannot be undone past.");
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Stop the current turn before undoing.");
 			throw error;
 		}
 		this.#log.info("undid", { threadId, steps, count });
-		this.#show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\nFiles and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
+		this.#show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\n${kept === undefined ? "" : `${kept}\n\n`}Files and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
 	}
 
 	/**
@@ -1806,15 +1812,56 @@ export class Bridge {
 	async #redo(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
 		const { projection } = await state.projection(30_000);
 		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before redoing.");
+		let kept: JsonValue | undefined;
 		try {
-			await state.shows(await this.#store.redo({ threadId, expectedHead: head }));
+			const redone = await this.#store.redo({ threadId, expectedHead: head });
+			await state.shows(redone.head);
+			kept = redone.kept;
 		} catch (error) {
 			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back." : "There is no undo to take back.");
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Send or remove the queued messages before redoing.");
 			throw error;
 		}
 		this.#log.info("redid", { threadId });
-		this.#show(threadId, state, { messageId, command: "/redo", answer: "Brought back what the last undo took. Shown here only: not sent to the model, not saved." });
+		const hooks = this.config.undo;
+		const note = hooks === undefined ? undefined : (await this.#undoHook(threadId, "redo", (signal) => hooks.redone({ threadId, kept, signal })))?.note;
+		this.#show(threadId, state, { messageId, command: "/redo", answer: `Brought back what the last undo took.${note === undefined ? " " : `\n\n${note}\n\n`}Shown here only: not sent to the model, not saved.` });
+	}
+
+	/**
+	 * One of the integrator's `undo` hooks: at most `UNDO_HOOK_TIMEOUT_MS`. The undo or the redo stands whatever it
+	 * does, so a failure is logged and becomes the note: the user is told that what the host keeps did not follow.
+	 */
+	async #undoHook<T extends UndoHookAnswer>(threadId: string, what: "undo" | "redo", run: (signal: AbortSignal) => Promise<T | undefined>): Promise<T | UndoHookAnswer | undefined> {
+		const signal = AbortSignal.timeout(UNDO_HOOK_TIMEOUT_MS);
+		try {
+			return await Promise.race([
+				run(signal),
+				new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error(`no answer within ${UNDO_HOOK_TIMEOUT_MS / 1000} seconds`)), { once: true })),
+			]);
+		} catch (error) {
+			const message = (error as Error).message || String(error);
+			this.#log.warn(`the host's ${what} hook failed`, { threadId, error: message });
+			return { note: `What this host keeps of these turns outside the conversation did not follow the ${what}: ${message}` };
+		}
+	}
+
+	/**
+	 * Tell the integrator of an undo that was applied (`UndoHooks.undone`), and keep what it hands back with the undo
+	 * for its redo. `before`: the thread's undos before this one; a command that arrives again is not told twice.
+	 * Returns the integrator's note for the user.
+	 */
+	async #undone(threadId: string, requestId: string, before: readonly AppliedUndo[], from: number, entryId: number): Promise<string | undefined> {
+		const hooks = this.config.undo;
+		if (hooks === undefined || before.some((undo) => undo.requestId === requestId)) return undefined;
+		// The thread's own conversations: every head it has had, the one it just left first.
+		const conversations = [...new Set([from, ...before.flatMap((undo) => [undo.head, undo.from]).reverse()])] as ConversationId[];
+		const answer = await this.#undoHook(threadId, "undo", (signal) => hooks.undone({ threadId, conversations, entryId: entryId as EntryId, signal }));
+		if (answer !== undefined && "kept" in answer && answer.kept !== undefined) {
+			const { kept } = answer;
+			await this.#store.keepWithUndo(threadId, requestId, kept).catch((error: unknown) => this.#log.warn("what the host handed back for a redo was not kept", { threadId, error: String(error) }));
+		}
+		return answer?.note;
 	}
 
 	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
@@ -1911,10 +1958,16 @@ export class Bridge {
 			if ("unknown" in target) return `Unknown checkpoint ${input.checkpointId}.`;
 			if ("nothing" in target) return "Nothing to revert.";
 			const expectedHead = await state.head();
+			const before = this.#summary(input.threadId)?.undos ?? [];
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
 			const fork = await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
 			// Shown before it is answered, so a message sent next is not given the conversation the thread just left.
-			if ((await this.#store.thread(input.threadId))?.head === fork) await state.shows(fork);
+			if ((await this.#store.thread(input.threadId))?.head === fork) {
+				await state.shows(fork);
+				// T3's Revert sends no message to answer: what the integrator has to say is a reply of no run.
+				const note = await this.#undone(input.threadId, input.commandId, before, expectedHead, target.entryId);
+				if (note !== undefined) this.#show(input.threadId, state, { messageId: `revert-${input.commandId}`, answer: `${note}\n\nShown here only: not sent to the model, not saved.` });
+			}
 			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
 			return null;
 		})().catch((error: unknown) => (error as Error).message || "Rewind failed.");
