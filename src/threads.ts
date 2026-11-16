@@ -91,6 +91,8 @@ export type MessageInput = {
 	readonly context?: JsonValue;
 	/** A note: added to the conversation without starting a turn (`APP_NOTE_ENTRY`); the next turn sees it. */
 	readonly note?: boolean;
+	/** Marked in the entry's data: the run that answers the message asks the integrator for its context first. */
+	readonly awaitsContext?: boolean;
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -604,6 +606,7 @@ export class Threads {
 		}
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
+		if (input.awaitsContext === true) data.awaitsContext = true;
 		// A note reaches the model's context without starting a turn: a write whose entry carries the user message. Idle,
 		// it is appended at once; busy, pi-durable places it at the run's next boundary.
 		if (input.note === true) {

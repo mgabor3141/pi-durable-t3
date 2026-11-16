@@ -99,6 +99,8 @@ export interface EntryRecord {
 	byTaskId?: number;
 	/** A head marker's first entry of the context it starts (a compaction summary's first kept entry). */
 	head?: number;
+	/** Context edits: each replaces (or omits) an earlier entry's messages in the model's context. */
+	edits?: readonly { target: number; action: "omit" | "replace"; messages?: readonly DurableMessage[] }[];
 }
 
 interface ToolSlot {

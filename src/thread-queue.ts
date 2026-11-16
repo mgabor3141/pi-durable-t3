@@ -94,7 +94,7 @@ export class ThreadQueue {
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
 				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
 			}
-			return { input, rest };
+			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true };
 		}, BACKGROUND_CONTEXT);
 		if (held === undefined) return;
 		const content = held.input.content;
@@ -109,6 +109,7 @@ export class ThreadQueue {
 			messageId: held.input.messageId,
 			...(blocks === undefined || blocks.length === 0 ? {} : { blocks }),
 			...(held.input.attachments.length === 0 ? {} : { attachments: held.input.attachments }),
+			...(held.awaitsContext ? { awaitsContext: true } : {}),
 		}, undefined);
 		if (held.rest.length > 0) {
 			await this.#threads.harness.commit(async (tx) => {

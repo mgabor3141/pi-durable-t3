@@ -59,8 +59,9 @@ export async function measureTransfer(scenario: TransferScenario): Promise<Trans
 		stateDir,
 		env: new NodeExecutionEnv({ cwd: f.root }),
 		listen: { host: "127.0.0.1", port: PORT },
-		...(contextMs === 0 ? {} : { messageContext: async () => (await sleep(contextMs), undefined) }),
 	});
+	// The run waits for it, not the message's sender.
+	if (contextMs > 0) f.tools.install(t3.messageContext(async () => (await sleep(contextMs), undefined)));
 	const sockets: MeasuredWs[] = [];
 	const connect = async () => {
 		const socket = await connectMeasured(PORT, token);

@@ -47,11 +47,9 @@ import { messageOf } from "../host-errors.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
-import type { MessageContextAnswer } from "./message-context.ts";
+import { MessageContexts } from "./message-contexts.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
-/** How long a message waits for the integrator's `messageContext` before it goes on without it. */
-export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
 /** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
 const ACTIVE_OR_QUEUED: ReadonlySet<string> = new Set(["preparing", "starting", "running", "waiting", "queued"]);
 
@@ -170,6 +168,8 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
+	/** Context for the model about each message, from the integrator (`T3Attachment.messageContext`). */
+	readonly messageContexts: MessageContexts;
 
 	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: Attachments) {
 		this.config = config;
@@ -213,6 +213,14 @@ export class Bridge {
 		this.sidebar = new SidebarState(this.#core, this.#titles);
 		this.#limits = new ProviderLimits(this.#core, this.sidebar);
 		this.userInput = new UserInputRequests((conversationId) => this.threadIdForConversation(conversationId));
+		this.messageContexts = new MessageContexts({
+			get harness() {
+				return store.harness;
+			},
+			log,
+			threadIdForConversation: (conversationId) => this.threadIdForConversation(conversationId),
+			changed: (threadId) => this.#views.get(threadId)?.recompute(),
+		});
 	}
 
 	/** The longest any model's provider keeps a prompt cache entry: a thread idle for longer has none left. */
@@ -520,6 +528,7 @@ export class Bridge {
 			...(thread?.summary === undefined ? {} : { summary: thread.summary }),
 			model,
 			...(this.config.maxRetries === undefined ? {} : { maxRetries: this.config.maxRetries }),
+			...(this.messageContexts.pending.size === 0 ? {} : { pendingContexts: this.messageContexts.pending }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(listed === undefined ? {} : { contextWindow: listed.contextWindow, ...(listed.promptCache === undefined ? {} : { promptCache: listed.promptCache }) }),
 			...(thread === undefined
@@ -1128,28 +1137,6 @@ export class Bridge {
 		return [{ type: "text" as const, text: list, hidden: true }, ...(images ?? [])];
 	}
 
-	/** The integrator's `messageContext` for a message: at most `MESSAGE_CONTEXT_TIMEOUT_MS`; a failure is logged, not fatal. */
-	async #messageContext(threadId: string, conversationId: number, text: string): Promise<MessageContextAnswer | undefined> {
-		const hook = this.config.messageContext;
-		if (hook === undefined) return undefined;
-		const signal = AbortSignal.timeout(MESSAGE_CONTEXT_TIMEOUT_MS);
-		const late = () => new Error(`no answer within ${MESSAGE_CONTEXT_TIMEOUT_MS} ms`);
-		try {
-			const answer = await Promise.race([
-				hook({ threadId, conversationId: conversationId as ConversationId, text, signal }),
-				new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(late()), { once: true })),
-			]);
-			// An answer that settled as the wait ended (a hook resolving on its abort) is as late as none.
-			if (signal.aborted) throw late();
-			if (answer === undefined || answer.text.trim() === "") return undefined;
-			if (typeof answer.shownAs?.name !== "string" || answer.shownAs.name.trim() === "") throw new Error("the answer names no shownAs.name");
-			return answer;
-		} catch (error) {
-			this.#log.warn("message context failed; the message goes on without it", { threadId, error: (error as Error).message });
-			return undefined;
-		}
-	}
-
 	/** A message's attachments, kept in the environment (`Attachments.keep`); a host without an attachment dir takes none. */
 	async #keepAttachments(threadId: string, messageId: string, records: readonly AttachmentRecord[] | undefined): Promise<KeptAttachment[]> {
 		if (records === undefined || records.length === 0) return [];
@@ -1223,8 +1210,6 @@ export class Bridge {
 			const attachments = input.attachments === undefined ? undefined : kept.map((attachment) => attachment.record);
 			const context = rebindContext(input.context, input.attachments, attachments);
 			const attachmentBlocks = this.#attachmentBlocks(state, kept);
-			// The integrator's context for this message (memories), stored with it: a note or an automatic message gets none.
-			const extra = input.note === true || input.automatic === true ? undefined : await this.#messageContext(input.threadId, head, input.text);
 			// A side chat's note or a fork brought back (T3's pending context transfer) goes with any message that is not a
 			// note, as T3 delivers it with the next turn that sends a prompt.
 			const transfer =
@@ -1234,20 +1219,7 @@ export class Bridge {
 							this.#log.warn("pending context could not be built; it waits for the next message", { threadId: input.threadId, error: String(error) });
 							return undefined;
 						});
-			const contextBlocks: ContentBlock[] = [
-				...(transfer?.block === undefined ? [] : [transfer.block]),
-				...(extra === undefined
-					? []
-					: [
-							{
-								type: "text" as const,
-								text: extra.text,
-								hidden: true as const,
-								shownAs: { name: extra.shownAs.name, input: { ...extra.shownAs.input }, ...(extra.shownAs.details === undefined || extra.shownAs.details.trim() === "" ? {} : { details: extra.shownAs.details }) },
-								...(extra.data === undefined ? {} : { data: extra.data }),
-							},
-						]),
-			];
+			const contextBlocks: ContentBlock[] = transfer?.block === undefined ? [] : [transfer.block];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,
@@ -1260,6 +1232,9 @@ export class Bridge {
 				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
 				// T3's composer context is JSON by construction: the contract decoded it from the wire.
 				...(context === undefined ? {} : { context: context as unknown as JsonValue }),
+				// The integrator's context for this message (memories) is asked for by the run that answers it
+				// (`message-contexts.ts`), not here: a note or an automatic message gets none.
+				...(this.messageContexts.active && input.note !== true && input.automatic !== true ? { awaitsContext: true } : {}),
 			};
 			// `restart` interrupts the active turn first; `steer` applies to it; while a run is live `start`/`queue`
 			// become a follow-up. Each is one submission, keyed by the commandId for wire idempotency.

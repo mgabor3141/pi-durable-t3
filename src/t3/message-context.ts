@@ -3,14 +3,14 @@
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { ConversationId } from "@earendil-works/pi-durable";
 
-/** A message about to start or steer a turn, as `attachT3`'s `messageContext` hook sees it. */
+/** A message a run is about to answer, as `T3Attachment.messageContext`'s hook sees it. */
 export type MessageContextRequest = {
 	readonly threadId: string;
 	/** The thread's head conversation. */
 	readonly conversationId: ConversationId;
 	/** The message as it was sent. */
 	readonly text: string;
-	/** Aborted when the bridge stops waiting (`MESSAGE_CONTEXT_TIMEOUT_MS`). */
+	/** Aborted when the run stops waiting (`MESSAGE_CONTEXT_TIMEOUT_MS`), or is stopped. */
 	readonly signal: AbortSignal;
 };
 
@@ -35,7 +35,8 @@ export type MessageContextAnswer = {
 /** The line that separates a context row's model text from its display-only `details`. */
 export const DISPLAY_ONLY_RULE = "──── shown here only, not sent to the model ────";
 
-/** A message's stored context blocks, as the bridge writes them (a text block, hidden, with `shownAs`). */
+/** A message's stored context blocks, as the bridge writes them (a text block, hidden, with `shownAs`): in the
+ * context edit that adds them to the message (`message-contexts.ts`), or, from before those, in the message itself. */
 type StoredContextBlock = { readonly type: "text"; readonly hidden: true; readonly shownAs: object; readonly data?: JsonValue };
 
 /**
@@ -43,9 +44,12 @@ type StoredContextBlock = { readonly type: "text"; readonly hidden: true; readon
  * integrator stored with each message's context, read back from the transcript (for example the entries still in the
  * model's context, `Conversation.context()`).
  */
-export function messageContextData(entry: { readonly model?: readonly { readonly role: string; readonly content?: unknown }[] }): JsonValue[] {
+export function messageContextData(entry: {
+	readonly model?: readonly { readonly role: string; readonly content?: unknown }[];
+	readonly edits?: readonly { readonly messages?: readonly { readonly role: string; readonly content?: unknown }[] }[];
+}): JsonValue[] {
 	const found: JsonValue[] = [];
-	for (const message of entry.model ?? []) {
+	for (const message of [...(entry.model ?? []), ...(entry.edits ?? []).flatMap((edit) => edit.messages ?? [])]) {
 		if (message.role !== "user" || !Array.isArray(message.content)) continue;
 		for (const block of message.content as Partial<StoredContextBlock>[]) {
 			if (block.type === "text" && block.hidden === true && typeof block.shownAs === "object" && block.data !== undefined) found.push(block.data);
@@ -55,7 +59,7 @@ export function messageContextData(entry: { readonly model?: readonly { readonly
 }
 
 /**
- * Context for the model about one message, such as memories recalled for it, or `undefined` for none. Stored with the
- * message, not added per request, so the provider's prompt cache holds.
+ * Context for the model about one message, such as memories recalled for it, or `undefined` for none. Stored as part
+ * of the message, not added per request, so the provider's prompt cache holds.
  */
 export type MessageContext = (request: MessageContextRequest) => Promise<MessageContextAnswer | undefined>;

@@ -172,9 +172,10 @@ a long day's work (`bench/transfer.bench.test.ts`; 201 turns, 2,000 tool calls, 
 | a turn: two 8 KB tool results, an answer of 3,000 words | 234 KB | 5.6 KB |
 
 On loopback a command is answered in 20 to 35 ms and its message is in the thread's stream 50 ms later (the batch
-window), while that thread streams or not. A `messageContext` hook is on the path of that answer: a message is
-answered when the hook has, so a recall that takes a second is a second every sender waits (`BENCH_CONTEXT_MS`
-measures it).
+window), while that thread streams or not. A `messageContext` hook is not on the path of that answer: the run that
+answers the message asks it before its next request (`src/t3/message-contexts.ts`), so a recall that takes a second
+is a second before the model's answer starts, with the message shown and the thread working (`BENCH_CONTEXT_MS`
+measures that the sender does not wait).
 
 ## Peer links (not built yet)
 

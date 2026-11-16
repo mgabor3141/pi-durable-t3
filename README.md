@@ -209,14 +209,17 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `abortable(tool)` and `abortableExtension(extension)`: a tool (or every tool of an extension) whose call returns the
   moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
   when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
-- `messageContext` (an `attachT3` option): context for the model about each message that starts or steers a turn,
-  such as memories recalled for it. The text is stored with the message, outside its text and thread search, so the
-  prompt cache holds. T3 shows it as a tool row right after the message (`shownAs`: a name and the input it was looked
+- `t3.messageContext(hook)` (an extension to install on the Harness's registry): context for the model about each
+  message that starts or steers a turn, such as memories recalled for it. The message itself is taken at once; the run
+  that answers it asks the hook before its next request, so a slow recall delays the model's answer, not the sender,
+  and Stop ends the wait. The text becomes part of the message through a context edit (an `app.message-context`
+  entry), outside its text and thread search and the same in every later request, so the prompt cache holds. T3 shows
+  it as a tool row right after the message (`shownAs`: a name and the input it was looked
   up with, the text as output), so the user sees what the model was given; no tool ran, and `thread_read`'s
   tool-call count leaves it out. `shownAs.details` follow the text in the row under a "shown here only, not sent to
   the model" rule (`DISPLAY_ONLY_RULE`). `data` is kept with the stored block, never sent or shown, and
   `messageContextData(entry)` reads it back from the transcript, for example to know what is still in the model's
-  context. Not called for notes or a child's report; the bridge waits at most 5 seconds, and a failure
+  context. Not called for notes or a child's report; the run waits at most 5 seconds, and a failure
   or timeout is logged while the message goes on without it.
 - `undo` (an `attachT3` option): what you keep of turns outside the conversation, such as memories written from them,
   follows an undo. `undone` is called after `/undo` or T3's Revert moved a thread back, with the thread's own

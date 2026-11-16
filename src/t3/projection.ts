@@ -30,6 +30,7 @@ import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } f
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
+import { contextEdits as messageContextEdits } from "./message-contexts.ts";
 import { sentTokens, sizeAfterCompaction } from "./context-size.ts";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
 
@@ -218,6 +219,9 @@ export interface ThreadMeta {
 	/** T3's limit recovery, from the thread record: the run a provider's limit ended, when the limit resets, and whether
 	 * the host continues the run then. Shown while that run is still the thread's last. */
 	readonly limitRecovery?: { readonly runId: string; readonly resetAt: number; readonly autoResume: boolean; readonly snooze?: boolean };
+	/** Message contexts a request was sent with whose edit is not placed yet, by the message's entry
+	 * (`message-contexts.ts`): shown meanwhile. In memory only. */
+	readonly pendingContexts?: ReadonlyMap<number, ContentBlock>;
 	/** Commands answered on the spot (`/context`): shown in the thread, in memory only (`ShownExchange`). */
 	readonly shown?: readonly ShownExchange[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
@@ -373,6 +377,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const transcript = [...history, ...(view?.entries ?? [])].filter((entry) => meta.forkEntryId === undefined || entry.id > meta.forkEntryId);
 	const drafts = groupRuns(transcript);
 	const compactionTokens = compactionTokenCounts(transcript);
+	const contextEdits = messageContextEdits(transcript);
 	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
 	// that entry as its run, so T3 paints the compacting state with a real run id (its composer queues instead of
 	// starting a parallel turn). An older /compact, long done, is not the run of a compaction that runs now.
@@ -402,7 +407,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const forkRuns: ProjectedRun[] = [];
 	const toolImages = new Map<string, readonly ToolImage[]>();
 	const lastActivity = meta.updatedAt;
-	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
+	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, contextEdits, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
 }
 
 function pushBaseline(b: Build): void {
@@ -725,7 +730,13 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		} as Any);
 		// The message's context (`messageContext`, such as recalled memories), shown as the tool row the integrator named,
 		// so the user sees what the model was given with the message. No tool ran.
-		const content = message.role === "user" && Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
+		// A context asked for by the run that answers the message is a context edit of the message's entry
+		// (`message-contexts.ts`), shown from the request that carried it until the edit is placed.
+		const own = message.role === "user" && Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
+		// Only while the thread works: the edit is placed by the time its run has ended, and a context whose edit an
+		// undo took back is not the message's any more.
+		const pending = b.busy ? meta.pendingContexts?.get(entry.id) : undefined;
+		const content = b.contextEdits.get(entry.id) ?? (pending === undefined ? own : [{ type: "text" as const, text: "" }, pending]);
 		content.forEach((block, index) => {
 			if (block.type !== "text" || block.shownAs === undefined) return;
 			turnItems.push({

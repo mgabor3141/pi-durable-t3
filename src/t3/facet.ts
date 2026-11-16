@@ -16,6 +16,7 @@ import type { BridgeConfig } from "./config.ts";
 import { makeServerLayer } from "./http.ts";
 import { PreviewSessions } from "./preview.ts";
 import type { Logger } from "./logging.ts";
+import type { MessageContext } from "./message-context.ts";
 import { WorkspaceFiles } from "./files.ts";
 import { WorkspaceAssets } from "./workspace-assets.ts";
 import type { ModelCatalog } from "./models.ts";
@@ -43,6 +44,8 @@ type FacetHandle = {
 	secretRequests(sink: SecretSink): Extension;
 	/** The `ask_user` tool (`T3Attachment.askUser`). */
 	askUser(): Extension;
+	/** A message's context from the integrator (`T3Attachment.messageContext`). */
+	messageContext(messageContext: MessageContext): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/** T3's html tools as an extension (`T3Attachment.htmlTools`). */
@@ -135,6 +138,7 @@ export function startFacet(deps: {
 		},
 		secretRequests: (sink) => secretRequests.extension(sink),
 		askUser: () => bridge.userInput.extension(),
+		messageContext: (messageContext) => bridge.messageContexts.extension(messageContext),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.

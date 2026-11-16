@@ -118,13 +118,6 @@ type AttachT3Options = {
 	 */
 	readonly webhookOrigin?: () => string | undefined;
 	/**
-	 * Context for the model about each message that starts or steers a turn, such as memories recalled for it. The text
-	 * you resolve with is stored with the message, hidden in T3's display and thread search, so the prompt cache holds.
-	 * Not called for notes or automatic messages (a child's report). The bridge waits at most 5 seconds; a rejection or a
-	 * timeout is logged as a warning and the message goes on without it. Absent: none.
-	 */
-	readonly messageContext?: MessageContext;
-	/**
 	 * What you keep of turns outside the conversation (memories written from them) follows an undo: `undone` is called
 	 * after `/undo` or T3's Revert moved a thread back, `redone` after `/redo` returned what that undo took. Each may
 	 * resolve with a `note` for the user, shown with the command's answer, so that it is plain what happened to what
@@ -196,6 +189,15 @@ export type T3Attachment = {
 	 * says otherwise); a card that is dismissed, or that nobody answers, tells the agent so.
 	 */
 	askUser(): Extension;
+	/**
+	 * Context for the model about each message that starts or steers a turn, such as memories recalled for it, as an
+	 * extension to install on the Harness's registry. The run that answers a message asks `messageContext` for it
+	 * before its next request (the message itself is taken at once), waits at most 5 seconds, and stores what it
+	 * resolves with as part of the message: hidden in T3's display and thread search, shown as the row it names, and
+	 * the same in every later request, so the prompt cache holds. Not called for notes or automatic messages (a
+	 * child's report). A rejection or a timeout is logged as a warning and the message goes on without it. Once.
+	 */
+	messageContext(messageContext: MessageContext): Extension;
 	/**
 	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
 	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
@@ -294,7 +296,6 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.webhookOrigin === undefined ? {} : { webhookOrigin: options.webhookOrigin }),
-		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
 		...(options.undo === undefined ? {} : { undo: options.undo }),
 		...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
@@ -322,6 +323,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		htmlTools: (toolOptions) => facet.htmlTools(toolOptions),
 		secretRequests: (sink) => facet.secretRequests(sink),
 		askUser: () => facet.askUser(),
+		messageContext: (messageContext) => facet.messageContext(messageContext),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),
