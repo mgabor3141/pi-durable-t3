@@ -31,6 +31,8 @@ export type ThreadsFixture = {
 	readonly registry: ProjectRegistry;
 	/** The extensions installed on the Harness's tool registry (a restart installs them again). */
 	readonly extensions: readonly Extension[];
+	/** pi-durable's tool registry of the Harness: a test installs the tools a bridge gives once it has one. */
+	readonly tools: ReturnType<typeof createRegistry>;
 };
 
 export async function makeThreads(
@@ -70,7 +72,7 @@ export async function makeThreads(
 	// (`"p"`, `"one"`) so a test names its project directly.
 	const projectRegistry = await testRegistry(harness, projects);
 	const threads = new Threads({ harness, registry: projectRegistry });
-	return { threads, harness, model, root: dir, projects, registry: projectRegistry, extensions: options.extensions ?? [] };
+	return { threads, harness, model, root: dir, projects, registry: projectRegistry, extensions: options.extensions ?? [], tools: registry };
 }
 
 /**

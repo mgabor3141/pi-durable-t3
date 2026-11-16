@@ -41,6 +41,8 @@ type FacetHandle = {
 	setTitle(threadId: string, title: string): Promise<void>;
 	/** The `request_secret` tool, saving into `sink` (`T3Attachment.secretRequests`). */
 	secretRequests(sink: SecretSink): Extension;
+	/** The `ask_user` tool (`T3Attachment.askUser`). */
+	askUser(): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
 	threadTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/** T3's html tools as an extension (`T3Attachment.htmlTools`). */
@@ -132,6 +134,7 @@ export function startFacet(deps: {
 			await bridge.renameThread(threadId, title);
 		},
 		secretRequests: (sink) => secretRequests.extension(sink),
+		askUser: () => bridge.userInput.extension(),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.

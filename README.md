@@ -201,7 +201,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `attachT3(harness, options): Promise<T3Attachment>` and the `AttachT3Options` type (options are documented in the
   type's comments).
 - `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, `threadTools(options)`, `htmlTools(options)` (needs
-  `attachmentsDir`), `secretRequests(sink)`, `textGenerationModel()`, and (when `preview` is configured)
+  `attachmentsDir`), `secretRequests(sink)`, `askUser()`, `textGenerationModel()`, and (when `preview` is configured)
   `previewBrowser.open(conversationId, url)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.

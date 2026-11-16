@@ -184,6 +184,12 @@ export type T3Attachment = {
 	 */
 	secretRequests(sink: SecretSink): Extension;
 	/**
+	 * `ask_user` as a model-facing tool: the agent asks the user one to four questions, the thread shows T3's question
+	 * card above the composer, and the call returns the answers. The agent waits meanwhile (30 minutes unless the call
+	 * says otherwise); a card that is dismissed, or that nobody answers, tells the agent so.
+	 */
+	askUser(): Extension;
+	/**
 	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
 	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
 	 */
@@ -307,6 +313,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		threadTools: (toolOptions) => facet.threadTools(toolOptions),
 		htmlTools: (toolOptions) => facet.htmlTools(toolOptions),
 		secretRequests: (sink) => facet.secretRequests(sink),
+		askUser: () => facet.askUser(),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),

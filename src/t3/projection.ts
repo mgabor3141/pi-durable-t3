@@ -26,6 +26,7 @@ import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
+import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
@@ -389,6 +390,8 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const providerTurns: OrchestrationV2ProviderTurn[] = [];
 	const messages: OrchestrationV2ConversationMessage[] = [];
 	const turnItems: OrchestrationV2TurnItem[] = [];
+	/** The questions the agent asked (`ask_user`): T3 reads a card's state from its runtime request. */
+	const runtimeRequests: OrchestrationV2ThreadProjection["runtimeRequests"][number][] = [];
 	/** Messages of commands the host answered itself (`ShownExchange`): shown, and not the thread's own. */
 	const shownIds = new Set<string>();
 	const subagents: OrchestrationV2Subagent[] = [];
@@ -398,7 +401,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const forkRuns: ProjectedRun[] = [];
 	const toolImages = new Map<string, readonly ToolImage[]>();
 	const lastActivity = meta.updatedAt;
-	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
+	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
 }
 
 function pushBaseline(b: Build): void {
@@ -666,7 +669,7 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 
 /** A run's turn items: the user's message, each response with its tool calls, failed requests, child cards, steers, and what is still streaming. */
 function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, r: ReturnType<typeof projectRunRows>): void {
-	const { meta, threadId, providerThreadId, live, nodes, messages, turnItems, shownIds, subagents, toolImages } = b;
+	const { meta, threadId, providerThreadId, live, nodes, messages, turnItems, shownIds, subagents, toolImages, runtimeRequests } = b;
 	const { ordinal, synthetic, u, runId, nodeId, turnId, requestedAt, running } = r;
 	const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
 		id: id(itemId),
@@ -832,6 +835,37 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 					// T3's `file` delivery, for its note: the agent's commands can read the value, as they can here.
 					delivery: "file",
 					secretStatus,
+				} as Any);
+				continue;
+			}
+			// T3's question card: the call is the request (`user-input.ts`). T3 reads whether it still waits, and the
+			// answers once it does not, from the runtime request beside the item.
+			if (block.name === ASK_USER_TOOL) {
+				const requestId = userInputRequestId(block.id);
+				const questions = userInputQuestions(block.arguments);
+				const outcome = (resultMessage?.role === "toolResult" ? (resultMessage.details as { userInput?: { status?: string; answers?: Answers } } | undefined) : undefined)?.userInput;
+				const answers = outcome?.status === "answered" ? (outcome.answers ?? {}) : undefined;
+				const requestStatus = itemStatus === "running" ? "pending" : answers !== undefined ? "resolved" : outcome?.status === "timed_out" ? "expired" : "cancelled";
+				turnItems.push({
+					...common,
+					title: questions[0]?.header ?? "Question",
+					type: "user_input_request",
+					requestId: id(requestId),
+					questions,
+					...(answers === undefined ? {} : { questionAnswer: { requestId, answers, attachmentsByQuestionId: {}, questionTextById: Object.fromEntries(questions.map((question) => [question.id, question.question])) } }),
+				} as Any);
+				runtimeRequests.push({
+					id: id(requestId),
+					nodeId: id(nodeId),
+					providerTurnId: id(turnId),
+					nativeRequestRef: null,
+					kind: "user_input",
+					status: requestStatus,
+					// The asking call waits for the answer, as a provider's own question does under T3.
+					responseCapability: { type: "live", providerSessionId: id(`ps-${threadId}`) },
+					createdAt: time(at),
+					resolvedAt: requestStatus === "pending" ? null : time(resultAt),
+					...(answers === undefined ? {} : { answers }),
 				} as Any);
 				continue;
 			}
@@ -1166,7 +1200,7 @@ function projectQueued(b: Build): void {
 
 /** The rows are built: number the items, add the runs that were rolled back, and make the thread's row. */
 function projectRows(b: Build) {
-	const { meta, memory, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, subagents, checkpointScopes, checkpoints } = b;
+	const { meta, memory, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, subagents, checkpointScopes, checkpoints, runtimeRequests } = b;
 	// T3 numbers turn items in the order they enter the thread (`nextTurnItemOrdinal`), one ordinal per item: a client
 	// places an item by it, and a bounded window's watermark is the newest ordinal. Items are built in that order.
 	numberTurnItems(turnItems, memory.ordinals);
@@ -1311,7 +1345,7 @@ function projectRows(b: Build) {
 		providerSessions,
 		providerThreads,
 		providerTurns,
-		runtimeRequests: [],
+		runtimeRequests,
 		messages,
 		plans: [],
 		turnItems,

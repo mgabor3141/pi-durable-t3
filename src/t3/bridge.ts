@@ -37,6 +37,7 @@ import { SidebarState } from "./sidebar-state.ts";
 import { Stops } from "./stops.ts";
 import { ThreadCommands } from "./thread-commands.ts";
 import { ThreadTitles } from "./thread-titles.ts";
+import { UserInputRequests } from "./user-input.ts";
 import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
@@ -167,6 +168,8 @@ export class Bridge {
 	readonly #stops: Stops;
 	/** T3's sidebar commands (settle, archive, snooze, pin, …) and its settlement sweep. */
 	readonly sidebar: SidebarState;
+	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
+	readonly userInput: UserInputRequests;
 
 	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: Attachments) {
 		this.config = config;
@@ -209,6 +212,7 @@ export class Bridge {
 		this.#stops = new Stops(this.#core);
 		this.sidebar = new SidebarState(this.#core, this.#titles);
 		this.#limits = new ProviderLimits(this.#core, this.sidebar);
+		this.userInput = new UserInputRequests((conversationId) => this.threadIdForConversation(conversationId));
 	}
 
 	/** The longest any model's provider keeps a prompt cache entry: a thread idle for longer has none left. */

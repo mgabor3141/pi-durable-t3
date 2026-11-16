@@ -115,6 +115,8 @@ async function main(): Promise<void> {
 	// The thread tools (`thread_prompt` and the rest, with T3's scheduled-task tools): a conversation that is a thread's
 	// head acts as that thread. Installed once the bridge exists, before anything resumes.
 	runtime.registry.install(t3.threadTools());
+	// The agent's questions, as T3's card above the composer.
+	runtime.registry.install(t3.askUser());
 
 	// Crash resume: the caller resumes the harness, AFTER the attach resolved (an interrupted run resumes on its own;
 	// capabilities.md).

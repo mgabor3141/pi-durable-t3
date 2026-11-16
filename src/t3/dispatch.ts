@@ -174,6 +174,20 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			case "thread.merge_back":
 				await bridge.mergeBack({ sourceThreadId: command.sourceThreadId, targetThreadId: command.targetThreadId, sourcePoint: command.sourcePoint });
 				break;
+			// T3's answer to a card. The only cards here are the agent's questions (`ask_user`): pi runs tools without
+			// approvals, so a decision has nothing to decide.
+			case "runtime-request.respond": {
+				if (command.answers === undefined || !bridge.userInput.owns(command.requestId)) throw new CommandError(unsupportedMessage(command.type));
+				if (Object.values(command.attachmentsByQuestionId ?? {}).some((attached) => attached.length > 0)) {
+					throw new CommandError("attachmentsByQuestionId is not supported by pi-durable-t3: an answer is text. Send the file as a message.");
+				}
+				await bridge.userInput.respond({ threadId: command.threadId, requestId: command.requestId, answers: command.answers });
+				break;
+			}
+			case "thread.user-input.dismiss":
+				if (!bridge.userInput.owns(command.requestId)) throw new CommandError(unsupportedMessage(command.type));
+				await bridge.userInput.respond({ threadId: command.threadId, requestId: command.requestId });
+				break;
 			case "thread.runtime-mode.set":
 				if (command.runtimeMode !== "full-access") throw new CommandError("pi runs tools without approvals; full-access is the only mode.");
 				break;
