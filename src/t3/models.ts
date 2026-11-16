@@ -180,7 +180,7 @@ export class ModelCatalog {
 					{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
 					{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
 					{ name: "undo", description: "Take back your last message and what the agent did for it", input: { hint: "n, or: step [n] for the agent's last steps only" } },
-					{ name: "redo", description: "Bring back what the last undo took, while nothing new was written" },
+					{ name: "redo", description: "Bring back what the last undo took, while nothing new was written; /redo fork opens it as a new thread" },
 					{ name: "continue", description: "Let the agent go on from where the conversation stands, with no new message" },
 				],
 				skills: [],

@@ -94,7 +94,7 @@ it("/undo takes back the last turn, or the last n; /redo brings them back, until
 	await send("/undo");
 	await say("three");
 	expect(await context()).toEqual(["user:one", "assistant:answer one", "user:three", "assistant:answer three"]);
-	await expect(send("/redo")).rejects.toThrow("The thread has gone on since the undo, so it cannot be taken back.");
+	await expect(send("/redo")).rejects.toThrow("The thread has gone on since the undo, so it cannot be taken back here.");
 	await expect(send("/undo sideways")).rejects.toThrow("Usage: /undo [n]");
 });
 
@@ -286,4 +286,41 @@ it("a row that is new after an undo is numbered above every row a client has see
 	await settled((ids) => ids.includes(`ti-shown-a${asked}`), "the answer to /context is shown");
 	// And in the order the thread has them.
 	expect(rows().slice(-4)).toEqual([`ti-shown-u${undo}`, `ti-shown-a${undo}`, `ti-shown-u${asked}`, `ti-shown-a${asked}`]);
+});
+
+it("/redo fork opens what the undo took as a new thread, when the thread has gone on and when it has not", { timeout: 60_000 }, async () => {
+	const told: { threadId: string; kept: unknown }[] = [];
+	const { f, send, say, head, context, shown } = await setup({
+		undone: async () => ({ kept: { turns: 1 } }),
+		redone: async (event) => (told.push({ threadId: event.threadId, kept: event.kept }), { note: "Memory: the notes are written again." }),
+	});
+	f.model.respond(fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer"), fauxAssistantMessage("another answer"));
+	await say("one");
+	await say("two");
+	await expect(send("/redo fork")).rejects.toThrow("There is no undo to take back.");
+	await send("/undo");
+	await say("something else");
+	const here = ["user:one", "assistant:first answer", "user:something else", "assistant:another answer"];
+	expect(await context()).toEqual(here);
+
+	// The thread has gone on: a redo is refused, and says what works.
+	await expect(send("/redo")).rejects.toThrow("The thread has gone on since the undo, so it cannot be taken back here. `/redo fork` opens what the undo took as a new thread.");
+	const command = await send("/redo fork");
+	expect(await context(), "this thread is as it was").toEqual(here);
+	const threads = await f.threads.list();
+	const fork = threads.find((thread) => thread.threadId !== "t")!;
+	expect(threads).toHaveLength(2);
+	expect(fork).toMatchObject({ title: "Before undo", lineage: { parentThreadId: "t", relationshipToParent: "fork" } });
+	const forked = (await (await conversation(f.harness, fork.head)).context(BACKGROUND_CONTEXT)).messages.filter((message) => message.role !== "system").map((message) => `${message.role}:${typeof message.content === "string" ? message.content : message.content.map((block) => (block.type === "text" ? block.text : "")).join("")}`);
+	expect(forked, "what the undo took, whole").toEqual(["user:one", "assistant:first answer", "user:two", "assistant:second answer"]);
+	// What the integrator keeps of the undone turns comes back for the new thread.
+	expect(told).toEqual([{ threadId: fork.threadId, kept: { turns: 1 } }]);
+	const answer = (await shown(["completed", "completed", "rolled_back"])).items.find((item) => item.id === `ti-shown-a${command}`)!.text;
+	expect(answer).toContain('Opened what the last undo took as a new thread: "Before undo". This thread is as it was.');
+	expect(answer).toContain("Memory: the notes are written again.");
+	// The fork is a thread like any other.
+	f.model.respond(fauxAssistantMessage("third answer"));
+	await f.threads.submit({ threadId: fork.threadId, conversationId: fork.head, requestId: "rf", message: "three" }, undefined);
+	await idle(f.harness, fork.head);
+	expect(await head(), "and this thread's head did not move").toBe((await f.threads.thread("t"))!.head);
 });

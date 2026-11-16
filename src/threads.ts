@@ -1099,6 +1099,22 @@ export class Threads {
 		});
 	}
 
+	/**
+	 * What the thread's last undo took, as a thread of its own: a fork of the conversation the undo left, whole, so
+	 * the thread keeps what was written since and the new thread has what was taken back. Works where `redo` does
+	 * not: when the thread has gone on. The new thread is a fork of this one, as T3 shows a fork.
+	 */
+	async forkUndone(input: { readonly threadId: string; readonly expectedHead: number; readonly targetThreadId: string }): Promise<{ readonly record: ThreadRecord; readonly kept: JsonValue | undefined }> {
+		const thread = await this.thread(input.threadId);
+		const undo = thread?.undos.findLast((candidate) => candidate.redone !== true && candidate.head === thread.head);
+		if (thread === undefined || thread.head !== input.expectedHead || undo === undefined) throw hostError("nothing_to_redo", "there is no undo to take back");
+		const left = await this.#harness.conversation(undo.from as ConversationId, BACKGROUND_CONTEXT);
+		const newest = (await left?.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT))?.items[0]?.id;
+		if (newest === undefined) throw hostError("nothing_to_redo", "there is no undo to take back");
+		const record = await this.fork({ sourceThreadId: input.threadId, targetThreadId: input.targetThreadId, entryId: newest as number, conversation: undo.from, title: thread.title === "" ? "Before undo" : `${thread.title} (before undo)` });
+		return { record, kept: undo.kept };
+	}
+
 	/** Keep with an applied undo what the integrator handed back for its redo (`AppliedUndo.kept`). */
 	async keepWithUndo(threadId: string, requestId: string, kept: JsonValue): Promise<void> {
 		await this.updateRecord(threadId, (record) => {
@@ -1126,6 +1142,8 @@ export class Threads {
 		/** A side chat (T3's `thread.fork` with `sideChat`): hidden in lists, showing only its own rows, its first message
 		 * carrying a note about the main thread. */
 		sideChat?: boolean;
+		/** Fork this conversation instead of the source's head: one the source has left (`forkUndone`). */
+		conversation?: number;
 	}): Promise<ThreadRecord> {
 		if (input.entryId === undefined && input.sideChat !== true) throw hostError("not_rewindable", "a fork needs an entry to fork at");
 		let sourceAgent: Awaited<ReturnType<Conversation["agent"]>> | undefined;
@@ -1144,7 +1162,7 @@ export class Threads {
 			const fork =
 				input.entryId === undefined
 					? await configureNewConversation(tx, sourceAgent!)
-					: await tx.forkConversation(source.head as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
+					: await tx.forkConversation((input.conversation ?? source.head) as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
 			const projectId = await this.#projectForConversation(tx, fork.id);
 			if (projectId === undefined) throw hostError("unknown_project", `the fork of ${input.sourceThreadId} matches no registered project`);
 			// T3's `ThreadForkService`: the source's title with " fork" unless one is named, the source's root, and the run
