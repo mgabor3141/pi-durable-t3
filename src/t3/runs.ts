@@ -212,7 +212,11 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 		}
 		if (isUserEntry(entry)) {
 			const current = runs.at(-1);
-			if (steerable && current !== undefined && endsWithCompletedToolRound(current.steps)) current.steps.push(entry);
+			// Messages a run's end placed together (a steer and the message queued behind it) begin one run: the answer
+			// that follows is to both. Each alone would leave the first a run that nothing answered, shown as interrupted.
+			const placedBy = (placed: EntryRecord) => (placed as { byTaskId?: unknown }).byTaskId;
+			const together = current !== undefined && current.steps.length === 0 && current.synthetic !== true && isUserEntry(current.userEntry) && placedBy(entry) !== undefined && placedBy(entry) === placedBy(current.userEntry);
+			if (current !== undefined && (together || (steerable && endsWithCompletedToolRound(current.steps)))) current.steps.push(entry);
 			else {
 				runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
 				pendingCard = undefined;

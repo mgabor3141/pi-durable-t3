@@ -127,6 +127,8 @@ credentials: it reads the public descriptor and spends the pairing rate limit, a
 `historyCursor` and `hasMoreHistory`; `/history` serves older pages), then changes in 50 ms windows as `*.updated` /
 `*.created` events. The events are derived by diffing two projections of the thread, and every batch is checked by
 applying it with T3's own client reducer; a change no event can say (a record that went away) is sent as a snapshot.
+A queued message that is placed or removed is not such a change: its queued run stays in the stream, cancelled, as
+T3's own server keeps it (`ThreadView.#withPlaced`), and T3's client leaves a cancelled run out of the queue.
 T3's paging, wire projection, body deduper and client reducer are vendored by `dev/setup-t3.sh` into `vendor/shared`
 and `vendor/t3-server`. Assistant items keep one id from first token to commit, and turn items are numbered in the
 order they enter the thread, as T3's `nextTurnItemOrdinal` does. A row keeps its ordinal for as long as the thread is open, and a
@@ -167,7 +169,6 @@ a long day's work (`bench/transfer.bench.test.ts`; 201 turns, 2,000 tool calls, 
 | sidebar, opened cold | 296 KB | 12.8 KB |
 | the thread, opened cold (bounded) | 96 KB | 8.9 KB |
 | a turn: two 8 KB tool results, an answer of 3,000 words | 234 KB | 5.6 KB |
-| a steered and a queued message taking their places (one snapshot) | 95 KB | 6.1 KB |
 
 On loopback a command is answered in 20 to 35 ms and its message is in the thread's stream 50 ms later (the batch
 window), while that thread streams or not. A `messageContext` hook is on the path of that answer: a message is

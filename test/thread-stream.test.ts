@@ -123,7 +123,7 @@ it("a resume after the last sequence gets only what follows; an unknown one gets
 	expect(late.updates[0]?.kind).toBe("events");
 });
 
-it("a removed record (a cancelled queued message) is a snapshot; the client still matches", { timeout: 60_000 }, async () => {
+it("a queued message that is removed stays in the stream as a cancelled run, as T3's server keeps it; a record that goes away is a snapshot", { timeout: 60_000 }, async () => {
 	const { f, bridge, reasons, idle, send } = await open({ tokensPerSecond: 20 });
 	const watcher = client(bridge);
 	f.model.respond(fauxAssistantMessage("slow ".repeat(40)));
@@ -134,11 +134,18 @@ it("a removed record (a cancelled queued message) is a snapshot; the client stil
 	const queued = (await bridge.projection("t")).projection.runs.find((run) => run.status === "queued");
 	expect(queued, "the follow-up is queued").toBeDefined();
 	await bridge.cancelQueued("t", queued!.id as string);
+	await sleep(200);
+	// No event of T3's takes a run away, and none is needed: the client is told the run is cancelled, which its queue
+	// leaves out. The thread is not sent again.
+	expect(reasons, "removing a queued message needs no snapshot").toEqual([]);
+	expect(watcher.current()!.runs.find((run) => run.id === queued!.id)?.status).toBe("cancelled");
+	expect((await bridge.projection("t")).projection.runs.some((run) => run.id === queued!.id), "the bridge's own readers do not see it").toBe(false);
 	await bridge.interrupt("t");
 	await idle();
 	await sleep(150);
 	const { projection } = await bridge.projection("t");
-	expect(reasons.length, `the cancel needed a snapshot: ${JSON.stringify(reasons)}`).toBeGreaterThan(0);
+	// The Stop's row goes away when the run has ended: a record that is gone, which is a snapshot (and the cancelled run with it).
+	expect(reasons.length, `the stop's end needed a snapshot: ${JSON.stringify(reasons)}`).toBeGreaterThan(0);
 	expect(visibleKeys(watcher.current()!)).toEqual(visibleKeys(projection));
 	expect(watcher.current()!.runs.map((run) => run.id)).toEqual(projection.runs.map((run) => run.id));
 });

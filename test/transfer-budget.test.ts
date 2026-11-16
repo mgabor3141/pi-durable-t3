@@ -45,10 +45,10 @@ const CEILINGS: Readonly<Record<string, number>> = {
 	"turn: sidebar stream, messages": 12,
 	// Caught up from the events the host kept, not with the thread sent again: ~3 KB.
 	"reconnect: thread, wire": 8_000,
-	// A steered and a queued message taking their places. Their queued rows are replaced by a run each, which
-	// no event of T3's can say, so the thread is sent whole once (a bounded snapshot, ~4.4 KB on the wire).
-	"placed: thread stream, wire": 9_000,
-	"placed: thread stream, snapshots": 1,
+	// A steered and a queued message taking their places: their queued runs stay in the stream, cancelled, as T3's
+	// server keeps them, so the change goes out as events and the thread is not sent again (~1.5 KB on the wire).
+	"placed: thread stream, wire": 4_000,
+	"placed: thread stream, snapshots": 0,
 	"sidebar: pin and rename, wire": 800,
 	// Waiting, on loopback: observed 15 to 30 ms for a command's answer, 55 to 65 ms until the thread's stream
 	// shows it (updates go out in batches 50 ms apart), under 10 ms for a sidebar command. The ceilings are

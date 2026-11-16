@@ -140,6 +140,10 @@ export class ThreadView {
 	#configuration: Configuration | undefined;
 	#catalog: CatalogEntry[] = [];
 	#stream: StreamState | undefined;
+	/** The projection the stream was last brought to, as projected (the stream's own has `#placed` added). */
+	#streamed: OrchestrationV2ThreadProjection | undefined;
+	/** Queued runs that have gone since the stream began, kept in it as cancelled (`#withPlaced`). */
+	#placed: { readonly run: OrchestrationV2ThreadProjection["runs"][number]; readonly message: OrchestrationV2ThreadProjection["messages"][number] | undefined }[] = [];
 	/** The events since `#logFloor`, oldest first: what a resuming subscriber is replayed. */
 	#log: ThreadStreamItem[] = [];
 	#logFloor = 0;
@@ -446,16 +450,18 @@ export class ThreadView {
 			clearTimeout(this.#flushTimer);
 			this.#flushTimer = undefined;
 		}
-		const next = this.#loaded ? this.#result?.projection : undefined;
-		if (next === undefined) return this.#stream;
+		const projected = this.#loaded ? this.#result?.projection : undefined;
+		if (projected === undefined) return this.#stream;
 		const live = [...this.#subscribers].filter((subscriber) => subscriber.pending === undefined);
 		if (this.#stream === undefined) {
-			this.#restartStream(next);
-		} else if (this.#stream.projection !== next) {
+			this.#restartStream(projected);
+		} else if (this.#streamed !== projected) {
+			const next = this.#withPlaced(this.#stream.projection, projected);
+			this.#streamed = projected;
 			const diff = diffProjection(this.#stream.projection, next);
 			if ("snapshot" in diff) {
 				this.#host.log.info("thread stream sent a snapshot", { threadId: this.threadId, reason: diff.snapshot });
-				const stream = this.#restartStream(next);
+				const stream = this.#restartStream(projected);
 				for (const subscriber of live) subscriber.update({ kind: "snapshot", ...stream });
 			} else if (diff.events.length === 0) {
 				this.#stream = { sequence: this.#stream.sequence, projection: next };
@@ -477,10 +483,35 @@ export class ThreadView {
 	/** Start the stream over at `projection`: a new sequence, an empty log. */
 	#restartStream(projection: OrchestrationV2ThreadProjection): StreamState {
 		const sequence = this.#host.nextSequence();
+		this.#placed = [];
+		this.#streamed = projection;
 		this.#stream = { sequence, projection };
 		this.#log = [];
 		this.#logFloor = sequence;
 		return this.#stream;
+	}
+
+	/**
+	 * The projection as the stream sends it: with the queued runs that have gone since the stream began, cancelled. A
+	 * queued message that is placed (a steer into its run, a follow-up as a run of its own) or removed is a run that is
+	 * no longer there, which no event of T3's can say; T3's own server keeps such a run, cancelled, and its client
+	 * leaves a cancelled run out of the queue. So the stream keeps it too, instead of sending the thread whole. The
+	 * bridge's own readers get the projection without them.
+	 */
+	#withPlaced(previous: OrchestrationV2ThreadProjection, projected: OrchestrationV2ThreadProjection): OrchestrationV2ThreadProjection {
+		const runs = new Set(projected.runs.map((run) => run.id));
+		for (const run of previous.runs) {
+			if (run.status !== "queued" || runs.has(run.id)) continue;
+			this.#placed.push({ run: { ...run, status: "cancelled" }, message: previous.messages.find((message) => message.id === run.userMessageId) });
+		}
+		if (this.#placed.length === 0) return projected;
+		// A placed message is in the thread under its own id; one that was removed is kept with its run.
+		const messages = new Set(projected.messages.map((message) => message.id));
+		return {
+			...projected,
+			runs: [...projected.runs, ...this.#placed.map((placed) => placed.run)],
+			messages: [...projected.messages, ...this.#placed.flatMap((placed) => (placed.message === undefined || messages.has(placed.message.id) ? [] : [placed.message]))],
+		};
 	}
 
 	/** A subscriber's first update: the events after the sequence it resumes from, when the log still holds them and
