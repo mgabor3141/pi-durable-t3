@@ -378,6 +378,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const drafts = groupRuns(transcript);
 	const compactionTokens = compactionTokenCounts(transcript);
 	const contextEdits = messageContextEdits(transcript);
+	const promptUpdates = systemPromptUpdates(transcript);
 	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
 	// that entry as its run, so T3 paints the compacting state with a real run id (its composer queues instead of
 	// starting a parallel turn). An older /compact, long done, is not the run of a compaction that runs now.
@@ -407,7 +408,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const forkRuns: ProjectedRun[] = [];
 	const toolImages = new Map<string, readonly ToolImage[]>();
 	const lastActivity = meta.updatedAt;
-	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, contextEdits, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
+	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, contextEdits, promptUpdates, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
 }
 
 function pushBaseline(b: Build): void {
@@ -1044,7 +1045,20 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 			shownAnswer(b, shown, ordinal);
 		}
 	};
+	// A system prompt that changed while the thread went on (`systemPromptUpdates`): T3's notice row, where it did.
+	// Its entry is no step of the run, so the rows are placed by entry id, among this run's.
+	const nextRun = b.drafts[b.drafts.indexOf(draft) + 1]?.userEntry.id ?? Number.POSITIVE_INFINITY;
+	const updates = b.promptUpdates.filter((update) => update.id > u.id && update.id < nextRun);
+	const pushUpdates = (before: number) => {
+		while (updates.length > 0 && updates[0]!.id < before) {
+			const update = updates.shift()!;
+			const at = update.at ?? requestedAt;
+			pushCards(at);
+			turnItems.push({ ...base(`ti-s${update.id}`, at, "completed", true), type: "system_notice", message: `System prompt updated: ${update.sections.join(", ")}` } as Any);
+		}
+	};
 	draft.steps.forEach((step, stepIndex) => {
+		pushUpdates(step.id);
 		pushShown(step.id);
 		// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
 		if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
@@ -1093,6 +1107,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		if (m.stopReason === "aborted" && answeredAgain) return;
 		pushAssistant(key, m, at, false, toolResults, liveTools);
 	});
+	pushUpdates(Number.POSITIVE_INFINITY);
 	pushFailures("retrying");
 	const partial = running ? live?.generation?.message : undefined;
 	if (partial?.role === "assistant") pushCards(partial.timestamp ?? Date.now());
@@ -1503,6 +1518,51 @@ function projectCompactedSize(b: Build): void {
 	const endedAt = turn.completedAt ?? turn.startedAt;
 	const updatedAt = new Date(Math.max(compactedAt, reportedAt, endedAt === null ? 0 : DateTime.toEpochMillis(endedAt))).toISOString();
 	providerTurns[providerTurns.length - 1] = { ...turn, tokenUsage: { usedTokens, maxTokens: meta.contextWindow, updatedAt } } as OrchestrationV2ProviderTurn;
+}
+
+/**
+ * The system prompt sections that changed while a thread went on, by the `pi.system` entry that changed them: a
+ * section given a text other than the one it had, or taken out. pi-durable writes such an entry where the
+ * conversation is when a section's rendering changes (an AGENTS.md that was edited, for a host that lets its prompt
+ * follow). Not counted: the prompt's first rendering, a compaction's baseline, and a section taken out and given
+ * back the same (pi-durable's way of restoring the sections' order, and `/reload`'s of rendering again).
+ */
+function systemPromptUpdates(entries: readonly EntryRecord[]): { id: EntryRecord["id"]; at: number | undefined; sections: string[] }[] {
+	const updates: { id: EntryRecord["id"]; at: number | undefined; sections: string[] }[] = [];
+	// What each section last said, kept over its removal: given back the same, it has not changed.
+	const said = new Map<string, string>();
+	const shown = new Set<string>();
+	let rendered = false;
+	let cleared: string[] = [];
+	for (const entry of entries) {
+		if (isCompactionEntry(entry)) {
+			rendered = false;
+			continue;
+		}
+		if (entry.kind !== "pi.system") continue;
+		const sections = (entry.model?.[0] as { sections?: Record<string, string | null> } | undefined)?.sections;
+		if (sections === undefined) continue;
+		const changed: string[] = [];
+		const removed: string[] = [];
+		for (const [key, text] of Object.entries(sections)) {
+			if (text === null) {
+				if (shown.delete(key)) removed.push(key);
+				continue;
+			}
+			if (rendered && said.get(key) !== text) changed.push(key);
+			said.set(key, text);
+			shown.add(key);
+		}
+		// Every section taken out is a rendering about to be written again: what it leaves out is named when it is.
+		// Some taken out are gone.
+		const gone = [...cleared.filter((key) => !shown.has(key)), ...(shown.size === 0 ? [] : removed)];
+		cleared = shown.size === 0 ? removed : [];
+		if (rendered && (changed.length > 0 || gone.length > 0)) {
+			updates.push({ id: entry.id, at: (entry.model?.[0] as { timestamp?: number } | undefined)?.timestamp, sections: [...changed, ...gone.map((key) => `${key} (removed)`)] });
+		}
+		if (shown.size > 0) rendered = true;
+	}
+	return updates;
 }
 
 /** A compaction summary entry: shown as T3's compaction card where it landed. */
