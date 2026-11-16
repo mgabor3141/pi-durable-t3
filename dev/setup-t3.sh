@@ -20,7 +20,7 @@ mkdir -p "$here/node_modules/@t3tools"
 ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
 ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
 ln -sfn ../../vendor/t3-server "$here/node_modules/@t3tools/t3-server"
-if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/web/index.html" ]; then
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/vendor/t3-server/webhookFilter.ts" ] && [ -f "$here/web/index.html" ]; then
   echo "setup:t3: already at $T3_TAG"
   exit 0
 fi
@@ -108,6 +108,12 @@ cp "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" "$here/vendor/t3-server/
 # The page an MCP OAuth sign-in shows when it cannot continue, as-is.
 [ -f "$CACHE/apps/server/src/auth/mcpOAuthHtml.ts" ] || { echo "setup:t3: apps/server/src/auth/mcpOAuthHtml.ts missing"; exit 1; }
 cp "$CACHE/apps/server/src/auth/mcpOAuthHtml.ts" "$here/vendor/t3-server/mcpOAuthHtml.ts"
+# A webhook's prompt placeholders and filters (scheduled tasks), as-is: what a request's `{{body.path}}` resolves to, how
+# request text is framed as untrusted in the prompt, and which credentials are redacted.
+for file in webhookTemplate.ts webhookFilter.ts; do
+  [ -f "$CACHE/apps/server/src/scheduledTasks/$file" ] || { echo "setup:t3: apps/server/src/scheduledTasks/$file missing"; exit 1; }
+  cp "$CACHE/apps/server/src/scheduledTasks/$file" "$here/vendor/t3-server/$file"
+done
 cp "$here/vendor/contracts/tsconfig.json" "$here/vendor/t3-server/tsconfig.json"
 cat > "$here/vendor/t3-server/package.json" <<'JSON'
 { "name": "@t3tools/t3-server", "private": true, "type": "module", "exports": { "./*": "./*.ts" } }

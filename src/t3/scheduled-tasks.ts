@@ -1,5 +1,5 @@
 // T3's scheduled tasks (apps/server/src/scheduledTasks/ScheduledTaskService.ts + scheduling/Scheduler.ts), replicated
-// for the interval and fixed-time triggers. Webhook triggers are refused (capabilities.md). The tasks live in one
+// for the interval, fixed-time, one-time and webhook triggers (a webhook's own state is `task-webhooks.ts`). The tasks live in one
 // document in the Harness's storage (`pi-durable-t3.scheduled-tasks`), beside the threads they bind to, as T3 keeps them
 // in its database; a run is a dispatch — a new thread with the prompt as its first message, or the prompt queued on
 // the task's thread — never the turn's completion.
@@ -13,10 +13,11 @@ import type { Bridge } from "./bridge.ts";
 import type { Provenance } from "../threads.ts";
 import type { Logger } from "./logging.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./schedule.ts";
+import { TaskWebhooks, type WebhookTriggerRequest, type WebhookTriggerResult } from "./task-webhooks.ts";
 
 type Task = typeof ScheduledTask.Type;
 
-export const WEBHOOKS_UNSUPPORTED = "Webhook triggers are not supported by pi-durable-t3 yet.";
+export const SECRET_REF_UNSUPPORTED = "secretRef is not supported by pi-durable-t3: its request_secret saves a secret under a name, not as a one-use reference. Pass the signing secret as `secret`.";
 export const FULL_ACCESS_ONLY = "pi runs tools without approvals; full-access is the only mode.";
 export const NO_PLAN_MODE = "Plan mode is not supported by pi-durable-t3.";
 export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-t3: choose "Use the project checkout" as the workspace.';
@@ -48,7 +49,7 @@ function resolveThreadMode(input: Pick<ScheduledTaskUpsertInput, "threadId" | "t
 }
 
 /** The message id T3 mints for a fire; the projection reads the task id back out of it. */
-export const SCHEDULED_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
+export const SCHEDULED_MESSAGE_ID = /^scheduled-task-message:(.+):(?:\d+:(?:scheduled|manual)|webhook:delivery:[^:]+)$/;
 
 const decodeTask = Schema.decodeUnknownSync(ScheduledTask);
 const encodeTask = Schema.encodeSync(ScheduledTask);
@@ -106,11 +107,16 @@ export class ScheduledTasks {
 	/** Set once loaded, so a call after that runs to its first write without yielding. */
 	#ready = false;
 
-	constructor(options: { harness: Harness; dispatch: ScheduledTaskDispatch; now?: () => Date; log?: Logger }) {
+	/** The webhook tasks' URLs, secrets and deliveries. */
+	readonly #webhooks: TaskWebhooks;
+
+	/** `webhookOrigin`: where a webhook's sender reaches this host (`https://host`), for the URL a task shows. */
+	constructor(options: { harness: Harness; dispatch: ScheduledTaskDispatch; now?: () => Date; log?: Logger; webhookOrigin?: () => string | undefined }) {
 		this.#harness = options.harness;
 		this.#dispatch = options.dispatch;
 		this.#now = options.now ?? (() => new Date());
 		this.#log = options.log;
+		this.#webhooks = new TaskWebhooks({ harness: options.harness, now: this.#now, log: options.log, origin: options.webhookOrigin });
 	}
 
 	/** Read the tasks, once, strictly: a task this version cannot decode stops the host (design.md). A task left
@@ -127,6 +133,7 @@ export class ScheduledTasks {
 				}
 				this.#tasks.set(task.id, task);
 			}
+			await this.#webhooks.load([...this.#tasks.values()].filter((task) => task.schedule.type === "webhook").map((task) => task.id));
 			const now = this.#now();
 			for (const task of [...this.#tasks.values()]) {
 				if (task.lastRunStatus !== "running") continue;
@@ -179,6 +186,55 @@ export class ScheduledTasks {
 				this.#log?.warn("scheduled task run failed", { taskId: task.id, error: errorMessage(error) });
 			}
 		}
+		// A webhook's coalescing windows that have closed.
+		await this.#webhooks.runDue((taskId) => this.#tasks.get(taskId), (task, deliveryId, prompt) => this.#runWebhook(task, deliveryId, prompt));
+	}
+
+	/** One webhook delivery's run: after any run of the task that is under way (T3 runs a task's deliveries one at a time). */
+	async #runWebhook(task: Task, deliveryId: string, prompt: string): Promise<void> {
+		while (this.#activeRuns.has(task.id)) await new Promise((resolve) => setTimeout(resolve, 25));
+		const ran = await this.#runTask(task, "webhook", { deliveryId, prompt });
+		if (ran.task.lastRunStatus === "failed" && ran.task.lastRunError !== null) throw new Error(ran.task.lastRunError);
+	}
+
+	/** A request to a task's webhook URL (T3's `triggerWebhook`): the route answers what this returns. */
+	async triggerWebhook(request: WebhookTriggerRequest): Promise<WebhookTriggerResult> {
+		if (!this.#ready) await this.load();
+		return this.#webhooks.trigger(this.#tasks.get(request.hookId), request, (task, deliveryId, prompt) => this.#runWebhook(task, deliveryId, prompt));
+	}
+
+	/** T3's `rotateWebhookToken`. */
+	async rotateWebhookToken(input: { id: string }): Promise<{ task: Task }> {
+		if (!this.#ready) await this.load();
+		const task = this.#load(input.id);
+		if (task.schedule.type !== "webhook") throw taskError("Only webhook tasks have a URL token.", input.id);
+		try {
+			await this.#webhooks.rotate(task.id);
+		} catch (cause) {
+			throw taskError("Could not rotate webhook token.", input.id, cause);
+		}
+		const updated = { ...task, updatedAt: this.#now().toISOString() };
+		await this.#write(updated);
+		return { task: this.#shown(updated) };
+	}
+
+	/** T3's `listWebhookDeliveries` and `getWebhookDelivery`: the task's last deliveries, newest first, and one in full. */
+	listWebhookDeliveries(input: { id: string }): { deliveries: ReturnType<TaskWebhooks["deliveries"]> } {
+		this.#load(input.id);
+		return { deliveries: this.#webhooks.deliveries(input.id) };
+	}
+
+	getWebhookDelivery(input: { id: string; deliveryId: string }): { delivery: NonNullable<ReturnType<TaskWebhooks["delivery"]>> } {
+		this.#load(input.id);
+		const delivery = this.#webhooks.delivery(input.id, input.deliveryId);
+		if (delivery === undefined) throw taskError("Webhook delivery not found.", input.id);
+		return { delivery };
+	}
+
+	/** A task as T3 is shown it: a webhook task with its URL. */
+	#shown(task: Task): Task {
+		const webhook = this.#webhooks.endpoint(task);
+		return webhook === undefined ? task : { ...task, webhook };
 	}
 
 	async #rescheduleMissedRun(task: Task, now: Date): Promise<void> {
@@ -188,7 +244,7 @@ export class ScheduledTasks {
 	}
 
 	/** Run `task`: the task as the run left it, and the thread the run went to (null when none started). */
-	async #runTask(task: Task, trigger: "scheduled" | "manual"): Promise<{ task: Task; threadId: string | null }> {
+	async #runTask(task: Task, trigger: "scheduled" | "manual" | "webhook", webhook?: { readonly deliveryId: string; readonly prompt: string }): Promise<{ task: Task; threadId: string | null }> {
 		if (this.#activeRuns.has(task.id)) {
 			if (trigger !== "scheduled") throw taskError("Schedule task is already running.", task.id);
 			return { task, threadId: null };
@@ -208,7 +264,10 @@ export class ScheduledTasks {
 
 			await this.#write({ ...active, updatedAt: startedAtIso, lastRunAt: startedAtIso, lastRunStatus: "running", lastRunError: null });
 
-			const fireKey = `${active.id}:${startedAt.getTime()}:${trigger}`;
+			// A delivery runs the task as it is now, if it is still a webhook task that is on (T3's `WebhookDeliverySkipped`).
+			if (webhook !== undefined && (!active.enabled || active.schedule.type !== "webhook")) throw taskError(active.enabled ? "Task is no longer a webhook task." : "Task is disabled.", task.id);
+			const fireKey = webhook === undefined ? `${active.id}:${startedAt.getTime()}:${trigger}` : `${active.id}:webhook:${webhook.deliveryId}`;
+			const prompt = webhook?.prompt ?? active.prompt;
 			const commandId = `scheduled-task:${fireKey}`;
 			const messageId = `scheduled-task-message:${fireKey}`;
 			let lastRunError: string | null = null;
@@ -216,12 +275,12 @@ export class ScheduledTasks {
 			try {
 				if (active.threadId === null) {
 					// A run carries the task's provenance, as T3's `ScheduledTaskService` dispatches it.
-					const launched = await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: active.prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
+					const launched = await this.#dispatch.launch({ commandId, messageId, projectId: active.projectId, title: active.title, text: prompt, modelSelection: active.modelSelection, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 					threadId = typeof launched === "string" ? launched : null;
 					// A one-thread task keeps the thread its first run made (T3's `bindThread`).
 					if (threadId !== null && scheduledTaskThreadMode(active) !== "new_thread") await this.#bindThread(active, threadId);
 				} else {
-					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: active.prompt, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
+					await this.#dispatch.queue({ commandId, messageId, projectId: active.projectId, threadId: active.threadId, text: prompt, provenance: { createdBy: active.createdBy, creationSource: active.creationSource } });
 					threadId = active.threadId;
 				}
 			} catch (error) {
@@ -290,7 +349,7 @@ export class ScheduledTasks {
 
 	/** T3's order: most recently updated first, then id. */
 	list(): { tasks: Task[] } {
-		return { tasks: [...this.#tasks.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)) };
+		return { tasks: [...this.#tasks.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)).map((task) => this.#shown(task)) };
 	}
 
 	onChange(listener: () => void): () => void {
@@ -300,7 +359,8 @@ export class ScheduledTasks {
 
 	async upsert(input: ScheduledTaskUpsertInput): Promise<{ task: Task }> {
 		if (!this.#ready) await this.load();
-		if (input.schedule.type === "webhook") throw taskError(WEBHOOKS_UNSUPPORTED, input.id);
+		// This host's `request_secret` gives a name, not T3's one-use reference: refused by name, before anything is saved.
+		if (input.schedule.type === "webhook" && input.schedule.signature?.secretRef !== undefined) throw taskError(SECRET_REF_UNSUPPORTED, input.id);
 		// T3 stores a Scratch project's worktree request as the root (ScheduledTaskService.upsert). Any other worktree
 		// request is refused: every run here is at the project root, so it would silently run somewhere else.
 		const workspaceStrategy: Task["workspaceStrategy"] =
@@ -324,7 +384,21 @@ export class ScheduledTasks {
 		// An unchanged destination is not rechecked, so a task on an archived thread stays editable.
 		if (threadId !== null && threadId !== existing?.threadId) await this.#requireDestinationThread(threadId, input.projectId, id);
 		// A one-time run's time is stored as UTC ISO, as T3 stores it.
-		const schedule: Task["schedule"] = input.schedule.type === "once" ? { type: "once", runAt: new Date(Date.parse(input.schedule.runAt)).toISOString() } : input.schedule;
+		const stored = existing?.schedule.type === "webhook" ? existing.schedule : undefined;
+		const schedule: Task["schedule"] =
+			input.schedule.type === "once"
+				? { type: "once", runAt: new Date(Date.parse(input.schedule.runAt)).toISOString() }
+				: input.schedule.type === "webhook"
+					? // T3's rule: the signature check as given (its secret is kept apart), and a client that names no dedupe or
+						// filters keeps the stored ones; an empty filter list clears them.
+						{
+							type: "webhook",
+							signature: input.schedule.signature == null ? null : { header: input.schedule.signature.header.toLowerCase(), encoding: input.schedule.signature.encoding, prefix: input.schedule.signature.prefix },
+							maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
+							...((input.schedule.dedupe ?? stored?.dedupe) === undefined ? {} : { dedupe: input.schedule.dedupe ?? stored?.dedupe }),
+							...(((input.schedule.filters ?? stored?.filters)?.length ?? 0) === 0 ? {} : { filters: input.schedule.filters ?? stored?.filters }),
+						}
+					: input.schedule;
 		// Editing a title or prompt must not postpone (or resurrect) a due run: only schedule/enabled changes restart it.
 		const scheduleUnchanged = existing !== undefined && existing.enabled === input.enabled && isSameSchedule(existing.schedule, schedule);
 		if (!scheduleUnchanged) requireFutureOnce({ enabled: input.enabled, schedule }, now, id);
@@ -352,19 +426,27 @@ export class ScheduledTasks {
 			lastRunError: existing?.lastRunError ?? null,
 			runCount: existing?.runCount ?? 0,
 		};
+		// A webhook task's URL and secret, before the task that shows them; a task that stops being one loses them.
+		if (input.schedule.type === "webhook") {
+			try {
+				await this.#webhooks.save(task, input.schedule.signature);
+			} catch (cause) {
+				throw taskError(errorMessage(cause), id);
+			}
+		} else if (existing?.schedule.type === "webhook") await this.#webhooks.remove(id);
 		await this.#write(task);
-		return { task };
+		return { task: this.#shown(task) };
 	}
 
 	async setEnabled(input: { id: string; enabled: boolean }): Promise<{ task: Task }> {
 		if (!this.#ready) await this.load();
 		const existing = this.#load(input.id);
-		if (existing.enabled === input.enabled) return { task: existing };
+		if (existing.enabled === input.enabled) return { task: this.#shown(existing) };
 		const now = this.#now();
 		requireFutureOnce({ enabled: input.enabled, schedule: existing.schedule }, now, input.id);
 		const task = { ...existing, enabled: input.enabled, nextRunAt: nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now), updatedAt: now.toISOString() };
 		await this.#write(task);
-		return { task };
+		return { task: this.#shown(task) };
 	}
 
 	/** T3's `ScheduledTaskService.deleteForThread` (run by a thread deletion's `scheduled-tasks.cleanup` effect): the
@@ -387,7 +469,8 @@ export class ScheduledTasks {
 		if (!this.#ready) await this.load();
 		const task = this.#load(input.id);
 		try {
-			return await this.#runTask(task, "manual");
+			const ran = await this.#runTask(task, "manual");
+			return { ...ran, task: this.#shown(ran.task) };
 		} catch (cause) {
 			throw taskError("Could not run schedule task.", input.id, cause);
 		}
@@ -436,6 +519,7 @@ export class ScheduledTasks {
 				const doc = await tx.doc(ScheduledTasksDoc);
 				doc.tasks = doc.tasks.filter((entry) => !ids.includes((entry as { id?: string }).id ?? ""));
 			}, BACKGROUND_CONTEXT);
+			for (const task of removed) await this.#webhooks.remove(task.id).catch((error) => this.#log?.warn("a deleted task's webhook was not removed", { taskId: task.id, error: errorMessage(error) }));
 		} catch (error) {
 			for (const task of removed) if (!this.#tasks.has(task.id)) this.#tasks.set(task.id, task);
 			this.#notify();

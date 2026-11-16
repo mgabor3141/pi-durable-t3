@@ -51,7 +51,7 @@ import { CurrentAuthSession } from "./session-context.ts";
 import { piUsagePricing, summarizeUsage } from "./usage.ts";
 import type { Attachments } from "./attachments.ts";
 import type { WorkspaceAssets } from "./workspace-assets.ts";
-import { type ScheduledTasks, WEBHOOKS_UNSUPPORTED } from "./scheduled-tasks.ts";
+import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { AssetAccessError, AssetWorkspaceResolutionError, ThreadId, PreviewInvalidUrlError, PreviewSessionLookupError, type AuthEnvironmentScope } from "@t3tools/contracts";
 
 const isAssetAccessError = Schema.is(AssetAccessError);
@@ -605,8 +605,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 				// asked about — the whole point of the field (design.md, Invariants).
 				(message) => new OrchestrationV2ThreadLaunchError({ commandId: input.commandId, projectId: input.projectId, message }),
 			),
-		// T3's scheduled tasks, interval and fixed-time triggers (`scheduled-tasks.ts`); webhook triggers are refused with the
-		// contract's typed error, which the edit dialog shows as a toast.
+		// T3's scheduled tasks (`scheduled-tasks.ts`); a refusal is the contract's typed error, which the edit dialog
+		// shows as a toast.
 		// T3's `subscribeList`: subscribed before the snapshot, so no change falls between; then a fresh list per change.
 		"scheduledTasks.subscribe": () =>
 			fromListener<WsItem<"scheduledTasks.subscribe">>((emit) => {
@@ -618,9 +618,9 @@ export function makeRpcLayer(deps: RpcDeps) {
 		"scheduledTasks.setEnabled": (input) => scheduled(async () => deps.scheduledTasks.setEnabled(input)),
 		"scheduledTasks.delete": (input) => scheduled(async () => deps.scheduledTasks.delete(input)),
 		"scheduledTasks.runNow": (input) => scheduled(async () => ({ task: (await deps.scheduledTasks.runNow(input)).task })),
-		"scheduledTasks.rotateWebhookToken": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
-		"scheduledTasks.listWebhookDeliveries": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
-		"scheduledTasks.getWebhookDelivery": (input) => Effect.fail(new ScheduledTaskError({ message: WEBHOOKS_UNSUPPORTED, taskId: input.id })),
+		"scheduledTasks.rotateWebhookToken": (input) => scheduled(async () => deps.scheduledTasks.rotateWebhookToken(input)),
+		"scheduledTasks.listWebhookDeliveries": (input) => scheduled(async () => deps.scheduledTasks.listWebhookDeliveries(input)),
+		"scheduledTasks.getWebhookDelivery": (input) => scheduled(async () => deps.scheduledTasks.getWebhookDelivery(input)),
 		[`orchestration.dispatchCommand`]: dispatch,
 		// T3's command-palette / sidebar thread search, answered from the host's conversations (design.md, replication
 		// rule). The client validates the query (2..200) and limit; `limit` defaults to T3's 50.

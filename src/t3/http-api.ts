@@ -59,7 +59,11 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpEffect from "effect/http/HttpEffect";
+import * as ByteSize from "effect/ByteSize";
+import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import type { ScheduledTasks } from "./scheduled-tasks.ts";
+import { WEBHOOK_MAX_BODY_BYTES, WEBHOOK_ROUTE_PREFIX } from "./task-webhooks.ts";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import { ProjectConflict, ProjectIdConflict } from "../registry.ts";
 import type { AuthStore, ClientMetadata, PairingRateLimit, StoredToken } from "./auth.ts";
@@ -82,6 +86,7 @@ interface HttpApiDeps {
 	readonly sessionCookie: (token: string, expiresAtMs: number) => string;
 	readonly sessionCookieName: string;
 	readonly mcpOAuth: McpOAuth;
+	readonly scheduledTasks: ScheduledTasks;
 }
 
 /** The web app's page that asks the user to approve an MCP client. */
@@ -469,7 +474,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 				}),
 			),
 	);
-	// T3 Connect and webhooks are not served by this host.
+	// T3 Connect is not served by this host.
 	const connect = HttpApiBuilder.group(EnvironmentHttpApi, "connect", (handlers) =>
 		handlers
 			.handleRaw("linkProof", () => unsupported("connect.linkProof"))
@@ -503,12 +508,62 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 			.handleRaw("transcribe", () => unsupported("voice.transcribe"))
 			.handleRaw("postProcess", () => unsupported("voice.postProcess")),
 	);
+	// T3's webhook route (`scheduledTasks/webhookRoute.ts`): a scheduled task's URL. Raw, so a signature is checked
+	// over the exact bytes; the token in the URL is the credential, so no session is asked for. The outcome header is
+	// T3's (its relay records it).
+	const hookAnswer = (status: number, body: Record<string, string>, outcome: string, headers?: Record<string, string>) =>
+		HttpServerResponse.jsonUnsafe(body, { status, headers: { ...headers, "x-t3-hook-outcome": outcome } });
+	const webhook = ({ params, request }: { readonly params: { readonly hookId: string; readonly token: string }; readonly request: HttpServerRequest.HttpServerRequest }) =>
+		Effect.gen(function* () {
+			// The router answers HEAD with the GET route; link checkers probe with HEAD.
+			if (request.method === "HEAD") return hookAnswer(405, { error: "method_not_allowed" }, "method_not_allowed", { allow: "GET, POST, PUT, PATCH" });
+			const contentLength = Number(request.headers["content-length"] ?? "0");
+			if (!Number.isFinite(contentLength) || contentLength > WEBHOOK_MAX_BODY_BYTES) return hookAnswer(413, { error: "body_too_large" }, "body_too_large");
+			// Chunked requests carry no content-length, so the reader itself is capped.
+			const read = yield* request.arrayBuffer.pipe(
+				Effect.map((buffer) => new Uint8Array(buffer)),
+				Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(WEBHOOK_MAX_BODY_BYTES)),
+				Effect.option,
+			);
+			if (Option.isNone(read) || read.value.byteLength > WEBHOOK_MAX_BODY_BYTES) return hookAnswer(413, { error: "body_too_large" }, "body_too_large");
+			const body = read.value;
+			const headers: Record<string, string> = {};
+			for (const [name, value] of Object.entries(request.headers)) if (typeof value === "string") headers[name.toLowerCase()] = value;
+			const queryIndex = request.url.indexOf("?");
+			const result = yield* Effect.promise(() =>
+				deps.scheduledTasks
+					.triggerWebhook({
+						hookId: params.hookId,
+						token: params.token,
+						method: request.method,
+						path: `${WEBHOOK_ROUTE_PREFIX}/${encodeURIComponent(params.hookId)}`,
+						query: queryIndex === -1 ? "" : request.url.slice(queryIndex + 1),
+						headers,
+						body,
+						bodyText: new TextDecoder().decode(body),
+					})
+					.catch((error: unknown) => {
+						log.warn("webhook delivery failed", { hookId: params.hookId, error: messageOf(error) });
+						return { _tag: "error" as const };
+					}),
+			);
+			switch (result._tag) {
+				case "accepted":
+					return hookAnswer(202, { deliveryId: result.deliveryId }, result.outcome);
+				case "not_found":
+					return hookAnswer(404, { error: "hook_not_found" }, "not_found");
+				case "rejected_signature":
+					return hookAnswer(401, { error: "invalid_signature" }, "rejected_signature");
+				case "disabled":
+					return hookAnswer(409, { error: "hook_disabled" }, "disabled");
+				case "rate_limited":
+					return hookAnswer(429, { error: result.outcome }, result.outcome);
+				case "error":
+					return hookAnswer(500, { error: "internal_error" }, "error");
+			}
+		});
 	const webhooks = HttpApiBuilder.group(EnvironmentHttpApi, "webhooks", (handlers) =>
-		handlers
-			.handleRaw("webhookPost", () => unsupported("webhooks.webhookPost"))
-			.handleRaw("webhookPut", () => unsupported("webhooks.webhookPut"))
-			.handleRaw("webhookPatch", () => unsupported("webhooks.webhookPatch"))
-			.handleRaw("webhookGet", () => unsupported("webhooks.webhookGet")),
+		handlers.handleRaw("webhookPost", webhook).handleRaw("webhookPut", webhook).handleRaw("webhookPatch", webhook).handleRaw("webhookGet", webhook),
 	);
 
 	return HttpApiBuilder.layer(EnvironmentHttpApi).pipe(

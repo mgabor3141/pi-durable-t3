@@ -36,7 +36,7 @@ afterAll(async () => {
 
 type Task = { id: string; threadId: string | null; lastRunStatus: string; runCount: number; lastRunAt: string | null };
 
-it("subscribe, runNow (launch, then queue on the thread), and the webhook refusals", async () => {
+it("subscribe, runNow (launch, then queue on the thread), and a webhook task over the RPCs", async () => {
 	expect(await waitListening(PORT), host?.out().slice(-2000)).toBe(true);
 	const ws = await connectWs(PORT, await pair(PORT, pairCode(root)));
 	try {
@@ -85,13 +85,14 @@ it("subscribe, runNow (launch, then queue on the thread), and the webhook refusa
 			await sleep(50);
 		}
 
-		// Webhooks: refused, typed.
+		// Webhooks (task-webhooks.test.ts has the rest): a webhook task is saved with its URL's path; a task that is not
+		// one has no token to rotate, refused with the contract's typed error.
+		const hook = exitValue(await ws.call("scheduledTasks.upsert", { ...base, title: "Hook", prompt: "p", schedule: { type: "webhook", signature: null }, threadId: null }), "upsert webhook") as { task: { id: string; webhook: { path: string; url: string | null; hasSecret: boolean } } };
+		expect(hook.task.webhook).toMatchObject({ path: expect.stringMatching(/^\/api\/hooks\/[^/]+\/[\w-]{40,}$/), hasSecret: false });
+		expect(exitValue(await ws.call("scheduledTasks.listWebhookDeliveries", { id: hook.task.id }), "deliveries")).toEqual({ deliveries: [] });
 		const decode = Schema.decodeUnknownSync(Schema.toCodecJson(ScheduledTaskError));
-		const refusedUpsert = decode(exitError(await ws.call("scheduledTasks.upsert", { ...base, title: "Hook", prompt: "p", schedule: { type: "webhook", signature: null }, threadId: null }), "upsert webhook"));
-		expect(refusedUpsert.message).toBe("Webhook triggers are not supported by pi-durable-t3 yet.");
-		for (const tag of ["scheduledTasks.rotateWebhookToken", "scheduledTasks.listWebhookDeliveries"]) {
-			expect(decode(exitError(await ws.call(tag, { id: created.task.id }), tag)).message).toBe("Webhook triggers are not supported by pi-durable-t3 yet.");
-		}
+		expect(decode(exitError(await ws.call("scheduledTasks.rotateWebhookToken", { id: created.task.id }), "rotate")).message).toBe("Only webhook tasks have a URL token.");
+		exitValue(await ws.call("scheduledTasks.delete", { id: hook.task.id }), "delete webhook");
 
 		// Deleting a thread deletes the tasks bound to it (T3's `scheduled-tasks.cleanup` effect); an unbound task stays.
 		exitValue(await ws.call("orchestration.dispatchCommand", { type: "thread.delete", commandId: "del-bound-thread", threadId }), "thread.delete");

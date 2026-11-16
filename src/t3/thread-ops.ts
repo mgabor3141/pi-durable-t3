@@ -531,7 +531,7 @@ export class ThreadOps {
 		return task;
 	}
 
-	/** T3's `scheduledTaskSummary`; this host serves no webhooks, so no task carries one. */
+	/** T3's `scheduledTaskSummary`: a webhook task with its URL, when this host knows where it is reached. */
 	#summary(task: ScheduledTask): OrchestratorMcpScheduledTask {
 		return {
 			scheduledTaskId: task.id,
@@ -545,6 +545,8 @@ export class ThreadOps {
 			schedule: task.schedule,
 			nextRunAt: task.nextRunAt,
 			lastRunStatus: task.lastRunStatus,
+			...(task.webhook?.url == null ? {} : { webhookUrl: task.webhook.url }),
+			...(task.webhook === undefined ? {} : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
 		} as OrchestratorMcpScheduledTask;
 	}
 

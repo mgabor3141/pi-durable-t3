@@ -111,6 +111,13 @@ type AttachT3Options = {
 	 */
 	readonly titleThread?: TitleThread;
 	/**
+	 * Where a webhook's sender reaches this host, as `https://host` (no path), read at each use. A scheduled task with
+	 * a webhook trigger shows `<origin>/api/hooks/<task id>/<token>` as its URL, and agents are told it. Absent, or
+	 * answering nothing: the task shows the path only. The route itself is always served; whether a sender on the
+	 * internet reaches it is your network's doing.
+	 */
+	readonly webhookOrigin?: () => string | undefined;
+	/**
 	 * Context for the model about each message that starts or steers a turn, such as memories recalled for it. The text
 	 * you resolve with is stored with the message, hidden in T3's display and thread search, so the prompt cache holds.
 	 * Not called for notes or automatic messages (a child's report). The bridge waits at most 5 seconds; a rejection or a
@@ -286,6 +293,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		corsOrigins: options.corsOrigins ?? [DESKTOP_APP_ORIGIN],
 		staticDir: webApp,
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
+		...(options.webhookOrigin === undefined ? {} : { webhookOrigin: options.webhookOrigin }),
 		...(options.messageContext === undefined ? {} : { messageContext: options.messageContext }),
 		...(options.undo === undefined ? {} : { undo: options.undo }),
 		...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),

@@ -77,7 +77,7 @@ export function startFacet(deps: {
 	const bridge = new Bridge(config, log, deps.threads, deps.models, attachments);
 	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);
 	// Read before the host is ready (tasks the host cannot read stop it), polled while the facet runs.
-	const scheduledTasks = new ScheduledTasks({ harness: deps.threads.harness, dispatch: scheduledTaskDispatch(bridge), log });
+	const scheduledTasks = new ScheduledTasks({ harness: deps.threads.harness, dispatch: scheduledTaskDispatch(bridge), log, ...(bridge.config.webhookOrigin === undefined ? {} : { webhookOrigin: bridge.config.webhookOrigin }) });
 	bridge.start();
 	scheduledTasks.start();
 	// T3 deletes the tasks bound to a deleted thread (the thread deletion's `scheduled-tasks.cleanup` effect).

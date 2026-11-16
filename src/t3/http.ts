@@ -298,6 +298,7 @@ export function makeServerLayer(deps: {
 	const mcpOAuth = new McpOAuth(auth, { linksEnabled: () => bridge.config.settings.current().linkedEnvironmentsEnabled === true });
 
 	const apiLayer = makeHttpApiLayer({
+		scheduledTasks: deps.scheduledTasks,
 		mcpOAuth,
 		bridge,
 		auth,

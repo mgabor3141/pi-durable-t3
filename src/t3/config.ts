@@ -36,6 +36,9 @@ interface FacetConfig {
 	readonly staticDir: string | undefined;
 	/** A route the integrator runs (its own tailnet node, an SSH relay), advertised to T3. Absent: none. */
 	readonly remoteAccess?: RemoteAccess;
+	/** Where a webhook's sender reaches this host (`https://host`), read at each use: the URL a webhook task shows.
+	 * Absent, or nothing: a task shows its path only. */
+	readonly webhookOrigin?: () => string | undefined;
 	/** Title generation, delegated to the integrator. Absent: seeds and renames work, "Regenerate title" is refused. */
 	readonly titleThread?: TitleThread;
 	/** Context for the model about each message that starts or steers a turn (memories). Absent: none. */

@@ -557,7 +557,10 @@ it("an agent schedules, lists, changes and deletes a task with T3's tools", { ti
 	const [, changed, listed, webhook, deleted, again] = await sawAll(6);
 	expect(changed).toMatchObject({ enabled: false, boundThreadId: null, nextRunAt: null });
 	expect(listed.tasks).toEqual([expect.objectContaining({ scheduledTaskId: created.scheduledTaskId, enabled: false })]);
-	expect(webhook.error).toMatch(/^orchestration_error: Could not schedule task: /);
+	// A webhook task: this bridge was told no address it is reached at, so the agent is given no `webhookUrl`.
+	expect(webhook).toMatchObject({ title: "Hook", schedule: { type: "webhook", signature: null }, webhookSignature: "none", nextRunAt: null });
+	expect(webhook).not.toHaveProperty("webhookUrl");
+	await tasks().delete({ id: webhook.scheduledTaskId as never });
 	expect(deleted).toEqual({ scheduledTaskId: created.scheduledTaskId, deleted: true });
 	expect(again.error).toBe(`task_not_found: Scheduled task ${created.scheduledTaskId} was not found.`);
 	expect(tasks().list().tasks).toEqual([]);

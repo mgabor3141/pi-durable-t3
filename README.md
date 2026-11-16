@@ -71,6 +71,7 @@ const t3 = await attachT3(harness, {
 	listen,        // optional: { host, port }, default 127.0.0.1:3774
 	remoteAccess,  // optional: { current, subscribe } — a route you run (own tailnet node, SSH relay), advertised to T3
 	titleThread,   // optional: generate thread titles (below); absent = the first message seeds the title, no regenerate
+	webhookOrigin, // optional: () => "https://host", where a webhook's sender reaches this host: the URL a webhook task shows
 	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
 	rpcLog,        // optional: { onSuccess, onFailure, onStubbed } per-call debug sink for the T3 wire
 	// optional: context, label, corsOrigins, tokenTtlSeconds, log

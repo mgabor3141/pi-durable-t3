@@ -1,5 +1,5 @@
 // Scheduled tasks (T3's ScheduledTaskService + Schedule.ts, replicated for interval and fixed time): the schedule math,
-// upsert idempotence, a due task dispatching exactly once, runNow while running, restart recovery, the webhook refusal
+// upsert idempotence, a due task dispatching exactly once, runNow while running, restart recovery (webhooks: task-webhooks.test.ts)
 // and the change signal. A fake clock drives every test; the poll loop is never started, `tick()` is called directly.
 import { mkdtemp, rm } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WEBHOOKS_UNSUPPORTED, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -300,19 +300,6 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 
 		const reopened = (await fixture({ dir })).tasks;
 		expect(reopened.list().tasks[0]).toMatchObject({ id: task.id, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, runCount: 1, nextRunAt: "2026-07-01T12:01:00.000Z" });
-	});
-
-	it("a webhook trigger is refused with the typed error", async () => {
-		const { tasks } = await fixture();
-		let error: unknown;
-		try {
-			await tasks.upsert(input({ schedule: { type: "webhook", signature: null } as never }));
-		} catch (caught) {
-			error = caught;
-		}
-		expect(error).toBeInstanceOf(ScheduledTaskError);
-		expect((error as ScheduledTaskError).message).toBe(WEBHOOKS_UNSUPPORTED);
-		expect(tasks.list().tasks).toHaveLength(0);
 	});
 
 	it("a worktree workspace is refused: every run is at the project root", async () => {
