@@ -5,9 +5,9 @@
 import { get } from "node:http";
 import { gunzipSync } from "node:zlib";
 import WebSocket from "ws";
+import { sleep } from "./wait.ts";
 import { wsTicket } from "./ws-rpc.ts";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type HttpTransfer = {
 	readonly status: number;
@@ -65,6 +65,10 @@ export type MeasuredWs = {
 	chunks(requestId: string, from?: number): Arrival[];
 	/** What the socket has received in all: bytes on the wire, bytes once inflated, messages. */
 	totals(): WsTotals;
+	/** Send a frame as it is. */
+	send(frame: unknown): void;
+	/** Whether the socket has closed (the host reaps it when its token stops being active). */
+	isClosed(): boolean;
 	close(): void;
 };
 
@@ -77,6 +81,8 @@ export async function connectMeasured(port: number, token: string): Promise<Meas
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(ticket)}`, { perMessageDeflate: true });
 	const arrivals: Arrival[] = [];
 	let decodedBytes = 0;
+	let closed = false;
+	ws.on("close", () => void (closed = true));
 	ws.on("message", (data) => {
 		const text = data.toString();
 		const frame = JSON.parse(text) as Frame;
@@ -116,6 +122,8 @@ export async function connectMeasured(port: number, token: string): Promise<Meas
 		},
 		chunks: (requestId, from = 0) => arrivals.slice(from).filter((arrival) => arrival.frame._tag === "Chunk" && arrival.frame.requestId === requestId),
 		totals: () => ({ wireBytes: (ws as unknown as { _socket?: { bytesRead: number } })._socket?.bytesRead ?? 0, decodedBytes, messages: arrivals.length }),
+		send: (frame) => ws.send(JSON.stringify(frame)),
+		isClosed: () => closed,
 		close: () => ws.close(),
 	};
 }

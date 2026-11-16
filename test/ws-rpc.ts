@@ -2,6 +2,8 @@
 // Requests are `{_tag:"Request", id, tag, payload, headers}`; a unary answer is one `Exit` frame, and a stream sends
 // `Chunk` frames the client must `Ack` (the server's flow control — a client that does not ack sees only the first
 // chunk). Nothing here is a T3 import: the frames are the wire, and a test that asserts the wire asserts the contract.
+import { connectMeasured } from "./transfer.ts";
+import { sleep } from "./wait.ts";
 import { request } from "node:http";
 
 export type Frame = {
@@ -14,7 +16,6 @@ export type Frame = {
 	defect?: unknown;
 };
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function get(port: number, path: string): Promise<number> {
 	try {
@@ -78,61 +79,25 @@ export type WsRpc = {
 	close(): void;
 };
 
-/** Connect to `/ws` (protocol 2) with a fresh ticket, and ack every `Chunk` so streams keep flowing. */
+/** Connect to `/ws` as the web app does (`connectMeasured`: protocol 2, a fresh ticket, compression, every chunk acked). */
 export async function connectWs(port: number, token: string): Promise<WsRpc> {
-	const ticket = await wsTicket(port, token);
-	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(ticket)}`);
-	const frames: Frame[] = [];
-	const byRequest = new Map<number, Frame[]>();
-	let closed = false;
-	ws.addEventListener("close", () => {
-		closed = true;
-	});
-	ws.addEventListener("message", (event) => {
-		const frame = JSON.parse(String(event.data)) as Frame;
-		frames.push(frame);
-		if (frame._tag === "Chunk" && frame.requestId !== undefined) {
-			(byRequest.get(frame.requestId) ?? byRequest.set(frame.requestId, []).get(frame.requestId)!).push(frame);
-			// The server's per-request window opens only on an Ack: without it a stream stalls after its first chunk.
-			ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
-		}
-	});
-	await new Promise<void>((resolve, reject) => {
-		ws.addEventListener("open", () => resolve());
-		ws.addEventListener("error", () => reject(new Error("websocket connect failed")));
-	});
-	let nextId = 0;
-	const send = (frame: unknown): void => ws.send(JSON.stringify(frame));
-	const open = async (tag: string, payload: unknown): Promise<number> => {
-		const id = ++nextId;
-		send({ _tag: "Request", id, tag, payload, headers: [] });
-		return id;
-	};
-	const call = async (tag: string, payload: unknown, timeoutMs = 10_000): Promise<Frame> => {
-		const id = await open(tag, payload);
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const answer = frames.find((frame) => frame.requestId === id && (frame._tag === "Exit" || frame._tag === "Defect"));
-			if (answer !== undefined) return answer;
-			await sleep(25);
-		}
-		throw new Error(`no answer to ${tag} (id ${id}) within ${timeoutMs}ms; frames: ${JSON.stringify(frames).slice(0, 600)}`);
-	};
+	const socket = await connectMeasured(port, token);
+	const frames = (): Frame[] => socket.arrivals.map((arrival) => arrival.frame as unknown as Frame);
 	return {
-		isClosed: () => closed,
-		frames: () => frames.slice(),
-		chunks: (requestId) => (byRequest.get(requestId) ?? []).slice(),
-		call,
-		open,
-		send,
+		isClosed: () => socket.isClosed(),
+		frames,
+		chunks: (requestId) => socket.chunks(String(requestId)).map((arrival) => arrival.frame as unknown as Frame),
+		call: async (tag, payload, timeoutMs = 10_000) => (await socket.call(tag, payload, timeoutMs)).frame as unknown as Frame,
+		open: async (tag, payload) => Number(socket.open(tag, payload)),
+		send: (frame) => socket.send(frame),
 		// An answer or stream item that does not encode with the contract's schema ends its request with the RPC server's
 		// "Failed to encode response" defect (a protocol-level failure is a `Defect` frame). Closing a client that saw
 		// either fails the test, so every test that talks to a host checks that what it received is the contract's.
 		close: () => {
 			try {
-				ws.close();
+				socket.close();
 			} catch {}
-			const broken = frames.find(isEncodeFailure);
+			const broken = frames().find(isEncodeFailure);
 			if (broken !== undefined) throw new Error(`the host sent an item that does not encode: ${JSON.stringify(broken).slice(0, 800)}`);
 		},
 	};

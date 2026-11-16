@@ -1,6 +1,7 @@
 // T3's archive and snooze, kept on the thread as T3's server keeps them: an archived thread leaves the live sidebar for
 // the archive, and refuses sidebar changes until unarchived; a snoozed thread hides until its time, a message someone
 // sends wakes it (an automatic one does not), and the settlement sweep leaves it alone while it sleeps.
+import { until } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,15 +14,7 @@ import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, gated, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const iso = (value: DateTime.Utc | null | undefined): string | null => (value == null ? null : DateTime.formatIso(value));
-async function until(what: string, test: () => boolean | Promise<boolean>): Promise<void> {
-	for (let i = 0; i < 300; i++) {
-		if (await test()) return;
-		await sleep(20);
-	}
-	throw new Error(`timed out: ${what}`);
-}
 
 afterEach(() => vi.restoreAllMocks());
 

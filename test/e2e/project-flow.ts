@@ -12,6 +12,7 @@
 // PICK_TARGET (the directory to add), PICK_MARKER (a file inside it that must survive the removal).
 // Asserts on the DOM, the outgoing WS frames, the REST project list, and the filesystem.
 
+import { sleep } from "../wait.ts";
 import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
@@ -24,7 +25,6 @@ const launchTimeout = Number(process.env["E2E_LAUNCH_TIMEOUT_MS"] ?? 60000);
 const chrome = process.env["CHROMIUM"] ?? "/usr/bin/chromium";
 const heading = (message: string) => console.log(`\n=== project-flow: ${message} ===`);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function required(name: string): string {
 	const value = process.env[name];
 	if (!value) throw new Error(`${name} is required`);

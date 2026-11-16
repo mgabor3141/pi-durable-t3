@@ -5,6 +5,7 @@
 // it had, and the provider thread's last run is the turn rewound to. Before the fix the fork point cut the summary off,
 // the card's removal forced a snapshot without the rolled-back run, and T3 timed out ("Timed out waiting for the
 // thread to rewind").
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +21,6 @@ import { windowedProjection } from "../src/t3/thread-stream.ts";
 import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const FORK = "00000000-0000-4000-8000-0000000000f1";
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("editing the message after a compaction keeps the compaction, and T3 sees the rewind", { timeout: 60_000 }, async () => {
 	const snapshots: string[] = [];

@@ -2,6 +2,7 @@
 // `runNow` of a thread-less task launches a thread whose first user message carries `scheduledTaskId` (what T3's
 // timeline renders as an automation), a second task bound to that thread queues its prompt there, and webhook triggers
 // and the webhook-only calls are refused with the contract's `ScheduledTaskError`, decodable as such.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +34,6 @@ afterAll(async () => {
 	await rm(root, { recursive: true, force: true });
 }, 30_000);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type Task = { id: string; threadId: string | null; lastRunStatus: string; runCount: number; lastRunAt: string | null };
 
 it("subscribe, runNow (launch, then queue on the thread), and the webhook refusals", async () => {

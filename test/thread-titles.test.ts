@@ -2,6 +2,7 @@
 // ThreadTitleRegenerationService), driven on a real in-process `Bridge` over the chord objects with a scripted
 // `titleThread` hook: the seed on the first message only, the hook's request, renames (cancelling an in-flight
 // request), regenerate with and without the hook, "New thread" ignored, a restart, and launch titles.
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,6 @@ import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
 import { conversation, makeThreads, restart, type ThreadsFixture, bridgeConfig } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const warnings: string[] = [];
 const log: Logger = { info: () => {}, warn: (message) => void warnings.push(message) };
 

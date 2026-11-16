@@ -6,6 +6,7 @@
 // Each test spawns `node --experimental-strip-types examples/coding-agent/src/host.ts` with the offline reply model on a loopback port chosen
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
 // never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
+import { sleep } from "./wait.ts";
 import { seedProjects } from "./host-process-harness.ts";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -15,7 +16,6 @@ import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
 const main = new URL("../examples/coding-agent/src/host.ts", import.meta.url).pathname;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-host-proc-"));
 const agentDir = join(scratch, "agent");

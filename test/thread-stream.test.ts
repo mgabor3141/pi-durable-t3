@@ -1,6 +1,7 @@
 // The thread stream (`thread-stream.ts` + the bridge's flush): a session of prompts, a tool call, a queued follow-up,
 // an undo and a manual compaction, watched the way T3's web app watches it — every update is checked against T3's own
 // client reducer and the contract's encoding. Live changes go out as events; a snapshot only for what no event can say.
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,6 @@ import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const WEB: ThreadStreamOptions = { bounded: true, deferWork: true, compactTurnItems: true, dedupeBodies: true, compactIds: true };
 const encodeItem = Schema.encodeSync(OrchestrationV2ThreadStreamItem);
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const visibleKeys = (projection: OrchestrationV2ThreadProjection) => projection.visibleTurnItems.map((row) => `${row.sourceItemId}@${row.position}`);
 
 async function open(options: { turns?: number; tokensPerSecond?: number } = {}) {

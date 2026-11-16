@@ -3,6 +3,7 @@
 // truthfully (no rate table), and an inverted window must come back as T3's typed `UsageReadError` — the shape the UI
 // shows. Cost is pi's own; the offline reply model reports no price, so the turn is `unpriced` with real tokens, exactly
 // what the page renders as "Unpriced".
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +22,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const dayMs = 86_400_000;
 const utcDay = (offsetDays: number): UsageDay => new Date(Date.now() - offsetDays * dayMs).toISOString().slice(0, 10) as UsageDay;
 

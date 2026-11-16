@@ -1,6 +1,7 @@
 // Undo, as T3 shows it: the reverted runs stay in the projection marked rolled back, and the thread carries the last
 // rollback's outcome. Both are read from what is stored — the undo record names the head it left, whose runs are the
 // rolled-back ones — so they survive a restart and a chain of undos.
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,6 @@ import type { Threads } from "../src/threads.ts";
 import { createNamed, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function boot(threads: Threads, registry: ProjectRegistry, models: Models): Promise<Bridge> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-rollback-"));

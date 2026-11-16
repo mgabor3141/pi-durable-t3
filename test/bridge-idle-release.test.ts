@@ -1,6 +1,7 @@
 // An idle thread releases its chord references, so the objects behind it are disposed instead of piling up per open
 // (each reopen used to take two more references and never give them back). Reopening re-creates them from durable state:
 // the transcript is all there, and the thread takes the next message.
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,6 @@ import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 afterEach(() => vi.restoreAllMocks());
 

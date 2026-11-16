@@ -2,6 +2,7 @@
 // version is the host's: the provider's snapshot carries the version that runs, the newest there is, and the command,
 // and T3's Update (`server.updateProvider`) installs and restarts. T3 offers that button in the web app and the
 // desktop app; its server update (`server.updateServer`) only where a server's T3 version is behind the client's.
+import { sleep } from "./wait.ts";
 import { afterEach, expect, it, vi } from "vitest";
 import { HOST_UPDATE_CHECK_MS, HostUpdateWatch, RESTART_AFTER_MS } from "../src/t3/host-updates.ts";
 import type { HostUpdates } from "../src/t3/updates-config.ts";
@@ -144,8 +145,7 @@ it("over /ws: the provider carries the advisory, Update answers T3's provider pa
 	const { connectWs, exitValue, pair, waitListening } = await import("./ws-rpc.ts");
 	const { makeThreads } = await import("./threads-harness.ts");
 	const PORT = 4973;
-	const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-	type Provider = { version: string; versionAdvisory?: { status: string; latestVersion: string | null }; updateState?: { status: string; message: string | null } };
+		type Provider = { version: string; versionAdvisory?: { status: string; latestVersion: string | null }; updateState?: { status: string; message: string | null } };
 
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	const stateDir = join(f.root, "t3-state");

@@ -9,6 +9,7 @@
 // This test drives the real path a client drives: create a thread in the project over `/ws`, watch the shell, then
 // delete the project. The cascade has to answer on the shell (`thread.removed` per thread), the entry has to go, the
 // non-empty project has to refuse an unforced delete, and the workspace's files and the durable store have to survive.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,7 +30,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const shellItems = (chunks: Frame[]): ShellItem[] => chunks.flatMap((frame) => (frame.values ?? []) as ShellItem[]);
 
 type ShellItem = { kind: string; threadId?: string; projectId?: string; thread?: { id?: string; title?: string } };

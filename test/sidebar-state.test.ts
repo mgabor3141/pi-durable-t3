@@ -1,5 +1,6 @@
 // T3's sidebar state, kept on the thread as T3's server keeps it: pins and their order, the dragged order of the active
 // section, the read watermark and opens, automatic settlement switched off, and the settlement sweep.
+import { until } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,15 +13,7 @@ import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, makeThreads, bridgeConfig, gated } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const iso = (value: DateTime.Utc | null | undefined): string | null => (value == null ? null : DateTime.formatIso(value));
-async function until(what: string, test: () => boolean | Promise<boolean>): Promise<void> {
-	for (let i = 0; i < 300; i++) {
-		if (await test()) return;
-		await sleep(20);
-	}
-	throw new Error(`timed out: ${what}`);
-}
 
 afterEach(() => vi.restoreAllMocks());
 

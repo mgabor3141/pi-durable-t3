@@ -140,7 +140,8 @@ did not appear until the thread was opened again. An `afterSequence` resume repl
 sequence is a clock-floored counter of this process, so after a restart every resume is a snapshot, which the contract
 allows.
 
-Cost of one streamed reply of about 4 s (`bench/thread-stream.bench.test.ts`, faux model):
+Cost of one streamed reply of about 4 s (measured before compression, by a bench that `bench/transfer.bench.test.ts`
+has since replaced; faux model):
 
 | earlier turns | bounded open | full projection | items during the reply | snapshots | bytes for the reply | CPU |
 |---:|---:|---:|---:|---:|---:|---:|

@@ -1,6 +1,7 @@
 // The scenario the transfer budgets are measured on (`transfer-budget.test.ts`), and that the bench runs at other
 // sizes (`bench/transfer.bench.test.ts`): a host over a real socket, a long thread and a sidebar of threads written
 // through the commands a client sends, then what a person does, measured.
+import { sleep } from "./wait.ts";
 import { join } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -12,7 +13,6 @@ import { gated, makeThreads } from "./threads-harness.ts";
 import { connectMeasured, measureHttpGet, since, succeeded, type Arrival, type MeasuredWs } from "./transfer.ts";
 import { pair, waitListening } from "./ws-rpc.ts";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const WEB = { acceptBoundedSnapshot: true, acceptDeferredWork: true, acceptCompactTurnItems: true, acceptDedupedBodies: true, acceptCompactIds: true, requestCompletionMarker: true };
 
 export type TransferScenario = {

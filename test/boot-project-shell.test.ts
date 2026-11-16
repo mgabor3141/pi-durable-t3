@@ -6,6 +6,7 @@
 //
 // The fix seeds `#shownProjects` at `start()` with the boot registry (the shell snapshot is the connect baseline; seeding
 // is silent). This test uses a project loaded from the FILE, not one the session created — the shape the fix is for.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +24,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type ShellItem = { kind: string; projectId?: string; project?: { id: string; title: string; workspaceRoot?: string } };
 const shellItems = (chunks: Frame[]): ShellItem[] => chunks.flatMap((frame) => (frame.values ?? []) as ShellItem[]);
 type ShellSnapshot = { projects: { id: string; title: string }[] };

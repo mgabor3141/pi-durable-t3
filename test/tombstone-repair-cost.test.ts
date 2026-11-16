@@ -7,12 +7,12 @@
 //     a thread the document has removed has no live turn. Probe: start a long streaming run, begin the removal
 //     (its abort lands), admit a second long run in the window, await the removal → the conversation must
 //     settle on its own (both runs interrupted), not stream for the ~200 s their tokens would take.
+import { sleep } from "./wait.ts";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads } from "../src/threads.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("the removal wins the run", () => {
 	it("(b) a prompt admitted in the abort→commit window is interrupted by the removal (conc N4)", async () => {

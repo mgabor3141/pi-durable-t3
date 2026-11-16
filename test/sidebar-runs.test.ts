@@ -1,6 +1,7 @@
 // The sidebar shows a thread's latest run whether or not the thread is open, and the bridge sees every run end — one
 // that outlives the client's view of it, and one started without the bridge (an agent's prompt, a run resumed after a
 // restart). T3's sidebar sorts by those run times, and its notifications fire on that end.
+import { sleep, until } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,15 +14,7 @@ import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, gated, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const iso = (value: DateTime.Utc | null | undefined): string | null => (value == null ? null : DateTime.formatIso(value));
-async function until(what: string, test: () => boolean | Promise<boolean>): Promise<void> {
-	for (let i = 0; i < 300; i++) {
-		if (await test()) return;
-		await sleep(20);
-	}
-	throw new Error(`timed out: ${what}`);
-}
 
 afterEach(() => vi.restoreAllMocks());
 

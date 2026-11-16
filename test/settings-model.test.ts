@@ -4,6 +4,7 @@
 // like it reverted). A failed write answers the contract's typed `ServerSettingsError`, BUILT as the contract's
 // class with the required `settingsPath`/`operation` (M3: the hand-rolled shape encoded as a Defect). The bridge
 // validates the model against no catalog and computes no defaults — it stores what the client sent.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,7 +116,6 @@ describe("the settings store (T3's patch + persistence semantics)", () => {
 	});
 });
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A root with one project (the offline reply model pairs with minted codes). */
 async function makeRoot(name: string, port: number): Promise<string> {

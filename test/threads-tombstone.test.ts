@@ -3,6 +3,7 @@
 // AFTER the removal — resurrecting the conversation as a fresh thread row. This makes that promise durable: the
 // threads document keeps one id per removal (the removed thread's head conversation), and the promote path and the
 // undo fork skip tombstoned conversations — the only automatic adoptions that exist.
+import { sleep } from "./wait.ts";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -11,7 +12,6 @@ import { type ConversationId } from "@earendil-works/pi-durable";
 import { Threads } from "../src/threads.ts";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("a removal is durable (F1)", () => {
 	it("(a) a prompt in flight racing a removal: the thread does not resurrect — not now, not after a restart", async () => {

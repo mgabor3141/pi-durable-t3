@@ -1,6 +1,7 @@
 // `attachT3`'s `remoteAccess`: a route the integrator runs (its own tailnet node, an SSH relay) is advertised to T3,
 // as T3's server advertises what it discovers: the HTTPS URL as a `directEndpoints` entry, the SSH host editors open
 // paths on as a `remoteOpenTargets` entry. A change reaches connected clients as a fresh snapshot.
+import { sleep } from "./wait.ts";
 import { join } from "node:path";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import * as Schema from "effect/Schema";
@@ -11,7 +12,6 @@ import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { makeThreads } from "./threads-harness.ts";
 
 const PORT = 4971;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("advertises the integrator's URL and SSH host, and pushes a snapshot when they change", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }] });

@@ -3,6 +3,7 @@
 // server projection (GET /api/orchestration/threads/:id) and the DOM.
 // Run via dev/browser-smoke.sh, which sets T3_WEB (web app), BRIDGE (facet), PAIR (a single-use pairing code).
 
+import { sleep } from "../wait.ts";
 import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
@@ -21,7 +22,6 @@ type Projection = {
 };
 
 const token = await bridgeToken();
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function required(name: string): string {
 	const value = process.env[name];
 	if (!value) throw new Error(`${name} is required`);

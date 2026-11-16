@@ -1,6 +1,7 @@
 // T3's Settings → Sharing & access, server side, end to end over a real host: mint a pairing link, exchange it for a
 // client session, list the devices, revoke them, and watch the `subscribeAuthAccess` stream. Every response is
 // checked against the contract's schema (the web app's HttpApi client decodes the same bytes). One flow per host.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,7 +86,6 @@ const decodes = (schema: any, body: unknown): boolean => {
 type AccessEvent = { type: string; revision: number; payload: Record<string, unknown> };
 /** Stream events ride in `Chunk.values` (the RPC server's flow-controlled array frame). */
 const accessEvents = (ws: WsRpc, requestId: number): AccessEvent[] => ws.chunks(requestId).flatMap((frame) => (frame.values ?? []) as AccessEvent[]);
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(what: string, deadline: number, poll: () => Promise<boolean>): Promise<void> {
 	while (Date.now() < deadline) {
 		if (await poll()) return;

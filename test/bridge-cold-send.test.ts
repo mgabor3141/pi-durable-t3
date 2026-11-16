@@ -2,6 +2,7 @@
 // not-yet-loaded head and threw "still loading" — the message was lost. It worked only when an earlier `selectModel` had
 // happened to warm the thread. Now every write awaits the loaded head (S2). This drives a real `Bridge` over the chord
 // objects in-process (no server): create a thread, then send as the FIRST write, and prove the user turn is not lost.
+import { sleep } from "./wait.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,6 @@ import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("sends the first message on a cold thread with no prior warming (S2)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });

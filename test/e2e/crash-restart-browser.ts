@@ -14,6 +14,7 @@
 //   SENT_FILE   written once the message is on screen and the run is live (the shell kills on seeing it)
 //   RESTARTED_FILE  appears once the shell has restarted the host; this script then checks and exits.
 
+import { sleep } from "../wait.ts";
 import { chromium } from "playwright-core";
 
 const webAppUrl = required("T3_WEB").replace(/\/$/, "");
@@ -28,7 +29,6 @@ const launchTimeout = Number(process.env["E2E_LAUNCH_TIMEOUT_MS"] ?? 60000);
 const chrome = process.env["CHROMIUM"] ?? "/usr/bin/chromium";
 const heading = (message: string) => console.log(`\n=== crash-smoke: ${message} ===`);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 function required(name: string): string {
 	const value = process.env[name];
 	if (!value) throw new Error(`${name} is required`);

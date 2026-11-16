@@ -3,6 +3,7 @@
 // thread as a fresh one (S3). Here a thread's turn is in flight, the thread is deleted, and we assert the run is no
 // longer owed and a late promote — the only automatic adoption left — does not bring the thread back: the tombstone
 // outranks it (design.md, Invariants).
+import { sleep } from "./wait.ts";
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -10,7 +11,6 @@ import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
 import { createNamed, makeThreads } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("delete aborts the running turn (S3)", () => {
 	it("deleting a thread mid-run aborts it and a late promote does not resurrect the thread", async () => {

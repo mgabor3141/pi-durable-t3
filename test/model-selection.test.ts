@@ -2,6 +2,7 @@
 // T3's pi driver declares). One test, on the wire: the picker declares pi's ladder for a reasoning model, a level
 // carried on a launch reaches the conversation and is reported back by the projection, `thread.model-selection.set`
 // moves it, and a model the catalog does not have is refused BY NAME.
+import { sleep } from "./wait.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +20,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type ProviderModel = { slug: string; capabilities: { optionDescriptors?: { id: string; type: string; options?: { id: string }[] }[] } | null };
 
