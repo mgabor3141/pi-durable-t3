@@ -67,6 +67,11 @@ it("compacts an idle thread shortly before its prompt cache expires, once, and s
 	// The `/compact` is the host's own, marked as T3 marks its own.
 	expect(messages.find((message) => message.text === "/compact")).toMatchObject({ role: "user", createdBy: "agent", creationSource: "server", idleCompaction: "beforeCacheExpires" });
 	expect(logged.some((line) => line.startsWith("compacting an idle thread before its prompt cache expires"))).toBe(true);
+	// The context meter follows: the newest report is an estimate of what is left, not the size from before.
+	const after = (await bridge.projection("t")).projection.providerTurns.at(-1)!.tokenUsage as unknown as Usage & { usedTokens: number; updatedAt: string };
+	expect(after.usedTokens).toBeGreaterThan(0);
+	expect(after.usedTokens).toBeLessThan((usage as unknown as { usedTokens: number }).usedTokens);
+	expect(Date.parse(after.updatedAt)).toBeGreaterThanOrEqual(Date.parse((usage as unknown as { updatedAt: string }).updatedAt));
 	// A compaction is not compacted: one idle spell, one compaction.
 	await sleep(2500);
 	expect(await compactions()).toBe(1);

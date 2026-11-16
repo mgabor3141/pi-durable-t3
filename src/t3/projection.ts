@@ -30,6 +30,7 @@ import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } f
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
+import { sentTokens, sizeAfterCompaction } from "./context-size.ts";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
 
 /** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
@@ -526,7 +527,9 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 	const requestedAt = synthetic ? (firstStep === undefined ? anchorAt : (firstMessage(firstStep)?.timestamp ?? anchorAt)) : anchorAt;
 	const assistants = draft.steps.filter(isAssistantEntry);
 	const lastAssistant = assistants.at(-1);
-	const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
+	// The usage T3's context meter reads: the last request that was counted. One that failed has zeros, and would
+	// show an empty context.
+	const lastAssistantMessage = assistants.map((entry) => firstMessage(entry)).findLast((message) => message?.role === "assistant" && sentTokens(message.usage) > 0);
 	const usage = lastAssistantMessage?.role === "assistant" ? lastAssistantMessage.usage : undefined;
 	const running = isLast && busy;
 	const compactCommand = isCompactCommandEntry(u);
@@ -1462,6 +1465,7 @@ export function projectThread(
 		else shownIn.set(draft, [...(shownIn.get(draft) ?? []), shown]);
 	}
 	drafts.forEach((draft, index) => projectRun(b, shownIn, draft, index));
+	projectCompactedSize(b);
 	// Answers with no run to stand by: an undo's, on a thread it emptied.
 	for (const shown of shownAlone) shownAnswer(b, shown, drafts.length + 1);
 
@@ -1470,6 +1474,24 @@ export function projectThread(
 	projectQueued(b);
 	const rows = projectRows(b);
 	return { projection: rows.projection, shell: projectShell(b, rows), runs: b.projectedRuns, forkRuns: b.forkRuns, toolImages: b.toolImages };
+}
+
+/**
+ * After a compaction, until a request answers: the newest run's usage is the context's estimated size
+ * (`context-size.ts`). T3's meter shows the newest report, which would be the size from before.
+ */
+function projectCompactedSize(b: Build): void {
+	const { meta, transcript, providerTurns } = b;
+	const turn = providerTurns.at(-1);
+	if (turn === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0) return;
+	const usedTokens = sizeAfterCompaction(transcript);
+	if (usedTokens === undefined) return;
+	const compactedAt = firstMessage(transcript.findLast(isCompactionEntry)!)?.timestamp ?? 0;
+	// Not older than the report it replaces: T3 takes the newest by this time.
+	const reportedAt = turn.tokenUsage === undefined ? 0 : Date.parse(turn.tokenUsage.updatedAt);
+	const endedAt = turn.completedAt ?? turn.startedAt;
+	const updatedAt = new Date(Math.max(compactedAt, reportedAt, endedAt === null ? 0 : DateTime.toEpochMillis(endedAt))).toISOString();
+	providerTurns[providerTurns.length - 1] = { ...turn, tokenUsage: { usedTokens, maxTokens: meta.contextWindow, updatedAt } } as OrchestrationV2ProviderTurn;
 }
 
 /** A compaction summary entry: shown as T3's compaction card where it landed. */
@@ -1501,7 +1523,7 @@ function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord
 		const message = firstMessage(entry);
 		if (message?.role !== "assistant") continue;
 		const usage = (message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage;
-		const sent = (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
+		const sent = sentTokens(usage);
 		if (sent <= 0) continue;
 		for (const count of waiting) count.after = sent;
 		waiting = [];
