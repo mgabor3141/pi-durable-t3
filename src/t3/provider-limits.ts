@@ -61,7 +61,7 @@ export class ProviderLimits {
 			const autoResume = bridge.config.settings.current().autoResumeLimitedThreads === true || resetAt - Date.now() < AUTO_RESUME_WITHIN_MS;
 			await bridge.store.limitReached({ threadId, conversationId: head, runId: run.id as string, resetAt, autoResume });
 			// The messages queued behind the run stay queued (`Threads.abort`): they follow it when it is continued.
-			await bridge.store.abort({ threadId, conversationId: head });
+			await bridge.store.queue.abort({ threadId, conversationId: head });
 			bridge.log.info("a provider's limit ended a run", { threadId, resetAt: new Date(resetAt).toISOString(), autoResume });
 		})()
 			.catch((error: unknown) => bridge.log.warn("a run that reached a provider's limit was not ended; it goes on retrying", { threadId, error: String(error) }))

@@ -1263,8 +1263,8 @@ export class Bridge {
 				if (input.note === true) return void (await this.#store.submit({ ...request, note: true }, undefined));
 				if (input.mode === "restart" && busy) {
 					// The run ends and this message runs now; what was queued behind the run follows it.
-					await this.#store.abort({ threadId: input.threadId, conversationId: head });
-					return void (await this.#store.submitFirst(request));
+					await this.#store.queue.abort({ threadId: input.threadId, conversationId: head });
+					return void (await this.#store.queue.submitFirst(request));
 				}
 				// A thread that waits for a provider's limit to reset takes messages as a working one does: they wait their
 				// turn, a steer for the run that is continued and the others behind it.
@@ -1389,7 +1389,7 @@ export class Bridge {
 			this.#stops.requested(threadId, state);
 			// The abort resolves once every task it marked has ended, so a tool that does not listen would hold the answer.
 			// Its failure surfaces when it fails at once; a later one is logged.
-			const aborting = this.#store.abort(input).then(
+			const aborting = this.#store.queue.abort(input).then(
 				() => undefined,
 				(error: unknown) => (error instanceof Error ? error : new Error(String(error))),
 			);
@@ -1400,7 +1400,7 @@ export class Bridge {
 					if (error !== undefined) this.#log.warn("stop: the abort failed", { threadId, error: error.message });
 				});
 			}
-			const ended = await this.#store.endDeadRun(input);
+			const ended = await this.#store.queue.endDeadRun(input);
 			if (ended.run !== undefined || ended.compactions.length > 0) {
 				this.#log.warn("stop: ended work whose tasks had already ended (its state was changed outside pi-durable)", { threadId, conversationId: head, runTask: ended.run, compactionTasks: ended.compactions });
 			}
@@ -1412,7 +1412,7 @@ export class Bridge {
 	async cancelQueued(threadId: string, runId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
-			await this.#store.cancelQueued(threadId, runId);
+			await this.#store.queue.cancelQueued(threadId, runId);
 		} finally {
 			release();
 		}
@@ -1421,7 +1421,7 @@ export class Bridge {
 	async editQueued(threadId: string, runId: string, text: string, attachments?: readonly { id: string; name: string; mimeType: string; sizeBytes: number }[]): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
-			await this.#store.editQueued(threadId, runId, text, attachments === undefined ? undefined : [...attachments]);
+			await this.#store.queue.editQueued(threadId, runId, text, attachments === undefined ? undefined : [...attachments]);
 		} finally {
 			release();
 		}
@@ -1430,7 +1430,7 @@ export class Bridge {
 	async promoteQueued(threadId: string, runId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
-			await this.#store.promoteQueued(threadId, runId);
+			await this.#store.queue.promoteQueued(threadId, runId);
 		} finally {
 			release();
 		}
@@ -1439,7 +1439,7 @@ export class Bridge {
 	async startQueued(threadId: string, runId: string | undefined, requestId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
-			await this.#store.startQueued(threadId, runId, requestId);
+			await this.#store.queue.startQueued(threadId, runId, requestId);
 			// The queue was started by hand: the thread no longer waits for a limit to reset.
 			if (this.#summary(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
 		} finally {

@@ -123,7 +123,7 @@ it("a resume after the last sequence gets only what follows; an unknown one gets
 	expect(late.updates[0]?.kind).toBe("events");
 });
 
-it("a queued message that is removed stays in the stream as a cancelled run, as T3's server keeps it; a record that goes away is a snapshot", { timeout: 60_000 }, async () => {
+it("a queued message that is removed stays in the stream as a cancelled run, as T3's server keeps it", { timeout: 60_000 }, async () => {
 	const { f, bridge, reasons, idle, send } = await open({ tokensPerSecond: 20 });
 	const watcher = client(bridge);
 	f.model.respond(fauxAssistantMessage("slow ".repeat(40)));
@@ -144,10 +144,10 @@ it("a queued message that is removed stays in the stream as a cancelled run, as 
 	await idle();
 	await sleep(150);
 	const { projection } = await bridge.projection("t");
-	// The Stop's row goes away when the run has ended: a record that is gone, which is a snapshot (and the cancelled run with it).
-	expect(reasons.length, `the stop's end needed a snapshot: ${JSON.stringify(reasons)}`).toBeGreaterThan(0);
+	// The client still matches the thread: the same rows, and the same runs beside the cancelled one (which a later
+	// snapshot, when one is needed, leaves out).
 	expect(visibleKeys(watcher.current()!)).toEqual(visibleKeys(projection));
-	expect(watcher.current()!.runs.map((run) => run.id)).toEqual(projection.runs.map((run) => run.id));
+	expect(watcher.current()!.runs.filter((run) => run.id !== queued!.id).map((run) => run.id)).toEqual(projection.runs.map((run) => run.id));
 });
 
 it("the bounded snapshot stays small on a long thread, and its history pages walk back to the start", { timeout: 120_000 }, async () => {

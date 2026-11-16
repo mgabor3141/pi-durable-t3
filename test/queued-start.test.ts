@@ -23,7 +23,7 @@ describe("starting a queued message", () => {
 		const readInbox = async () => await fixture.harness.commit(async (tx) => JSON.parse(JSON.stringify(await tx.doc(InboxDoc, thread.head as never))), BACKGROUND_CONTEXT);
 		const inboxBefore = await readInbox();
 		expect(inboxBefore?.items).toMatchObject([{ id: queued.id, mode: "followUp", content: "queued" }]);
-		await fixture.threads.startQueued("t", `q${queued.id}`, "start");
+		await fixture.threads.queue.startQueued("t", `q${queued.id}`, "start");
 		await idle(fixture.harness, thread.head);
 		expect((await readInbox()).items).toEqual([]);
 		const entries = await (await conversation(fixture.harness, thread.head)).context(BACKGROUND_CONTEXT);
@@ -54,7 +54,7 @@ describe("starting a queued message", () => {
 		const thread = await createNamed(fixture.threads, fixture.harness, fixture.model)({ threadId: "t", projectId: "p" });
 		await fixture.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "first", message: "first" }, undefined);
 		const steer = await fixture.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "steer", message: "go left" }, "steer");
-		await fixture.threads.editQueued("t", `q${steer.id}`, "go right");
+		await fixture.threads.queue.editQueued("t", `q${steer.id}`, "go right");
 		first.open();
 		await idle(fixture.harness, thread.head);
 		const context = await (await conversation(fixture.harness, thread.head)).context(BACKGROUND_CONTEXT);
@@ -66,7 +66,7 @@ describe("starting a queued message", () => {
 		// Removed before the boundary: the turn ends without it.
 		await fixture.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "second", message: "second" }, undefined);
 		const dropped = await fixture.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "steer-2", message: "never mind" }, "steer");
-		await fixture.threads.cancelQueued("t", `q${dropped.id}`);
+		await fixture.threads.queue.cancelQueued("t", `q${dropped.id}`);
 		second.open();
 		await idle(fixture.harness, thread.head);
 		expect(JSON.stringify((await (await conversation(fixture.harness, thread.head)).context(BACKGROUND_CONTEXT)).messages)).not.toContain("never mind");
