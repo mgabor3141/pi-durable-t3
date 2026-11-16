@@ -48,6 +48,7 @@ import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
 import { MessageContexts } from "./message-contexts.ts";
+import { compactCommand, QueuedCompaction } from "./queued-compaction.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
 /** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
@@ -168,6 +169,8 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
+	/** A `/compact` that waits in the queue (`T3Attachment.queuedCompaction`). */
+	readonly queuedCompaction = new QueuedCompaction();
 	/** Context for the model about each message, from the integrator (`T3Attachment.messageContext`). */
 	readonly messageContexts: MessageContexts;
 
@@ -1183,6 +1186,11 @@ export class Bridge {
 			if (input.continuationOf !== undefined) {
 				await this.#commands.continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
 				return;
+			}
+			// A `/compact` sent as a queued message waits its turn behind the run that works (`queued-compaction.ts`); with
+			// no run to wait behind, or sent any other way, it compacts now.
+			if (input.mode === "queue" && this.queuedCompaction.active && compactCommand(input.text) !== undefined) {
+				if (await this.#store.queueBehindRun({ conversationId: head, requestId: input.commandId, message: input.text.trim(), messageId: input.messageId })) return;
 			}
 			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;

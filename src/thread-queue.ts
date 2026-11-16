@@ -9,6 +9,7 @@ import { hostError } from "./host-errors.ts";
 import { HeldQueueDoc, type Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
+import { compactCommand } from "./t3/queued-compaction.ts";
 import type { MessageInput } from "./threads.ts";
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -18,6 +19,7 @@ type QueueHost = {
 	readonly harness: Harness;
 	thread(threadId: string): Promise<Thread | undefined>;
 	submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission>;
+	compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void>;
 };
 
 export class ThreadQueue {
@@ -88,15 +90,24 @@ export class ThreadQueue {
 			if (target === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
 			const [input] = readQueuedInputs([target]);
 			if (input === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is not a user message`);
+			// A queued `/compact` is a command, never a prompt: it leaves the queue and compacts, and the others stay
+			// queued behind the compaction, which places them when its summary lands.
+			const guidance = compactCommand(input.text);
+			if (guidance !== undefined) {
+				tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
+				inbox.items.splice(inbox.items.indexOf(target), 1);
+				return { compact: { guidance, messageId: input.messageId }, input, rest: [], awaitsContext: false };
+			}
 			const rest = candidates.filter((item) => item.id !== target.id).map((item) => copy(item));
 			// The selected submission becomes the new run; the others keep their queued submissions while they wait.
 			tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
 				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
 			}
-			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true };
+			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true, compact: undefined };
 		}, BACKGROUND_CONTEXT);
 		if (held === undefined) return;
+		if (held.compact !== undefined) return this.#threads.compact(threadId, held.compact.guidance === "" ? undefined : held.compact.guidance, held.compact.messageId);
 		const content = held.input.content;
 		const blocks = Array.isArray(content)
 			? content.filter((block): block is ContentBlock => typeof block === "object" && block !== null && (block as { type?: unknown }).type !== "text")
@@ -145,12 +156,19 @@ export class ThreadQueue {
 	async promoteQueued(threadId: string, runId: string): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const submissionId = this.#queuedSubmission(runId);
-		await this.#threads.harness.commit(async (tx) => {
+		const compact = await this.#threads.harness.commit(async (tx) => {
 			const inbox = await tx.doc(InboxDoc, conversationId);
 			const item = inbox.items.find((candidate) => candidate.id === submissionId);
 			if (item === undefined || item.mode === "write") throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
-			item.mode = "steer";
+			// A queued `/compact` sent now: it compacts now, beside the run, as one typed without queueing does.
+			const [input] = readQueuedInputs([item]);
+			const guidance = input === undefined ? undefined : compactCommand(input.text);
+			if (input === undefined || guidance === undefined) return void (item.mode = "steer");
+			tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
+			inbox.items.splice(inbox.items.indexOf(item), 1);
+			return { guidance, messageId: input.messageId };
 		}, BACKGROUND_CONTEXT);
+		if (compact !== undefined) await this.#threads.compact(threadId, compact.guidance === "" ? undefined : compact.guidance, compact.messageId);
 	}
 
 	/**

@@ -44,6 +44,8 @@ type FacetHandle = {
 	secretRequests(sink: SecretSink): Extension;
 	/** The `ask_user` tool (`T3Attachment.askUser`). */
 	askUser(): Extension;
+	/** A `/compact` that waits in the queue (`T3Attachment.queuedCompaction`). */
+	queuedCompaction(): Extension;
 	/** A message's context from the integrator (`T3Attachment.messageContext`). */
 	messageContext(messageContext: MessageContext): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
@@ -139,6 +141,7 @@ export function startFacet(deps: {
 		secretRequests: (sink) => secretRequests.extension(sink),
 		askUser: () => bridge.userInput.extension(),
 		messageContext: (messageContext) => bridge.messageContexts.extension(messageContext),
+		queuedCompaction: () => bridge.queuedCompaction.extension(),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.

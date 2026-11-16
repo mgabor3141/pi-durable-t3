@@ -199,6 +199,13 @@ export type T3Attachment = {
 	 */
 	messageContext(messageContext: MessageContext): Extension;
 	/**
+	 * A `/compact` that waits its turn, as an extension to install on the Harness's registry. With it, a `/compact`
+	 * sent as a queued message while the agent works stays in the queue like any message (shown, edited, removed), and
+	 * when it is the next one the run that ends compacts before the messages behind it go on. Without it, and sent any
+	 * other way, a `/compact` compacts at once, beside the run.
+	 */
+	queuedCompaction(): Extension;
+	/**
 	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
 	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
 	 */
@@ -324,6 +331,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		secretRequests: (sink) => facet.secretRequests(sink),
 		askUser: () => facet.askUser(),
 		messageContext: (messageContext) => facet.messageContext(messageContext),
+		queuedCompaction: () => facet.queuedCompaction(),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),

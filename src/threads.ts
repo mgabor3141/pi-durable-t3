@@ -242,7 +242,7 @@ export class Threads {
 		this.#env = deps.env;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#onWarn = deps.onWarn ?? (() => {});
-		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), submit: (input, whenBusy) => this.submit(input, whenBusy) });
+		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), submit: (input, whenBusy) => this.submit(input, whenBusy), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId) });
 	}
 
 	/** The integrator's Harness; the bridge reads and watches conversation views through it. */
@@ -700,6 +700,23 @@ export class Threads {
 				...(entry === undefined ? {} : { entry: { kind: entry.kind, data: structuredClone(entry.data) } }),
 			});
 			return { id: created.id, status: "queued" } as unknown as Submission;
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/**
+	 * Queue a message behind the run that is working, or not at all: `false` when no run is, or when the run has
+	 * answered and only finishes (its `afterRun` hooks have looked at the queue already). For a queued command
+	 * (`t3/queued-compaction.ts`), which must never be placed as a prompt: decided in the commit that queues it.
+	 */
+	async queueBehindRun(input: { readonly conversationId: number; readonly requestId: string; readonly message: string; readonly messageId: string }): Promise<boolean> {
+		const conversationId = input.conversationId as ConversationId;
+		return this.#harness.commit(async (tx) => {
+			if ((await tx.submissionByRequest(conversationId, input.requestId)) !== undefined) return true;
+			const live = await tx.doc(LiveDoc, conversationId);
+			if (live.run === undefined || live.run.afterRun !== undefined) return false;
+			const created = await tx.createSubmission({ conversationId, requestId: input.requestId, type: "input", status: "queued" });
+			(await tx.doc(InboxDoc, conversationId)).items.push({ id: created.id, mode: "followUp", content: input.message, entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } });
+			return true;
 		}, BACKGROUND_CONTEXT);
 	}
 
