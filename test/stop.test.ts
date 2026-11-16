@@ -12,6 +12,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { type ConversationId, defineExtension, defineTool, type Extension, LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { abortable } from "../src/t3/abortable.ts";
+import { Stops } from "../src/t3/stops.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { object } from "../src/t3/schema.ts";
@@ -22,7 +23,7 @@ const warnings: string[] = [];
 const log: Logger = { info: () => {}, warn: (message: string) => void warnings.push(message) };
 afterEach(() => {
 	warnings.length = 0;
-	Bridge.stopConfirmMs = 10_000;
+	Stops.confirmMs = 10_000;
 });
 
 /** Calls under way: each tool below adds its name when its `execute` starts. */
@@ -70,7 +71,7 @@ const runEnded = (bridge: Bridge, timeoutMs: number) => bridge.waitFor("t", (pro
 
 it("Stop shows at once and answers at once; a run held by a deaf tool shows not responding, and ends when the tool returns", { timeout: 60_000 }, async () => {
 	// Stop answers after waiting up to a second for the abort; the run is flagged not responding later.
-	Bridge.stopConfirmMs = 1_500;
+	Stops.confirmMs = 1_500;
 	const { f, bridge } = await setup([defineExtension({ name: "deaf", tools: [deaf("slow", 3_000)] })]);
 	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("after"));
 	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });

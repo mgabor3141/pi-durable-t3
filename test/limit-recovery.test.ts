@@ -11,6 +11,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
+import { ProviderLimits } from "../src/t3/provider-limits.ts";
 import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { isBusy, report } from "../src/t3/reports.ts";
 import { createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
@@ -19,7 +20,7 @@ type Item = { id: string; type: string; runId: string | null; text?: string; sta
 type Run = { id: string; status: string; userMessageId: string; queueHeld?: boolean };
 type Recovery = { runId: string; resetAt: string; autoResume: boolean; snooze: boolean } | null;
 
-afterEach(() => void (Bridge.limitResumeMarginMs = 30_000));
+afterEach(() => void (ProviderLimits.resumeMarginMs = 30_000));
 const limit = (seconds: number) =>
 	fauxAssistantMessage("", { stopReason: "error", errorMessage: `Server requested ${seconds}s retry delay (max: 60s). 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}` });
 
@@ -50,7 +51,7 @@ async function setup(settings: { autoResumeLimitedThreads?: boolean } = {}) {
 
 it("a limit that resets soon ends the run at once, and the run is continued when it has reset; messages sent meanwhile wait", { timeout: 60_000 }, async () => {
 	// The reset is 61 seconds off; continue a second after the limit was reached instead of 30 seconds after the reset.
-	Bridge.limitResumeMarginMs = -60_000;
+	ProviderLimits.resumeMarginMs = -60_000;
 	const { f, bridge, send, shown } = await setup();
 	const seen: string[] = [];
 	const answer = (text: string) => (request: { messages: unknown }) => {

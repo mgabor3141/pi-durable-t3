@@ -154,13 +154,13 @@ it("the settlement sweep leaves a snoozed thread alone, and counts its wake as a
 	await bridge.loaded();
 	const until = Date.now() + 10 * day;
 	await dispatch(bridge, { type: "thread.snooze", threadId: "t", snoozedUntil: new Date(until).toISOString() });
-	await bridge.sweepSettlement(Date.now() + 5 * day);
+	await bridge.sidebar.sweep(Date.now() + 5 * day);
 	expect(bridge.threadShell("t").settledOverride).toBeNull();
 	// The snooze ran out at `until`: quiet since then, so not yet settled six days later, settled eight days later
 	// (T3's default is seven days).
-	await bridge.sweepSettlement(until + 6 * day);
+	await bridge.sidebar.sweep(until + 6 * day);
 	expect(bridge.threadShell("t").settledOverride).toBeNull();
-	await bridge.sweepSettlement(until + 8 * day);
+	await bridge.sidebar.sweep(until + 8 * day);
 	expect(bridge.threadShell("t").settledOverride).toBe("settled");
 	expect(DateTime.toEpochMillis(bridge.threadShell("t").settledAt!)).toBe(until);
 });

@@ -17,7 +17,7 @@ const SECRET = "ghp_supersecretvalue123";
 it("asks with T3's card, saves the answer by name, and keeps the value out of the thread", { timeout: 60_000 }, async () => {
 	let bridge: Bridge | undefined;
 	const saved = new Map<string, string>();
-	const requests = new SecretRequests((conversationId) => bridge!.threadIdForConversation(conversationId), { arrivalMs: 200, onSaved: (threadId) => bridge!.wakeForSavedSecret(threadId) });
+	const requests = new SecretRequests((conversationId) => bridge!.threadIdForConversation(conversationId), { arrivalMs: 200, onSaved: (threadId) => bridge!.sidebar.wakeForSavedSecret(threadId) });
 	const extension = requests.extension({ save: async (name, value) => void saved.set(name, value) });
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [extension] });
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p", title: "Secrets" });
@@ -41,7 +41,7 @@ it("asks with T3's card, saves the answer by name, and keeps the value out of th
 	// An answer through a secret provider (T3 0.1.9) is refused: this host has none, and does not say it has.
 	await expect(requests.answer({ threadId: ThreadId.make("t"), turnItemId: TurnItemId.make("ti-tcall-1"), answer: { type: "reference", reference: { provider: "op", reference: "op://vault/item" } } } as never)).rejects.toMatchObject({ reason: "reference_unreadable" });
 	// The thread was snoozed while its agent waited: the saved secret wakes it (T3 0.1.9), and only that.
-	await bridge.snoozeThread("t", new Date(Date.now() + 3_600_000).toISOString());
+	await bridge.sidebar.snooze("t", new Date(Date.now() + 3_600_000).toISOString());
 	expect(bridge.threadRecord("t")!.snoozedUntil).toBeDefined();
 
 	// An answer for another thread, or for no waiting card, is refused with T3's reasons.

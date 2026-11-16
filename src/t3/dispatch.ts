@@ -92,56 +92,49 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				await bridge.startQueued(command.threadId, undefined, command.commandId);
 				break;
 			case "thread.settle":
-				// T3's guard (`Orchestrator`, 0.1.9): a settle that names the run it saw last is refused when another has
-				// started since, so a settle decided on a finished run never hides a thread that is working again.
-				if (command.expectedLatestRunId !== undefined) {
-					const { projection } = await bridge.projection(command.threadId);
-					const latest = projection.runs.reduce<(typeof projection.runs)[number] | undefined>((found, run) => (found === undefined || run.ordinal > found.ordinal ? run : found), undefined);
-					if (latest?.id !== command.expectedLatestRunId) throw new CommandError("The thread received another run before settlement.");
-				}
-				await bridge.settleThread(command.threadId);
+				await bridge.sidebar.settle(command.threadId, command.expectedLatestRunId);
 				break;
 			case "thread.unsettle":
-				await bridge.unsettleThread(command.threadId);
+				await bridge.sidebar.unsettle(command.threadId);
 				break;
 			case "thread.tag.set":
-				await bridge.setThreadTag(command.threadId, command.tag, command.tagged);
+				await bridge.sidebar.setTag(command.threadId, command.tag, command.tagged);
 				break;
 			case "thread.archive":
-				await bridge.archiveThread(command.threadId);
+				await bridge.sidebar.archive(command.threadId);
 				break;
 			case "thread.unarchive":
-				await bridge.unarchiveThread(command.threadId);
+				await bridge.sidebar.unarchive(command.threadId);
 				break;
 			case "thread.snooze":
-				await bridge.snoozeThread(command.threadId, command.snoozedUntil);
+				await bridge.sidebar.snooze(command.threadId, command.snoozedUntil);
 				break;
 			case "thread.unsnooze":
-				await bridge.unsnoozeThread(command.threadId);
+				await bridge.sidebar.unsnooze(command.threadId);
 				break;
 			case "thread.visit":
-				await bridge.visitThread(command.threadId, command.visitedAt, command.opened === true, command.searchQuery);
+				await bridge.sidebar.visit(command.threadId, command.visitedAt, command.opened === true, command.searchQuery);
 				break;
 			case "thread.mark-unread":
-				await bridge.markThreadUnread(command.threadId);
+				await bridge.sidebar.markUnread(command.threadId);
 				break;
 			case "thread.pin":
-				await bridge.pinThread(command.threadId, command.orderKey);
+				await bridge.sidebar.pin(command.threadId, command.orderKey);
 				break;
 			case "thread.unpin":
-				await bridge.unpinThread(command.threadId);
+				await bridge.sidebar.unpin(command.threadId);
 				break;
 			case "thread.pin.reorder":
-				await bridge.reorderThread(command.threadId, "pinned", command.orderKey);
+				await bridge.sidebar.reorder(command.threadId, "pinned", command.orderKey);
 				break;
 			case "thread.active.reorder":
-				await bridge.reorderThread(command.threadId, "active", command.orderKey);
+				await bridge.sidebar.reorder(command.threadId, "active", command.orderKey);
 				break;
 			case "thread.auto-settle.set":
-				await bridge.setAutoSettle(command.threadId, command.enabled);
+				await bridge.sidebar.setAutoSettle(command.threadId, command.enabled);
 				break;
 			case "thread.auto-settle":
-				await bridge.autoSettleThread(
+				await bridge.sidebar.autoSettle(
 					command.threadId,
 					DateTime.toEpochMillis(command.snapshotAt),
 					command.settledAt === undefined ? undefined : DateTime.toEpochMillis(command.settledAt),

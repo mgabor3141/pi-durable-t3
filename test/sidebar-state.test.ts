@@ -9,7 +9,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig, gated } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -140,6 +140,26 @@ it("a settle that names the run it saw is refused once another run exists; a mes
 	await expect(dispatch(bridge, { type: "message.dispatch", threadId: "off", messageId: "m-fresh", text: "start over", attachments: [], freshContext: true })).rejects.toThrow(/freshContext is not supported/);
 });
 
+it("a thread that works, or holds a message someone queued, is not settled (T3's refusals)", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	await f.create({ threadId: "busy", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	const held = gated("done");
+	f.model.respond(held.step, fauxAssistantMessage("and the queued one"));
+	await bridge.sendMessage({ threadId: "busy", commandId: "c1", messageId: "m1", text: "work", mode: "start" });
+	await until("it runs", () => bridge.threadShell("busy").status === "running");
+	await expect(dispatch(bridge, { type: "thread.settle", threadId: "busy" })).rejects.toThrow("Thread busy is still running. Stop it before settling.");
+	// Stopped, with a message waiting in its queue: still someone's unanswered message.
+	await bridge.sendMessage({ threadId: "busy", commandId: "c2", messageId: "m2", text: "then this", mode: "queue" });
+	await bridge.interrupt("busy");
+	held.release();
+	await until("it stopped", () => bridge.threadShell("busy").status !== "running");
+	await expect(dispatch(bridge, { type: "thread.settle", threadId: "busy" })).rejects.toThrow("Thread busy has a queued message. Send it or remove it from the queue before settling.");
+	expect(bridge.threadShell("busy").settledOverride).toBeNull();
+});
+
 it("the settlement sweep settles quiet threads as of when they went quiet, and leaves pinned, switched-off and recent ones", { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	for (const threadId of ["quiet", "pinned", "off", "recent"]) await f.create({ threadId, projectId: "p" });
@@ -158,9 +178,9 @@ it("the settlement sweep settles quiet threads as of when they went quiet, and l
 	const day = 24 * 60 * 60 * 1000;
 
 	// T3's default is seven days (three until 0.1.9).
-	await bridge.sweepSettlement(Date.now() + 6 * day);
+	await bridge.sidebar.sweep(Date.now() + 6 * day);
 	expect(bridge.threadShell("quiet").settledOverride).toBeNull();
-	await bridge.sweepSettlement(wentQuiet + 7 * day + 1);
+	await bridge.sidebar.sweep(wentQuiet + 7 * day + 1);
 	expect(bridge.threadShell("quiet").settledOverride).toBe("settled");
 	expect(DateTime.toEpochMillis(bridge.threadShell("quiet").settledAt!)).toBe(wentQuiet);
 	expect(bridge.threadShell("pinned").settledOverride).toBeNull();
@@ -173,12 +193,12 @@ it("the settlement sweep settles quiet threads as of when they went quiet, and l
 	await dispatch(bridge, { type: "thread.unsettle", threadId: "quiet" });
 	await dispatch(bridge, { type: "thread.auto-settle.set", threadId: "off", enabled: true });
 	f.settings.update({ sidebarAutoSettleAfterDays: null } as never);
-	await bridge.sweepSettlement(Date.now() + 30 * day);
+	await bridge.sidebar.sweep(Date.now() + 30 * day);
 	expect(bridge.threadShell("off").settledOverride).toBeNull();
 	f.settings.update({ projectSettingsOverrides: { p: { sidebarAutoSettleAfterDays: 10 } } } as never);
-	await bridge.sweepSettlement(Date.now() + 5 * day);
+	await bridge.sidebar.sweep(Date.now() + 5 * day);
 	expect(bridge.threadShell("off").settledOverride).toBeNull();
-	await bridge.sweepSettlement(Date.now() + 11 * day);
+	await bridge.sidebar.sweep(Date.now() + 11 * day);
 	expect(bridge.threadShell("off").settledOverride).toBe("settled");
 	// A thread someone un-settled stays active.
 	expect(bridge.threadShell("quiet").settledOverride).toBe("active");

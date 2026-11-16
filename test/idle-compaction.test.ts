@@ -10,10 +10,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS } from "../src/t3/idle-compaction.ts";
+import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS, IdleCompaction } from "../src/t3/idle-compaction.ts";
 import { conversation, createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
-afterEach(() => void (Bridge.idleCompaction = { minTokens: IDLE_COMPACTION_MIN_TOKENS, leadMs: IDLE_COMPACTION_LEAD_MS }));
+afterEach(() => void (IdleCompaction.limits = { minTokens: IDLE_COMPACTION_MIN_TOKENS, leadMs: IDLE_COMPACTION_LEAD_MS }));
 
 type Message = { id: string; text: string; role: string; createdBy: string; creationSource: string; idleCompaction?: string };
 type Usage = { usedTokens: number; promptCacheTtlMs?: number; promptCacheExpiresAt?: string; updatedAt: string };
@@ -43,12 +43,12 @@ async function setup(settings: object) {
 		await idle(f.harness, thread.head);
 	};
 	const compactions = async () => (await (await conversation(f.harness, thread.head)).entries({ order: "ascending" }, 300, undefined, BACKGROUND_CONTEXT)).items.filter((entry) => entry.kind === "pi.compaction").length;
-	return { f, bridge, thread, turn, compactions, logged };
+	return { f, bridge, thread, turn, compactions, logged, store };
 }
 
 it("compacts an idle thread shortly before its prompt cache expires, once, and says it did", { timeout: 60_000 }, async () => {
 	// The cache lives 300 seconds from the request: start a second after it instead of two minutes before the end.
-	Bridge.idleCompaction = { minTokens: 1000, leadMs: 299_000 };
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
 	const { f, bridge, thread, turn, compactions, logged } = await setup({ idleCompaction: "beforeCacheExpires" });
 	await turn("one", "first" + long);
 	await turn("two", "second" + long);
@@ -74,7 +74,7 @@ it("compacts an idle thread shortly before its prompt cache expires, once, and s
 });
 
 it("leaves a thread alone under T3's other settings, under the floor, and when the thread went on", { timeout: 60_000 }, async () => {
-	Bridge.idleCompaction = { minTokens: 1000, leadMs: 299_000 };
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
 	// T3's default is "When you return", which its web app does for Claude threads only: nothing happens here.
 	const off = await setup({});
 	await off.turn("one", "first" + long);
@@ -83,7 +83,7 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	expect(await off.compactions()).toBe(0);
 
 	// Under the floor (T3's 200,000 tokens) a cold re-read is cheap.
-	Bridge.idleCompaction = { minTokens: 10_000_000, leadMs: 299_000 };
+	IdleCompaction.limits = { minTokens: 10_000_000, leadMs: 299_000 };
 	const small = await setup({ idleCompaction: "beforeCacheExpires" });
 	await small.turn("one", "first" + long);
 	await small.turn("two", "second" + long);
@@ -91,7 +91,7 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	expect(await small.compactions()).toBe(0);
 
 	// A thread that is used again is not idle: the timer of the earlier run is replaced by the later run's.
-	Bridge.idleCompaction = { minTokens: 1000, leadMs: 297_500 };
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 297_500 };
 	const busy = await setup({ idleCompaction: "beforeCacheExpires" });
 	await busy.turn("one", "first" + long);
 	await sleep(1200);
@@ -102,12 +102,25 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	await expect.poll(busy.compactions, { timeout: 20_000 }).toBe(1);
 
 	// A snoozed thread is left alone.
-	Bridge.idleCompaction = { minTokens: 1000, leadMs: 298_500 };
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 298_500 };
 	const snoozed = await setup({ idleCompaction: "beforeCacheExpires" });
 	await snoozed.turn("one", "first" + long);
 	await snoozed.turn("two", "second" + long);
-	await snoozed.bridge.snoozeThread("t", new Date(Date.now() + 3_600_000).toISOString());
+	await snoozed.bridge.sidebar.snooze("t", new Date(Date.now() + 3_600_000).toISOString());
 	await sleep(3000);
 	expect(await snoozed.compactions()).toBe(0);
 	expect(snoozed.logged.some((line) => line.includes("the thread is snoozed"))).toBe(true);
+});
+
+it("turning the setting on covers a thread that is idle already, as a start of the bridge does", { timeout: 60_000 }, async () => {
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
+	const { f, turn, compactions, store } = await setup({});
+	await turn("one", "first" + long);
+	await turn("two", "second" + long);
+	await sleep(1500);
+	expect(await compactions()).toBe(0);
+	f.model.append(fauxAssistantMessage("## Goal\nsummarized"));
+	// The same look the bridge takes when it starts: the threads whose latest run completed within the cache's lifetime.
+	store.update({ idleCompaction: "beforeCacheExpires" });
+	await expect.poll(compactions, { timeout: 20_000 }).toBe(1);
 });

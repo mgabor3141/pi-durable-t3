@@ -21,42 +21,34 @@ import type { Project } from "../config.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectWorkspaceMissing, ProjectWorkspaceNotCreatable, ProjectWorkspaceNotDirectory } from "../registry.ts";
 import { claimScratchThreadFolder, ensureScratchProject, isScratchRoot, SCRATCH_PROJECT_ICON } from "../scratch.ts";
 import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadLineage, type ThreadRecord, type Threads, USER_WEB } from "../threads.ts";
-import type { AppliedUndo, PendingContext, ThreadOrigin } from "../threads.ts";
-import type { UndoHookAnswer } from "./undo-hooks.ts";
+import type { PendingContext, ThreadOrigin } from "../threads.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
-import type { BridgeConfig, TitleThreadRequest } from "./config.ts";
-import type { AgentChange, ConversationId, EntryId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
-import { autoSettleAt, autoSettleDays, recordThreadOpen } from "./sidebar.ts";
+import type { BridgeConfig } from "./config.ts";
+import type { AgentChange, ConversationId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
-import { globalIdleCompaction, ProjectId, ThreadId } from "@t3tools/contracts";
-import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS, idleCompactionWindow, type IdleCompactionWindow } from "./idle-compaction.ts";
-import { type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
-import { contextReport, type ContextReportView } from "./context-report.ts";
+import { ProjectId, ThreadId } from "@t3tools/contracts";
+import type { BridgeCore } from "./bridge-core.ts";
+import { IdleCompaction } from "./idle-compaction.ts";
+import { ProviderLimits, type RecoveryUpdate } from "./provider-limits.ts";
+import { SidebarState } from "./sidebar-state.ts";
+import { Stops } from "./stops.ts";
+import { ThreadCommands } from "./thread-commands.ts";
+import { ThreadTitles } from "./thread-titles.ts";
+import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, limitResetAt, projectThread, requestedRetryDelayMs, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
-import { isAssistantEntry, isUserEntry, stopReason, USER_ENTRY_KINDS } from "./runs.ts";
-import { HostError, messageOf } from "../host-errors.ts";
+import { USER_ENTRY_KINDS } from "./runs.ts";
+import { messageOf } from "../host-errors.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
 import type { MessageContextAnswer } from "./message-context.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
-/** A provider's limit that resets within this long is waited for: the run is continued then. A longer one ends the run,
- * and the user may ask for the same (T3's "Resume at reset"). */
-const LIMIT_AUTO_RESUME_WITHIN_MS = 5 * 60 * 60_000;
-/** T3's `OrchestrationV2LimitRecoveryUpdate`. */
-type RecoveryUpdate = { readonly runId: string; readonly resetAt: string; readonly autoResume?: boolean; readonly snooze?: boolean };
-/** The longest a timer runs (Node's limit is 2^31-1 ms); a later reset is waited for in turns. */
-const TIMER_MAX_MS = 2 ** 31 - 1;
-/** How long an undo or a redo waits for the integrator's `undo` hooks. */
-const UNDO_HOOK_TIMEOUT_MS = 30_000;
-/** How many answered commands a thread shows (`ShownExchange`). */
-const MAX_SHOWN = 20;
 /** How long a message waits for the integrator's `messageContext` before it goes on without it. */
 export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
 /** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
@@ -133,7 +125,6 @@ export type ProjectMutation = {
 
 
 /** How often T3 sweeps for threads to settle (`ThreadSettlementService`: every minute). */
-const SETTLE_SWEEP_MS = 60_000;
 /** How long Stop waits for its abort before it answers; the run's end follows on its own. */
 const STOP_ADMIT_MS = 1_000;
 
@@ -151,8 +142,6 @@ export class Bridge {
 	/** The project ids last shown to clients, so a registry change emits the removed shells. */
 	#projectIds = new Set<string>();
 	readonly #commandResults = new Map<string, Promise<number>>();
-	/** T3's `thread.titleRegeneration`, per thread: the one current title request. In memory only (state.md). */
-	readonly #titleRequests = new Map<string, { requestId: string; startedAt: number; controller: AbortController }>();
 	#directory: Thread[] = [];
 	/** Settles once the directory is first loaded. */
 	readonly #loaded = Promise.withResolvers<void>();
@@ -168,9 +157,16 @@ export class Bridge {
 	/** The live tasks at the last task-graph frame. */
 	#liveTasks = new Set<string>();
 	#taskWatch: TaskGraphWatch | undefined;
-	#settleTimer: NodeJS.Timeout | undefined;
 	#settingsStop: (() => void) | undefined;
-	#sweeping = false;
+	/** What the bridge's parts are given of it (`bridge-core.ts`). */
+	readonly #core: BridgeCore;
+	readonly #limits: ProviderLimits;
+	readonly #idle: IdleCompaction;
+	readonly #titles: ThreadTitles;
+	readonly #commands: ThreadCommands;
+	readonly #stops: Stops;
+	/** T3's sidebar commands (settle, archive, snooze, pin, …) and its settlement sweep. */
+	readonly sidebar: SidebarState;
 
 	constructor(config: BridgeConfig, log: Logger, store: Threads, models: Models, attachments?: Attachments) {
 		this.config = config;
@@ -191,6 +187,33 @@ export class Bridge {
 			nextSequence: () => bridge.nextSequence(),
 			projected: (view, change) => this.#projected(view, change),
 		};
+		this.#core = {
+			config,
+			log,
+			store,
+			closed: () => this.#closed,
+			thread: (threadId) => this.#summary(threadId),
+			threads: () => this.#directory,
+			acquire: (threadId) => this.acquire(threadId),
+			projection: (threadId) => this.projection(threadId),
+			shell: (threadId) => this.#shellFor(threadId),
+			view: (threadId) => this.#viewOf(threadId),
+			republish: (threadId) => this.#republish(threadId),
+			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
+			hasThread: (threadId) => this.hasThread(threadId),
+			textGenerationModel: () => this.textGenerationModel(),
+		};
+		this.#idle = new IdleCompaction(this.#core);
+		this.#titles = new ThreadTitles(this.#core);
+		this.#commands = new ThreadCommands(this.#core);
+		this.#stops = new Stops(this.#core);
+		this.sidebar = new SidebarState(this.#core, this.#titles);
+		this.#limits = new ProviderLimits(this.#core, this.sidebar);
+	}
+
+	/** The longest any model's provider keeps a prompt cache entry: a thread idle for longer has none left. */
+	#longestCacheMs(): number {
+		return 1000 * Math.max(0, ...this.#models.getModels().flatMap((model) => [model.promptCache?.short ?? 0, model.promptCache?.long ?? 0]));
 	}
 
 	start(): void {
@@ -202,13 +225,12 @@ export class Bridge {
 			.then(() => {
 				this.#applyDirectory(undefined);
 				void this.#watchRuns();
-				void this.sweepSettlement();
+				void this.sidebar.sweep();
+				this.#idle.armIdle(this.#longestCacheMs());
 			})
 			.catch((error: unknown) => this.#log.warn("the thread directory failed to load", { error: messageOf(error) }));
-		// T3's settlement sweep: every minute, and when the settings change.
-		this.#settleTimer = setInterval(() => void this.sweepSettlement(), SETTLE_SWEEP_MS);
-		this.#settleTimer.unref();
-		this.#settingsStop = this.config.settings.subscribe(() => void this.sweepSettlement());
+		this.sidebar.start();
+		this.#settingsStop = this.config.settings.subscribe(() => this.#idle.armIdle(this.#longestCacheMs()));
 		// A UI edit to the registry (add/remove/rename/move) lands here: removed ids emit a removal and every current
 		// project shell is re-emitted — a client keys shells by id, so an unchanged re-emission is a no-op.
 		this.#projectIds = new Set(this.#configured().map((project) => project.id));
@@ -227,7 +249,7 @@ export class Bridge {
 			if (!touched.has(thread.threadId)) continue;
 			this.#views.get(thread.threadId)?.moved(thread.head);
 		}
-		for (const threadId of touched) this.#armRecovery(threadId, live.get(threadId));
+		for (const threadId of touched) this.#limits.arm(threadId, live.get(threadId));
 		this.#refreshShells(touched);
 		if (!this.#directoryBooted) {
 			this.#directoryBooted = true;
@@ -480,6 +502,8 @@ export class Bridge {
 		const cwd = agentCwd ?? project?.path ?? "";
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
+		const stop = this.#stops.of(threadId, state);
+		const shown = this.#commands.shown(threadId);
 		const listed = model === null ? undefined : state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId);
 		return {
 			threadId,
@@ -523,11 +547,9 @@ export class Bridge {
 			...(thread?.limitRecovery === undefined ? {} : { limitRecovery: thread.limitRecovery }),
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
-			...(this.#stopOf(threadId, state) === undefined ? {} : { stop: this.#stopOf(threadId, state) }),
-			...(this.#shown.has(threadId) ? { shown: this.#shown.get(threadId)! } : {}),
-			titleRegeneration: this.#titleRequests.has(threadId)
-				? { requestId: this.#titleRequests.get(threadId)!.requestId, startedAt: this.#titleRequests.get(threadId)!.startedAt }
-				: null,
+			...(stop === undefined ? {} : { stop }),
+			...(shown === undefined ? {} : { shown }),
+			titleRegeneration: this.#titles.pending(threadId),
 		};
 	}
 
@@ -732,153 +754,11 @@ export class Bridge {
 		const runChanged = run !== undefined && JSON.stringify(run) !== JSON.stringify(kept ?? null);
 		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
-		if (change.settled) this.#armIdleCompaction(view.threadId);
-		const stop = this.#stops.get(view.threadId);
-		if (stop !== undefined && view.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) this.#clearStop(view.threadId);
+		if (change.settled) this.#idle.arm(view.threadId);
+		this.#stops.settle(view);
 		this.#holdWhileRunning(view);
-		this.#limitReached(view);
+		this.#limits.reached(view);
 		this.#publishShell(view.threadId);
-	}
-
-	// ---- idle compaction (T3's "Before the cache expires") ----------------------------------------------------
-
-	/** One timer a thread, set when a run of it settles and replaced by the next (in memory, as T3's: a restart skips them). */
-	readonly #idleTimers = new Map<string, { timer?: NodeJS.Timeout }>();
-	/** T3's floor and lead (`idle-compaction.ts`). */
-	static idleCompaction = { minTokens: IDLE_COMPACTION_MIN_TOKENS, leadMs: IDLE_COMPACTION_LEAD_MS };
-
-	#idleCompactionOn(): boolean {
-		return globalIdleCompaction(this.config.settings.current()) === "beforeCacheExpires";
-	}
-
-	async #idleWindow(threadId: string): Promise<IdleCompactionWindow> {
-		const thread = this.#summary(threadId);
-		if (thread === undefined) return { skip: "the thread is gone" };
-		const { projection } = await this.projection(threadId);
-		const childrenWorking = this.#directory.some((child) => child.deletedAt === null && child.lineage.parentThreadId === threadId && child.spawn !== undefined && child.spawn.outcome === undefined);
-		return idleCompactionWindow(projection, { mergeBackPending: thread.pendingContext?.type === "merge_back", childrenWorking }, Date.now(), Bridge.idleCompaction);
-	}
-
-	/**
-	 * A run settled: if the thread is one to compact while idle (`idleCompactionWindow`), wait until shortly before its
-	 * prompt cache expires, look again, and send `/compact` as T3 does. Anything that happens meanwhile (a message, a
-	 * snooze, the setting) is seen by the second look or replaces the timer.
-	 */
-	#armIdleCompaction(threadId: string): void {
-		clearTimeout(this.#idleTimers.get(threadId)?.timer);
-		this.#idleTimers.delete(threadId);
-		if (!this.#idleCompactionOn()) return;
-		const armed: { timer?: NodeJS.Timeout } = {};
-		this.#idleTimers.set(threadId, armed);
-		const current = () => this.#idleTimers.get(threadId) === armed;
-		void (async () => {
-			const window = await this.#idleWindow(threadId);
-			if (!current()) return;
-			if ("skip" in window) return void this.#idleTimers.delete(threadId);
-			armed.timer = setTimeout(() => {
-				void (async () => {
-					if (!current()) return;
-					this.#idleTimers.delete(threadId);
-					if (!this.#idleCompactionOn()) return;
-					const due = await this.#idleWindow(threadId);
-					if ("skip" in due || due.runId !== window.runId) return this.#log.info("an idle thread is not compacted after all", { threadId, why: "skip" in due ? due.skip : "the thread went on" });
-					this.#log.info("compacting an idle thread before its prompt cache expires", { threadId, expiresAt: new Date(due.endMs).toISOString() });
-					await this.#store.compact(threadId, undefined, `idle-compact:${threadId}:${due.runId}`, true);
-				})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: messageOf(error) }));
-			}, Math.max(0, window.startMs - Date.now()));
-		})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: messageOf(error) }));
-	}
-
-	// ---- a provider's limit (T3's limit recovery) --------------------------------------------------------------
-
-	/** How long after the reset a run is continued: a request on the very second is one the provider may still refuse. */
-	static limitResumeMarginMs = 30_000;
-	/** Threads whose run is being ended for a limit, and the timers of the ones that are continued at the reset. */
-	readonly #limiting = new Set<string>();
-	readonly #recoveryTimers = new Map<string, NodeJS.Timeout>();
-
-	/**
-	 * A request failed and the provider said how long to wait (`requestedRetryDelayMs`): the run is not sent again on
-	 * the harness's own backoff, which knows nothing of that wait and would fail every time until it is over. The run
-	 * ends here, the thread records when the limit resets (`Threads.limitReached`), and a reset that is near enough is
-	 * waited for (`#armRecovery`). T3 shows it as its usage limit: "Resumes 9:40 PM", or "Resets …" for a later one.
-	 */
-	#limitReached(view: ThreadView): void {
-		const threadId = view.threadId;
-		const live = view.view?.docs["pi.live"];
-		if (this.#closed || this.#limiting.has(threadId) || live?.run === undefined || requestedRetryDelayMs(live.generation?.retry?.error) === undefined) return;
-		const head = this.#summary(threadId)?.head;
-		const run = view.result?.projection.runs.findLast((candidate) => candidate.status === "running");
-		const failed = view.transcript.findLast((entry) => isAssistantEntry(entry) && stopReason(entry) === "error");
-		const message = failed?.model?.[0];
-		const resetAt = message?.role === "assistant" ? limitResetAt(message) : undefined;
-		if (head === undefined || run === undefined || resetAt === undefined) return;
-		this.#limiting.add(threadId);
-		const release = this.acquire(threadId);
-		void (async () => {
-			// Recorded first, so the run ends as one that is waited for: nobody is told in between that it failed.
-			// T3's setting "Auto-resume limited threads" waits for any reset, however far; without it, a near one only.
-			const autoResume = this.config.settings.current().autoResumeLimitedThreads === true || resetAt - Date.now() < LIMIT_AUTO_RESUME_WITHIN_MS;
-			await this.#store.limitReached({ threadId, conversationId: head, runId: run.id as string, resetAt, autoResume });
-			// The messages queued behind the run stay queued (`Threads.abort`): they follow it when it is continued.
-			await this.#store.abort({ threadId, conversationId: head });
-			this.#log.info("a provider's limit ended a run", { threadId, resetAt: new Date(resetAt).toISOString(), autoResume });
-		})()
-			.catch((error: unknown) => this.#log.warn("a run that reached a provider's limit was not ended; it goes on retrying", { threadId, error: String(error) }))
-			.finally(() => {
-				this.#limiting.delete(threadId);
-				release();
-			});
-	}
-
-	/** Set, or clear, the timer that continues a thread's run when its limit has reset (`LimitRecovery.autoResume`). */
-	#armRecovery(threadId: string, thread: Thread | undefined): void {
-		clearTimeout(this.#recoveryTimers.get(threadId));
-		this.#recoveryTimers.delete(threadId);
-		const recovery = thread?.limitRecovery;
-		if (this.#closed || recovery === undefined || !recovery.autoResume) return;
-		const wait = recovery.resetAt + Bridge.limitResumeMarginMs - Date.now();
-		const timer = setTimeout(
-			() => {
-				this.#recoveryTimers.delete(threadId);
-				if (wait > TIMER_MAX_MS) return this.#armRecovery(threadId, this.#summary(threadId));
-				const release = this.acquire(threadId);
-				void this.#store
-					.resumeAfterLimit(threadId)
-					.then((did) => this.#log.info("a provider's limit has reset", { threadId, did }))
-					.catch((error: unknown) => this.#log.warn("a run was not continued when its provider's limit reset", { threadId, error: String(error) }))
-					.finally(release);
-			},
-			Math.min(Math.max(wait, 0), TIMER_MAX_MS),
-		);
-		timer.unref();
-		this.#recoveryTimers.set(threadId, timer);
-	}
-
-	/**
-	 * T3's `thread.metadata.update` with `limitRecovery`: "Resume at reset" and "Cancel auto-resume" set `autoResume`,
-	 * the snooze beside them hides the thread until the reset. Refused, in T3's words, when the limit it names is not
-	 * the one the thread stands at.
-	 */
-	async #configureRecovery(threadId: string, update: RecoveryUpdate | null): Promise<void> {
-		const recovery = this.#summary(threadId)?.limitRecovery;
-		if (update === null) {
-			if (recovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
-			return;
-		}
-		const resetAt = Date.parse(update.resetAt);
-		if (update.snooze === true && resetAt <= Date.now()) throw new CommandError("The reset time has passed. Retry the thread manually.");
-		if (recovery === undefined || recovery.runId !== update.runId || recovery.resetAt !== resetAt || this.#summary(threadId)?.settledOverride === "settled") {
-			throw new CommandError("The provider limit changed before recovery could be configured.");
-		}
-		const snoozed = recovery.snooze === true;
-		await this.#store.updateRecord(threadId, (record) => {
-			if (record.limitRecovery === undefined) return false;
-			if (update.autoResume !== undefined) record.limitRecovery.autoResume = update.autoResume;
-			if (update.snooze !== undefined) record.limitRecovery.snooze = update.snooze;
-		});
-		if (update.snooze === true) await this.snoozeThread(threadId, update.resetAt);
-		else if (update.snooze === false && snoozed) await this.unsnoozeThread(threadId);
 	}
 
 	/** The latest run as the summary keeps it, from an open thread's shell: `null` with no run, `undefined` while one runs
@@ -1307,44 +1187,14 @@ export class Bridge {
 			const snooze = input.automatic !== true && input.note !== true && record?.snoozedUntil !== undefined;
 			if (record?.settledOverride !== undefined || snooze) {
 				await this.#store.wake(input.threadId, snooze);
-						this.#titleChanged(input.threadId);
+				this.#republish(input.threadId);
 			}
 			if (input.continuationOf !== undefined) {
-				await this.#continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
+				await this.#commands.continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
 				return;
 			}
-			// T3's slash command: `/compact` (with optional guidance) is a compaction task, not a prompt.
-			const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(input.text.trim());
-			if (compact !== null) {
-				const guidance = compact[1]?.trim();
-				await this.#store.compact(input.threadId, guidance === undefined || guidance === "" ? undefined : guidance, input.messageId);
-				return;
-			}
-			// `/reload`: the next request renders the system prompt afresh (`Threads.reload`); it starts no turn.
-			if (input.text.trim() === "/reload") {
-				await this.#store.reload(input.threadId, input.messageId);
-				return;
-			}
-			// `/context`: what fills the context, answered here and shown only (`#showContext`).
-			if (input.text.trim() === "/context") {
-				await this.#showContext(input.threadId, input.messageId, state, head);
-				return;
-			}
-			// `/undo` and `/redo`: the thread's head moves back to before a turn or a step, and forward again.
-			const undo = /^\/undo(?:\s+(.*))?$/.exec(input.text.trim());
-			if (undo !== null) {
-				await this.#undo(input.threadId, input.messageId, state, head, undo[1]?.trim() ?? "");
-				return;
-			}
-			if (input.text.trim() === "/redo") {
-				await this.#redo(input.threadId, input.messageId, state, head);
-				return;
-			}
-			// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
-			if (input.text.trim() === "/continue") {
-				await this.#continue(input.threadId, `continue:${input.messageId}`, head, { messageId: input.messageId });
-				return;
-			}
+			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/continue`).
+			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
@@ -1357,9 +1207,9 @@ export class Bridge {
 			const seeded = seed !== undefined && seed !== "" && (!this.#hasMessages(state) || record?.pendingContext?.type === "side_chat");
 			const previousTitle = this.#summary(input.threadId)?.title ?? "";
 			if (seeded) {
-				this.#cancelTitle(input.threadId);
-				await this.#setStoredTitle(input.threadId, seed);
-				this.#beginTitle(input.threadId, input.commandId);
+				this.#titles.cancel(input.threadId);
+				await this.#titles.store(input.threadId, seed);
+				this.#titles.begin(input.threadId, input.commandId);
 			}
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
 			// commandId for durable dedup (design.md, Invariants). Attachments are kept in the environment before the message
@@ -1424,9 +1274,9 @@ export class Bridge {
 				else await this.#store.submit(request, undefined);
 			})().catch((error: unknown) => {
 				if (seeded) {
-					void this.#completeTitle(input.threadId, input.commandId, undefined);
+					void this.#titles.complete(input.threadId, input.commandId, undefined);
 					// T3 stores the seed and the message in one command: a message that did not land leaves no seed title.
-					if (this.#summary(input.threadId)?.title === seed) void this.#setStoredTitle(input.threadId, previousTitle).catch(() => {});
+					if (this.#summary(input.threadId)?.title === seed) void this.#titles.store(input.threadId, previousTitle).catch(() => {});
 				}
 				throw error;
 			});
@@ -1437,7 +1287,7 @@ export class Bridge {
 					delete current.pendingContext;
 				});
 			}
-			if (seeded) this.#generateTitle(input.threadId, input.commandId, { reason: "first-message", messageId: input.messageId });
+			if (seeded) this.#titles.generate(input.threadId, input.commandId, { reason: "first-message", messageId: input.messageId });
 		} finally {
 			release();
 		}
@@ -1450,50 +1300,12 @@ export class Bridge {
 		return (state.result?.projection.messages.length ?? 0) > 0 || (state.view?.entries ?? []).some((entry) => USER_ENTRY_KINDS.has(entry.kind));
 	}
 
-	async #setStoredTitle(threadId: string, title: string): Promise<void> {
-		await this.#store.rename(threadId, title);
-		this.#titleChanged(threadId);
-	}
-
-	/** Re-publish a thread after a title or `titleRegeneration` change. */
-	#titleChanged(threadId: string): void {
+	/** Show a thread again after a change no projection follows (its title, a title request, its sidebar state). */
+	#republish(threadId: string): void {
 		this.#views.get(threadId)?.recompute();
 		this.#publishShell(threadId);
 	}
 
-	/** Start a request (`titleRegeneration: { requestId, startedAt }`), superseding any pending one. */
-	#beginTitle(threadId: string, requestId: string): void {
-		if (this.config.titleThread === undefined) return;
-		this.#cancelTitle(threadId);
-		this.#titleRequests.set(threadId, { requestId, startedAt: Date.now(), controller: new AbortController() });
-		this.#titleChanged(threadId);
-	}
-
-	/** Drop the pending request, aborting its signal (a rename, a newer request, a delete). */
-	#cancelTitle(threadId: string): void {
-		const pending = this.#titleRequests.get(threadId);
-		if (pending === undefined) return;
-		this.#titleRequests.delete(threadId);
-		pending.controller.abort();
-		this.#titleChanged(threadId);
-	}
-
-	/**
-	 * T3's `thread.title.regeneration.complete`: applied only while `requestId` is still current. A "New thread" (or, on
-	 * regenerate, the unchanged title) changes nothing (ThreadTitleRegenerationService).
-	 */
-	async #completeTitle(threadId: string, requestId: string, title: string | undefined, previousTitle?: string): Promise<void> {
-		const pending = this.#titleRequests.get(threadId);
-		if (pending?.requestId !== requestId) return;
-		this.#titleRequests.delete(threadId);
-		const next = title?.trim();
-		if (next !== undefined && next !== "" && next !== "New thread" && next !== previousTitle?.trim() && this.hasThread(threadId)) {
-			await this.#setStoredTitle(threadId, next).catch((error: unknown) => this.#log.warn("storing a generated title failed", { threadId, error: String(error) }));
-		}
-		this.#titleChanged(threadId);
-	}
-
-	/** Run the integrator's hook for the current request, detached: the caller (a send, a regenerate) does not wait. */
 	/**
 	 * T3's text-generation model (Settings → the model for titles and other generated text), read at each use: the
 	 * model it names when that is one of this host's (`pi` provider, in the catalog), with its thinking level. Unset — the
@@ -1526,58 +1338,14 @@ export class Bridge {
 		return new Set(preferences?.[PROVIDER_INSTANCE_ID]?.hiddenModels ?? []);
 	}
 
-	#generateTitle(threadId: string, requestId: string, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }): void {
-		const hook = this.config.titleThread;
-		const pending = this.#titleRequests.get(threadId);
-		if (hook === undefined || pending?.requestId !== requestId) return;
-		const signal = pending.controller.signal;
-		void (async () => {
-			const release = this.acquire(threadId);
-			let previousTitle: string | undefined;
-			try {
-				const state = this.#viewOf(threadId);
-				const conversationId = (await state.head()) as ConversationId;
-				const at = await this.#titleEntry(state, kind, signal);
-				if (at === undefined || signal.aborted) return void (await this.#completeTitle(threadId, requestId, undefined));
-				const request: TitleThreadRequest =
-					kind.reason === "regenerate"
-						? { threadId, conversationId, at, reason: "regenerate", previousTitle: (previousTitle = this.#summary(threadId)?.title || "New thread"), signal }
-						: { threadId, conversationId, at, reason: "first-message", signal };
-				const model = this.textGenerationModel();
-				if (model !== undefined) Object.assign(request, { model });
-				// The user's title guidance (T3's `threadTitleInstructions`), capped as T3's `policyInstruction` caps it.
-				const guidance = (this.config.settings.current().threadTitleInstructions as string | undefined)?.trim();
-				if (guidance) Object.assign(request, { guidance: guidance.slice(0, 20_000) });
-				const title = await hook(request);
-				await this.#completeTitle(threadId, requestId, title, previousTitle);
-			} catch (error) {
-				// T3: a failure logs a warning and completes without a title.
-				if (!signal.aborted) this.#log.warn("Thread title generation failed", { threadId, requestId, error: (error as Error).message || String(error) });
-				await this.#completeTitle(threadId, requestId, undefined);
-			} finally {
-				release();
-			}
-		})();
-	}
-
-	/** The entry a request names: the first message's committed entry (waited for, not its reply), or the head's latest. */
-	async #titleEntry(state: ThreadView, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, signal: AbortSignal): Promise<EntryId | undefined> {
-		if (kind.reason === "regenerate") return state.view?.entries.at(-1)?.id as EntryId | undefined;
-		const find = (): EntryId | undefined =>
-			state.view?.entries.find(
-				(candidate) => USER_ENTRY_KINDS.has(candidate.kind) && (candidate.data as { messageId?: unknown } | undefined)?.messageId === kind.messageId,
-			)?.id as EntryId | undefined;
-		return state.waitFor(find, 60_000, () => new Error("timed out"), signal).catch(() => undefined);
-	}
-
 	/** A user rename (T3's `thread.metadata.update` with `title`, or `T3Attachment.setTitle`): durable, and it cancels a
 	 * pending generation (`titleRegeneration: null`). */
 	async renameThread(threadId: string, title: string): Promise<void> {
 		const trimmed = title.trim();
 		if (trimmed === "") throw new CommandError("Thread title cannot be empty.");
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		this.#cancelTitle(threadId);
-		await this.#setStoredTitle(threadId, trimmed);
+		this.#titles.cancel(threadId);
+		await this.#titles.store(threadId, trimmed);
 	}
 
 	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
@@ -1595,234 +1363,13 @@ export class Bridge {
 			throw new CommandError("Regenerating titles is not supported by this host (it has no title generator).");
 		}
 		if (!this.hasThread(command.threadId)) throw new CommandError(`Unknown thread: ${command.threadId}`);
-		if (command.limitRecovery !== undefined) await this.#configureRecovery(command.threadId, command.limitRecovery as RecoveryUpdate | null);
+		if (command.limitRecovery !== undefined) await this.#limits.configure(command.threadId, command.limitRecovery as RecoveryUpdate | null);
 		if (command.title !== undefined) await this.renameThread(command.threadId, command.title);
 		if (command.regenerateTitle === true) {
-			this.#beginTitle(command.threadId, command.commandId);
-			this.#generateTitle(command.threadId, command.commandId, { reason: "regenerate" });
+			this.#titles.begin(command.threadId, command.commandId);
+			this.#titles.generate(command.threadId, command.commandId, { reason: "regenerate" });
 		} else if (command.regenerateTitle === false) {
-			this.#cancelTitle(command.threadId);
-		}
-	}
-
-	/** T3's refusal of sidebar changes to an archived thread. */
-	#notArchived(threadId: string): void {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		if (this.#summary(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is archived.`);
-	}
-
-	/** T3's `thread.settle`: a durable sidebar settlement, reflected in the shell immediately. */
-	async settleThread(threadId: string): Promise<void> {
-		this.#notArchived(threadId);
-		await this.#store.settle(threadId);
-		this.#titleChanged(threadId);
-	}
-
-	/** T3's `thread.unsettle`: put the thread back in the active section, durably. */
-	async unsettleThread(threadId: string): Promise<void> {
-		this.#notArchived(threadId);
-		await this.#store.unsettle(threadId);
-		this.#titleChanged(threadId);
-	}
-
-	// ---- sidebar state (T3's server keeps it on the thread row) ------------------------------------------------
-
-	#sidebarChange(threadId: string, change: (record: ThreadRecord) => boolean | void): Promise<ThreadRecord> {
-		this.#notArchived(threadId);
-		return this.#store.updateRecord(threadId, change);
-	}
-
-	/** T3's `thread.tag.set`: add a tag (once) or remove it. Tags are not sidebar state T3 refuses on an archived thread. */
-	async setThreadTag(threadId: string, tag: string, tagged: boolean): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		await this.#store.updateRecord(threadId, (record) => {
-			const current = record.tags ?? [];
-			const next = tagged ? (current.includes(tag) ? current : [...current, tag]) : current.filter((existing) => existing !== tag);
-			if (next.length === current.length && next.every((value, index) => value === current[index])) return false;
-			if (next.length === 0) delete record.tags;
-			else record.tags = next;
-		});
-	}
-
-	/** T3's `thread.archive`: out of the sidebar and into the archive; a title being generated is dropped. */
-	async archiveThread(threadId: string): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		if (this.#summary(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is already archived.`);
-		this.#cancelTitle(threadId);
-		const now = Date.now();
-		await this.#store.updateRecord(threadId, (record) => {
-			record.archivedAt = now;
-		});
-	}
-
-	/** T3's `thread.unarchive`. */
-	async unarchiveThread(threadId: string): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		if (this.#summary(threadId)?.archivedAt === undefined) throw new CommandError(`Thread ${threadId} is not archived.`);
-		await this.#store.updateRecord(threadId, (record) => {
-			delete record.archivedAt;
-		});
-	}
-
-	/** T3's `thread.snooze`: hidden until a time in the future; refused while a message waits in its queue (T3 refuses a
-	 * queued run someone sent). */
-	async snoozeThread(threadId: string, snoozedUntil: string): Promise<void> {
-		this.#notArchived(threadId);
-		const until = Date.parse(snoozedUntil);
-		const now = Date.now();
-		if (Number.isNaN(until) || until <= now) throw new CommandError(`Thread ${threadId} snooze wake time ${snoozedUntil} is not in the future.`);
-		const release = this.acquire(threadId);
-		try {
-			const { projection } = await this.#viewOf(threadId).projection(15_000);
-			if (projection.runs.some((run) => run.status === "queued")) throw new CommandError(`Thread ${threadId} has a queued run and cannot be snoozed.`);
-		} finally {
-			release();
-		}
-		await this.#store.updateRecord(threadId, (record) => {
-			record.snoozedUntil = until;
-			record.snoozedAt = now;
-		});
-	}
-
-	/** T3's wake on a saved secret (`secret_request.record`, 0.1.9): a snoozed thread whose agent just got what it
-	 * waited for shows again. Only the snooze is cleared: no wake stamp, and a settle override stays. */
-	async wakeForSavedSecret(threadId: string): Promise<void> {
-		if (this.threadRecord(threadId)?.snoozedUntil === undefined) return;
-		await this.#store.updateRecord(threadId, (record) => {
-			delete record.snoozedUntil;
-			delete record.snoozedAt;
-		});
-	}
-
-	/** T3's `thread.unsnooze`: awake now, stamped unless it already was. */
-	async unsnoozeThread(threadId: string): Promise<void> {
-		const now = Date.now();
-		await this.#sidebarChange(threadId, (record) => {
-			const awake = record.snoozedUntil === undefined;
-			delete record.snoozedUntil;
-			delete record.snoozedAt;
-			if (!awake) record.lastSnoozeWakeAt = now;
-			if (awake && record.snoozedAt === undefined) return false;
-		});
-	}
-
-	/** T3's `thread.visit`: the read watermark moves forward only (by the client's clock); an open (`opened`) is counted for
-	 * the command palette by the server's clock, with the query that picked the thread. */
-	async visitThread(threadId: string, visitedAt: string, opened: boolean, searchQuery: string | undefined): Promise<void> {
-		const at = Date.parse(visitedAt);
-		if (Number.isNaN(at)) throw new CommandError(`Thread ${threadId} visit time ${visitedAt} is not a valid timestamp.`);
-		const now = Date.now();
-		await this.#sidebarChange(threadId, (record) => {
-			const forward = record.lastVisitedAt === undefined || at > record.lastVisitedAt;
-			if (!forward && !opened) return false;
-			if (forward) record.lastVisitedAt = at;
-			if (opened) record.opens = recordThreadOpen(record.opens, now, searchQuery);
-		});
-	}
-
-	/** T3's `thread.mark-unread`: the watermark goes back to just before the latest run's end. */
-	async markThreadUnread(threadId: string): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		const completedAt = this.#shellFor(threadId).latestRunCompletedAt;
-		if (completedAt == null) throw new CommandError(`Thread ${threadId} has no completed run to mark unread.`);
-		const at = DateTime.toEpochMillis(completedAt) - 1;
-		const now = Date.now();
-		await this.#sidebarChange(threadId, (record) => {
-			record.lastVisitedAt = at;
-			// T3 retires a snooze that already ran out, keeping when it woke.
-			if (record.snoozedUntil !== undefined && record.snoozedUntil <= now) {
-				record.lastSnoozeWakeAt = record.snoozedUntil;
-				delete record.snoozedUntil;
-				delete record.snoozedAt;
-			}
-		});
-	}
-
-	/** T3's `thread.pin`: pinned once (a later pin keeps its time and place); pinning a settled thread makes it active. */
-	async pinThread(threadId: string, orderKey: string | undefined): Promise<void> {
-		const now = Date.now();
-		await this.#sidebarChange(threadId, (record) => {
-			const already = record.pinnedAt !== undefined;
-			if (!already) {
-				record.pinnedAt = now;
-				if (orderKey !== undefined) record.pinOrderKey = orderKey;
-			}
-			if (record.settledOverride === "settled") {
-				record.settledOverride = "active";
-				delete record.settledAt;
-				// T3 v0.1.7: the un-settle is stamped, as any other.
-				record.unsettledAt = now;
-			}
-			// A pinned thread is not snoozed (T3's pin wakes it, stamped).
-			if (record.snoozedUntil !== undefined) record.lastSnoozeWakeAt = now;
-			delete record.snoozedUntil;
-			delete record.snoozedAt;
-		});
-	}
-
-	/** T3's `thread.unpin`. */
-	async unpinThread(threadId: string): Promise<void> {
-		await this.#sidebarChange(threadId, (record) => {
-			if (record.pinnedAt === undefined && record.pinOrderKey === undefined) return false;
-			delete record.pinnedAt;
-			delete record.pinOrderKey;
-		});
-	}
-
-	/** T3's `thread.pin.reorder` and `thread.active.reorder`: the thread's place among the pins, or in the active section. */
-	async reorderThread(threadId: string, section: "pinned" | "active", orderKey: string): Promise<void> {
-		await this.#sidebarChange(threadId, (record) => {
-			const field = section === "pinned" ? "pinOrderKey" : "activeOrderKey";
-			if (record[field] === orderKey) return false;
-			record[field] = orderKey;
-		});
-	}
-
-	/** T3's `thread.auto-settle.set`: turn automatic settlement off for this thread (stamped once), or back on. */
-	async setAutoSettle(threadId: string, enabled: boolean): Promise<void> {
-		const now = Date.now();
-		await this.#sidebarChange(threadId, (record) => {
-			if (enabled === (record.autoSettleDisabledAt === undefined)) return false;
-			if (enabled) delete record.autoSettleDisabledAt;
-			else record.autoSettleDisabledAt = now;
-		});
-	}
-
-	/** T3's `thread.auto-settle`: settle a thread nobody settled or kept active, unless it changed after `snapshotAt`. */
-	async autoSettleThread(threadId: string, snapshotAt: number, settledAt: number | undefined): Promise<void> {
-		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		const shell = this.#shellFor(threadId);
-		if (shell.settledOverride !== null || DateTime.toEpochMillis(shell.updatedAt) > snapshotAt) {
-			throw new CommandError(`Thread ${threadId} changed before automatic settlement.`);
-		}
-		await this.#store.settle(threadId, settledAt);
-	}
-
-	/**
-	 * T3's settlement sweep (`ThreadSettlementService`): settle every thread that has been quiet for longer than its
-	 * project's `sidebarAutoSettleAfterDays` (T3's default: 7 days; `null` turns it off), as of when it went quiet. Pinned
-	 * threads, threads kept active, threads with automatic settlement turned off, and running threads stay.
-	 */
-	async sweepSettlement(now = Date.now()): Promise<void> {
-		if (this.#closed || this.#sweeping) return;
-		this.#sweeping = true;
-		try {
-			const settings = this.config.settings.current();
-			for (const thread of this.#directory) {
-				if (this.#closed) return;
-				const days = autoSettleDays(settings, thread.projectId);
-				if (days === null || !this.hasThread(thread.threadId)) continue;
-				const shell = this.#shellFor(thread.threadId);
-				const settledAt = autoSettleAt(shell, days, now, thread.lastSnoozeWakeAt);
-				if (settledAt === null) continue;
-				try {
-					await this.autoSettleThread(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), settledAt);
-				} catch (error) {
-					this.#log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: messageOf(error) });
-				}
-			}
-		} finally {
-			this.#sweeping = false;
+			this.#titles.cancel(command.threadId);
 		}
 	}
 
@@ -1839,7 +1386,7 @@ export class Bridge {
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.
 			const head = await state.head();
 			const input = { threadId, conversationId: head };
-			this.#stopRequested(threadId, state);
+			this.#stops.requested(threadId, state);
 			// The abort resolves once every task it marked has ended, so a tool that does not listen would hold the answer.
 			// Its failure surfaces when it fails at once; a later one is logged.
 			const aborting = this.#store.abort(input).then(
@@ -1860,221 +1407,6 @@ export class Bridge {
 		} finally {
 			release();
 		}
-	}
-
-	/** Commands answered on the spot, by thread (`ShownExchange`): in memory, the newest `MAX_SHOWN`. */
-	readonly #shown = new Map<string, ShownExchange[]>();
-
-	/**
-	 * `/context`: a few rows on what fills the model's context (`context-report.ts`), shown in the thread and kept
-	 * nowhere: no entry is written, so the model is never sent it and a restart forgets it. A thread that has not run
-	 * has nothing in its context yet, and no run for the command to stand in.
-	 */
-	async #showContext(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
-		const { projection } = await state.projection(30_000);
-		const run = projection.runs.findLast((candidate) => candidate.status !== "queued" && candidate.status !== "rolled_back");
-		if (run === undefined) throw new CommandError("Nothing is in the context yet: send a message first.");
-		const conversation = await this.#store.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
-		if (conversation === undefined) throw new CommandError(`Unknown thread: ${threadId}`);
-		const view = await conversation.context(BACKGROUND_CONTEXT);
-		const meta = this.#meta(threadId, this.#summary(threadId), state);
-		const answer = contextReport({
-			view: view as unknown as ContextReportView,
-			...(meta.contextWindow === undefined ? {} : { window: meta.contextWindow }),
-			...(meta.model === null ? {} : { model: modelSlug(meta.model) }),
-		});
-		this.#show(threadId, state, { messageId, command: "/context", answer });
-	}
-
-	/** Show a command the host answered itself (`ShownExchange`); one sent again replaces its earlier answer. */
-	#show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "answer"> & { readonly command?: string }): void {
-		const exchange: ShownExchange = { ...said, at: Date.now(), after: state.transcript.at(-1)?.id ?? -1 };
-		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== exchange.messageId), exchange];
-		this.#shown.set(threadId, shown.slice(-MAX_SHOWN));
-		state.recompute();
-	}
-
-	/**
-	 * `/undo [n]` takes back the user's last message (or last `n`) with everything the agent did for it; `/undo step
-	 * [n]` only the agent's last response (or last `n`) with its tool calls and their results, so the user's message
-	 * stands unanswered. Like T3's Revert, it moves the thread's head to a fork that ends before what is taken back
-	 * (`Threads.rewind`): the conversation it leaves keeps everything, which is what `/redo` returns to. The model's
-	 * context is what changes; files and anything done outside the conversation stay as they are. The command and its
-	 * answer are shown only (`ShownExchange`): written to the head, they would be the first thing a redo loses.
-	 */
-	async #undo(threadId: string, messageId: string, state: ThreadView, head: number, argument: string): Promise<void> {
-		const parsed = /^(step)?\s*(\d+)?$/.exec(argument);
-		const count = parsed?.[2] === undefined ? 1 : Number(parsed[2]);
-		if (parsed === null || count < 1) throw new CommandError("Usage: /undo [n] takes back your last n messages; /undo step [n] the agent's last n steps.");
-		const steps = parsed[1] !== undefined;
-		const { projection, runs } = await state.projection(30_000);
-		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before undoing.");
-		if (projection.runs.some((run) => run.status === "queued")) throw new CommandError("Send or remove the queued messages before undoing.");
-		const entries = new Map(state.transcript.map((entry) => [entry.id, entry]));
-		const before = this.#summary(threadId)?.undos ?? [];
-		let kept: string | undefined;
-		// The turns a user's message began: a `/compact` or a note that opened a run is not a turn to take back.
-		const turns = runs.filter((run) => {
-			const entry = entries.get(run.userEntryId);
-			return entry !== undefined && isUserEntry(entry);
-		});
-		const last = (n: number, word: string) => (n === 1 ? word : `${n} ${word}s`);
-		let entryId: number;
-		let said: string;
-		if (steps) {
-			const turn = turns.at(-1);
-			if (turn === undefined) throw new CommandError("There is nothing to undo.");
-			// A step is a response the model was given back: a request that failed or was cut off is not one.
-			const responses = state.transcript.filter((entry) => entry.id > turn.userEntryId && isAssistantEntry(entry) && ["stop", "length", "toolUse"].includes(stopReason(entry) ?? ""));
-			const target = responses.at(-count);
-			if (target === undefined) {
-				throw new CommandError(responses.length === 0 ? "The agent has taken no step in the last turn; /undo takes back your message." : `The last turn has ${responses.length} step${responses.length === 1 ? "" : "s"}; /undo takes back the whole turn.`);
-			}
-			entryId = target.id;
-			said = `Took back the agent's last ${last(count, "step")}. \`/continue\` lets it go on from there, or send a message to steer it.`;
-		} else {
-			const target = turns.at(-count);
-			if (target === undefined) throw new CommandError(turns.length === 0 ? "There is nothing to undo." : `There ${turns.length === 1 ? "is 1 turn" : `are ${turns.length} turns`} to undo.`);
-			entryId = target.userEntryId;
-			said = `Took back your last ${last(count, "message")} and what the agent did for ${count === 1 ? "it" : "them"}.`;
-		}
-		try {
-			const fork = await this.#store.rewind({ threadId, expectedHead: head, entryId, requestId: `undo:${messageId}`, ...(steps ? { step: true as const } : {}) });
-			// A head that moved meanwhile is left alone, and the fork became a thread of its own (`Threads.rewind`).
-			if ((await this.#store.thread(threadId))?.head !== fork) throw new CommandError("The thread changed while it was being undone; what was asked for is a new thread beside it.");
-			await state.shows(fork);
-			kept = await this.#undone(threadId, `undo:${messageId}`, before, head, entryId);
-		} catch (error) {
-			if (error instanceof HostError && error.code === "not_rewindable") throw new CommandError("That is before a compaction, which cannot be undone past.");
-			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Stop the current turn before undoing.");
-			throw error;
-		}
-		this.#log.info("undid", { threadId, steps, count });
-		this.#show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\n${kept === undefined ? "" : `${kept}\n\n`}Files and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
-	}
-
-	/**
-	 * `/continue`: a run on the context as it is (`Threads.continue`): after a stop, a failed run or an undone step the
-	 * agent goes on without a message written to say so. The typed command is shown where it was sent and the run it
-	 * continues is the same run to T3, running again. `resumed`: T3's Resume, which names the run it continues and is
-	 * refused as T3 refuses it when that is no longer the thread's last run, stopped or failed.
-	 */
-	async #continue(threadId: string, requestId: string, head: number, by: { readonly messageId: string } | { readonly resumed: { readonly state: ThreadView; readonly runId: string } }): Promise<void> {
-		if ("resumed" in by) {
-			const { projection } = await by.resumed.state.projection(30_000);
-			const latest = projection.runs.findLast((run) => run.status !== "queued" && run.status !== "rolled_back");
-			if (latest?.id !== by.resumed.runId || (latest.status !== "interrupted" && latest.status !== "failed")) throw new CommandError("This thread can no longer be resumed from that run.");
-		}
-		try {
-			await this.#store.continue({ threadId, conversationId: head, requestId, ...("messageId" in by ? { messageId: by.messageId } : {}) });
-		} catch (error) {
-			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("The agent is working already.");
-			if (error instanceof HostError && error.code === "nothing_to_continue") {
-				throw new CommandError(error.message === "nothing was asked yet" ? "There is nothing to continue: send a message first." : "There is nothing to continue: the conversation ends with the agent's answer. Send a message to go on.");
-			}
-			throw error;
-		}
-		// Continued by hand: a limit that was waited for is waited for no longer.
-		if (this.#summary(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
-		this.#log.info("continued", { threadId });
-	}
-
-	/** `/redo`: take the last undo back (`Threads.redo`), T3's Revert included. */
-	async #redo(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
-		const { projection } = await state.projection(30_000);
-		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before redoing.");
-		let kept: JsonValue | undefined;
-		try {
-			const redone = await this.#store.redo({ threadId, expectedHead: head });
-			await state.shows(redone.head);
-			kept = redone.kept;
-		} catch (error) {
-			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back." : "There is no undo to take back.");
-			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Send or remove the queued messages before redoing.");
-			throw error;
-		}
-		this.#log.info("redid", { threadId });
-		const hooks = this.config.undo;
-		const note = hooks === undefined ? undefined : (await this.#undoHook(threadId, "redo", (signal) => hooks.redone({ threadId, kept, signal })))?.note;
-		this.#show(threadId, state, { messageId, command: "/redo", answer: `Brought back what the last undo took.${note === undefined ? " " : `\n\n${note}\n\n`}Shown here only: not sent to the model, not saved.` });
-	}
-
-	/**
-	 * One of the integrator's `undo` hooks: at most `UNDO_HOOK_TIMEOUT_MS`. The undo or the redo stands whatever it
-	 * does, so a failure is logged and becomes the note: the user is told that what the host keeps did not follow.
-	 */
-	async #undoHook<T extends UndoHookAnswer>(threadId: string, what: "undo" | "redo", run: (signal: AbortSignal) => Promise<T | undefined>): Promise<T | UndoHookAnswer | undefined> {
-		const signal = AbortSignal.timeout(UNDO_HOOK_TIMEOUT_MS);
-		try {
-			return await Promise.race([
-				run(signal),
-				new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error(`no answer within ${UNDO_HOOK_TIMEOUT_MS / 1000} seconds`)), { once: true })),
-			]);
-		} catch (error) {
-			const message = (error as Error).message || String(error);
-			this.#log.warn(`the host's ${what} hook failed`, { threadId, error: message });
-			return { note: `What this host keeps of these turns outside the conversation did not follow the ${what}: ${message}` };
-		}
-	}
-
-	/**
-	 * Tell the integrator of an undo that was applied (`UndoHooks.undone`), and keep what it hands back with the undo
-	 * for its redo. `before`: the thread's undos before this one; a command that arrives again is not told twice.
-	 * Returns the integrator's note for the user.
-	 */
-	async #undone(threadId: string, requestId: string, before: readonly AppliedUndo[], from: number, entryId: number): Promise<string | undefined> {
-		const hooks = this.config.undo;
-		if (hooks === undefined || before.some((undo) => undo.requestId === requestId)) return undefined;
-		// The thread's own conversations: every head it has had, the one it just left first.
-		const conversations = [...new Set([from, ...before.flatMap((undo) => [undo.head, undo.from]).reverse()])] as ConversationId[];
-		const answer = await this.#undoHook(threadId, "undo", (signal) => hooks.undone({ threadId, conversations, entryId: entryId as EntryId, signal }));
-		if (answer !== undefined && "kept" in answer && answer.kept !== undefined) {
-			const { kept } = answer;
-			await this.#store.keepWithUndo(threadId, requestId, kept).catch((error: unknown) => this.#log.warn("what the host handed back for a redo was not kept", { threadId, error: String(error) }));
-		}
-		return answer?.note;
-	}
-
-	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
-	#stops = new Map<string, { readonly taskId: number; readonly requestedAt: number; unresponsiveAt?: number; readonly timer: ReturnType<typeof setTimeout> }>();
-
-	/** How long a stopped run may take to end before the thread shows it not responding (T3's Claude adapter waits as
-	 * long for a Stop to be confirmed). */
-	static stopConfirmMs = 10_000;
-
-	#stopRequested(threadId: string, state: ThreadView): void {
-		const taskId = state.view?.docs["pi.live"]?.run?.taskId as number | undefined;
-		if (taskId === undefined || this.#stops.get(threadId)?.taskId === taskId) return;
-		this.#clearStop(threadId);
-		const timer = setTimeout(() => {
-			const stop = this.#stops.get(threadId);
-			if (stop?.timer !== timer) return;
-			stop.unresponsiveAt = Date.now();
-			this.#log.warn("stop: the run has not ended", { threadId, runTask: taskId, waitedMs: Bridge.stopConfirmMs });
-			this.#reproject(threadId);
-		}, Bridge.stopConfirmMs);
-		timer.unref();
-		this.#stops.set(threadId, { taskId, requestedAt: Date.now(), timer });
-		this.#reproject(threadId);
-	}
-
-	#clearStop(threadId: string): void {
-		const stop = this.#stops.get(threadId);
-		if (stop === undefined) return;
-		clearTimeout(stop.timer);
-		this.#stops.delete(threadId);
-	}
-
-	/** The Stop shown on the thread's running run, if its run is the one stopped. */
-	#stopOf(threadId: string, state: ThreadView | undefined): ThreadMeta["stop"] {
-		const stop = this.#stops.get(threadId);
-		if (stop === undefined || state?.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) return undefined;
-		return { requestedAt: stop.requestedAt, ...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: stop.unresponsiveAt }) };
-	}
-
-	#reproject(threadId: string): void {
-		this.#views.get(threadId)?.recompute();
-		this.#publishShell(threadId);
 	}
 
 	async cancelQueued(threadId: string, runId: string): Promise<void> {
@@ -2138,8 +1470,8 @@ export class Bridge {
 			if ((await this.#store.thread(input.threadId))?.head === fork) {
 				await state.shows(fork);
 				// T3's Revert sends no message to answer: what the integrator has to say is a reply of no run.
-				const note = await this.#undone(input.threadId, input.commandId, before, expectedHead, target.entryId);
-				if (note !== undefined) this.#show(input.threadId, state, { messageId: `revert-${input.commandId}`, answer: `${note}\n\nShown here only: not sent to the model, not saved.` });
+				const note = await this.#commands.undone(input.threadId, input.commandId, before, expectedHead, target.entryId);
+				if (note !== undefined) this.#commands.show(input.threadId, state, { messageId: `revert-${input.commandId}`, answer: `${note}\n\nShown here only: not sent to the model, not saved.` });
 			}
 			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
 			return null;
@@ -2205,10 +1537,10 @@ export class Bridge {
 			if (projection.runs.length > 0 || projection.messages.length > 0) return;
 		}
 		const sideChats = this.#directory.filter((thread) => thread.lineage.sideChat === true && thread.lineage.parentThreadId === threadId).map((thread) => thread.threadId);
-		this.#cancelTitle(threadId);
+		this.#titles.cancel(threadId);
 		await this.#store.remove(threadId);
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
-		this.#shown.delete(threadId);
+		this.#commands.forget(threadId);
 		for (const listener of this.#deletedListeners) listener(threadId);
 		for (const sideChat of sideChats) if (this.hasThread(sideChat)) await this.deleteThread(sideChat);
 	}
@@ -2307,15 +1639,12 @@ export class Bridge {
 
 	async close(): Promise<void> {
 		// Shutdown cancels the title work it started: the hook's model call stops, and nothing lands on a closed host.
-		for (const pending of this.#titleRequests.values()) pending.controller.abort();
-		this.#titleRequests.clear();
-		for (const threadId of [...this.#stops.keys()]) this.#clearStop(threadId);
+		this.#titles.close();
+		this.#stops.close();
 		this.#closed = true;
-		if (this.#settleTimer !== undefined) clearInterval(this.#settleTimer);
-		for (const armed of this.#idleTimers.values()) clearTimeout(armed.timer);
-		this.#idleTimers.clear();
-		for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
-		this.#recoveryTimers.clear();
+		this.sidebar.close();
+		this.#idle.close();
+		this.#limits.close();
 		this.#settingsStop?.();
 		await this.#taskWatch?.stop().catch(() => {});
 		this.#runHolds.clear();
