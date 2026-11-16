@@ -2,6 +2,7 @@
 // by its text (the user message and the assistant's answer), a thread with no match is absent, a deleted thread is
 // never named, and the result is T3's shape (best match per thread, user message first). This is the layer the RPC
 // answers from; the pure ranking rules are proven in `thread-search.test.ts`.
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { createNamed, idle, makeThreads } from "./threads-harness.ts";
@@ -77,5 +78,29 @@ describe("Threads.search", () => {
 		const { threads } = await makeThreads();
 		await threads.create({ threadId: "t", projectId: "p" });
 		expect(await threads.search("anything", 50)).toEqual([]);
+	});
+
+	it("finds what a compaction took out of the model's context, and what was written since the last search", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
+		model.respond(fauxAssistantMessage("about the aardvark"));
+		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "first, the platypus" }, undefined);
+		await idle(harness, thread.head);
+		expect(await threads.search("platypus", 50)).toHaveLength(1);
+
+		const conversation = (await harness.conversation(thread.head as never, BACKGROUND_CONTEXT))!;
+		await conversation.submit({ type: "write", entry: { kind: "pi.compaction", head: "self", model: [{ role: "user", content: [{ type: "text", text: "<summary>earlier work</summary>" }], timestamp: Date.now() }] } } as never, BACKGROUND_CONTEXT);
+		await idle(harness, thread.head);
+		model.respond(fauxAssistantMessage("about the okapi"));
+		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r2", message: "then, the quokka" }, undefined);
+		await idle(harness, thread.head);
+		const context = await conversation.context(BACKGROUND_CONTEXT);
+		expect(JSON.stringify(context.messages), "out of the model's context").not.toContain("platypus");
+
+		expect((await threads.search("platypus", 50)).map((hit) => hit.source)).toEqual(["user"]);
+		expect((await threads.search("aardvark", 50)).map((hit) => hit.source)).toEqual(["assistant"]);
+		expect((await threads.search("quokka", 50)).map((hit) => hit.snippet)).toEqual(["then, the quokka"]);
+		expect(await threads.search("earlier work", 50), "a summary is not a message").toEqual([]);
 	});
 });

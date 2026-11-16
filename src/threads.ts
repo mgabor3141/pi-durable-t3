@@ -395,31 +395,53 @@ export class Threads {
 	 * T3's `ThreadSearch.search` semantics (in `t3/thread-search.ts`): every thread's committed user/assistant messages are
 	 * read, matched by an ASCII-case-insensitive substring, ranked per thread (a user message first, then newest, then
 	 * lowest entry id), and ordered globally (user-first thread, then most-recently-updated, then thread id), capped at
-	 * `limit`. A thread is searched by its HEAD conversation — the sidebar's live thread. Deleted threads are absent from
+	 * `limit`. A thread is searched by its HEAD conversation — the sidebar's live thread — and by its whole transcript. Deleted threads are absent from
 	 * the document, so a search never names one (design.md, Invariants).
 	 */
 	async search(query: string, limit: number): Promise<ThreadSearchMatch[]> {
 		const threads = await this.list();
 		const threadUpdatedAt = new Map<string, number>();
 		const candidates: SearchCandidate[] = [];
+		const heads = new Set<number>();
 		for (const thread of threads) {
+			heads.add(thread.head);
+			const read = await this.#searchable(thread);
+			if (read === undefined) continue;
 			// T3's `threads.updated_at`: the most-recent activity on the head. A message's timestamp is the activity this
 			// host records, so the newest message time (falling back to creation) is the thread's recency.
-			let updatedAt = thread.createdAt;
-			const conversation = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
-			if (conversation === undefined) continue;
-			const { entries } = await conversation.context(BACKGROUND_CONTEXT);
-			for (const entry of entries as readonly import("./t3/model-types.ts").EntryRecord[]) {
+			threadUpdatedAt.set(thread.threadId, Math.max(thread.createdAt, read.updatedAt));
+			candidates.push(...read.candidates);
+		}
+		for (const head of this.#searched.keys()) if (!heads.has(head)) this.#searched.delete(head);
+		return searchThreads(candidates, threadUpdatedAt, query, limit);
+	}
+
+	/**
+	 * Each head's messages as search reads them, kept between searches: entries do not change, so a search reads only
+	 * the ones written since the last. The whole transcript, not the model's context: T3 searches every message, and a
+	 * compaction takes none of them out of what the thread shows.
+	 */
+	readonly #searched = new Map<number, { last: EntryId | undefined; updatedAt: number; candidates: SearchCandidate[] }>();
+
+	async #searchable(thread: Thread): Promise<{ updatedAt: number; candidates: readonly SearchCandidate[] } | undefined> {
+		const conversation = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) return undefined;
+		const read = this.#searched.get(thread.head) ?? { last: undefined, updatedAt: 0, candidates: [] };
+		this.#searched.set(thread.head, read);
+		let cursor: Parameters<typeof conversation.entries>[2];
+		const from = read.last === undefined ? {} : { minEntryId: ((read.last as number) + 1) as EntryId };
+		do {
+			const page = await conversation.entries({ ...from, order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
+			for (const entry of page.items as unknown as readonly import("./t3/model-types.ts").EntryRecord[]) {
+				read.last = entry.id as EntryId;
 				const candidate = searchCandidate(entry, thread.threadId, thread.projectId);
 				if (candidate === undefined) continue;
-				if (candidate.messageCreatedAt !== undefined && candidate.messageCreatedAt !== null && candidate.messageCreatedAt > updatedAt) {
-					updatedAt = candidate.messageCreatedAt;
-				}
-				candidates.push(candidate);
+				if (candidate.messageCreatedAt !== null && candidate.messageCreatedAt > read.updatedAt) read.updatedAt = candidate.messageCreatedAt;
+				read.candidates.push(candidate);
 			}
-			threadUpdatedAt.set(thread.threadId, updatedAt);
-		}
-		return searchThreads(candidates, threadUpdatedAt, query, limit);
+			cursor = page.next;
+		} while (cursor !== undefined);
+		return read;
 	}
 
 	async thread(threadId: string): Promise<Thread | undefined> {
