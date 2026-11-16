@@ -258,6 +258,19 @@ const ReceiptsDoc = defineDoc<{ receipts: Receipt[] }>({
 	checkpointWhen: () => true,
 });
 
+/**
+ * Queued inputs taken out of a conversation's inbox for the length of one operation (`#aroundQueue`), by conversation
+ * id: written in the commit that takes them out and cleared in the one that puts them back, so a host that dies in
+ * between finds them here when it starts again (`load`).
+ */
+export const HeldQueueDoc = defineDoc<{ held: Record<string, JsonValue[]> }>({
+	kind: "pi-durable-t3.held-queue",
+	version: 1,
+	scope: "session",
+	initial: () => ({ held: {} }),
+	checkpointWhen: () => true,
+});
+
 /** The directory: written only when a thread is created, deleted or moves its head. Version 2: a store written with the
  * single threads document of version 1 is refused (no migration: such a store is migrated by hand). */
 export const ThreadsDoc = defineDoc<Directory>({
@@ -471,6 +484,17 @@ export class Threads {
 	/** Load the documents into memory, once. Every read and write awaits it. */
 	load(): Promise<void> {
 		this.#loading ??= (async () => {
+			// A host that died while it held a conversation's queue aside (`#aroundQueue`): back where it was.
+			const aside = await this.#harness.snapshot(HeldQueueDoc, BACKGROUND_CONTEXT);
+			if (aside !== undefined && Object.keys(aside.held).length > 0) {
+				await this.#harness.commit(async (tx) => {
+					const doc = await tx.doc(HeldQueueDoc);
+					for (const [conversationId, held] of Object.entries(doc.held)) {
+						(await tx.doc(InboxDoc, Number(conversationId) as ConversationId)).items.unshift(...(copy(held) as never[]));
+						delete doc.held[conversationId];
+					}
+				}, BACKGROUND_CONTEXT);
+			}
 			const receipts = await this.#harness.snapshot(ReceiptsDoc, BACKGROUND_CONTEXT);
 			for (const receipt of receipts?.receipts ?? []) this.#receipts.set(receipt.commandId, receipt.sequence);
 			const directory = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
@@ -1227,6 +1251,8 @@ export class Threads {
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
 				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
 			}
+			// Kept where a restart finds them, until they are back.
+			if (queued.length > 0) (await tx.doc(HeldQueueDoc)).held[String(conversationId)] = queued as unknown as JsonValue[];
 			return queued;
 		}, BACKGROUND_CONTEXT);
 		const giveBack = async () => {
@@ -1234,6 +1260,7 @@ export class Threads {
 			await this.#harness.commit(async (tx) => {
 				// Ahead of anything queued since: they were queued first.
 				(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
+				delete (await tx.doc(HeldQueueDoc)).held[String(conversationId)];
 			}, BACKGROUND_CONTEXT);
 		};
 		let result: T;
