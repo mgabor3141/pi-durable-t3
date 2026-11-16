@@ -25,7 +25,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile   # runs `prepare`: T3's contracts and web app at the pin (network), then the build
       - run: pnpm typecheck
+      # The transfer budgets (`test/transfer-budget.test.ts`) write what they observed; the run's summary shows it.
       - run: pnpm test
+        env:
+          TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/transfer-budget.md
+      - if: always()
+        run: test -f "$RUNNER_TEMP/transfer-budget.md" && cat "$RUNNER_TEMP/transfer-budget.md" >> "$GITHUB_STEP_SUMMARY" || true
       # The browser smokes drive the real T3 web app; the runner's preinstalled Chrome stands in for /usr/bin/chromium.
       - run: FACET_PORT=5070 CHROMIUM="$(command -v google-chrome)" pnpm smoke
       - run: FACET_PORT=5072 CHROMIUM="$(command -v google-chrome)" bash dev/pack-proof.sh

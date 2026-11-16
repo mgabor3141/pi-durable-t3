@@ -146,6 +146,30 @@ The reply costs the same on every thread. Before this design (a full projection 
 9.8, 38.6 and 31.2 MB. Re-projecting the whole thread on a change is cheap once dates are shared and records compared
 structurally, so per-run memoization was measured and left out.
 
+**On the wire.** T3 replaces whole records in its events, so an answer that streams is sent again with every update,
+and a sidebar row is sent whole when one field of it changes. T3's server makes that cheap with compression, and so
+does this host: HTTP answers are gzipped for a client that accepts it (`HttpMiddleware.compression`), and `/ws`
+negotiates permessage-deflate with one compression window for the connection, so an update that repeats most of the
+last one costs little more than what is new in it.
+
+What a client is sent and how long it waits is measured on the real transports and held to ceilings
+(`test/transfer-budget.test.ts`, after T3's `transferBudgetV2.integration.test.ts`): the sidebar and a long thread
+opened cold, a turn with tool results and a streamed answer as a thread subscriber, the sidebar and a second client
+see it, a reconnect, a steer and a queued message, and the sidebar's own commands. The same scenario at the size of
+a long day's work (`bench/transfer.bench.test.ts`; 201 turns, 2,000 tool calls, 171 threads in the sidebar):
+
+| | JSON | on the wire |
+|---|--:|--:|
+| sidebar, opened cold | 296 KB | 12.8 KB |
+| the thread, opened cold (bounded) | 96 KB | 8.9 KB |
+| a turn: two 8 KB tool results, an answer of 3,000 words | 234 KB | 5.6 KB |
+| a steered and a queued message taking their places (one snapshot) | 95 KB | 6.1 KB |
+
+On loopback a command is answered in 20 to 35 ms and its message is in the thread's stream 50 ms later (the batch
+window), while that thread streams or not. A `messageContext` hook is on the path of that answer: a message is
+answered when the hook has, so a recall that takes a second is a second every sender waits (`BENCH_CONTEXT_MS`
+measures it).
+
 ## Peer links (not built yet)
 
 How T3 links environments (`apps/server/src/peer/`, `docs/internals/remote.md`, behind the Linked environments beta),

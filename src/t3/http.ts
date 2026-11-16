@@ -24,6 +24,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as HttpMiddleware from "effect/http/HttpMiddleware";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -510,7 +511,12 @@ export function makeServerLayer(deps: {
 		maxAge: 600,
 	});
 
-	return HttpRouter.serve(Layer.mergeAll(routes, apiLayer, mcpLayer, pairingRateLimit, cors) as Any, { disableLogger: true }).pipe(
-		Layer.provide(NodeHttpServer.layer(() => httpServer, { host: bridge.config.host, port: bridge.config.port })),
+	// As T3's server (`layerHttpCompression`, and `websocket: { perMessageDeflate: true }` in its `server.ts`): HTTP
+	// answers are compressed when the client accepts it, and the socket's frames share one compression window, which is
+	// what makes a stream of updates that each repeat most of the last one cheap to send.
+	const compression = HttpRouter.middleware(HttpMiddleware.compression(), { global: true });
+
+	return HttpRouter.serve(Layer.mergeAll(routes, apiLayer, mcpLayer, pairingRateLimit, cors, compression) as Any, { disableLogger: true }).pipe(
+		Layer.provide(NodeHttpServer.layer(() => httpServer, { host: bridge.config.host, port: bridge.config.port, websocket: { perMessageDeflate: true } })),
 	);
 }

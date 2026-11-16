@@ -1,6 +1,6 @@
 {
   "name": "@mgabor3141/pi-durable-t3",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "description": "T3 Code as a frontend for a pi-durable Harness: attachT3(harness, options).",
   "license": "MIT",
   "repository": {
@@ -57,11 +57,13 @@
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
     "@types/node": "22.19.19",
+    "@types/ws": "8.18.2",
     "playwright-core": "1.64.1",
     "smol-toml": "1.9.0",
     "tsdown": "0.23.1",
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "ws": "8.22.0"
   },
   "pnpm": {
     "overrides": {

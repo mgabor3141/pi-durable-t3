@@ -182,6 +182,12 @@ FACET_PORT=5070 dev/pack-proof.sh   # the packed tarball and a git install, each
 
 `PI_DURABLE_T3_LIVE_MODEL=<provider>/<model> pnpm test` also runs one real-model turn.
 
+`test/transfer-budget.test.ts` holds what a client is sent (bytes on the wire and decoded, messages, snapshots) and
+how long it waits (a command answered, shown in the thread, shown in the sidebar) to ceilings, on the real HTTP and
+WebSocket transports; `TRANSFER_BUDGET_REPORT_PATH=<file>` writes the observed numbers as Markdown, which CI puts in
+the run's summary. `npx vitest run --config bench/vitest.config.ts bench/transfer.bench.test.ts` measures the same
+scenario at other sizes (see the file's header), and with a slow `messageContext` hook.
+
 The suite runs one file at a time on purpose. It starts real host processes and SQLite stores; a parallel run on a
 small host can exhaust memory and swap. Keep `fileParallelism: false` in `vitest.config.ts` unless the host has
 headroom, and do not add `--no-file-parallelism=false` by habit.
