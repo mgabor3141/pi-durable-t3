@@ -48,7 +48,7 @@ import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
 import { MessageContexts } from "./message-contexts.ts";
-import { compactCommand, QueuedCompaction } from "./queued-compaction.ts";
+import { queuedCommand, QueuedCommands } from "./queued-commands.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
 /** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
@@ -169,8 +169,8 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
-	/** A `/compact` that waits in the queue (`T3Attachment.queuedCompaction`). */
-	readonly queuedCompaction = new QueuedCompaction();
+	/** The commands that wait in the queue (`T3Attachment.queuedCommands`). */
+	readonly queuedCommands = new QueuedCommands();
 	/** Context for the model about each message, from the integrator (`T3Attachment.messageContext`). */
 	readonly messageContexts: MessageContexts;
 
@@ -1187,9 +1187,9 @@ export class Bridge {
 				await this.#commands.continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
 				return;
 			}
-			// A `/compact` sent as a queued message waits its turn behind the run that works (`queued-compaction.ts`); with
-			// no run to wait behind, or sent any other way, it compacts now.
-			if (input.mode === "queue" && this.queuedCompaction.active && compactCommand(input.text) !== undefined) {
+			// A `/compact` or `/reload` sent as a queued message waits its turn behind the run that works
+			// (`queued-commands.ts`); with no run to wait behind, or sent any other way, it is answered now.
+			if (input.mode === "queue" && this.queuedCommands.active && queuedCommand(input.text) !== undefined) {
 				if (await this.#store.queueBehindRun({ conversationId: head, requestId: input.commandId, message: input.text.trim(), messageId: input.messageId })) return;
 			}
 			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/continue`).

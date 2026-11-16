@@ -32,7 +32,7 @@ it("src/ never names the agent (no coding-agent package, credentials, prompt, to
 			if (line.includes("agent.instructions")) return;
 			// And one more of the same kind: pi-durable's `CompactionInput` names a compaction's guidance (what the
 			// user typed after `/compact`) with that word. A queued `/compact` starts the task itself
-			// (`queued-compaction.ts`), where a `/compact` sent now goes through `Conversation.compact(guidance)`.
+			// (`queued-commands.ts`), where a `/compact` sent now goes through `Conversation.compact(guidance)`.
 			if (line.includes("const input: CompactionInput")) return;
 			for (const token of FORBIDDEN) {
 				if (line.includes(token)) hits.push(`${relative(SRC, file)}:${index + 1}: ${token}`);

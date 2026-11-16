@@ -117,8 +117,8 @@ async function main(): Promise<void> {
 	runtime.registry.install(t3.threadTools());
 	// The agent's questions, as T3's card above the composer.
 	runtime.registry.install(t3.askUser());
-	// A `/compact` sent as a queued message waits its turn in the queue.
-	runtime.registry.install(t3.queuedCompaction());
+	// A `/compact` or `/reload` sent as a queued message waits its turn in the queue.
+	runtime.registry.install(t3.queuedCommands());
 
 	// Crash resume: the caller resumes the harness, AFTER the attach resolved (an interrupted run resumes on its own;
 	// capabilities.md).

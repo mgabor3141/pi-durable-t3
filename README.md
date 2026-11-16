@@ -209,11 +209,12 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `abortable(tool)` and `abortableExtension(extension)`: a tool (or every tool of an extension) whose call returns the
   moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
   when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
-- `t3.queuedCompaction()` (an extension to install on the Harness's registry): a `/compact` sent as a queued message
-  while the agent works waits its turn. It is a queued message like any other until it is the next one; then the run
-  that ends compacts before the messages behind it go on. Without the extension, with no run to wait behind, or sent
-  any other way, a `/compact` compacts at once, beside the run. It relies on pi-durable placing queued messages one at
-  a time (`followUpMode`, the default).
+- `t3.queuedCommands()` (an extension to install on the Harness's registry): a `/compact` or a `/reload` sent as a
+  queued message while the agent works waits its turn. It is a queued message like any other until it is the next one;
+  then the run that ends does what it says before the messages behind it go on: the context is compacted, or the next
+  message's request renders the system prompt again. Without the extension, with no run to wait behind, or sent any
+  other way, each is answered at once. It relies on pi-durable placing queued messages one at a time (`followUpMode`,
+  the default). The other commands (`/context`, `/undo`, `/redo`, `/continue`) are answered when they arrive.
 - `t3.messageContext(hook)` (an extension to install on the Harness's registry): context for the model about each
   message that starts or steers a turn, such as memories recalled for it. The message itself is taken at once; the run
   that answers it asks the hook before its next request, so a slow recall delays the model's answer, not the sender,

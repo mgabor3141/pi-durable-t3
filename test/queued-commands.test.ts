@@ -1,4 +1,4 @@
-// A `/compact` sent as a queued message while the agent works waits its turn (`queued-compaction.ts`): it is a queued
+// A `/compact` sent as a queued message while the agent works waits its turn (`queued-commands.ts`): it is a queued
 // message like any other until it is the next one, then the run that ends compacts before the messages behind it go
 // on. With no run to wait behind it compacts at once, as one sent any other way does; and it is never a prompt.
 import { mkdtemp, rm } from "node:fs/promises";
@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
+import { defineExtension, section, type Extension } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import { bridgeConfig, conversation, createNamed, gated, idle, makeThreads, quietLog } from "./threads-harness.ts";
@@ -14,12 +16,12 @@ import { until } from "./wait.ts";
 type Msg = { role: string; content: unknown };
 const long = "x".repeat(60_000);
 
-async function setup(install = true) {
-	const f = await makeThreads({ projects: [{ id: "p" }] });
+async function setup(install = true, extensions: readonly Extension[] = []) {
+	const f = await makeThreads({ projects: [{ id: "p" }], extensions });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
-	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-queued-compaction-"));
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-queued-commands-"));
 	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), quietLog, f.threads, f.model.models);
-	if (install) f.tools.install(bridge.queuedCompaction.extension());
+	if (install) f.tools.install(bridge.queuedCommands.extension());
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {
@@ -158,4 +160,32 @@ it("a queued /compact left behind a stopped run compacts when the queue is resum
 	expect(all.indexOf("pi.compaction")).toBeLessThan(all.lastIndexOf("app.user"));
 	expect(requests.flat().some((line) => line.startsWith("user:/compact"))).toBe(false);
 	expect(requests.at(-1)!.at(-1)).toBe("user:three");
+});
+
+it("a queued /reload renders the system prompt again for the message behind it, and not before", { timeout: 60_000 }, async () => {
+	let rule = "Rule one.";
+	// A section that keeps what the thread shows, as a host with a fixed prompt has them: only a reload renders it again.
+	const prompted = defineExtension({ name: "rules", sections: [section("rules", (input) => input.shown["rules"] ?? rule, { tag: false })] });
+	const { f, bridge, thread, send, answer, requests, raw, kinds, queued } = await setup(true, [prompted]);
+	const working = gated("one");
+	f.model.respond(answer(working.step as never), answer("two"), answer("three"));
+	await send("one");
+	await until("the run", () => requests.length === 1);
+	rule = "Rule two.";
+	await send("two", "queue");
+	await send("/reload", "queue");
+	await send("three", "queue");
+	expect(await queued()).toEqual(["m2", "m3", "m4"]);
+	working.release();
+	await until("the queue to empty", async () => (await queued()).length === 0 && requests.length === 3);
+	await idle(f.harness, thread.head);
+	// "two" was answered on the prompt as it was; the reload ran at its turn, so "three" got the prompt rendered again.
+	const prompt = (request: number) => JSON.stringify(getCurrentSystemMessage(JSON.parse(raw[request]!) as never));
+	expect(prompt(1)).toContain("Rule one.");
+	expect(prompt(2)).toContain("Rule two.");
+	expect(prompt(2)).not.toContain("Rule one.");
+	expect(await kinds()).toEqual(["app.user", "pi.assistant", "app.user", "pi.assistant", "app.reload", "app.user", "pi.assistant"]);
+	expect(requests.flat().some((line) => line.startsWith("user:/reload")), "never a prompt").toBe(false);
+	const { projection } = await bridge.projection("t");
+	expect(projection.messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual(["one", "two", "/reload", "three"]);
 });

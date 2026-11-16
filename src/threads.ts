@@ -242,7 +242,7 @@ export class Threads {
 		this.#env = deps.env;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#onWarn = deps.onWarn ?? (() => {});
-		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), submit: (input, whenBusy) => this.submit(input, whenBusy), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId) });
+		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), submit: (input, whenBusy) => this.submit(input, whenBusy), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId), reload: (threadId, messageId) => this.reload(threadId, messageId) });
 	}
 
 	/** The integrator's Harness; the bridge reads and watches conversation views through it. */
@@ -706,7 +706,7 @@ export class Threads {
 	/**
 	 * Queue a message behind the run that is working, or not at all: `false` when no run is, or when the run has
 	 * answered and only finishes (its `afterRun` hooks have looked at the queue already). For a queued command
-	 * (`t3/queued-compaction.ts`), which must never be placed as a prompt: decided in the commit that queues it.
+	 * (`t3/queued-commands.ts`), which must never be placed as a prompt: decided in the commit that queues it.
 	 */
 	async queueBehindRun(input: { readonly conversationId: number; readonly requestId: string; readonly message: string; readonly messageId: string }): Promise<boolean> {
 		const conversationId = input.conversationId as ConversationId;
