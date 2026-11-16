@@ -325,11 +325,10 @@ function markModelSwitches(runs: readonly Any[], turnItems: Any[], drafts: reado
 	}
 }
 
-export function projectThread(
-	meta: ThreadMeta,
-	view: ConversationView | undefined,
-	memory: ThreadMemory,
-): ProjectionResult {
+/** What a thread's projection is built from, and the rows it is built into: `begin` makes it, each part adds to it. */
+type Build = ReturnType<typeof begin> & { lastActivity: number };
+
+function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: ThreadMemory) {
 	const threadId = meta.threadId;
 	const providerThreadId = `pt-${threadId}`;
 	const live = view?.docs["pi.live"];
@@ -372,8 +371,12 @@ export function projectThread(
 	const projectedRuns: ProjectedRun[] = [];
 	const forkRuns: ProjectedRun[] = [];
 	const toolImages = new Map<string, readonly ToolImage[]>();
-	let lastActivity = meta.updatedAt;
+	const lastActivity = meta.updatedAt;
+	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
+}
 
+function pushBaseline(b: Build): void {
+	const { meta, threadId, providerThreadId, nodes, checkpointScopes, checkpoints } = b;
 	// The baseline checkpoint (before the first turn) hangs off a synthetic system node.
 	nodes.push({
 		id: id("n-baseline"),
@@ -419,627 +422,634 @@ export function projectThread(
 		files: [],
 		capturedAt: time(meta.createdAt),
 	});
+}
 
-	// A compaction is the context head. Its card is emitted where the cut is: after the history it replaces and
-	// before the kept entries. It is normally runless; a manual `/compact` command owns it, so T3 can fold the command
-	// and the card into one compaction row rather than showing both.
-	const pushCompaction = (entry: EntryRecord, ordinal: number, runId: string | null = null): void => {
-		const message = firstMessage(entry);
-		const at = message?.timestamp ?? meta.createdAt;
-		const summary = textOf(message?.role === "user" ? message.content : undefined);
-		const tokens = compactionTokens.get(entry.id);
-		turnItems.push({
-			id: id(`ti-k${entry.id}`),
-			threadId: id(threadId),
-			runId: runId === null ? null : id(runId),
-			nodeId: null,
-			providerThreadId: id(providerThreadId),
-			providerTurnId: null,
-			nativeItemRef: null,
-			parentItemId: null,
-			ordinal,
-			status: "completed",
-			title: "Context compacted",
-			startedAt: time(at),
-			completedAt: time(at),
-			updatedAt: time(at),
-			type: "compaction",
-			driver: id(PROVIDER_DRIVER),
-			...(summary.length === 0 ? {} : { summary }),
-			...(tokens?.before === undefined ? {} : { beforeTokenCount: tokens.before }),
-			...(tokens?.after === undefined ? {} : { afterTokenCount: tokens.after }),
-		} as Any);
-	};
+// A compaction is the context head. Its card is emitted where the cut is: after the history it replaces and
+// before the kept entries. It is normally runless; a manual `/compact` command owns it, so T3 can fold the command
+// and the card into one compaction row rather than showing both.
+function pushCompaction(b: Build, entry: EntryRecord, ordinal: number, runId: string | null = null): void {
+	const { meta, threadId, providerThreadId, compactionTokens, turnItems } = b;
+	const message = firstMessage(entry);
+	const at = message?.timestamp ?? meta.createdAt;
+	const summary = textOf(message?.role === "user" ? message.content : undefined);
+	const tokens = compactionTokens.get(entry.id);
+	turnItems.push({
+		id: id(`ti-k${entry.id}`),
+		threadId: id(threadId),
+		runId: runId === null ? null : id(runId),
+		nodeId: null,
+		providerThreadId: id(providerThreadId),
+		providerTurnId: null,
+		nativeItemRef: null,
+		parentItemId: null,
+		ordinal,
+		status: "completed",
+		title: "Context compacted",
+		startedAt: time(at),
+		completedAt: time(at),
+		updatedAt: time(at),
+		type: "compaction",
+		driver: id(PROVIDER_DRIVER),
+		...(summary.length === 0 ? {} : { summary }),
+		...(tokens?.before === undefined ? {} : { beforeTokenCount: tokens.before }),
+		...(tokens?.after === undefined ? {} : { afterTokenCount: tokens.after }),
+	} as Any);
+}
 
-	// Where each answered command stands (`ShownExchange`): the latest run a user's message began, begun by then.
-	const shownAnswer = (shown: ShownExchange, ordinal: number): void => {
-		const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
-		const at = shown.at + 1;
-		turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
-		messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
-		shownIds.add(answerId);
-		// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
-		lastActivity = Math.max(lastActivity, at);
-	};
-	const shownIn = new Map<RunDraft, ShownExchange[]>();
-	const shownAlone: ShownExchange[] = [];
-	for (const shown of meta.shown ?? []) {
-		const draft = drafts.findLast((candidate) => candidate.synthetic !== true && isUserEntry(candidate.userEntry) && candidate.userEntry.id <= shown.after);
-		if (draft === undefined) shownAlone.push(shown);
-		else shownIn.set(draft, [...(shownIn.get(draft) ?? []), shown]);
+// Where each answered command stands (`ShownExchange`): the latest run a user's message began, begun by then.
+function shownAnswer(b: Build, shown: ShownExchange, ordinal: number): void {
+	const { threadId, providerThreadId, messages, turnItems, shownIds } = b;
+	const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
+	const at = shown.at + 1;
+	turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
+	messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
+	shownIds.add(answerId);
+	// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
+	b.lastActivity = Math.max(b.lastActivity, at);
+}
+
+/** One run: its rows, then its turn items in the order they happened. A draft that is only a compaction card has neither. */
+function projectRun(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, index: number): void {
+	const { drafts } = b;
+	const ordinal = index + 1;
+	const previous = index === 0 ? undefined : drafts[index - 1];
+	const compactCardRunId = previous !== undefined && isCompactCommandEntry(previous.userEntry) ? `r${previous.userEntry.id}` : null;
+	if (draft.card !== undefined) pushCompaction(b, draft.card, ordinal, compactCardRunId);
+	if (draft.markerOnly === true) return;
+	projectRunItems(b, shownIn, draft, projectRunRows(b, draft, index));
+}
+
+/** A run's rows: the run, its attempt, node, provider turn (with the usage of its last request) and checkpoint. */
+function projectRunRows(b: Build, draft: RunDraft, index: number) {
+	const { meta, threadId, providerThreadId, modelSelection, drafts, busy, runs, attempts, nodes, providerTurns, checkpointScopes, checkpoints, projectedRuns, forkRuns } = b;
+	const ordinal = index + 1;
+	const isLast = index === drafts.length - 1;
+	const synthetic = draft.synthetic === true;
+	const u = draft.userEntry;
+	const runId = `r${u.id}`;
+	const nodeId = `n${u.id}`;
+	const attemptId = `a${u.id}`;
+	const turnId = `ptu${u.id}`;
+	const userMessage = firstMessage(u)!;
+	const anchorAt = userMessage.timestamp ?? meta.createdAt;
+	// A synthetic run starts where its kept entries start: the compaction summary is only a marker, not a prompt.
+	const firstStep = draft.steps[0];
+	const requestedAt = synthetic ? (firstStep === undefined ? anchorAt : (firstMessage(firstStep)?.timestamp ?? anchorAt)) : anchorAt;
+	const assistants = draft.steps.filter(isAssistantEntry);
+	const lastAssistant = assistants.at(-1);
+	const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
+	const usage = lastAssistantMessage?.role === "assistant" ? lastAssistantMessage.usage : undefined;
+	const running = isLast && busy;
+	const compactCommand = isCompactCommandEntry(u);
+	let status: OrchestrationV2Run["status"];
+	if (running) status = "running";
+	else if ((synthetic || compactCommand) && lastAssistant === undefined) status = "completed";
+	else {
+		const reason = stopReason(lastAssistant);
+		status =
+			reason === "stop" || reason === "length"
+				? "completed"
+				: reason === "error"
+					? "failed"
+					: "interrupted";
 	}
-
-	drafts.forEach((draft, index) => {
-		const ordinal = index + 1;
-		const previous = index === 0 ? undefined : drafts[index - 1];
-		const compactCardRunId = previous !== undefined && isCompactCommandEntry(previous.userEntry) ? `r${previous.userEntry.id}` : null;
-		if (draft.card !== undefined) pushCompaction(draft.card, ordinal, compactCardRunId);
-		if (draft.markerOnly === true) return;
-		const isLast = index === drafts.length - 1;
-		const synthetic = draft.synthetic === true;
-		const u = draft.userEntry;
-		const runId = `r${u.id}`;
-		const nodeId = `n${u.id}`;
-		const attemptId = `a${u.id}`;
-		const turnId = `ptu${u.id}`;
-		const userMessage = firstMessage(u)!;
-		const anchorAt = userMessage.timestamp ?? meta.createdAt;
-		// A synthetic run starts where its kept entries start: the compaction summary is only a marker, not a prompt.
-		const firstStep = draft.steps[0];
-		const requestedAt = synthetic ? (firstStep === undefined ? anchorAt : (firstMessage(firstStep)?.timestamp ?? anchorAt)) : anchorAt;
-		const assistants = draft.steps.filter(isAssistantEntry);
-		const lastAssistant = assistants.at(-1);
-		const lastAssistantMessage = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
-		const usage = lastAssistantMessage?.role === "assistant" ? lastAssistantMessage.usage : undefined;
-		const running = isLast && busy;
-		const compactCommand = isCompactCommandEntry(u);
-		let status: OrchestrationV2Run["status"];
-		if (running) status = "running";
-		else if ((synthetic || compactCommand) && lastAssistant === undefined) status = "completed";
-		else {
-			const reason = stopReason(lastAssistant);
-			status =
-				reason === "stop" || reason === "length"
-					? "completed"
-					: reason === "error"
-						? "failed"
-						: "interrupted";
-		}
-		// A compaction card is not a place to fork at or a run's last message: the run's own last entry is.
-		const lastEntry = draft.steps.findLast((step) => !isCompactionEntry(step)) ?? u;
-		// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
-		const lastMessage = firstMessage(lastEntry);
-		// Never before it was asked for: a message stamped earlier (a clock step, a reply made ahead) still ends the run then.
-		const completedMs = running ? null : Math.max(requestedAt, endOf(lastMessage, requestedAt));
-		lastActivity = Math.max(lastActivity, completedMs ?? requestedAt);
-		// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
-		const runModel: Any = (() => {
-			const m = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
-			return m?.role === "assistant" && m.provider !== undefined && m.model !== undefined
-				? { instanceId: PROVIDER_INSTANCE_ID, model: `${m.provider}/${m.model}`, ...(m.thinkingLevel === undefined ? {} : { options: thinkingOption(m.thinkingLevel) }) }
-				: modelSelection;
-		})();
-		const settled = !running;
-		// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
-		// History runs do: a rewind into the transcript above a compaction is a real rewind, not display-only.
-		const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
-		runs.push({
-			id: id(runId),
-			threadId: id(threadId),
-			ordinal,
-			providerInstanceId: id(PROVIDER_INSTANCE_ID),
-			modelSelection: runModel,
-			providerThreadId: id(providerThreadId),
-			userMessageId: id(messageIdOf(u) ?? `m${u.id}`),
-			rootNodeId: id(nodeId),
-			activeAttemptId: id(attemptId),
-			status,
-			requestedAt: time(requestedAt),
-			startedAt: time(requestedAt),
-			completedAt: completedMs === null ? null : time(completedMs),
-			checkpointId: checkpointId === null ? null : id(checkpointId),
-			contextHandoffId: null,
-		});
-		const attemptStatus = status === "running" ? "running" : status === "failed" ? "failed" : status;
-		attempts.push({
-			id: id(attemptId),
-			runId: id(runId),
-			attemptOrdinal: 1,
-			rootNodeId: id(nodeId),
-			providerInstanceId: id(PROVIDER_INSTANCE_ID),
-			providerThreadId: id(providerThreadId),
-			providerTurnId: id(turnId),
-			reason: "initial",
-			status: attemptStatus as OrchestrationV2RunAttempt["status"],
-			startedAt: time(requestedAt),
-			completedAt: completedMs === null ? null : time(completedMs),
-		});
-		nodes.push({
-			id: id(nodeId),
-			threadId: id(threadId),
-			runId: id(runId),
-			parentNodeId: null,
-			rootNodeId: id(nodeId),
-			kind: "root_turn",
-			status: status as OrchestrationV2ExecutionNode["status"],
-			countsForRun: true,
-			providerThreadId: id(providerThreadId),
-			providerTurnId: id(turnId),
-			nativeItemRef: null,
-			runtimeRequestId: null,
-			checkpointScopeId: id(`cs${u.id}`),
-			startedAt: time(requestedAt),
-			completedAt: completedMs === null ? null : time(completedMs),
-		});
-		providerTurns.push({
-			id: id(turnId),
-			providerThreadId: id(providerThreadId),
-			nodeId: id(nodeId),
-			runAttemptId: id(attemptId),
-			nativeTurnRef: null,
-			ordinal,
-			status: attemptStatus as OrchestrationV2ProviderTurn["status"],
-			startedAt: time(requestedAt),
-			completedAt: completedMs === null ? null : time(completedMs),
-			...(usage === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0 ? {} : { tokenUsage: {
-				usedTokens: usage.totalTokens,
-				maxTokens: meta.contextWindow,
-				inputTokens: usage.input,
-				cachedInputTokens: usage.cacheRead,
-				outputTokens: usage.output,
-				...(usage.reasoning === undefined ? {} : { reasoningOutputTokens: usage.reasoning }),
-				...promptCacheOf(usage, lastAssistantMessage?.timestamp, meta.promptCache),
-				updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
-			} }),
-		});
-		if (!synthetic) {
-			checkpointScopes.push({
-				id: id(`cs${u.id}`),
-				threadId: id(threadId),
-				runId: id(runId),
-				nodeId: id(nodeId),
-				parentScopeId: null,
-				providerThreadId: id(providerThreadId),
-				kind: "root_run",
-				ordinalWithinParent: index,
-				advancesAppRunCount: true,
-				cwd: meta.cwd,
-				createdAt: time(requestedAt),
-			});
-		}
-		if (checkpointId !== null) {
-			checkpoints.push({
-				id: id(checkpointId),
-				threadId: id(threadId),
-				scopeId: id(`cs${u.id}`),
-				runId: id(runId),
-				nodeId: id(nodeId),
-				parentCheckpointId: id(checkpoints.at(-1)!.id),
-				ordinalWithinScope: 1,
-				appRunOrdinal: ordinal,
-				ref: id(`pi:${lastEntry.id}`),
-				status: "ready",
-				files: [],
-				capturedAt: time(completedMs ?? requestedAt),
-			});
-		}
-		const projectedRun = { runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status };
-		// A synthetic run has no user turn to rewind to, but its last entry is still a valid fork point.
-		forkRuns.push(projectedRun);
-		if (!synthetic) projectedRuns.push(projectedRun);
-
-		// ---- items ----
-		const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
-			id: id(itemId),
+	// A compaction card is not a place to fork at or a run's last message: the run's own last entry is.
+	const lastEntry = draft.steps.findLast((step) => !isCompactionEntry(step)) ?? u;
+	// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
+	const lastMessage = firstMessage(lastEntry);
+	// Never before it was asked for: a message stamped earlier (a clock step, a reply made ahead) still ends the run then.
+	const completedMs = running ? null : Math.max(requestedAt, endOf(lastMessage, requestedAt));
+	b.lastActivity = Math.max(b.lastActivity, completedMs ?? requestedAt);
+	// The run's model, read from the assistant message pi recorded for it (capabilities.md: no provider session to read).
+	const runModel: Any = (() => {
+		const m = lastAssistant === undefined ? undefined : firstMessage(lastAssistant);
+		return m?.role === "assistant" && m.provider !== undefined && m.model !== undefined
+			? { instanceId: PROVIDER_INSTANCE_ID, model: `${m.provider}/${m.model}`, ...(m.thinkingLevel === undefined ? {} : { options: thinkingOption(m.thinkingLevel) }) }
+			: modelSelection;
+	})();
+	const settled = !running;
+	// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
+	// History runs do: a rewind into the transcript above a compaction is a real rewind, not display-only.
+	const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
+	runs.push({
+		id: id(runId),
+		threadId: id(threadId),
+		ordinal,
+		providerInstanceId: id(PROVIDER_INSTANCE_ID),
+		modelSelection: runModel,
+		providerThreadId: id(providerThreadId),
+		userMessageId: id(messageIdOf(u) ?? `m${u.id}`),
+		rootNodeId: id(nodeId),
+		activeAttemptId: id(attemptId),
+		status,
+		requestedAt: time(requestedAt),
+		startedAt: time(requestedAt),
+		completedAt: completedMs === null ? null : time(completedMs),
+		checkpointId: checkpointId === null ? null : id(checkpointId),
+		contextHandoffId: null,
+	});
+	const attemptStatus = status === "running" ? "running" : status === "failed" ? "failed" : status;
+	attempts.push({
+		id: id(attemptId),
+		runId: id(runId),
+		attemptOrdinal: 1,
+		rootNodeId: id(nodeId),
+		providerInstanceId: id(PROVIDER_INSTANCE_ID),
+		providerThreadId: id(providerThreadId),
+		providerTurnId: id(turnId),
+		reason: "initial",
+		status: attemptStatus as OrchestrationV2RunAttempt["status"],
+		startedAt: time(requestedAt),
+		completedAt: completedMs === null ? null : time(completedMs),
+	});
+	nodes.push({
+		id: id(nodeId),
+		threadId: id(threadId),
+		runId: id(runId),
+		parentNodeId: null,
+		rootNodeId: id(nodeId),
+		kind: "root_turn",
+		status: status as OrchestrationV2ExecutionNode["status"],
+		countsForRun: true,
+		providerThreadId: id(providerThreadId),
+		providerTurnId: id(turnId),
+		nativeItemRef: null,
+		runtimeRequestId: null,
+		checkpointScopeId: id(`cs${u.id}`),
+		startedAt: time(requestedAt),
+		completedAt: completedMs === null ? null : time(completedMs),
+	});
+	providerTurns.push({
+		id: id(turnId),
+		providerThreadId: id(providerThreadId),
+		nodeId: id(nodeId),
+		runAttemptId: id(attemptId),
+		nativeTurnRef: null,
+		ordinal,
+		status: attemptStatus as OrchestrationV2ProviderTurn["status"],
+		startedAt: time(requestedAt),
+		completedAt: completedMs === null ? null : time(completedMs),
+		...(usage === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0 ? {} : { tokenUsage: {
+			usedTokens: usage.totalTokens,
+			maxTokens: meta.contextWindow,
+			inputTokens: usage.input,
+			cachedInputTokens: usage.cacheRead,
+			outputTokens: usage.output,
+			...(usage.reasoning === undefined ? {} : { reasoningOutputTokens: usage.reasoning }),
+			...promptCacheOf(usage, lastAssistantMessage?.timestamp, meta.promptCache),
+			updatedAt: new Date(completedMs ?? requestedAt).toISOString(),
+		} }),
+	});
+	if (!synthetic) {
+		checkpointScopes.push({
+			id: id(`cs${u.id}`),
 			threadId: id(threadId),
 			runId: id(runId),
 			nodeId: id(nodeId),
+			parentScopeId: null,
 			providerThreadId: id(providerThreadId),
-			providerTurnId: id(turnId),
-			nativeItemRef: null,
-			parentItemId: null,
-			ordinal,
-			status: itemStatus,
-			title: null,
-			startedAt: time(at),
-			completedAt: done ? time(end) : null,
-			updatedAt: time(end),
+			kind: "root_run",
+			ordinalWithinParent: index,
+			advancesAppRunCount: true,
+			cwd: meta.cwd,
+			createdAt: time(requestedAt),
 		});
-		const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
-			const message = firstMessage(entry)!;
-			const messageId = messageIdOf(entry) ?? `m${entry.id}`;
-			// The compaction anchor is shown as the card, not as the summary in a bubble: report the prompt the clients
-			// already know how to hide when the same run carries a compaction item (`/compact`).
-			const anchor = synthetic && entry === u;
-			const at = anchor ? requestedAt : (message.timestamp ?? requestedAt);
-			const text = anchor ? "/compact" : textOf(message.role === "user" ? message.content : undefined);
-			// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
-			const attachments = anchor ? [] : attachmentsOf(entry);
-			// The composer records its text references resolve against. Older entries only kept the attachments; rebuild
-			// the image/file bindings from the references so their inline labels do not render "(unavailable)".
-			const context = anchor ? undefined : contextOf(entry) ?? contextFromText(text, attachments);
-			// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
-			const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
-			const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
-			// The thread a message came from (`thread_prompt`, a child's report): recorded on the entry with its author.
-			const { senderThreadId, ...author } = authorOf(entry.data);
-			// T3 marks the `/compact` it sent by itself (`idle-compaction.ts`), and says so on the compaction's row.
-			const idle = isCompactCommandEntry(entry) && (entry.data as { idleCompaction?: unknown } | undefined)?.idleCompaction === "beforeCacheExpires" ? { idleCompaction: "beforeCacheExpires" as const } : {};
-			const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
+	}
+	if (checkpointId !== null) {
+		checkpoints.push({
+			id: id(checkpointId),
+			threadId: id(threadId),
+			scopeId: id(`cs${u.id}`),
+			runId: id(runId),
+			nodeId: id(nodeId),
+			parentCheckpointId: id(checkpoints.at(-1)!.id),
+			ordinalWithinScope: 1,
+			appRunOrdinal: ordinal,
+			ref: id(`pi:${lastEntry.id}`),
+			status: "ready",
+			files: [],
+			capturedAt: time(completedMs ?? requestedAt),
+		});
+	}
+	const projectedRun = { runId, ordinal, userEntryId: u.id, lastEntryId: lastEntry.id, status };
+	// A synthetic run has no user turn to rewind to, but its last entry is still a valid fork point.
+	forkRuns.push(projectedRun);
+	if (!synthetic) projectedRuns.push(projectedRun);
+	return { ordinal, synthetic, u, runId, nodeId, turnId, requestedAt, running };
+}
+
+/** A run's turn items: the user's message, each response with its tool calls, failed requests, child cards, steers, and what is still streaming. */
+function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, r: ReturnType<typeof projectRunRows>): void {
+	const { meta, threadId, providerThreadId, live, nodes, messages, turnItems, shownIds, subagents, toolImages } = b;
+	const { ordinal, synthetic, u, runId, nodeId, turnId, requestedAt, running } = r;
+	const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
+		id: id(itemId),
+		threadId: id(threadId),
+		runId: id(runId),
+		nodeId: id(nodeId),
+		providerThreadId: id(providerThreadId),
+		providerTurnId: id(turnId),
+		nativeItemRef: null,
+		parentItemId: null,
+		ordinal,
+		status: itemStatus,
+		title: null,
+		startedAt: time(at),
+		completedAt: done ? time(end) : null,
+		updatedAt: time(end),
+	});
+	const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
+		const message = firstMessage(entry)!;
+		const messageId = messageIdOf(entry) ?? `m${entry.id}`;
+		// The compaction anchor is shown as the card, not as the summary in a bubble: report the prompt the clients
+		// already know how to hide when the same run carries a compaction item (`/compact`).
+		const anchor = synthetic && entry === u;
+		const at = anchor ? requestedAt : (message.timestamp ?? requestedAt);
+		const text = anchor ? "/compact" : textOf(message.role === "user" ? message.content : undefined);
+		// The images the entry carries in its data (T3's `ChatImageAttachment`s) — shown on the message after a restart.
+		const attachments = anchor ? [] : attachmentsOf(entry);
+		// The composer records its text references resolve against. Older entries only kept the attachments; rebuild
+		// the image/file bindings from the references so their inline labels do not render "(unavailable)".
+		const context = anchor ? undefined : contextOf(entry) ?? contextFromText(text, attachments);
+		// A scheduled task's message: T3 records the task on it, and the id the scheduler mints names the task.
+		const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
+		const scheduled = scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) };
+		// The thread a message came from (`thread_prompt`, a child's report): recorded on the entry with its author.
+		const { senderThreadId, ...author } = authorOf(entry.data);
+		// T3 marks the `/compact` it sent by itself (`idle-compaction.ts`), and says so on the compaction's row.
+		const idle = isCompactCommandEntry(entry) && (entry.data as { idleCompaction?: unknown } | undefined)?.idleCompaction === "beforeCacheExpires" ? { idleCompaction: "beforeCacheExpires" as const } : {};
+		const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
+		turnItems.push({
+			...base(`ti-u${entry.id}`, at, "completed", true),
+			...author,
+			...sender,
+			type: "user_message",
+			messageId: id(messageId),
+			...scheduled,
+			inputIntent: intent,
+			text,
+			attachments,
+			...(context === undefined ? {} : { context }),
+		} as Any);
+		// The message's context (`messageContext`, such as recalled memories), shown as the tool row the integrator named,
+		// so the user sees what the model was given with the message. No tool ran.
+		const content = message.role === "user" && Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
+		content.forEach((block, index) => {
+			if (block.type !== "text" || block.shownAs === undefined) return;
 			turnItems.push({
-				...base(`ti-u${entry.id}`, at, "completed", true),
-				...author,
-				...sender,
-				type: "user_message",
-				messageId: id(messageId),
-				...scheduled,
-				inputIntent: intent,
-				text,
-				attachments,
-				...(context === undefined ? {} : { context }),
+				...base(`${MESSAGE_CONTEXT_ITEM}${entry.id}.${index}`, at, "completed", true),
+				title: block.shownAs.name,
+				type: "dynamic_tool",
+				toolName: block.shownAs.name,
+				input: block.shownAs.input,
+				output: block.shownAs.details === undefined ? block.text : `${block.text}\n\n${DISPLAY_ONLY_RULE}\n${block.shownAs.details}`,
 			} as Any);
-			// The message's context (`messageContext`, such as recalled memories), shown as the tool row the integrator named,
-			// so the user sees what the model was given with the message. No tool ran.
-			const content = message.role === "user" && Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
-			content.forEach((block, index) => {
-				if (block.type !== "text" || block.shownAs === undefined) return;
-				turnItems.push({
-					...base(`${MESSAGE_CONTEXT_ITEM}${entry.id}.${index}`, at, "completed", true),
-					title: block.shownAs.name,
-					type: "dynamic_tool",
-					toolName: block.shownAs.name,
-					input: block.shownAs.input,
-					output: block.shownAs.details === undefined ? block.text : `${block.text}\n\n${DISPLAY_ONLY_RULE}\n${block.shownAs.details}`,
-				} as Any);
-			});
+		});
+		messages.push({
+			...author,
+			...sender,
+			...scheduled,
+			...idle,
+			id: id(messageId),
+			threadId: id(threadId),
+			runId: id(runId),
+			nodeId: id(nodeId),
+			role: "user",
+			text,
+			attachments,
+			...(context === undefined ? {} : { context }),
+			streaming: false,
+			createdAt: time(at),
+			updatedAt: time(at),
+		});
+	};
+	const pushAssistant = (
+		key: string,
+		message: Extract<DurableMessage, { role: "assistant" }>,
+		at: number,
+		streaming: boolean,
+		toolResults: ReadonlyMap<string, EntryRecord>,
+		liveTools: ReadonlyMap<string, LiveToolSlot>,
+	) => {
+		const end = endOf(message, at);
+		const thinking = thinkingOf(message.content);
+		if (thinking.length > 0) {
+			turnItems.push({
+				...base(`ti-r${key}`, at, streaming ? "running" : "completed", !streaming, end),
+				type: "reasoning",
+				text: thinking,
+				streaming,
+			} as Any);
+		}
+		const text = textOf(message.content);
+		if (text.length > 0 || (streaming && message.content.length === 0)) {
+			const messageId = `m${key}`;
+			turnItems.push({
+				...base(`ti-a${key}`, at, streaming ? "running" : "completed", !streaming, end),
+				type: "assistant_message",
+				messageId: id(messageId),
+				text,
+				streaming,
+			} as Any);
 			messages.push({
-				...author,
-				...sender,
-				...scheduled,
-				...idle,
+				createdBy: "agent",
+				creationSource: "provider",
 				id: id(messageId),
 				threadId: id(threadId),
 				runId: id(runId),
 				nodeId: id(nodeId),
-				role: "user",
+				role: "assistant",
 				text,
-				attachments,
-				...(context === undefined ? {} : { context }),
-				streaming: false,
+				attachments: [],
+				streaming,
 				createdAt: time(at),
-				updatedAt: time(at),
+				updatedAt: time(end),
 			});
-		};
-		const pushAssistant = (
-			key: string,
-			message: Extract<DurableMessage, { role: "assistant" }>,
-			at: number,
-			streaming: boolean,
-			toolResults: ReadonlyMap<string, EntryRecord>,
-			liveTools: ReadonlyMap<string, LiveToolSlot>,
-		) => {
-			const end = endOf(message, at);
-			const thinking = thinkingOf(message.content);
-			if (thinking.length > 0) {
-				turnItems.push({
-					...base(`ti-r${key}`, at, streaming ? "running" : "completed", !streaming, end),
-					type: "reasoning",
-					text: thinking,
-					streaming,
-				} as Any);
-			}
-			const text = textOf(message.content);
-			if (text.length > 0 || (streaming && message.content.length === 0)) {
-				const messageId = `m${key}`;
-				turnItems.push({
-					...base(`ti-a${key}`, at, streaming ? "running" : "completed", !streaming, end),
-					type: "assistant_message",
-					messageId: id(messageId),
-					text,
-					streaming,
-				} as Any);
-				messages.push({
-					createdBy: "agent",
-					creationSource: "provider",
-					id: id(messageId),
-					threadId: id(threadId),
-					runId: id(runId),
-					nodeId: id(nodeId),
-					role: "assistant",
-					text,
-					attachments: [],
-					streaming,
-					createdAt: time(at),
-					updatedAt: time(end),
-				});
-			}
-			for (const block of message.content) {
-				if (block.type !== "toolCall") continue;
-				const result = toolResults.get(block.id);
-				const resultMessage = result === undefined ? undefined : firstMessage(result);
-				const liveSlot = liveTools.get(block.id);
-				const output =
-					resultMessage?.role === "toolResult" ? textOf(resultMessage.content) : (liveSlot?.output ?? undefined);
-				const failed = resultMessage?.role === "toolResult" && resultMessage.isError === true;
-				const images = resultMessage?.role === "toolResult" ? toolImagesOf(resultMessage.content) : [];
-				if (images.length > 0) toolImages.set(`ti-t${block.id}`, images);
-				const aborted = result !== undefined && isAbortedToolResult(result);
-				const itemStatus: OrchestrationV2TurnItem["status"] = aborted
-					? "interrupted"
-					: result !== undefined
-						? failed
-							? "failed"
-							: "completed"
-						: running
-							? "running"
-							: "interrupted";
-				const resultAt = resultMessage?.timestamp ?? at;
-				const common = base(`ti-t${block.id}`, resultAt, itemStatus, result !== undefined);
-				// T3's secret card: the call is the request (`secret-requests.ts`). Its outcome is in the result's details; a
-				// call still running waits for the user, and one that ended without a result was stopped.
-				if (block.name === REQUEST_SECRET_TOOL) {
-					const outcome = (resultMessage?.role === "toolResult" ? (resultMessage.details as { secretRequest?: { status?: string } } | undefined) : undefined)?.secretRequest?.status;
-					const secretStatus = itemStatus === "running" ? "pending" : outcome === "saved" || outcome === "declined" ? outcome : "cancelled";
-					const label = typeof block.arguments["label"] === "string" && block.arguments["label"].trim() !== "" ? block.arguments["label"].trim() : "Secret";
-					turnItems.push({
-						...common,
-						title: label,
-						type: "secret_request",
-						label,
-						reason: typeof block.arguments["reason"] === "string" ? block.arguments["reason"] : "",
-						// The card's button (T3 0.1.9): the page to get the value from.
-						...(typeof block.arguments["url"] === "string" && block.arguments["url"].trim() !== "" ? { url: block.arguments["url"].trim() } : {}),
-						...(typeof block.arguments["placeholder"] === "string" ? { placeholder: block.arguments["placeholder"] } : {}),
-						// T3's `file` delivery, for its note: the agent's commands can read the value, as they can here.
-						delivery: "file",
-						secretStatus,
-					} as Any);
-					continue;
-				}
-				if (block.name === "bash" && typeof block.arguments.command === "string") {
-					turnItems.push({
-						...common,
-						title: "bash",
-						type: "command_execution",
-						input: block.arguments.command,
-						...(output === undefined ? {} : { output }),
-						...(failed ? { outputIndicatesFailure: true } : {}),
-					} as Any);
-				} else if (block.name === CODEMODE_TOOL && typeof block.arguments.code === "string") {
-					// T3 shows a JavaScript tool (`js`, `isJavaScriptReplTool` in T3's shared toolActivity) with a code icon, its
-					// title as the row's label, and its `code` highlighted as TypeScript; a script's first line is that label,
-					// as a command's own text is a command row's.
-					turnItems.push({
-						...common,
-						title: scriptHeadline(block.arguments.code),
-						type: "dynamic_tool",
-						toolName: T3_JAVASCRIPT_TOOL,
-						input: { code: block.arguments.code },
-						...(output === undefined && images.length === 0 ? {} : { output: withImageMarkers(output, images) }),
-					} as Any);
-				} else {
-					// The model's own html_render call: its page is the `app.html-render` entry's item, so the call's output
-					// must not name it too, or T3 would show the page twice.
-					const shown = block.name === HTML_RENDER_TOOL_NAME && output !== undefined ? withoutHtmlRender(output) : output;
-					turnItems.push({
-						...common,
-						title: block.name,
-						type: "dynamic_tool",
-						toolName: block.name,
-						input: block.arguments,
-						...(shown === undefined && images.length === 0 ? {} : { output: withImageMarkers(shown, images) }),
-					} as Any);
-				}
-			}
-		};
-		// Requests that failed one after another are one row, as T3 shows a provider's retries: it stands where the first
-		// failed, says the last one's error, and counts. pi-durable records every failed request as an entry of its own.
-		let failures: { readonly key: string; readonly at: number; readonly count: number; readonly last: Extract<DurableMessage, { role: "assistant" }> } | undefined;
-		const pushFailures = (outcome: "retrying" | "recovered" | "stopped" | "failed", endedAt?: number) => {
-			if (failures === undefined) return;
-			const { key, at, count, last } = failures;
-			failures = undefined;
-			// The request that ended the run was not sent again.
-			const retries = outcome === "failed" ? count - 1 : count;
-			const message = (last.errorMessage ?? "").trim().slice(0, 4000).trim() || "The model request failed.";
-			const wait = outcome === "retrying" ? live?.generation?.retry : undefined;
-			const status = ({ retrying: "running", recovered: "completed", stopped: "interrupted", failed: "failed" } as const)[outcome];
-			turnItems.push({
-				...base(`ti-e${key}`, at, status, outcome !== "retrying", endedAt ?? endOf(last, at)),
-				type: "error",
-				failure: { class: failureClass(message), message, code: null, retryable: retries > 0 ? true : null, ...(outcome === "failed" && limitResetAt(last) !== undefined ? { resetAt: new Date(limitResetAt(last)!).toISOString() } : {}) },
-				...(retries === 0
-					? {}
-					: {
-							retry: {
-								attempt: retries,
-								maxAttempts: meta.maxRetries !== undefined && meta.maxRetries >= 1 ? meta.maxRetries : null,
-								retryDelayMs: wait === undefined ? null : Math.max(0, Math.round(wait.at - (last.timestamp ?? wait.at))),
-							},
-						}),
-			} as Any);
-		};
-
-		// A synthetic run has no prompt to show: the card at the cut is its start. Emitting the summary as a
-		// `/compact` user message would put it inside the run, where the fold and the compaction marker disagree.
-		if (!synthetic) pushUser(u, "turn_start");
-		const toolResults = new Map<string, EntryRecord>();
-		for (const step of draft.steps) {
-			const m = firstMessage(step);
-			if (m?.role === "toolResult") toolResults.set(m.toolCallId, step);
 		}
-		const liveTools = new Map<string, LiveToolSlot>();
-		if (running) {
-			for (const slot of live?.tools ?? []) {
-				const key = (slot["callId"] ?? slot.toolCallId ?? slot.id) as string | undefined;
-				if (key !== undefined) liveTools.set(key, slot);
-			}
-		}
-		// An assistant message is keyed by its run and its place among the run's assistant messages, not by its entry: the
-		// message streaming now and the entry it is committed as are one item, so a client keeps updating the same record.
-		let assistantIndex = 0;
-		// The cards of the threads this run started, each placed before the first assistant message that began after it.
-		const cards = (meta.children ?? []).filter((child) => child.parentRunId === runId).toSorted((left, right) => left.createdAt - right.createdAt);
-		const pushCards = (before: number) => {
-			while (cards.length > 0 && cards[0]!.createdAt < before) {
-				const child = cards.shift()!;
-				const cardNode = childCardNodeId(child.threadId);
-				const settledCard = child.completedAt !== null;
-				const startAt = time(child.createdAt);
-				const endAt = settledCard ? time(child.completedAt!) : null;
-				nodes.push({
-					id: id(cardNode),
-					threadId: id(threadId),
-					runId: id(runId),
-					parentNodeId: id(nodeId),
-					rootNodeId: id(nodeId),
-					kind: "subagent",
-					status: child.status as OrchestrationV2ExecutionNode["status"],
-					countsForRun: false,
-					providerThreadId: null,
-					providerTurnId: null,
-					nativeItemRef: null,
-					runtimeRequestId: null,
-					checkpointScopeId: null,
-					startedAt: startAt,
-					completedAt: endAt,
-				} as Any);
-				const card = {
-					origin: "app_owned",
-					driver: id(PROVIDER_DRIVER),
-					providerInstanceId: id(PROVIDER_INSTANCE_ID),
-					childThreadId: id(child.threadId),
-					prompt: child.prompt,
-					result: child.result,
-				};
-				subagents.push({
-					id: id(cardNode),
-					threadId: id(threadId),
-					runId: id(runId),
-					parentNodeId: id(nodeId),
-					createdBy: "agent",
-					providerThreadId: null,
-					nativeTaskRef: null,
-					title: child.title,
-					model: child.model,
-					status: child.status,
-					startedAt: startAt,
-					completedAt: endAt,
-					updatedAt: endAt ?? startAt,
-					...card,
-				} as Any);
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			const result = toolResults.get(block.id);
+			const resultMessage = result === undefined ? undefined : firstMessage(result);
+			const liveSlot = liveTools.get(block.id);
+			const output =
+				resultMessage?.role === "toolResult" ? textOf(resultMessage.content) : (liveSlot?.output ?? undefined);
+			const failed = resultMessage?.role === "toolResult" && resultMessage.isError === true;
+			const images = resultMessage?.role === "toolResult" ? toolImagesOf(resultMessage.content) : [];
+			if (images.length > 0) toolImages.set(`ti-t${block.id}`, images);
+			const aborted = result !== undefined && isAbortedToolResult(result);
+			const itemStatus: OrchestrationV2TurnItem["status"] = aborted
+				? "interrupted"
+				: result !== undefined
+					? failed
+						? "failed"
+						: "completed"
+					: running
+						? "running"
+						: "interrupted";
+			const resultAt = resultMessage?.timestamp ?? at;
+			const common = base(`ti-t${block.id}`, resultAt, itemStatus, result !== undefined);
+			// T3's secret card: the call is the request (`secret-requests.ts`). Its outcome is in the result's details; a
+			// call still running waits for the user, and one that ended without a result was stopped.
+			if (block.name === REQUEST_SECRET_TOOL) {
+				const outcome = (resultMessage?.role === "toolResult" ? (resultMessage.details as { secretRequest?: { status?: string } } | undefined) : undefined)?.secretRequest?.status;
+				const secretStatus = itemStatus === "running" ? "pending" : outcome === "saved" || outcome === "declined" ? outcome : "cancelled";
+				const label = typeof block.arguments["label"] === "string" && block.arguments["label"].trim() !== "" ? block.arguments["label"].trim() : "Secret";
 				turnItems.push({
-					...base(`ti-c${child.threadId}`, child.createdAt, child.status as OrchestrationV2TurnItem["status"], settledCard, child.completedAt ?? child.createdAt),
-					nodeId: id(cardNode),
-					title: child.title,
-					type: "subagent",
-					subagentId: id(cardNode),
-					...card,
+					...common,
+					title: label,
+					type: "secret_request",
+					label,
+					reason: typeof block.arguments["reason"] === "string" ? block.arguments["reason"] : "",
+					// The card's button (T3 0.1.9): the page to get the value from.
+					...(typeof block.arguments["url"] === "string" && block.arguments["url"].trim() !== "" ? { url: block.arguments["url"].trim() } : {}),
+					...(typeof block.arguments["placeholder"] === "string" ? { placeholder: block.arguments["placeholder"] } : {}),
+					// T3's `file` delivery, for its note: the agent's commands can read the value, as they can here.
+					delivery: "file",
+					secretStatus,
 				} as Any);
+				continue;
 			}
-		};
-		// What the host answered itself while this was the latest run (`ShownExchange`), where it was answered: after the
-		// items of the entries there were then and before those of any written since (a run goes on after a `/continue`,
-		// and one that runs was asked `/context`). T3 numbers items in this order.
-		const shownHere = [...(shownIn.get(draft) ?? [])];
-		const pushShown = (before: number) => {
-			for (const shown of shownHere.splice(0)) {
-				if (shown.after >= before) {
-					shownHere.push(shown);
-					continue;
-				}
-				if (shown.command !== undefined) {
-					const author = { createdBy: "user", creationSource: "web" } as const;
-					turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
-					messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
-					shownIds.add(shown.messageId);
-				}
-				shownAnswer(shown, ordinal);
-			}
-		};
-		draft.steps.forEach((step, stepIndex) => {
-			pushShown(step.id);
-			// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
-			if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
-			if (isUserEntry(step) || isNoteEntry(step)) {
-				pushUser(step, "steer");
-				return;
-			}
-			// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
-			if (isCompactionEntry(step)) {
-				pushCards(firstMessage(step)?.timestamp ?? requestedAt);
-				pushCompaction(step, ordinal, runId);
-				return;
-			}
-			// A published page: T3's html_render tool item, which its timeline shows inline (`htmlRenderFromToolItem`).
-			const render = htmlRenderOf(step);
-			if (render !== undefined) {
-				const { createdAt, ...reference } = render;
-				pushCards(createdAt);
+			if (block.name === "bash" && typeof block.arguments.command === "string") {
 				turnItems.push({
-					...base(`ti-h${step.id}`, createdAt, "completed", true),
-					title: HTML_RENDER_TOOL_NAME,
+					...common,
+					title: "bash",
+					type: "command_execution",
+					input: block.arguments.command,
+					...(output === undefined ? {} : { output }),
+					...(failed ? { outputIndicatesFailure: true } : {}),
+				} as Any);
+			} else if (block.name === CODEMODE_TOOL && typeof block.arguments.code === "string") {
+				// T3 shows a JavaScript tool (`js`, `isJavaScriptReplTool` in T3's shared toolActivity) with a code icon, its
+				// title as the row's label, and its `code` highlighted as TypeScript; a script's first line is that label,
+				// as a command's own text is a command row's.
+				turnItems.push({
+					...common,
+					title: scriptHeadline(block.arguments.code),
 					type: "dynamic_tool",
-					toolName: HTML_RENDER_TOOL_NAME,
-					input: { title: reference.title, height: reference.height },
-					output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }),
+					toolName: T3_JAVASCRIPT_TOOL,
+					input: { code: block.arguments.code },
+					...(output === undefined && images.length === 0 ? {} : { output: withImageMarkers(output, images) }),
 				} as Any);
-				return;
+			} else {
+				// The model's own html_render call: its page is the `app.html-render` entry's item, so the call's output
+				// must not name it too, or T3 would show the page twice.
+				const shown = block.name === HTML_RENDER_TOOL_NAME && output !== undefined ? withoutHtmlRender(output) : output;
+				turnItems.push({
+					...common,
+					title: block.name,
+					type: "dynamic_tool",
+					toolName: block.name,
+					input: block.arguments,
+					...(shown === undefined && images.length === 0 ? {} : { output: withImageMarkers(shown, images) }),
+				} as Any);
 			}
-			const m = firstMessage(step);
-			if (m?.role !== "assistant") return;
-			pushCards(m.timestamp ?? requestedAt);
-			const key = `${u.id}.${assistantIndex++}`;
-			const at = m.timestamp ?? requestedAt;
-			const answeredAgain = draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
-			if (m.stopReason === "error") {
-				failures = { key: failures?.key ?? key, at: failures?.at ?? at, count: (failures?.count ?? 0) + 1, last: m };
-				// What a failed request left is superseded by the request sent again, and one that waits to be sent again
-				// will be. The request that ended the run keeps what it left.
-				if (answeredAgain || running) return;
-				pushAssistant(key, m, at, false, toolResults, liveTools);
-				pushFailures("failed");
-				return;
-			}
-			pushFailures(m.stopReason === "aborted" && !answeredAgain ? "stopped" : "recovered", at);
-			// A partial interrupted by a crash is superseded by the resumed answer.
-			if (m.stopReason === "aborted" && answeredAgain) return;
-			pushAssistant(key, m, at, false, toolResults, liveTools);
-		});
-		pushFailures("retrying");
-		const partial = running ? live?.generation?.message : undefined;
-		if (partial?.role === "assistant") pushCards(partial.timestamp ?? Date.now());
-		pushCards(Infinity);
-		if (partial?.role === "assistant") {
-			pushAssistant(
-				`${u.id}.${assistantIndex}`,
-				partial,
-				partial.timestamp ?? Date.now(),
-				true,
-				toolResults,
-				liveTools,
-			);
 		}
-		pushShown(Infinity);
-		// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
-		const stop = running ? meta.stop : undefined;
-		if (stop !== undefined) {
-			turnItems.push({
-				...base(`ti-stop${u.id}`, stop.requestedAt, "completed", true),
+	};
+	// Requests that failed one after another are one row, as T3 shows a provider's retries: it stands where the first
+	// failed, says the last one's error, and counts. pi-durable records every failed request as an entry of its own.
+	let failures: { readonly key: string; readonly at: number; readonly count: number; readonly last: Extract<DurableMessage, { role: "assistant" }> } | undefined;
+	const pushFailures = (outcome: "retrying" | "recovered" | "stopped" | "failed", endedAt?: number) => {
+		if (failures === undefined) return;
+		const { key, at, count, last } = failures;
+		failures = undefined;
+		// The request that ended the run was not sent again.
+		const retries = outcome === "failed" ? count - 1 : count;
+		const message = (last.errorMessage ?? "").trim().slice(0, 4000).trim() || "The model request failed.";
+		const wait = outcome === "retrying" ? live?.generation?.retry : undefined;
+		const status = ({ retrying: "running", recovered: "completed", stopped: "interrupted", failed: "failed" } as const)[outcome];
+		turnItems.push({
+			...base(`ti-e${key}`, at, status, outcome !== "retrying", endedAt ?? endOf(last, at)),
+			type: "error",
+			failure: { class: failureClass(message), message, code: null, retryable: retries > 0 ? true : null, ...(outcome === "failed" && limitResetAt(last) !== undefined ? { resetAt: new Date(limitResetAt(last)!).toISOString() } : {}) },
+			...(retries === 0
+				? {}
+				: {
+						retry: {
+							attempt: retries,
+							maxAttempts: meta.maxRetries !== undefined && meta.maxRetries >= 1 ? meta.maxRetries : null,
+							retryDelayMs: wait === undefined ? null : Math.max(0, Math.round(wait.at - (last.timestamp ?? wait.at))),
+						},
+					}),
+		} as Any);
+	};
+
+	// A synthetic run has no prompt to show: the card at the cut is its start. Emitting the summary as a
+	// `/compact` user message would put it inside the run, where the fold and the compaction marker disagree.
+	if (!synthetic) pushUser(u, "turn_start");
+	const toolResults = new Map<string, EntryRecord>();
+	for (const step of draft.steps) {
+		const m = firstMessage(step);
+		if (m?.role === "toolResult") toolResults.set(m.toolCallId, step);
+	}
+	const liveTools = new Map<string, LiveToolSlot>();
+	if (running) {
+		for (const slot of live?.tools ?? []) {
+			const key = (slot["callId"] ?? slot.toolCallId ?? slot.id) as string | undefined;
+			if (key !== undefined) liveTools.set(key, slot);
+		}
+	}
+	// An assistant message is keyed by its run and its place among the run's assistant messages, not by its entry: the
+	// message streaming now and the entry it is committed as are one item, so a client keeps updating the same record.
+	let assistantIndex = 0;
+	// The cards of the threads this run started, each placed before the first assistant message that began after it.
+	const cards = (meta.children ?? []).filter((child) => child.parentRunId === runId).toSorted((left, right) => left.createdAt - right.createdAt);
+	const pushCards = (before: number) => {
+		while (cards.length > 0 && cards[0]!.createdAt < before) {
+			const child = cards.shift()!;
+			const cardNode = childCardNodeId(child.threadId);
+			const settledCard = child.completedAt !== null;
+			const startAt = time(child.createdAt);
+			const endAt = settledCard ? time(child.completedAt!) : null;
+			nodes.push({
+				id: id(cardNode),
+				threadId: id(threadId),
+				runId: id(runId),
+				parentNodeId: id(nodeId),
+				rootNodeId: id(nodeId),
+				kind: "subagent",
+				status: child.status as OrchestrationV2ExecutionNode["status"],
+				countsForRun: false,
+				providerThreadId: null,
 				providerTurnId: null,
-				title: "Interrupt requested",
-				type: "run_interrupt_request",
-				message: USER_STOP_REASON,
-				...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: time(stop.unresponsiveAt) }),
+				nativeItemRef: null,
+				runtimeRequestId: null,
+				checkpointScopeId: null,
+				startedAt: startAt,
+				completedAt: endAt,
+			} as Any);
+			const card = {
+				origin: "app_owned",
+				driver: id(PROVIDER_DRIVER),
+				providerInstanceId: id(PROVIDER_INSTANCE_ID),
+				childThreadId: id(child.threadId),
+				prompt: child.prompt,
+				result: child.result,
+			};
+			subagents.push({
+				id: id(cardNode),
+				threadId: id(threadId),
+				runId: id(runId),
+				parentNodeId: id(nodeId),
+				createdBy: "agent",
+				providerThreadId: null,
+				nativeTaskRef: null,
+				title: child.title,
+				model: child.model,
+				status: child.status,
+				startedAt: startAt,
+				completedAt: endAt,
+				updatedAt: endAt ?? startAt,
+				...card,
+			} as Any);
+			turnItems.push({
+				...base(`ti-c${child.threadId}`, child.createdAt, child.status as OrchestrationV2TurnItem["status"], settledCard, child.completedAt ?? child.createdAt),
+				nodeId: id(cardNode),
+				title: child.title,
+				type: "subagent",
+				subagentId: id(cardNode),
+				...card,
 			} as Any);
 		}
+	};
+	// What the host answered itself while this was the latest run (`ShownExchange`), where it was answered: after the
+	// items of the entries there were then and before those of any written since (a run goes on after a `/continue`,
+	// and one that runs was asked `/context`). T3 numbers items in this order.
+	const shownHere = [...(shownIn.get(draft) ?? [])];
+	const pushShown = (before: number) => {
+		for (const shown of shownHere.splice(0)) {
+			if (shown.after >= before) {
+				shownHere.push(shown);
+				continue;
+			}
+			if (shown.command !== undefined) {
+				const author = { createdBy: "user", creationSource: "web" } as const;
+				turnItems.push({ ...base(`ti-shown-u${shown.messageId}`, shown.at, "completed", true), ...author, type: "user_message", messageId: id(shown.messageId), inputIntent: "steer", text: shown.command, attachments: [] } as Any);
+				messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
+				shownIds.add(shown.messageId);
+			}
+			shownAnswer(b, shown, ordinal);
+		}
+	};
+	draft.steps.forEach((step, stepIndex) => {
+		pushShown(step.id);
+		// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
+		if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
+		if (isUserEntry(step) || isNoteEntry(step)) {
+			pushUser(step, "steer");
+			return;
+		}
+		// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
+		if (isCompactionEntry(step)) {
+			pushCards(firstMessage(step)?.timestamp ?? requestedAt);
+			pushCompaction(b, step, ordinal, runId);
+			return;
+		}
+		// A published page: T3's html_render tool item, which its timeline shows inline (`htmlRenderFromToolItem`).
+		const render = htmlRenderOf(step);
+		if (render !== undefined) {
+			const { createdAt, ...reference } = render;
+			pushCards(createdAt);
+			turnItems.push({
+				...base(`ti-h${step.id}`, createdAt, "completed", true),
+				title: HTML_RENDER_TOOL_NAME,
+				type: "dynamic_tool",
+				toolName: HTML_RENDER_TOOL_NAME,
+				input: { title: reference.title, height: reference.height },
+				output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }),
+			} as Any);
+			return;
+		}
+		const m = firstMessage(step);
+		if (m?.role !== "assistant") return;
+		pushCards(m.timestamp ?? requestedAt);
+		const key = `${u.id}.${assistantIndex++}`;
+		const at = m.timestamp ?? requestedAt;
+		const answeredAgain = draft.steps.slice(stepIndex + 1).some(isAssistantEntry);
+		if (m.stopReason === "error") {
+			failures = { key: failures?.key ?? key, at: failures?.at ?? at, count: (failures?.count ?? 0) + 1, last: m };
+			// What a failed request left is superseded by the request sent again, and one that waits to be sent again
+			// will be. The request that ended the run keeps what it left.
+			if (answeredAgain || running) return;
+			pushAssistant(key, m, at, false, toolResults, liveTools);
+			pushFailures("failed");
+			return;
+		}
+		pushFailures(m.stopReason === "aborted" && !answeredAgain ? "stopped" : "recovered", at);
+		// A partial interrupted by a crash is superseded by the resumed answer.
+		if (m.stopReason === "aborted" && answeredAgain) return;
+		pushAssistant(key, m, at, false, toolResults, liveTools);
 	});
+	pushFailures("retrying");
+	const partial = running ? live?.generation?.message : undefined;
+	if (partial?.role === "assistant") pushCards(partial.timestamp ?? Date.now());
+	pushCards(Infinity);
+	if (partial?.role === "assistant") {
+		pushAssistant(
+			`${u.id}.${assistantIndex}`,
+			partial,
+			partial.timestamp ?? Date.now(),
+			true,
+			toolResults,
+			liveTools,
+		);
+	}
+	pushShown(Infinity);
+	// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
+	const stop = running ? meta.stop : undefined;
+	if (stop !== undefined) {
+		turnItems.push({
+			...base(`ti-stop${u.id}`, stop.requestedAt, "completed", true),
+			providerTurnId: null,
+			title: "Interrupt requested",
+			type: "run_interrupt_request",
+			message: USER_STOP_REASON,
+			...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: time(stop.unresponsiveAt) }),
+		} as Any);
+	}
+}
 
-	// Answers with no run to stand by: an undo's, on a thread it emptied.
-	for (const shown of shownAlone) shownAnswer(shown, drafts.length + 1);
-
-	markModelSwitches(runs, turnItems, drafts);
-
+function projectLiveCompactions(b: Build): void {
+	const { meta, threadId, providerThreadId, live, liveCompactions, manualCompaction, manualCompactionRunId, newestDraft, compactDraft, turnItems } = b;
 	// A live compaction is shown only while something waits for it, as T3 shows a provider's compaction: a manual one
 	// (`/compact`, its own run; a reload still shows it) and a blocking one (the agent's next request waits for it, in
 	// the agent's run). A background compaction runs while the agent keeps working, so it has no row until its summary
@@ -1075,7 +1085,10 @@ export function projectThread(
 			driver: id(PROVIDER_DRIVER),
 		} as Any);
 	}
+}
 
+function projectQueued(b: Build): void {
+	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, runs, messages } = b;
 	// Queued follow-ups and steers live in pi's inbox until a boundary places them: a steer at the running turn's next
 	// boundary (after the tool call in flight, which may be a long script), a follow-up when the turn ends. T3's queue
 	// reads them as runs, so project each as a queued run now, steers first, as pi places them: T3 offers edit and remove
@@ -1123,7 +1136,11 @@ export function projectThread(
 			updatedAt: time(requestedAt),
 		} as Any);
 	});
+}
 
+/** The rows are built: number the items, add the runs that were rolled back, and make the thread's row. */
+function projectRows(b: Build) {
+	const { meta, memory, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, subagents, checkpointScopes, checkpoints } = b;
 	// T3 numbers turn items in the order they enter the thread (`nextTurnItemOrdinal`), one ordinal per item: a client
 	// places an item by it, and a bounded window's watermark is the newest ordinal. Items are built in that order.
 	turnItems.forEach((item, index) => {
@@ -1155,7 +1172,7 @@ export function projectThread(
 			item,
 		}));
 
-	const updatedAt = time(lastActivity);
+	const updatedAt = time(b.lastActivity);
 	// One provider session with honest capabilities, so clients hide what pi cannot do instead of offering it and failing.
 	const providerSessionId = `ps-${threadId}`;
 	const providerSessions: OrchestrationV2ProviderSession[] = [
@@ -1168,7 +1185,7 @@ export function projectThread(
 			model: meta.model === null ? null : modelSlug(meta.model),
 			capabilities: PI_CAPABILITIES,
 			createdAt: time(meta.createdAt),
-			updatedAt: time(lastActivity),
+			updatedAt: time(b.lastActivity),
 			lastError: null,
 		},
 	];
@@ -1281,7 +1298,13 @@ export function projectThread(
 		visibleTurnItems,
 		updatedAt,
 	};
+	return { projection, visibleTurnItems, updatedAt, author, sidebar, thread };
+}
 
+/** The thread's shell: its sidebar row, with the latest run and message as T3's shell reads them. */
+function projectShell(b: Build, rows: ReturnType<typeof projectRows>): OrchestrationV2ThreadShell {
+	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, messages, turnItems, shownIds } = b;
+	const { visibleTurnItems, updatedAt, author, sidebar, thread } = rows;
 	const liveRuns = runs.filter((run) => run.status !== "rolled_back");
 	// T3's `latestUnheldRun`: the newest run that is not waiting in a held queue, so a thread whose run stopped or
 	// reached a limit shows that, and not "queued", while messages wait behind it.
@@ -1362,8 +1385,33 @@ export function projectThread(
 		...sidebar,
 		deletedAt: null,
 	} as Any;
+	return shell;
+}
 
-	return { projection, shell, runs: projectedRuns, forkRuns, toolImages };
+export function projectThread(
+	meta: ThreadMeta,
+	view: ConversationView | undefined,
+	memory: ThreadMemory,
+): ProjectionResult {
+	const b: Build = begin(meta, view, memory);
+	const { drafts } = b;
+	pushBaseline(b);
+	const shownIn = new Map<RunDraft, ShownExchange[]>();
+	const shownAlone: ShownExchange[] = [];
+	for (const shown of meta.shown ?? []) {
+		const draft = drafts.findLast((candidate) => candidate.synthetic !== true && isUserEntry(candidate.userEntry) && candidate.userEntry.id <= shown.after);
+		if (draft === undefined) shownAlone.push(shown);
+		else shownIn.set(draft, [...(shownIn.get(draft) ?? []), shown]);
+	}
+	drafts.forEach((draft, index) => projectRun(b, shownIn, draft, index));
+	// Answers with no run to stand by: an undo's, on a thread it emptied.
+	for (const shown of shownAlone) shownAnswer(b, shown, drafts.length + 1);
+
+	markModelSwitches(b.runs, b.turnItems, drafts);
+	projectLiveCompactions(b);
+	projectQueued(b);
+	const rows = projectRows(b);
+	return { projection: rows.projection, shell: projectShell(b, rows), runs: b.projectedRuns, forkRuns: b.forkRuns, toolImages: b.toolImages };
 }
 
 /** A compaction summary entry: shown as T3's compaction card where it landed. */
