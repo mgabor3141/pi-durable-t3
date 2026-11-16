@@ -129,7 +129,11 @@ credentials: it reads the public descriptor and spends the pairing rate limit, a
 applying it with T3's own client reducer; a change no event can say (a record that went away) is sent as a snapshot.
 T3's paging, wire projection, body deduper and client reducer are vendored by `dev/setup-t3.sh` into `vendor/shared`
 and `vendor/t3-server`. Assistant items keep one id from first token to commit, and turn items are numbered in the
-order they enter the thread, as T3's `nextTurnItemOrdinal` does. An `afterSequence` resume replays the last 128 events
+order they enter the thread, as T3's `nextTurnItemOrdinal` does. A row keeps its ordinal for as long as the thread is open, and a
+new row is numbered above every ordinal given before (`TurnItemOrdinals`): T3's client, holding the newest rows of a
+long thread, drops a new row whose ordinal is not above the highest it has seen, taking it for history it has not
+loaded. Numbering by place alone reused the ordinals of rows an undo took away, and the answer to the next command
+did not appear until the thread was opened again. An `afterSequence` resume replays the last 128 events
 (T3's `decideThreadResume`), else sends a snapshot; a subscriber more than 512 items behind gets a snapshot. The
 sequence is a clock-floored counter of this process, so after a restart every resume is a snapshot, which the contract
 allows.

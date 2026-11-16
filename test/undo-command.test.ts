@@ -2,6 +2,7 @@
 // or before one of the agent's steps (a response with its tool calls and results), and forward again. Nothing is
 // deleted: an undo moves the head to a fork that ends earlier, and a redo returns to the conversation it left, while
 // nothing was written since. The command and its answer are shown only; the model's context is what changes.
+import { applyOrchestrationV2ProjectionEvent } from "../src/t3/t3-server.ts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -242,4 +243,47 @@ it("an undo hook that fails does not undo the undo: the user is told what did no
 	// A redo with nothing kept still tells the integrator, with nothing.
 	await send("/redo");
 	expect(await context()).toEqual(["user:one", "assistant:answer one"]);
+});
+
+// T3's client keeps only the newest rows of a long thread, and takes a new row whose ordinal is not above the highest
+// it has seen for history it has not loaded: it drops it (`shouldDropMissingPartialTurnItem`). An undo takes rows away,
+// so numbering the rows that are left by their place would hand the next new row an ordinal the client has seen: the
+// answer to a `/context` after an `/undo` did not appear until the thread was opened again. Rows keep their ordinal,
+// and a new one is always above every ordinal a client of this view was sent.
+it("a row that is new after an undo is numbered above every row a client has seen, so T3's windowed client shows it", { timeout: 60_000 }, async () => {
+	const { f, bridge, send, say } = await setup();
+	f.model.respond(fauxAssistantMessage("answer one"), fauxAssistantMessage("answer two"), fauxAssistantMessage("answer three"));
+	await say("one");
+	await say("two");
+	// A client as T3's: the projection it opened with, then every event applied with T3's own reducer, as a client
+	// that holds a window of a longer thread applies them (the highest ordinal it has seen is its watermark).
+	let client = (await bridge.projection("t")).projection;
+	let watermark = Math.max(...client.turnItems.map((item) => item.ordinal));
+	const stop = bridge.subscribeThread("t", bridge.currentStream("t")?.sequence, (update) => {
+		if (update.kind === "snapshot") {
+			client = update.projection;
+			watermark = Math.max(...client.visibleTurnItems.map((row) => row.item.ordinal));
+			return;
+		}
+		for (const item of update.items) {
+			if (item.kind !== "event") continue;
+			client = applyOrchestrationV2ProjectionEvent(client, item.event as never, { partialTimeline: true, latestLocalTurnOrdinal: watermark })!;
+			const event = item.event as { type: string; payload: { ordinal?: number } };
+			if (event.type === "turn-item.updated" && event.payload.ordinal !== undefined) watermark = Math.max(watermark, event.payload.ordinal);
+		}
+	});
+	onTestFinished(stop);
+	const rows = () => client.visibleTurnItems.map((row) => String(row.item.id));
+	const settled = async (holds: (ids: string[]) => boolean, what: string) => {
+		for (let i = 0; i < 200 && !holds(rows()); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(holds(rows()), `${what}: ${rows().join(", ")}`).toBe(true);
+	};
+	await say("three");
+	await settled((ids) => ids.some((id) => id.startsWith("ti-a")) && client.messages.some((message) => message.text === "answer three"), "the client saw the third turn");
+	const undo = await send("/undo");
+	await settled((ids) => ids.includes(`ti-shown-a${undo}`), "the answer to /undo is shown");
+	const asked = await send("/context");
+	await settled((ids) => ids.includes(`ti-shown-a${asked}`), "the answer to /context is shown");
+	// And in the order the thread has them.
+	expect(rows().slice(-4)).toEqual([`ti-shown-u${undo}`, `ti-shown-a${undo}`, `ti-shown-u${asked}`, `ti-shown-a${asked}`]);
 });

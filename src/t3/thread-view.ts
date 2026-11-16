@@ -9,7 +9,7 @@ import type { AppliedUndo } from "../threads.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import type { ConversationView, EntryRecord, ModelRef } from "./model-types.ts";
-import { type ProjectionResult, projectThread, type ThreadMeta } from "./projection.ts";
+import { type ProjectionResult, projectThread, type ThreadMeta, type TurnItemOrdinals } from "./projection.ts";
 import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
 import { type RolledBackRun, rolledBackRuns, undoneHeads } from "./undo.ts";
@@ -134,6 +134,8 @@ export class ThreadView {
 	/** Display-only transcript above the active context's compaction cut. */
 	#history: EntryRecord[] | undefined;
 	#rolledBack: RolledBackRun[] = [];
+	/** The ordinals this view has given the thread's rows, for as long as it is open: every client of it was sent these. */
+	readonly #ordinals: TurnItemOrdinals = { byId: new Map(), high: 0 };
 	#conversationId: number | undefined;
 	#configuration: Configuration | undefined;
 	#catalog: CatalogEntry[] = [];
@@ -420,7 +422,7 @@ export class ThreadView {
 		// Only a projection of the head's real view counts as loaded.
 		const loaded = this.#conversationId !== undefined && !this.#loaded;
 		if (loaded) this.#loaded = true;
-		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history });
+		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history, ordinals: this.#ordinals });
 		this.#host.projected(this, { loaded, settled: wasRunning && this.#result.shell.status !== "running" });
 		if (this.#subscribers.size === 0 || this.#flushTimer !== undefined) return;
 		this.#flushTimer = setTimeout(() => {

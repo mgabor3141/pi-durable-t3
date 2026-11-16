@@ -230,6 +230,32 @@ interface ThreadMemory {
 	/** Transcript before the active context's cut, for display only. Compaction keeps these entries on disk but drops
 	 * them from the model context; without them the thread appears to start at the divider. They are never rewound. */
 	readonly history?: readonly EntryRecord[];
+	/** The ordinals this view of the thread has given its rows (`TurnItemOrdinals`); absent, rows are numbered by place. */
+	readonly ordinals?: TurnItemOrdinals;
+}
+
+/**
+ * The ordinal each turn item was given, kept by whoever projects a thread again and again (a `ThreadView`). T3 numbers
+ * items as they enter a thread and never reuses a number, and its client relies on that: holding the newest rows of
+ * a long thread, it takes a new row whose ordinal is not above the highest it has seen for history it has not loaded,
+ * and drops it. Rows go away here (an undo, a queued message that is placed), so numbering by place would hand a new
+ * row a number a client has seen. So a row keeps its ordinal, and a new one is above every ordinal given before.
+ */
+export type TurnItemOrdinals = { readonly byId: Map<string, number>; high: number };
+
+/** Number `items`, which are in the order the thread shows them: rising, each row's own where that still fits. */
+function numberTurnItems(items: readonly OrchestrationV2TurnItem[], ordinals: TurnItemOrdinals | undefined): void {
+	let last = 0;
+	items.forEach((item, index) => {
+		const kept = ordinals?.byId.get(item.id as string);
+		// A row that is new, or that now stands after one numbered above it, is numbered anew.
+		const ordinal = ordinals === undefined ? index + 1 : kept !== undefined && kept > last ? kept : Math.max(last, ordinals.high) + 1;
+		(item as { ordinal: number }).ordinal = ordinal;
+		last = ordinal;
+		if (ordinals === undefined) return;
+		ordinals.byId.set(item.id as string, ordinal);
+		ordinals.high = Math.max(ordinals.high, ordinal);
+	});
 }
 
 interface ProjectedRun {
@@ -1143,9 +1169,7 @@ function projectRows(b: Build) {
 	const { meta, memory, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, subagents, checkpointScopes, checkpoints } = b;
 	// T3 numbers turn items in the order they enter the thread (`nextTurnItemOrdinal`), one ordinal per item: a client
 	// places an item by it, and a bounded window's watermark is the newest ordinal. Items are built in that order.
-	turnItems.forEach((item, index) => {
-		(item as { ordinal: number }).ordinal = index + 1;
-	});
+	numberTurnItems(turnItems, memory.ordinals);
 
 	// Runs removed by rewinds stay as rolled back; their items stay hidden (design.md, Invariants).
 	const known = new Set(runs.map((run) => run.id as string));
