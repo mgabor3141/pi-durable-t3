@@ -16,7 +16,7 @@ export const worstVerdict = (verdicts: readonly Verdict[]): Verdict => verdicts.
 const ACTIVE_RUN = new Set(["queued", "preparing", "starting", "running", "waiting"]);
 const TOOL_ITEMS = new Set(["command_execution", "dynamic_tool", "subagent", "secret_request"]);
 /** What one report may print of the final answer before it is cut; the rest is read with `thread_read`. */
-export const REPORT_BUDGET = 16_000;
+const REPORT_BUDGET = 16_000;
 const MESSAGE_BUDGET = 2_000;
 const OWN_PROMPT_CHARS = 120;
 
@@ -31,7 +31,7 @@ export const isActiveIn = (projection: Pick<OrchestrationV2ThreadProjection, "th
 	return (run: OrchestrationV2Run): boolean => isActiveRun(run) || (run.status === "failed" && recovery?.autoResume === true && recovery.runId === (run.id as string));
 };
 /** @internal */
-export const byOrdinal = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => left.ordinal - right.ordinal);
+const byOrdinal = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => left.ordinal - right.ordinal);
 
 /** Is the thread doing anything (a live or queued run)? */
 export const isBusy = (projection: OrchestrationV2ThreadProjection) => projection.runs.some(isActiveIn(projection));
@@ -103,7 +103,7 @@ export function report(
 }
 
 /** The run a message started or joined, once the thread shows it. */
-export function runOfMessage(projection: OrchestrationV2ThreadProjection, messageId: string): string | undefined {
+function runOfMessage(projection: OrchestrationV2ThreadProjection, messageId: string): string | undefined {
 	const message = projection.messages.find((candidate) => (candidate.id as string) === messageId);
 	return message?.runId == null ? undefined : (message.runId as string);
 }

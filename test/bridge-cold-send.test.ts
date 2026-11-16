@@ -3,7 +3,6 @@
 // happened to warm the thread. Now every write awaits the loaded head (S2). This drives a real `Bridge` over the chord
 // objects in-process (no server): create a thread, then send as the FIRST write, and prove the user turn is not lost.
 import { mkdtemp, rm } from "node:fs/promises";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -13,7 +12,7 @@ import { type ConversationId } from "@earendil-works/pi-durable";
 import { Bridge } from "../src/t3/bridge.ts";
 import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -25,7 +24,7 @@ it("sends the first message on a cold thread with no prior warming (S2)", async 
 	fixture.model.respond(fauxAssistantMessage("pong"));
 
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
+		bridgeConfig({ stateDir: scratch, registry: fixture.registry }),
 		log,
 		fixture.threads, fixture.model.models,
 	);

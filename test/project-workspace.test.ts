@@ -1,16 +1,14 @@
 // A project path that exists as a FILE can never be registered: `projects.mutate` create AND update naming it are
 // refused with a typed project error naming the path — no entry stored, no entry moved.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { ServerSettingsStore } from "../src/settings.ts";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createModels } from "@earendil-works/pi-ai";
-import { unstartedStore } from "./threads-harness.ts";
+import { unstartedStore, bridgeConfig } from "./threads-harness.ts";
 import { type ProjectRegistry, ProjectWorkspaceNotDirectory } from "../src/registry.ts";
 import { storedRegistry } from "./test-registry.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -19,18 +17,7 @@ const log: Logger = { info: () => {}, warn: () => {} };
 
 async function makeBridge(dataDir: string, env?: ExecutionEnv): Promise<{ bridge: Bridge; registry: ProjectRegistry }> {
 	const { registry } = await storedRegistry(dataDir);
-	const config: BridgeConfig = {
-		host: "127.0.0.1",
-		port: 0,
-		label: "t",
-		stateDir: dataDir,
-		scratchDir: undefined,
-		tokenTtlSeconds: 60,
-		settings: ServerSettingsStore.open(dataDir),
-		corsOrigins: [], staticDir: undefined,
-		registry,
-		...(env === undefined ? {} : { env }),
-	};
+	const config = bridgeConfig({ stateDir: dataDir, registry, ...(env === undefined ? {} : { env }) });
 	// create/update/delete never touch the host, so an unloaded one is enough to construct a Bridge.
 	return { bridge: new Bridge(config, log, unstartedStore(), createModels()), registry };
 }

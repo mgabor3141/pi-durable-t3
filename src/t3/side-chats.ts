@@ -10,9 +10,9 @@ import type { OrchestrationV2Run, OrchestrationV2ThreadProjection, Orchestration
 import { MESSAGE_CONTEXT_ITEM } from "./projection.ts";
 
 /** T3's `SIDE_CHAT_CONTEXT_MAX_CHARS`: the whole note, framing included. */
-export const SIDE_CHAT_CONTEXT_MAX_CHARS = 8_000;
+const SIDE_CHAT_CONTEXT_MAX_CHARS = 8_000;
 /** The merge-back context's cap, in characters (T3's `DEFAULT_HANDOFF_TOKEN_CAP`, which it measures in bytes). */
-export const MERGE_BACK_MAX_CHARS = 16_000;
+const MERGE_BACK_MAX_CHARS = 16_000;
 
 /** The rows that name what a hidden context block holds. */
 export const SIDE_CHAT_ROW = "side_chat";

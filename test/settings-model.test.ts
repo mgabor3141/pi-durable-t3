@@ -11,7 +11,6 @@ import { afterAll, describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 import { AgentSessionScanResult, ServerConfigStreamEvent, ServerSettingsError } from "@t3tools/contracts";
 import { ServerSettingsStore, SETTINGS_FILE, ProviderInstanceExists } from "../src/settings.ts";
-import { ConfigError } from "../src/config.ts";
 import { connectWs, exitError, exitValue, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 

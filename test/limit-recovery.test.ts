@@ -13,7 +13,7 @@ import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { isBusy, report } from "../src/t3/reports.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
 
 type Item = { id: string; type: string; runId: string | null; text?: string; status: string; failure?: { class: string; resetAt?: string }; retry?: unknown };
 type Run = { id: string; status: string; userMessageId: string; queueHeld?: boolean };
@@ -30,7 +30,7 @@ async function setup(settings: { autoResumeLimitedThreads?: boolean } = {}) {
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
 	const store = ServerSettingsStore.open(scratch);
 	if (Object.keys(settings).length > 0) store.update(settings);
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: store, corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: () => {}, warn: () => {} }, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, settings: store }), quietLog, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();

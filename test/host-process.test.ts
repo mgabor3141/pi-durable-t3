@@ -8,7 +8,7 @@
 // never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
 import { seedProjects } from "./host-process-harness.ts";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -60,12 +60,6 @@ const get = async (port: number, path: string): Promise<number> => {
 		return 0;
 	}
 };
-
-/** GET `path` on `port` with `headers`; the status and the parsed body (a body is asserted as often as the status). */
-async function getJson(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
-	const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers, signal: AbortSignal.timeout(3000) });
-	return { status: response.status, body: (await response.json().catch(() => ({}))) as Record<string, unknown> };
-}
 
 /** Poll the well-known endpoint until the server answers 200 (ready and listening), or give up. */
 async function waitListening(port: number, timeoutMs = 15_000): Promise<boolean> {

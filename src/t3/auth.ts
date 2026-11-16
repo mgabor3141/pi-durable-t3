@@ -10,11 +10,11 @@ import { readJson, writeJsonAtomic } from "./json-store.ts";
 
 /** The subject T3 hides from the pairing-links list: the host's own startup credential. `mintPairingCode` mints a
  * link a *user* copies by hand, so it is a one-time token, and it shows — like `t3 auth pairing create`. */
-export const ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
-export const ONE_TIME_TOKEN_SUBJECT = "one-time-token";
+const ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
+const ONE_TIME_TOKEN_SUBJECT = "one-time-token";
 /** T3's subject for a session an MCP client got over OAuth (`./mcp-oauth.ts`): accepted by `/mcp` only, and refused
  * everywhere else (T3's `rejectMcpClientAudience`). */
-export const MCP_CLIENT_SUBJECT = "mcp-client";
+const MCP_CLIENT_SUBJECT = "mcp-client";
 /** T3's `MCP_CLIENT_SESSION_TTL`. */
 const MCP_CLIENT_SESSION_TTL_MS = 30 * 86_400_000;
 
@@ -85,7 +85,7 @@ export type AccessChange =
 	| { type: "clientUpserted"; session: StoredToken }
 	| { type: "clientRemoved"; sessionId: string };
 
-export interface IssuedPairing {
+interface IssuedPairing {
 	id: string;
 	credential: string;
 	subject: string;
@@ -245,7 +245,6 @@ export class AuthStore {
 
 	/** Burn a minted link before it is spent. True when a link with this id existed. */
 	revokePairingLink(id: string): boolean {
-		const now = Date.now();
 		const data = this.#read();
 		const target = data.pairings.find((pairing) => pairing.id === id);
 		if (target === undefined) return false;

@@ -5,11 +5,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -24,7 +23,7 @@ it("a bound task dispatched right at boot finds its thread", async () => {
 	};
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-boot-"));
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
+		bridgeConfig({ stateDir: scratch, registry: fixture.registry }),
 		log,
 		fixture.threads, fixture.model.models,
 	);

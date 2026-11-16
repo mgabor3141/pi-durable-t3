@@ -10,7 +10,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, gated, makeThreads } from "./threads-harness.ts";
+import { createNamed, gated, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -38,7 +38,7 @@ async function fixture() {
 	const settings = ServerSettingsStore.open(scratch);
 	const bridges: Bridge[] = [];
 	const bridge = (): Bridge => {
-		const made = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings, corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+		const made = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, settings }), log, f.threads, f.model.models);
 		bridges.push(made);
 		return made;
 	};

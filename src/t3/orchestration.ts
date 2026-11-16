@@ -24,6 +24,7 @@ import type { Logger } from "./logging.ts";
 import { childCardNodeId } from "./projection.ts";
 import { exchanges, isActiveIn, isActiveRun, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
 import { subagentThreadTitle } from "./child-title.ts";
+import { messageOf } from "../host-errors.ts";
 
 /** A refusal the tool returns to the agent as its error (no stack, no retry advice beyond the message). */
 export class ThreadToolError extends Error {}
@@ -38,9 +39,9 @@ const FOLLOW_CHUNK_MS = 60 * 60_000;
 
 const hash = (...parts: readonly (string | undefined)[]) => createHash("sha256").update(parts.map((part) => part ?? "").join("\0")).digest("base64url").slice(0, 20);
 
-export type PromptMode = "auto" | "followUp" | "steer" | "notify";
+type PromptMode = "auto" | "followUp" | "steer" | "notify";
 
-export interface PromptInput {
+interface PromptInput {
 	readonly threadId?: string;
 	readonly new?: { readonly title?: string; readonly model?: string; readonly fork?: boolean };
 	readonly message: string;
@@ -51,7 +52,7 @@ export interface PromptInput {
 	readonly clientRequestId?: string;
 }
 
-export interface PromptResult {
+interface PromptResult {
 	readonly threadId: string;
 	readonly messageId: string;
 	/** The activity's report, when the prompt waited. */
@@ -60,7 +61,7 @@ export interface PromptResult {
 	readonly notify: boolean;
 }
 
-export interface ThreadSummaryRow {
+interface ThreadSummaryRow {
 	readonly threadId: string;
 	readonly title: string;
 	readonly parentThreadId: string | null;
@@ -455,7 +456,7 @@ export class Orchestration {
 					this.#deliverTo(request.threadId);
 				}
 			} catch (error) {
-				if (!this.#closed) this.#log.warn("thread notification follower stopped", { threadId, error: error instanceof Error ? error.message : String(error) });
+				if (!this.#closed) this.#log.warn("thread notification follower stopped", { threadId, error: messageOf(error) });
 			} finally {
 				this.#following.delete(threadId);
 			}
@@ -515,7 +516,7 @@ export class Orchestration {
 					}
 				}
 			} catch (error) {
-				if (!this.#closed) this.#log.warn("thread report delivery stopped", { caller, error: error instanceof Error ? error.message : String(error) });
+				if (!this.#closed) this.#log.warn("thread report delivery stopped", { caller, error: messageOf(error) });
 			} finally {
 				this.#delivering.delete(caller);
 				if ((this.#outbox.get(caller)?.size ?? 0) === 0) this.#outbox.delete(caller);

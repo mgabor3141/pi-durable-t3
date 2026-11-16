@@ -23,7 +23,7 @@ export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-
 export const FRESH_SESSION_UNSUPPORTED = "A fresh session each run is not supported by pi-durable-t3: a thread keeps its context. Choose a new thread each run, or one thread that continues.";
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 /** T3's Scheduler cadence. */
-export const POLL_INTERVAL_MS = 5_000;
+const POLL_INTERVAL_MS = 5_000;
 
 /** The two dispatch paths a run takes (T3's `threadLaunch.launch` and `threadManagement.sendToThread(mode: "queue")`). */
 export interface ScheduledTaskDispatch {

@@ -49,6 +49,7 @@ import { CurrentAuthSession } from "./session-context.ts";
 import type { PreviewSessions } from "./preview.ts";
 import { makePreviewStreamHandler } from "./preview-http.ts";
 import { McpOAuth } from "./mcp-oauth.ts";
+import { messageOf } from "../host-errors.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -120,7 +121,7 @@ function makeDescriptor(bridge: Bridge, auth: AuthStore, preview: PreviewSession
 
 /** The browser session cookie's name (T3's `SessionStore.cookieName`): the same-origin web app authenticates every
  * call — HTTP and the WS ticket — with it, since a page served from this origin sends cookies, not a bearer. */
-export const SESSION_COOKIE_NAME = "pi_durable_t3_session";
+const SESSION_COOKIE_NAME = "pi_durable_t3_session";
 
 export const authDescriptor: ServerConfig["auth"] = {
 	policy: "remote-reachable",
@@ -470,7 +471,7 @@ export function makeServerLayer(deps: {
 					const web = yield* HttpServerRequest.toWeb(request).pipe(Effect.orDie);
 					const response = yield* Effect.promise(() =>
 						route.handle(web).catch((error: unknown) => {
-							log.warn("host route failed", { path: route.path, error: error instanceof Error ? error.message : String(error) });
+							log.warn("host route failed", { path: route.path, error: messageOf(error) });
 							return new Response("Internal error", { status: 500 });
 						}),
 					);

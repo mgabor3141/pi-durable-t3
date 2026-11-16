@@ -5,7 +5,7 @@
 // project for a conversation from its own recorded `pi.agent.cwd` through the registry; if no project covers it, the
 // conversation is NOT promoted — it stays ownerless and the log names it. A thread never carries an empty `projectId`.
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { configure } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -16,10 +16,9 @@ const seed = fauxAssistantMessage("seed");
 
 it("(a) a conversation whose cwd matches no project is NOT promoted, and the log names it", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }] });
-	const { harness, model } = f;
+	const { harness } = f;
 	const warnings: string[] = [];
 	const threads = new Threads({ harness, registry: f.registry, onWarn: (m) => warnings.push(m) });
-	const create = createNamed(threads, harness, model);
 
 	// A fresh conversation whose cwd belongs to no registered project (the registry lost it, or it was hand-made).
 	const conversationId = await harness.commit(async (tx) => {

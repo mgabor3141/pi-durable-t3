@@ -17,14 +17,12 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { ThreadOps } from "../src/t3/thread-ops.ts";
-import { createNamed, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // biome-ignore lint/suspicious/noExplicitAny: a schema of any shape
 const encodes = (schema: any, value: unknown) => Schema.encodeUnknownSync(schema)(value);
 const tid = (value: string) => ThreadId.make(value);
@@ -36,7 +34,7 @@ async function setup(options: { tokensPerSecond?: number } = {}) {
 	await create({ threadId: "b", projectId: "p", title: "Worker" });
 	await create({ threadId: "c", projectId: "q", title: "Elsewhere" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-ops-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

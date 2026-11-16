@@ -15,7 +15,7 @@
 //
 // Failures are plain classes here (`EntriesError`, `FileError`); `rpc.ts` turns them into the contract's typed errors.
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import type { ExecutionEnv, FileError as EnvFileError, FileInfo, Result } from "@earendil-works/pi-durable/env";
+import type { ExecutionEnv, FileError as EnvFileError, Result } from "@earendil-works/pi-durable/env";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
 	ProjectEntriesFailure,
@@ -28,6 +28,7 @@ import type {
 	ProjectSearchContentsResult,
 	ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
+import { messageOf } from "../host-errors.ts";
 
 /** `WorkspaceFileSystem.PROJECT_READ_FILE_MAX_BYTES`: a read returns at most this many bytes; `truncated` says more existed. */
 export const READ_FILE_MAX_BYTES = 1024 * 1024;
@@ -231,12 +232,12 @@ function lineMatches(query: ContentQuery): { ranges: (line: string) => { start: 
 				const start = haystack.indexOf(needle);
 				return start < 0 ? [] : [{ start, end: start + needle.length }];
 			},
-			fallback: error instanceof Error ? error.message : String(error),
+			fallback: messageOf(error),
 		};
 	}
 }
 
-export interface WorkspaceFilesOptions {
+interface WorkspaceFilesOptions {
 	/** The environment every read and write goes through. */
 	readonly env: ExecutionEnv;
 	/** Invocation context for environment calls; default `BACKGROUND_CONTEXT`. */

@@ -7,7 +7,7 @@
 // retry answers that project. The registry file is the dedup record, so this holds across a restart (a restart is the
 // ack-loss shape a client cannot distinguish). A create that is NOT the replay — the same path under a different
 // minted id — is a real conflict and stays refused.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";

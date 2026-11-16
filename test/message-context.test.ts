@@ -6,12 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { DISPLAY_ONLY_RULE, messageContextData, type MessageContext, type MessageContextAnswer, type MessageContextRequest } from "../src/t3/message-context.ts";
 import { report } from "../src/t3/reports.ts";
-import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 type Msg = { role: string; content: unknown };
@@ -24,7 +23,7 @@ async function setup(messageContext: MessageContext) {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-message-context-"));
 	const warnings: string[] = [];
 	const log: Logger = { info: () => {}, warn: (message) => void warnings.push(message) };
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry, messageContext }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, messageContext }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

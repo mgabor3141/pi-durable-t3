@@ -8,19 +8,18 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import type { ProjectRegistry } from "../src/registry.ts";
 import type { Threads } from "../src/threads.ts";
-import { createNamed, makeThreads, restart } from "./threads-harness.ts";
+import { createNamed, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function boot(threads: Threads, registry: ProjectRegistry, models: Models): Promise<Bridge> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-rollback-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry }, log, threads, models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry }), log, threads, models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

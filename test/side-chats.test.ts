@@ -6,12 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { Orchestration } from "../src/t3/orchestration.ts";
 import { mergeBackContext, sideChatNote } from "../src/t3/side-chats.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 type Msg = { role: string; content: unknown };
 type Block = { type: string; text?: string; hidden?: boolean; shownAs?: { name: string; input: Record<string, string> } };
@@ -21,7 +20,7 @@ async function setup() {
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "main", projectId: "p", title: "Main" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-side-chats-"));
 	const log: Logger = { info: () => {}, warn: () => {} };
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

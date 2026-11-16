@@ -11,13 +11,12 @@ import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { selectImageBlocks } from "../src/t3/bridge.ts";
 import { checkImage, checkImageData, checkToolResult, imageCheckExtension } from "../src/t3/image-check.ts";
 import { object } from "../src/t3/schema.ts";
-import { createNamed, idle, makeThreads, restart } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, "fixtures/images", name)));
 
@@ -151,7 +150,7 @@ const textIn = (messages: readonly Msg[]) => messages.flatMap((message) => (type
 /** A bridge over `threads`, to send messages as the web app does. */
 async function bridgeOver(f: Awaited<ReturnType<typeof makeThreads>>, threads = f.threads, registry = f.registry): Promise<Bridge> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-image-check-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry }, log, threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry }), log, threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

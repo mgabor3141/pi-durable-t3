@@ -8,12 +8,11 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { OrchestrationV2ThreadBoundedSnapshot, OrchestrationV2ThreadHistoryPage, OrchestrationV2ThreadStreamItem, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge, type StreamUpdate } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { applyOrchestrationV2ProjectionEvent } from "../src/t3/t3-server.ts";
 import { boundedSnapshot, historyPage, snapshotItem, subscriberFilter, type ThreadStreamItem, type ThreadStreamOptions } from "../src/t3/thread-stream.ts";
-import { createNamed, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const WEB: ThreadStreamOptions = { bounded: true, deferWork: true, compactTurnItems: true, dedupeBodies: true, compactIds: true };
 const encodeItem = Schema.encodeSync(OrchestrationV2ThreadStreamItem);
@@ -26,7 +25,7 @@ async function open(options: { turns?: number; tokensPerSecond?: number } = {}) 
 	const f = await makeThreads({ projects: [{ id: "p" }], coding: true, ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }) });
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p", title: "Stream" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-stream-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

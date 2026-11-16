@@ -6,6 +6,7 @@
 		"lib": ["ES2024"],
 		"types": ["node"],
 		"strict": true,
+		"noUnusedLocals": true,
 		"erasableSyntaxOnly": true,
 		"verbatimModuleSyntax": true,
 		"esModuleInterop": true,

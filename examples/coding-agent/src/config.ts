@@ -7,7 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import { arr, compile, int, obj, opt, type Static, str, type ValidationError } from "@earendil-works/pi-schema";
+import { arr, compile, int, obj, opt, str, type ValidationError } from "@earendil-works/pi-schema";
 import { ConfigError } from "../../../src/bridge.ts";
 
 export { ConfigError };
@@ -61,7 +61,6 @@ const HostTomlSchema = obj({
 	token_ttl_days: int({ default: 90, minimum: 1 }),
 	cors_origins: opt(arr(str({ minLength: 1 }))),
 });
-type HostToml = Static<typeof HostTomlSchema>;
 const validateHostToml = compile(HostTomlSchema);
 
 /** Each top-level key's `default` where the document has no value (the schema is flat). */

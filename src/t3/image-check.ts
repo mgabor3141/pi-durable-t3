@@ -12,7 +12,7 @@
 import type { Extension, ToolDiagnostic, ToolExecutionResult } from "@earendil-works/pi-durable";
 import { defineExtension, GenerationTask, hook, ToolTask } from "@earendil-works/pi-durable";
 
-export type ImageCheck = { readonly ok: true; readonly mimeType: string } | { readonly ok: false; readonly reason: string };
+type ImageCheck = { readonly ok: true; readonly mimeType: string } | { readonly ok: false; readonly reason: string };
 
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
@@ -138,7 +138,7 @@ const isImage = (block: unknown): block is { type: "image"; data: string; mimeTy
 
 /** `blocks` with each image checked: a readable one kept (its type corrected), a broken one a text saying why. Returns the
  * same array when nothing changed, and the reasons of the refused ones. */
-export function checkImageBlocks<B>(blocks: readonly B[]): { readonly blocks: readonly B[]; readonly refused: readonly string[] } {
+function checkImageBlocks<B>(blocks: readonly B[]): { readonly blocks: readonly B[]; readonly refused: readonly string[] } {
 	let changed = false;
 	const refused: string[] = [];
 	const checked = blocks.map((block) => {

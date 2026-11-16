@@ -8,14 +8,13 @@ import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { ServerSettingsStore } from "../src/settings.ts";
 import type { Threads } from "../src/threads.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { TitleThread, TitleThreadRequest } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
 import { USER_ENTRY_KINDS } from "../src/t3/runs.ts";
-import { conversation, makeThreads, restart, type ThreadsFixture } from "./threads-harness.ts";
+import { conversation, makeThreads, restart, type ThreadsFixture, bridgeConfig } from "./threads-harness.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,11 +42,7 @@ function manualHook() {
 async function start(fixture: ThreadsFixture, threads: Threads, titleThread?: TitleThread): Promise<{ bridge: Bridge }> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-titles-"));
 	const bridge = new Bridge(
-		{
-			host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60,
-			settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry,
-			...(titleThread === undefined ? {} : { titleThread }),
-		},
+		bridgeConfig({ stateDir: scratch, registry: fixture.registry, ...(titleThread === undefined ? {} : { titleThread }) }),
 		log,
 		threads,
 		fixture.model.models,

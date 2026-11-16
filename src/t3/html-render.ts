@@ -206,7 +206,7 @@ async function preparePage(env: ExecutionEnv, html: string, context: Context): P
 
 // ---- the browser -------------------------------------------------------------------------------------------
 
-export type ConsoleMessage = { level: "log" | "info" | "warning" | "error"; text: string };
+type ConsoleMessage = { level: "log" | "info" | "warning" | "error"; text: string };
 const MAX_CONSOLE_MESSAGES = 20;
 const MAX_CONSOLE_TEXT_CHARS = 500;
 const VIEWPORT_HEIGHT = 800;
@@ -311,7 +311,7 @@ async function openPage(browser: Browser, width: number, appearance: "dark" | "l
 }
 
 /** T3's preview: the page at a width, in a theme, as a PNG of up to 4,000 px, with its content height and console. */
-export type HtmlPreview = {
+type HtmlPreview = {
 	width: number;
 	contentHeight: number;
 	capturedHeight: number;

@@ -11,10 +11,10 @@
 //   snippet    — the matched message's text, whitespace-collapsed and, when long, windowed around the match (T3's
 //                `buildSearchSnippet`, byte-for-byte).
 
-import type { ContentBlock, DurableMessage, EntryRecord } from "./model-types.ts";
+import type { ContentBlock, EntryRecord } from "./model-types.ts";
 import { firstMessage, isAssistantEntry, isUserEntry } from "./runs.ts";
 
-export type ThreadSearchSource = "user" | "assistant";
+type ThreadSearchSource = "user" | "assistant";
 
 /** One user/assistant message, as a candidate for search. `text` is the message's text; `messageId` breaks ties. */
 export interface SearchCandidate {

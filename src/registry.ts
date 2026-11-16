@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineDoc, type Harness, type Tx } from "@earendil-works/pi-durable";
 import { type Project, expandPath } from "./config.ts";
 import { projectIdForPath } from "./project-ids.ts";
+import { messageOf } from "./host-errors.ts";
 
 /** A mutation refused because the path already belongs to another project (T3: `ProjectWorkspaceConflictError`). */
 export class ProjectConflict extends Error {
@@ -79,14 +80,14 @@ export class ProjectWorkspaceMissing extends Error {
 export class ProjectWorkspaceNotCreatable extends Error {
 	readonly workspaceRoot: string;
 	constructor(workspaceRoot: string, cause: unknown) {
-		super(`Failed to create workspace root: ${workspaceRoot} (${cause instanceof Error ? cause.message : String(cause)})`);
+		super(`Failed to create workspace root: ${workspaceRoot} (${messageOf(cause)})`);
 		this.name = "ProjectWorkspaceNotCreatable";
 		this.workspaceRoot = workspaceRoot;
 	}
 }
 
 /** The cap on a stored id: a client-minted id longer than this is refused. */
-export const MAX_STORED_ID_LENGTH = 128;
+const MAX_STORED_ID_LENGTH = 128;
 
 /** A project as stored: `path` is the uniqueness key (compared normalized), `id` is assigned once (design.md, IDs). */
 type StoredProject = { id: string; path: string; title: string };
@@ -94,7 +95,7 @@ type ProjectsState = { projects: StoredProject[]; revision: number };
 
 /** The project registry, in the Harness's storage beside the threads that point at it (T3 keeps its projects in its
  * database too). One document: the list is short. */
-export const ProjectsDoc = defineDoc<ProjectsState>({
+const ProjectsDoc = defineDoc<ProjectsState>({
 	kind: "pi-durable-t3.projects",
 	version: 1,
 	scope: "session",

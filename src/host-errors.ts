@@ -14,3 +14,8 @@ export class HostError extends Error {
 export function hostError(code: HostErrorCode, message: string): HostError {
 	return new HostError(code, message);
 }
+
+/** What went wrong, as a line for a log or an answer: an `Error`'s message, anything else as it prints. */
+export function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}

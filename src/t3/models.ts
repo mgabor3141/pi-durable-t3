@@ -8,6 +8,7 @@ import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
 import type { Logger } from "./logging.ts";
 import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { messageOf } from "../host-errors.ts";
 
 export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[]; contextWindow: number };
 
@@ -35,7 +36,7 @@ const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
 };
 
 /** The picker capabilities: pi's ladder, restricted to the model's levels; fewer than two declares no control. */
-export function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapabilities | null {
+function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapabilities | null {
 	if (levels.length < 2) return null;
 	return {
 		optionDescriptors: [
@@ -90,7 +91,7 @@ export class ModelCatalog {
 		try {
 			this.#set(await this.#source());
 		} catch (error) {
-			this.#log?.warn("model catalog refresh failed", { error: error instanceof Error ? error.message : String(error) });
+			this.#log?.warn("model catalog refresh failed", { error: messageOf(error) });
 		}
 	}
 
@@ -107,7 +108,7 @@ export class ModelCatalog {
 				const { errors } = await update({ force, signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS) });
 				for (const [provider, error] of errors) this.#log?.warn("model list update failed", { provider, error: error.message });
 			} catch (error) {
-				this.#log?.warn("model list update failed", { error: error instanceof Error ? error.message : String(error) });
+				this.#log?.warn("model list update failed", { error: messageOf(error) });
 			}
 			await this.refresh();
 		});

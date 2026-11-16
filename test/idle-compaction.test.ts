@@ -11,7 +11,7 @@ import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS } from "../src/t3/idle-compaction.ts";
-import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 afterEach(() => void (Bridge.idleCompaction = { minTokens: IDLE_COMPACTION_MIN_TOKENS, leadMs: IDLE_COMPACTION_LEAD_MS }));
 
@@ -31,7 +31,7 @@ async function setup(settings: object) {
 	const store = ServerSettingsStore.open(scratch);
 	if (Object.keys(settings).length > 0) store.update(settings);
 	const logged: string[] = [];
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: store, corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: (message: string, fields?: unknown) => void logged.push(`${message} ${JSON.stringify(fields ?? {})}`), warn: (message: string, fields?: unknown) => void logged.push(`WARN ${message} ${JSON.stringify(fields ?? {})}`), error: () => {}, debug: () => {} } as never, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, settings: store }), { info: (message: string, fields?: unknown) => void logged.push(`${message} ${JSON.stringify(fields ?? {})}`), warn: (message: string, fields?: unknown) => void logged.push(`WARN ${message} ${JSON.stringify(fields ?? {})}`), error: () => {}, debug: () => {} } as never, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();

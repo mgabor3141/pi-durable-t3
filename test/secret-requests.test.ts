@@ -6,11 +6,10 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SecretRequestError, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { SecretRequests } from "../src/t3/secret-requests.ts";
-import { createNamed, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const SECRET = "ghp_supersecretvalue123";
@@ -23,7 +22,7 @@ it("asks with T3's card, saves the answer by name, and keeps the value out of th
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [extension] });
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p", title: "Secrets" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-secret-"));
-	bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

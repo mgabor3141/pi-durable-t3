@@ -6,21 +6,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { clientProvenance, type DispatchCommand, dispatchCommand } from "../src/t3/dispatch.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import type { ProjectRegistry } from "../src/registry.ts";
 import type { Threads } from "../src/threads.ts";
 import type { Models } from "@earendil-works/pi-ai";
-import { makeThreads, restart } from "./threads-harness.ts";
+import { makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const USER = { createdBy: "user", creationSource: "web" } as const;
 
 async function boot(threads: Threads, registry: ProjectRegistry, models: Models): Promise<Bridge> {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-receipts-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry }, log, threads, models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry }), log, threads, models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

@@ -7,14 +7,13 @@
 //       handlers into `OrchestrationV2GetThreadProjectionError`);
 //   (b) after 20 bogus probes, the shell's project list is BYTE-IDENTICAL to before (no phantom `/ (other)` project).
 import { mkdtemp, rm } from "node:fs/promises";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { Bridge, CommandError } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -22,7 +21,7 @@ async function openBridge(): Promise<{ bridge: Bridge; close: () => Promise<void
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-unknown-"));
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
+		bridgeConfig({ stateDir: scratch, registry: fixture.registry }),
 		log,
 		fixture.threads, fixture.model.models,
 	);

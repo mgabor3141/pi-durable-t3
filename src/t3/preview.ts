@@ -54,7 +54,7 @@ export type PreviewViewerSink = {
 	readonly close: (code: number, reason: string) => void;
 };
 
-export interface PreviewViewer {
+interface PreviewViewer {
 	readonly id: string;
 	readonly canOperate: boolean;
 	ack(): void;
@@ -63,7 +63,7 @@ export interface PreviewViewer {
 }
 
 /** A preview tab an agent can drive: the same Playwright page T3 streams to the user. */
-export type PreviewAgentSession = {
+type PreviewAgentSession = {
 	readonly id: string;
 	readonly page: Page;
 	touch(): void;

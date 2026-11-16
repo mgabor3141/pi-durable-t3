@@ -6,14 +6,13 @@
 // or create the project rooted there, answer its id — and, for a thread launched there, `folderForThread` claims a
 // folder of its own under that root. This test drives a real host over `/ws` and pins all of it, including the two
 // properties the UI relies on: a retried ensure answers the SAME project, and a deleted folder comes back.
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import { ServerSettingsStore } from "../src/settings.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 import { launch, type Launched, pairCode, t3Dir, seedProjects, storedProjects } from "./host-process-harness.ts";
 
 const PORT = 4947;
@@ -176,7 +175,7 @@ async function waitForShellProject(ws: Awaited<ReturnType<typeof connectWs>>, pr
 it("no scratch dir: ensureScratch is refused, and the config carries no scratchWorkspaceRoot (the feature is off)", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: fixture.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(fixture.root), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
+		bridgeConfig({ stateDir: fixture.root, registry: fixture.registry }),
 		{ info: () => {}, warn: () => {} },
 		fixture.threads, fixture.model.models,
 	);

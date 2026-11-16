@@ -9,15 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type ConversationId, defineExtension, defineTool, type Extension, LiveDoc, type TaskId } from "@earendil-works/pi-durable";
+import { type ConversationId, defineExtension, defineTool, type Extension, LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { abortable } from "../src/t3/abortable.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { object } from "../src/t3/schema.ts";
 import type { Threads } from "../src/threads.ts";
-import { conversation, createNamed, idle, makeThreads, restart } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const warnings: string[] = [];
 const log: Logger = { info: () => {}, warn: (message: string) => void warnings.push(message) };
@@ -48,7 +47,7 @@ async function setup(extensions: readonly Extension[]) {
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-stop-"));
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
 	const open = (threads: Threads) => {
-		const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, threads, f.model.models);
+		const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, threads, f.model.models);
 		bridge.start();
 		onTestFinished(() => bridge.close());
 		return bridge;
@@ -133,7 +132,7 @@ it("Stop ends a run whose tasks ended outside pi-durable, and the thread takes m
 	// A restart does not heal it: the thread loads running.
 	const again = await restart(f);
 	const reopened = (await (async () => {
-		const { open } = { open: (threads: Threads) => new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: (bridge as unknown as { config: { stateDir: string } }).config.stateDir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open((bridge as unknown as { config: { stateDir: string } }).config.stateDir), corsOrigins: [], staticDir: undefined, registry: again.registry }, log, threads, f.model.models) };
+		const { open } = { open: (threads: Threads) => new Bridge(bridgeConfig({ stateDir: (bridge as unknown as { config: { stateDir: string } }).config.stateDir, registry: again.registry }), log, threads, f.model.models) };
 		const made = open(again.threads);
 		made.start();
 		onTestFinished(() => made.close());

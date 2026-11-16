@@ -47,7 +47,7 @@ import {
   ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
-import { McpSchema, Tool, Toolkit } from "effect/ai";
+import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 

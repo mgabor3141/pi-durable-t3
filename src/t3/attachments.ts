@@ -30,7 +30,7 @@ export type AttachmentRecord = {
 };
 
 /** One upload the client sends: an image with its bytes inline as a data URL (the data-URL path). */
-export type ImageUpload = {
+type ImageUpload = {
 	readonly type: "image";
 	readonly name: string;
 	readonly mimeType: string;
@@ -39,14 +39,14 @@ export type ImageUpload = {
 };
 
 /** One upload URL the client mints before sending the bytes. */
-export type AttachmentUploadInput = {
+type AttachmentUploadInput = {
 	readonly type?: "image" | "file";
 	readonly name: string;
 	readonly mimeType: string;
 	readonly sizeBytes: number;
 };
 
-export type AttachmentUploadResult = {
+type AttachmentUploadResult = {
 	readonly attachmentId: string;
 	readonly relativeUrl: string;
 	readonly expiresAt: number;
@@ -135,7 +135,7 @@ export function parseBase64DataUrl(dataUrl: string): { mimeType: string; base64:
 }
 
 /** Lowercase, alphanumeric thread segment for an attachment id; the pending segment maps to `_pending` (unused here). */
-export function toSafeThreadSegment(threadId: string): string | null {
+function toSafeThreadSegment(threadId: string): string | null {
 	const segment = threadId
 		.trim()
 		.toLowerCase()
@@ -159,7 +159,7 @@ export function createDeterministicAttachmentId(threadId: string, stableKey: str
 }
 
 /** The id's file-extension suffix (`…-png`), lowercased, if present (T3's `parseAttachmentFileExtension`). */
-export function attachmentExtension(attachmentId: string): string | null {
+function attachmentExtension(attachmentId: string): string | null {
 	const match = /^[a-z0-9_]+(?:-[a-z0-9_]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([a-z0-9]{1,10})$/i.exec(attachmentId);
 	const suffix = match?.[1]?.toLowerCase();
 	return suffix === undefined ? null : suffix;

@@ -9,7 +9,7 @@
 // client reducer over it (`applyOrchestrationV2ProjectionEvent`): a batch that would not bring a client to the new
 // projection is replaced by a snapshot, so a client never drifts.
 import { DateTime } from "effect";
-import { EventId, ThreadId, type OrchestrationV2DomainEvent, type OrchestrationV2ProjectedTurnItem, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { EventId, type OrchestrationV2DomainEvent, type OrchestrationV2ProjectedTurnItem, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import {
 	applyOrchestrationV2ProjectionEvent,
 	boundedSnapshotResponseFields,
@@ -49,7 +49,7 @@ export type ThreadStreamOptions = {
 };
 
 /** One event before its sequence is assigned. */
-export type UnsequencedEvent = Omit<DomainEvent, "id">;
+type UnsequencedEvent = Omit<DomainEvent, "id">;
 
 /** The entity arrays an event can upsert, each with its event types, in the order a batch carries them: a run before
  * its attempts and items, a message before the turn item that repeats its body (the live deduper relies on it). */

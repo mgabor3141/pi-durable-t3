@@ -6,8 +6,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { Context } from "@earendil-works/chord/context";
 import type { Result, FileError } from "@earendil-works/pi-durable/env";
 import { Bridge } from "../src/t3/bridge.ts";
-import { ServerSettingsStore } from "../src/settings.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 it("claims a Scratch thread folder through the bridge's execution environment", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
@@ -20,19 +19,7 @@ it("claims a Scratch thread folder through the bridge's execution environment", 
 	};
 	const scratchRoot = join(fixture.root, "scratch");
 	const bridge = new Bridge(
-		{
-			host: "127.0.0.1",
-			port: 0,
-			label: "t",
-			stateDir: fixture.root,
-			env,
-			scratchDir: scratchRoot,
-			tokenTtlSeconds: 60,
-			settings: ServerSettingsStore.open(fixture.root),
-			corsOrigins: [],
-			staticDir: undefined,
-			registry: fixture.registry,
-		},
+		bridgeConfig({ stateDir: fixture.root, registry: fixture.registry, env, scratchDir: scratchRoot }),
 		{ info: () => {}, warn: () => {} },
 		fixture.threads, fixture.model.models,
 	);

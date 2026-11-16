@@ -56,7 +56,7 @@ const WRITES = new Set(["t3_thread_send", "t3_thread_interrupt", "create_threads
  * goes, `mcp-toolkit.ts`). */
 const ServedToolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit, ThreadToolkit);
 
-export interface McpDeps {
+interface McpDeps {
 	readonly bridge: Bridge;
 	readonly ops: ThreadOps;
 	readonly log: Logger;

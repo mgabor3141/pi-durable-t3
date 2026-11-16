@@ -44,15 +44,15 @@ import { type ProjectRegistry, projectsInCommit } from "./registry.ts";
 
 /** The entry kind a client prompt is placed as, carrying the client's message id in its `data` (state.md: no side
  * store). It must not start with `pi.` — pi-durable's namespace for an input's own entry kinds. */
-export const APP_USER_ENTRY = "app.user";
+const APP_USER_ENTRY = "app.user";
 
 /** Entry kinds that name a user turn, for the rewind's `not_rewindable` check; the facet owns a copy of this literal. */
 const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
 
 /** Who created a thread or a message (T3's `OrchestrationV2Actor`). */
-export type Actor = "user" | "agent" | "system";
+type Actor = "user" | "agent" | "system";
 /** Where it came from (T3's `OrchestrationV2CreationSource`). */
-export type CreationSource = "web" | "mobile" | "mcp" | "provider" | "server";
+type CreationSource = "web" | "mobile" | "mcp" | "provider" | "server";
 /** T3's creation fields: a thread's, and a user-role message's. */
 /** Who wrote something, and for a message one thread sends another, the sending thread (T3's `senderThreadId`). */
 export type Provenance = { readonly createdBy: Actor; readonly creationSource: CreationSource; readonly senderThreadId?: string };
@@ -71,9 +71,9 @@ export type ThreadLineage = {
  * sent: a side chat's note about its main thread, or a fork's conversation brought back (`thread.merge_back`). */
 export type PendingContext = { type: "side_chat" } | { type: "merge_back"; sourceThreadId: string; runId: string };
 /** T3's `OrchestrationV2LinkOrigin`: the linked environment's session whose agent started this work here. Set once. */
-export type LinkOrigin = { sessionId: string; label: string; access?: string };
+type LinkOrigin = { sessionId: string; label: string; access?: string };
 /** T3's `OrchestrationV2DelegatedFrom`: the thread in a linked environment that delegated this one. */
-export type DelegatedFrom = { environmentId: string; threadId: string; title: string };
+type DelegatedFrom = { environmentId: string; threadId: string; title: string };
 /**
  * A message that asked to be answered (`thread_prompt`'s `notify`): when the activity it started or joined in this thread
  * settles, the activity's report is posted into `threadId`, the sender's thread. Kept on the receiving thread's record

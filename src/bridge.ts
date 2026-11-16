@@ -33,6 +33,7 @@ import { startFacet } from "./t3/facet.ts";
 
 /** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 import { ConfigError } from "./config.ts";
+import { messageOf } from "./host-errors.ts";
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";
@@ -46,7 +47,7 @@ export { abortable, abortableExtension } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
-export const DESKTOP_APP_ORIGIN = "t3code://app";
+const DESKTOP_APP_ORIGIN = "t3code://app";
 
 /** The default listen address: loopback, T3's own app's port plus one (T3 uses 3773). */
 const DEFAULT_LISTEN = { host: "127.0.0.1", port: 3774 } as const;
@@ -57,7 +58,7 @@ function bundledWebApp(): string | undefined {
 	return existsSync(join(dir, "index.html")) ? dir : undefined;
 }
 
-export type AttachT3Options = {
+type AttachT3Options = {
 	/** The model catalog: T3's picker list and the list `server.refreshProviders` answers (availability is the Harness's). */
 	readonly models: Models;
 	/**
@@ -150,7 +151,7 @@ export type AttachT3Options = {
 };
 
 /** The page an agent drives in T3; the page is the one T3 streams to the user. */
-export type AgentPreviewSession = {
+type AgentPreviewSession = {
 	readonly id: string;
 	readonly page: Page;
 	touch(): void;
@@ -237,7 +238,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		await registry.load();
 		await threads.load();
 	} catch (error) {
-		throw new Error(`pi-durable-t3: cannot read the threads in this Harness's storage (${error instanceof Error ? error.message : String(error)}). A store written by an earlier version is migrated by hand.`, { cause: error });
+		throw new Error(`pi-durable-t3: cannot read the threads in this Harness's storage (${messageOf(error)}). A store written by an earlier version is migrated by hand.`, { cause: error });
 	}
 
 	const catalog = new ModelCatalog(

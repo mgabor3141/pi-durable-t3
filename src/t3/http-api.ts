@@ -67,8 +67,9 @@ import { type Bridge, CommandError } from "./bridge.ts";
 import type { Logger } from "./logging.ts";
 import { InvalidThreadHistoryCursorError, decodeThreadHistoryCursor, projectThreadProjectionForWire, projectedRowEncodedBytes, renderMcpOAuthErrorPage } from "./t3-server.ts";
 import { boundedSnapshot, historyPage } from "./thread-stream.ts";
+import { messageOf } from "../host-errors.ts";
 
-export interface HttpApiDeps {
+interface HttpApiDeps {
 	readonly bridge: Bridge;
 	readonly auth: AuthStore;
 	readonly log: Logger;
@@ -117,7 +118,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 	const { bridge, auth, log } = deps;
 
 	const internal = (reason: EnvironmentInternalErrorReason, cause: unknown): Effect.Effect<never, EnvironmentInternalError> =>
-		Effect.sync(() => log.warn("environment api operation failed", { reason, error: cause instanceof Error ? cause.message : String(cause) })).pipe(
+		Effect.sync(() => log.warn("environment api operation failed", { reason, error: messageOf(cause) })).pipe(
 			Effect.andThen(Effect.fail(new EnvironmentInternalError({ code: "internal_error", reason, traceId: traceId() }))),
 		);
 

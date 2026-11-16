@@ -9,11 +9,10 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { projectThreadProjectionForWire, projectTurnItemForDetail } from "../src/t3/t3-server.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 import { str } from "@earendil-works/pi-schema";
 import { object } from "../src/t3/schema.ts";
 import { WorkspaceAssets } from "../src/t3/workspace-assets.ts";
@@ -37,7 +36,7 @@ it("getTurnItem gives the full item behind a row whose output the wire withheld"
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [codemode] });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-turn-item-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {
@@ -97,7 +96,7 @@ it("a tool row shows the images its result holds, and the asset route serves eac
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [codemode] });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-turn-item-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

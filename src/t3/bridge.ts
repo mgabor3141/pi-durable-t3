@@ -33,13 +33,13 @@ import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
 import { globalIdleCompaction, ProjectId, ThreadId } from "@t3tools/contracts";
 import { IDLE_COMPACTION_LEAD_MS, IDLE_COMPACTION_MIN_TOKENS, idleCompactionWindow, type IdleCompactionWindow } from "./idle-compaction.ts";
-import { type ConversationView, type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
+import { type ContentBlock, type EntryRecord, type ModelRef, modelSlug, splitSlug, thinkingOf } from "./model-types.ts";
 import { contextReport, type ContextReportView } from "./context-report.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, limitResetAt, projectThread, requestedRetryDelayMs, type ShownExchange, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
-import { attachmentsOf, isAssistantEntry, isUserEntry, stopReason, USER_ENTRY_KINDS } from "./runs.ts";
-import { HostError } from "../host-errors.ts";
+import { isAssistantEntry, isUserEntry, stopReason, USER_ENTRY_KINDS } from "./runs.ts";
+import { HostError, messageOf } from "../host-errors.ts";
 import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
@@ -204,7 +204,7 @@ export class Bridge {
 				void this.#watchRuns();
 				void this.sweepSettlement();
 			})
-			.catch((error: unknown) => this.#log.warn("the thread directory failed to load", { error: error instanceof Error ? error.message : String(error) }));
+			.catch((error: unknown) => this.#log.warn("the thread directory failed to load", { error: messageOf(error) }));
 		// T3's settlement sweep: every minute, and when the settings change.
 		this.#settleTimer = setInterval(() => void this.sweepSettlement(), SETTLE_SWEEP_MS);
 		this.#settleTimer.unref();
@@ -480,6 +480,7 @@ export class Bridge {
 		const cwd = agentCwd ?? project?.path ?? "";
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
+		const listed = model === null ? undefined : state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId);
 		return {
 			threadId,
 			projectId: project?.id ?? thread?.projectId ?? "",
@@ -492,8 +493,7 @@ export class Bridge {
 			model,
 			...(this.config.maxRetries === undefined ? {} : { maxRetries: this.config.maxRetries }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-			...(model === null ? {} : { contextWindow: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.contextWindow }),
-			...(model === null ? {} : { promptCache: state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId)?.promptCache }),
+			...(listed === undefined ? {} : { contextWindow: listed.contextWindow, ...(listed.promptCache === undefined ? {} : { promptCache: listed.promptCache }) }),
 			...(thread === undefined
 				? {}
 				: {
@@ -675,7 +675,7 @@ export class Bridge {
 				if (record.spawn === undefined) return false;
 				record.spawn.outcome = outcome;
 			})
-			.catch((error: unknown) => this.#log.warn("child outcome write failed", { threadId: view.threadId, error: error instanceof Error ? error.message : String(error) }));
+			.catch((error: unknown) => this.#log.warn("child outcome write failed", { threadId: view.threadId, error: messageOf(error) }));
 	}
 
 	// ---- records (for `orchestration.ts`) -----------------------------------------------------------------------
@@ -784,9 +784,9 @@ export class Bridge {
 					if ("skip" in due || due.runId !== window.runId) return this.#log.info("an idle thread is not compacted after all", { threadId, why: "skip" in due ? due.skip : "the thread went on" });
 					this.#log.info("compacting an idle thread before its prompt cache expires", { threadId, expiresAt: new Date(due.endMs).toISOString() });
 					await this.#store.compact(threadId, undefined, `idle-compact:${threadId}:${due.runId}`, true);
-				})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: error instanceof Error ? error.message : String(error) }));
+				})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: messageOf(error) }));
 			}, Math.max(0, window.startMs - Date.now()));
-		})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: error instanceof Error ? error.message : String(error) }));
+		})().catch((error) => this.#log.warn("idle compaction skipped", { threadId, error: messageOf(error) }));
 	}
 
 	// ---- a provider's limit (T3's limit recovery) --------------------------------------------------------------
@@ -927,7 +927,7 @@ export class Bridge {
 				if (call.kind === "value") this.#onTaskGraph(call.value);
 			});
 		} catch (error) {
-			this.#log.warn("the task graph watch failed: runs that start without a client are not followed", { error: error instanceof Error ? error.message : String(error) });
+			this.#log.warn("the task graph watch failed: runs that start without a client are not followed", { error: messageOf(error) });
 		}
 	}
 
@@ -960,7 +960,7 @@ export class Bridge {
 				itemCount: shell.itemCount,
 				visibleItemCount: shell.visibleItemCount,
 			})
-			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: view.threadId, error: error instanceof Error ? error.message : String(error) }));
+			.catch((error: unknown) => this.#log.warn("sidebar summary write failed", { threadId: view.threadId, error: messageOf(error) }));
 	}
 
 	/** The stream's state as subscribers were last brought to it, without a flush (a slow subscriber's catch-up). */
@@ -1818,7 +1818,7 @@ export class Bridge {
 				try {
 					await this.autoSettleThread(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), settledAt);
 				} catch (error) {
-					this.#log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: error instanceof Error ? error.message : String(error) });
+					this.#log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: messageOf(error) });
 				}
 			}
 		} finally {

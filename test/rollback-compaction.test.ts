@@ -13,12 +13,11 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { applyOrchestrationV2ProjectionEvent } from "../src/t3/t3-server.ts";
 import { windowedProjection } from "../src/t3/thread-stream.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const FORK = "00000000-0000-4000-8000-0000000000f1";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,7 +28,7 @@ it("editing the message after a compaction keeps the compaction, and T3 sees the
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-rollback-compaction-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

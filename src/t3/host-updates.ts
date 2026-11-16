@@ -9,6 +9,7 @@
 import type { ServerProvider } from "@t3tools/contracts";
 import type { Logger } from "./logging.ts";
 import type { HostUpdates } from "./updates-config.ts";
+import { messageOf } from "../host-errors.ts";
 
 /** How often the newest version is looked for. */
 export const HOST_UPDATE_CHECK_MS = 3_600_000;
@@ -21,9 +22,9 @@ const OUTPUT_LIMIT = 10_000;
 type Advisory = NonNullable<ServerProvider["versionAdvisory"]>;
 type UpdateState = NonNullable<ServerProvider["updateState"]>;
 /** `label`: the host's name and the version that runs, for the end of the provider's version. */
-export type ProviderVersion = { readonly label: string; readonly versionAdvisory: Advisory; readonly updateState?: UpdateState };
+type ProviderVersion = { readonly label: string; readonly versionAdvisory: Advisory; readonly updateState?: UpdateState };
 
-const text = (error: unknown) => (error instanceof Error ? error.message : String(error)).trim() || "It failed without saying why.";
+const text = (error: unknown) => (messageOf(error)).trim() || "It failed without saying why.";
 
 export class HostUpdateWatch {
 	readonly #updates: HostUpdates;

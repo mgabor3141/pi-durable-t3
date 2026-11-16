@@ -22,7 +22,7 @@ type Any = any;
 const time = (ms: number) => DateTime.makeUnsafe(ms);
 
 /** A minted link, as the Connections list and the access stream show it (T3's `listPairingLinks` row). */
-export function toPairingLink(pairing: StoredPairing): AuthPairingLink {
+function toPairingLink(pairing: StoredPairing): AuthPairingLink {
 	return {
 		id: pairing.id,
 		...authScopeResponse(pairing.scopes as Any),

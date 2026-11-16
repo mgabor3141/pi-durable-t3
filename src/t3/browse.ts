@@ -16,8 +16,8 @@ function isExplicitRelativePath(value: string): boolean {
 	return value === "." || value === ".." || value.startsWith("./") || value.startsWith("../") || value.startsWith(".\\") || value.startsWith("..\\");
 }
 
-export type BrowseEntry = { readonly name: string; readonly fullPath: string };
-export type BrowseResult = { readonly parentPath: string; readonly entries: readonly BrowseEntry[] };
+type BrowseEntry = { readonly name: string; readonly fullPath: string };
+type BrowseResult = { readonly parentPath: string; readonly entries: readonly BrowseEntry[] };
 
 /** The failures `FilesystemBrowseError.classify`, so the handler builds the contract's typed error. */
 export class BrowseWindowsPathUnsupported extends Error {
@@ -117,7 +117,7 @@ export async function browseFilesystem(input: {
 // ---- file metadata (T3's `filesystem.getMetadata`) ----------------------------------------------------------------
 
 /** T3's `fileHeaderMimeType` (`workspace/fileHeaderMimeType.ts`): the type an extensionless file's first bytes name. */
-export function fileHeaderMimeType(bytes: Uint8Array): string | undefined {
+function fileHeaderMimeType(bytes: Uint8Array): string | undefined {
 	const startsWith = (signature: readonly number[], offset = 0) => signature.every((byte, index) => bytes[offset + index] === byte);
 	if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
 	if (startsWith([0xff, 0xd8, 0xff])) return "image/jpeg";
@@ -136,7 +136,7 @@ export function fileHeaderMimeType(bytes: Uint8Array): string | undefined {
 	return undefined;
 }
 
-export type FileMetadata = { kind: "file"; byteLength: number; mimeType?: string } | { kind: "directory" } | { kind: "other" };
+type FileMetadata = { kind: "file"; byteLength: number; mimeType?: string } | { kind: "directory" } | { kind: "other" };
 
 /**
  * T3's `filesystem.getMetadata` (`WorkspaceFileSystem.getMetadata`), read through the environment: for each path a reply

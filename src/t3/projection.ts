@@ -151,7 +151,7 @@ export interface ShownExchange {
 }
 
 /** The id prefix of a shown exchange's answer: a message no entry holds. */
-export const SHOWN_MESSAGE = "shown-";
+const SHOWN_MESSAGE = "shown-";
 
 export interface ThreadMeta {
 	readonly threadId: string;
@@ -1381,7 +1381,7 @@ function compactionTrigger(compaction: Any): string | undefined {
  * before, what the last request before the summary used (its input, cache and answer); after, what the first request
  * after it sent. A request without usage (one that failed) does not count. Each is absent until there is such a request.
  */
-export function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord["id"], { before?: number; after?: number }> {
+function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord["id"], { before?: number; after?: number }> {
 	const counts = new Map<EntryRecord["id"], { before?: number; after?: number }>();
 	let lastContext: number | undefined;
 	let waiting: { before?: number; after?: number }[] = [];

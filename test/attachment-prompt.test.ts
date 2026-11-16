@@ -3,7 +3,6 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
-import { createScriptedModel } from "./fake-model.ts";
 import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
 
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";

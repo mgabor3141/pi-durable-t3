@@ -24,11 +24,12 @@ import {
 import { APP_HTML_RENDER_ENTRY } from "./runs.ts";
 import { arr, int, opt, str, union } from "@earendil-works/pi-schema";
 import { literal, object } from "./schema.ts";
+import { messageOf } from "../host-errors.ts";
 
 type Callers = readonly ("model" | "tools")[];
 type Api = { readonly conversationId: number; readonly taskId: unknown; readonly callId: string };
 
-export interface HtmlToolsDeps {
+interface HtmlToolsDeps {
 	readonly threads: Threads;
 	readonly threadIdOf: (conversationId: number) => Promise<string | undefined>;
 	readonly attachments: Attachments;
@@ -112,7 +113,7 @@ export function htmlToolsExtension(deps: HtmlToolsDeps, options: { readonly call
 					result = await previewHtml(deps.env, await browser(), args, deps.context);
 				} catch (error) {
 					if (error instanceof HtmlPageError) return failure(error.message);
-					return failure(`The page could not be previewed: ${error instanceof Error ? error.message : String(error)}`);
+					return failure(`The page could not be previewed: ${messageOf(error)}`);
 				}
 				const { screenshot, ...facts } = result;
 				return {

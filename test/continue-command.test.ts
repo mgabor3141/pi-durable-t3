@@ -9,12 +9,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { abortable } from "../src/t3/abortable.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { object } from "../src/t3/schema.ts";
-import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
 
 type Item = { id: string; type: string; runId: string | null; text?: string; inputIntent?: string };
 type Run = { id: string; status: string; userMessageId: string; queueHeld?: boolean };
@@ -27,7 +26,7 @@ async function setup() {
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-continue-"));
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: () => {}, warn: () => {} }, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), quietLog, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();

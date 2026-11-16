@@ -6,10 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,7 +32,7 @@ it("an idle thread's objects are disposed, and a reopen rebuilds them with the w
 
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-idle-"));
 	const bridge = new Bridge(
-		{ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: fixture.registry },
+		bridgeConfig({ stateDir: scratch, registry: fixture.registry }),
 		log,
 		fixture.threads, fixture.model.models,
 	);

@@ -60,6 +60,7 @@ import type { WsHandlers, WsItem, WsPayload, WsSuccess } from "./ws-types.ts";
 import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
 import { TEXT_GENERATORS_UNSUPPORTED, unsupportedMessage } from "./unsupported.ts";
 import type { SecretRequests } from "./secret-requests.ts";
+import { messageOf } from "../host-errors.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
 type Any = any;
@@ -208,12 +209,12 @@ export function makeRpcLayer(deps: RpcDeps) {
 			sink(call);
 		} catch (error) {
 			// A debug callback must never turn into a broken RPC: report the sink's own failure and continue.
-			log.warn("RPC log callback failed", { method: call.method, error: error instanceof Error ? error.message : String(error) });
+			log.warn("RPC log callback failed", { method: call.method, error: messageOf(error) });
 		}
 	};
 	const failureMessage = (cause: Any) => {
 		const error = Cause.isCause(cause) ? Cause.squash(cause) : cause;
-		return error instanceof Error ? error.message : String(error);
+		return messageOf(error);
 	};
 	/** Wrap one implemented handler: success/failure callbacks carry the method, kind and duration. Streams report when
 	 * they open (their later failures are the stream's own). */
@@ -226,7 +227,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 					callSink(rpcLog?.onSuccess, { method: tag, kind: "stream", durationMs: elapsed(started) });
 					return value;
 				} catch (error) {
-					callSink(rpcLog?.onFailure, { method: tag, kind: "stream", durationMs: elapsed(started), error: error instanceof Error ? error.message : String(error) });
+					callSink(rpcLog?.onFailure, { method: tag, kind: "stream", durationMs: elapsed(started), error: messageOf(error) });
 					throw error;
 				}
 			}
@@ -234,7 +235,7 @@ export function makeRpcLayer(deps: RpcDeps) {
 			try {
 				effect = handler(payload);
 			} catch (error) {
-				callSink(rpcLog?.onFailure, { method: tag, kind: "request", durationMs: elapsed(started), error: error instanceof Error ? error.message : String(error) });
+				callSink(rpcLog?.onFailure, { method: tag, kind: "request", durationMs: elapsed(started), error: messageOf(error) });
 				throw error;
 			}
 			return Effect.matchCauseEffect(effect, {

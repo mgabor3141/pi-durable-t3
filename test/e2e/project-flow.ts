@@ -86,7 +86,6 @@ try {
 	const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 	page.on("pageerror", (error) => console.log(`[pageerror] ${error.message.slice(0, 200)}`));
 	page.on("websocket", (ws) => ws.on("framesent", (frame) => wsFrames.push(String(frame.payload))));
-	const sent = (needle: string) => wsFrames.some((frame) => frame.includes(needle));
 	const palette = page.getByTestId("command-palette");
 
 	// 1. Pair and land on the app.

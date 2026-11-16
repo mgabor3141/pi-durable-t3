@@ -4,7 +4,7 @@
 // Hermetic: a scripted faux model, a temp root, no network, no `~/.pi`.
 //
 // Run: node --experimental-strip-types test/shutdown-child.ts <root> <project> <port> [tool-sleep-ms]
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";

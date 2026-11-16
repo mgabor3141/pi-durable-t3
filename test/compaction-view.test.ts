@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 // A compacted thread through the bridge's view: pi-durable's view lists the whole transcript with the compaction summary
@@ -19,7 +18,7 @@ it("a compacted thread shows its turns in order and the card where the summary l
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "probe-"));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	const long = "x".repeat(40_000);
@@ -54,7 +53,7 @@ it("a compacted thread shows its turns in order and the card where the summary l
 		["user_message", "question 5"],
 		["assistant_message", "answer 5"],
 	]);
-	const fresh = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	const fresh = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	fresh.start(); await fresh.loaded();
 	const again = (await fresh.projection("t")).projection.turnItems as unknown as { type: string; text?: string; runId: string }[];
 	expect(shape(again)).toEqual(shape(items));

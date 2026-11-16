@@ -8,12 +8,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { AuthStore } from "../src/t3/auth.ts";
 import { Attachments } from "../src/t3/attachments.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { conversation, createNamed, gated, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, gated, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
@@ -26,7 +25,7 @@ it("an image and a file: both kept in the environment and named by path; the ima
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-send-att-"));
 	const home = join(scratch, "workspace", "attachments");
 	const attachments = new Attachments({ stateDir: join(scratch, "state"), signer: new AuthStore(join(scratch, "state"), { tokenTtlSeconds: 60 }), env: new NodeExecutionEnv({ cwd: "/" }), dir: home, context: BACKGROUND_CONTEXT });
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models, attachments);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {
@@ -74,7 +73,7 @@ it("a steer carries its attachments into the running turn (activeSteeringAccepts
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-steer-att-"));
 	const home = join(scratch, "workspace", "attachments");
 	const attachments = new Attachments({ stateDir: join(scratch, "state"), signer: new AuthStore(join(scratch, "state"), { tokenTtlSeconds: 60 }), env: new NodeExecutionEnv({ cwd: "/" }), dir: home, context: BACKGROUND_CONTEXT });
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models, attachments);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {

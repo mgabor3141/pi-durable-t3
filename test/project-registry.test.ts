@@ -4,14 +4,13 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { ProjectConflict, ProjectIdConflict, ProjectIdInvalid, ProjectNotFound } from "../src/registry.ts";
 import { projectIdForPath } from "../src/project-ids.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { tempRoot } from "./temp-root.ts";
 import { storedRegistry } from "./test-registry.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -102,7 +101,7 @@ describe("projects.mutate over the registry", () => {
 	it("answers the id the client minted (the shell carries it), and refuses a taken id with the typed error", async () => {
 		const dir = await tempRoot();
 		const f = await makeThreads({ projects: [] });
-		const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+		const bridge = new Bridge(bridgeConfig({ stateDir: dir, registry: f.registry }), log, f.threads, f.model.models);
 		bridge.start();
 		try {
 			await mkdir(join(dir, "sso"), { recursive: true });

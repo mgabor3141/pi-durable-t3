@@ -13,13 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createModels } from "@earendil-works/pi-ai";
-import { unstartedStore } from "./threads-harness.ts";
+import { unstartedStore, bridgeConfig } from "./threads-harness.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import type { BridgeConfig } from "../src/t3/config.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { storedRegistry } from "./test-registry.ts";
-import { createScriptedModel } from "./fake-model.ts";
-import { makeThreads } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -31,7 +28,7 @@ describe("a project id is minted by whoever registers it", () => {
 			await mkdir(root, { recursive: true });
 			const stored = await storedRegistry(dir);
 			const registry = stored.registry;
-			const config: BridgeConfig = { host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(join(dir, "settings-store")), corsOrigins: [], staticDir: undefined, registry };
+			const config = bridgeConfig({ stateDir: dir, registry, settings: ServerSettingsStore.open(join(dir, "settings-store")) });
 			const bridge = new Bridge(config, log, unstartedStore(), createModels());
 
 			const clientProjectId = randomUUID(); // exactly what `newProjectId()` mints in the web app.

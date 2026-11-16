@@ -31,7 +31,7 @@ const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
 const MCP_OAUTH_SCOPES = [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
 
-export interface McpOAuthUrls {
+interface McpOAuthUrls {
 	readonly issuer: string;
 	readonly resource: string;
 }
@@ -73,7 +73,7 @@ const parseRedirect = (value: string): URL | undefined => {
 };
 
 /** Loopback redirects ignore port (RFC 8252 `7.3); HTTPS redirects match exactly. */
-export const redirectMatches = (registered: string, presented: string): boolean => {
+const redirectMatches = (registered: string, presented: string): boolean => {
 	const left = parseRedirect(registered);
 	const right = parseRedirect(presented);
 	if (left === undefined || right === undefined) return false;
@@ -109,7 +109,7 @@ export interface AuthorizationParams {
 	readonly resource?: string;
 }
 
-export interface AuthorizationRequest {
+interface AuthorizationRequest {
 	readonly client: McpOAuthClient;
 	readonly redirectUri: string;
 	readonly codeChallenge: string;
@@ -119,7 +119,7 @@ export interface AuthorizationRequest {
 }
 
 /** A problem shown on the page: the client or its redirect is not verified, so nothing is sent back to it. */
-export class McpOAuthPageError extends Error {}
+class McpOAuthPageError extends Error {}
 /** A problem sent back to the (verified) client through its redirect URI. */
 export class McpOAuthRedirectError extends Error {
 	readonly error: "invalid_request" | "unsupported_response_type" | "invalid_target";
@@ -160,7 +160,7 @@ const APPROVAL_CODE_MESSAGES: Record<McpApprovalCodeRefusal, string> = {
 	unknown_or_used: "That pairing code is unknown, expired, or already used.",
 };
 
-export type ApprovalDecision =
+type ApprovalDecision =
 	| { readonly _tag: "pairing-code"; readonly access: AuthMcpClientAccess; readonly code: string }
 	| { readonly _tag: "browser-session"; readonly access: AuthMcpClientAccess; readonly csrfToken: string };
 

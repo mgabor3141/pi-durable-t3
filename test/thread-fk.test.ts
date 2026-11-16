@@ -11,19 +11,11 @@
 // land under it). On the serve side, a row with an unknown `projectId` must never be published as a
 // project — the shell lists registered projects and nothing else (closed by the identity cluster; pinned
 // here as a regression guard).
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { ServerSettingsStore } from "../src/settings.ts";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { HostError } from "../src/host-errors.ts";
-import { Bridge } from "../src/t3/bridge.ts";
-import type { Logger } from "../src/t3/logging.ts";
 import { makeThreads } from "./threads-harness.ts";
 
-const log: Logger = { info: () => {}, warn: () => {} };
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("a thread row is written only for a registered project", () => {
 	it("(a) a create whose commit lands after the project is removed is refused (conc N1)", async () => {

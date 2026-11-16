@@ -12,7 +12,7 @@
 import { AssetPreviewTypeValidationError, AssetWorkspaceAssetInspectionError, AssetWorkspaceAssetNotFoundError, AssetWorkspacePathValidationError, type AssetCreateUrlResult, type AssetResource } from "@t3tools/contracts";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ASSET_ROUTE_PREFIX, type Signer } from "./attachments.ts";
 
 /** T3's asset URL lifetime (`ASSET_TOKEN_TTL_MS`). The client re-mints before this expires. */
@@ -49,7 +49,7 @@ type Claims =
 	| { readonly version: 1; readonly kind: "tool-output-image"; readonly threadId: string; readonly itemId: string; readonly index: number; readonly expiresAt: number };
 
 /** The image a tool row shows at `index`, base64 as the model was given it; null when there is none. */
-export type ToolImageLookup = (threadId: string, itemId: string, index: number) => Promise<{ readonly data: string; readonly mimeType: string } | null>;
+type ToolImageLookup = (threadId: string, itemId: string, index: number) => Promise<{ readonly data: string; readonly mimeType: string } | null>;
 
 const decodeClaims = (payload: string): Claims | null => {
 	try {

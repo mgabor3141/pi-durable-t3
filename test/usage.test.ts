@@ -3,13 +3,11 @@
 // mapping the usage page renders — pi-reported cost (`providerReported`), zero-cost turns (`unpriced`), the field
 // split, forks counted once, and the day/hour window — without a host.
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { UsageReadError, type UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
 import type { EntryRecord, PiUsage } from "../src/t3/model-types.ts";
 import { piUsagePricing, summarizeUsage, usageRecordsOf } from "../src/t3/usage.ts";
 
-const DAY = 86_400_000;
 // A fixed 2026 day so the day-bucket tests are independent of the clock.
 const D1 = Date.parse("2026-03-10T12:00:00Z");
 const D2 = Date.parse("2026-03-11T09:30:00Z");

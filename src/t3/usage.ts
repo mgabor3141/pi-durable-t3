@@ -28,7 +28,7 @@ import { firstMessage } from "./runs.ts";
 /** T3's pricing source (`UsageService.ts`, `LITELLM_RATES_URL`). We never fetch it: pi prices its own turns, so this
  * host reports no model rate table (status `unavailable`, zero known models), and every priced record is
  * `providerReported`. The string is kept as T3's so the field is a real source id, not an invented one. */
-export const PRICING_SOURCE = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const PRICING_SOURCE = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /** The host's own pi-reported cost, in USD, for a turn: pi defaults missing catalog rates to zero, so a non-positive
  * cost is `null` (T3's pi reader: `reportedCostUsd`). */
@@ -54,7 +54,7 @@ const tokenTotal = (t: UsageTokenTotals): number =>
 
 /** One turn's usage, as T3's aggregator consumes it (`UsageRecord` in provider-core, minus the fields this host has
  * no source for). `reportedCostUsd === null` marks a turn pi recorded no positive cost for: it is `unpriced`. */
-export interface UsageRecord {
+interface UsageRecord {
 	readonly timestampMs: number;
 	/** `provider/model` for a turn, or T3's `Tools/summaries` label for an unattributed tool/summary record. */
 	readonly model: string;
@@ -322,7 +322,7 @@ const canonicalSelectors = (selectors: readonly ModelSelector[]) =>
 
 /** T3's `canonicalModelFilter`: one form for equal filters (deduplicated, code-unit order), so a client can compare the
  * filter echoed back with its own; an empty one is none. */
-export function canonicalModelFilter(filter: ModelFilter | undefined): ModelFilter | undefined {
+function canonicalModelFilter(filter: ModelFilter | undefined): ModelFilter | undefined {
 	if (filter === undefined) return undefined;
 	const exclude = filter.exclude?.length ? canonicalSelectors(filter.exclude) : undefined;
 	if (filter.include === undefined && exclude === undefined) return undefined;

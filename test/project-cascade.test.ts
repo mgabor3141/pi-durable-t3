@@ -16,8 +16,7 @@ import { afterAll, expect, it } from "vitest";
 import { connectWs, exitError, exitValue, getJson, pair, waitListening, type Frame } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, t3Dir, seedProjects } from "./host-process-harness.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import { ServerSettingsStore } from "../src/settings.ts";
-import { makeThreads } from "./threads-harness.ts";
+import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-cascade-"));
 const agentDir = join(scratch, "agent");
@@ -154,7 +153,7 @@ it("a thread.create racing the forced delete leaves no row under the removed pro
 	for (let round = 0; round < 10; round++) {
 		const f = await makeThreads({ projects: [{ id: "racy" }] });
 		const bridge = new Bridge(
-			{ host: "127.0.0.1", port: 0, label: "t", stateDir: f.root, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(f.root), corsOrigins: [], staticDir: undefined, registry: f.registry },
+			bridgeConfig({ stateDir: f.root, registry: f.registry }),
 			{ info: () => {}, warn: () => {} },
 			f.threads, f.model.models,
 		);

@@ -1,7 +1,7 @@
 // T3's inline HTML: html_render keeps a page as an attachment and shows it in the caller's thread as T3's html_render
 // tool item (which T3's timeline renders inline), html_preview renders it in the host's browser first. The page rules are
 // T3's. The browser tests run where Chromium can be launched and are skipped elsewhere.
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -12,7 +12,6 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { chromium, type Browser } from "playwright-core";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import type { Threads } from "../src/threads.ts";
 import { AuthStore } from "../src/t3/auth.ts";
 import { Attachments } from "../src/t3/attachments.ts";
@@ -21,7 +20,7 @@ import { assetResponse } from "../src/t3/http.ts";
 import { HtmlPageError, inlineLocalImages, measureHtml, pageSource, preparePublish, previewHtml, rejectViewportHeight } from "../src/t3/html-render.ts";
 import { htmlToolsExtension } from "../src/t3/html-tools.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
@@ -82,7 +81,7 @@ it("html_render keeps the page and shows it in the thread as T3's html_render it
 	holder.threads = f.threads;
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const bridge = (): Bridge => {
-		const made = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+		const made = new Bridge(bridgeConfig({ stateDir: dir, registry: f.registry }), log, f.threads, f.model.models, attachments);
 		onTestFinished(() => made.close());
 		return made;
 	};
@@ -148,7 +147,7 @@ it("a script's html_render (the way an agent that acts through codemode calls it
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [codemode, html] });
 	holder.threads = f.threads;
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
-	holder.bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: dir, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(dir), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models, attachments);
+	holder.bridge = new Bridge(bridgeConfig({ stateDir: dir, registry: f.registry }), log, f.threads, f.model.models, attachments);
 	onTestFinished(() => holder.bridge!.close());
 	holder.bridge.start();
 	await holder.bridge.loaded();

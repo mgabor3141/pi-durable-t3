@@ -1,6 +1,5 @@
 // Boot the T3 facet: the auth store, model catalog and bridge (over the threads layer), then the Effect HTTP/`/ws` server.
 import { createServer } from "node:http";
-import { join } from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -28,6 +27,7 @@ import { threadToolsExtension } from "./thread-tools.ts";
 import { htmlToolsExtension } from "./html-tools.ts";
 import { Orchestration } from "./orchestration.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
+import { messageOf } from "../host-errors.ts";
 
 type FacetHandle = {
 	/** Resolves with the port the listener ACTUALLY got, once it is listening; rejects with the bind error (e.g.
@@ -81,10 +81,10 @@ export function startFacet(deps: {
 	// T3 deletes the tasks bound to a deleted thread (the thread deletion's `scheduled-tasks.cleanup` effect).
 	bridge.onThreadDeleted((threadId) => {
 		void scheduledTasks.deleteForThread(threadId).catch((error: unknown) =>
-			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) }),
+			log.warn("could not delete the scheduled tasks of a deleted thread", { threadId, error: messageOf(error) }),
 		);
 		void preview?.closeThread(threadId).catch((error: unknown) =>
-			log.warn("could not close the preview tabs of a deleted thread", { threadId, error: error instanceof Error ? error.message : String(error) }),
+			log.warn("could not close the preview tabs of a deleted thread", { threadId, error: messageOf(error) }),
 		);
 	});
 

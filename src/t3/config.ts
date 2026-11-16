@@ -15,7 +15,7 @@ import type { HostRoute } from "./host-route.ts";
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
 /** The facet's integrator-owned fields, assembled once from `attachT3`'s options. */
-export interface FacetConfig {
+interface FacetConfig {
 	readonly host: string;
 	readonly port: number;
 	readonly label: string;

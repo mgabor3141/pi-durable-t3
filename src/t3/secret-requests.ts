@@ -16,18 +16,18 @@ import { object } from "./schema.ts";
 /** The tool's name, as T3's. */
 export const REQUEST_SECRET_TOOL = "request_secret";
 /** A secret's name: an environment variable's, so a shell can use it as one. */
-export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
+const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 /** How long an answer waits for its call to start waiting. */
 const ARRIVAL_MS = 5_000;
 
 /** The outcome a call reports in its details, for the card. T3's statuses, plus `timed_out` (shown as ended). */
-export type SecretRequestStatus = "saved" | "declined" | "cancelled" | "timed_out";
+type SecretRequestStatus = "saved" | "declined" | "cancelled" | "timed_out";
 
 /** What the agent reads when its card ends without a secret (T3's `SECRET_REQUEST_UNSAVED_NOTE`, without its retry key,
  * which this tool does not have: a new call is a new card). */
-export const UNSAVED_NOTE: Record<Exclude<SecretRequestStatus, "saved">, string> = {
+const UNSAVED_NOTE: Record<Exclude<SecretRequestStatus, "saved">, string> = {
 	declined: "The user declined. Don't ask for it in chat or another way; say what's blocked and go on without it.",
 	cancelled: "The card closed with the run. Ask again only if the secret is still needed.",
 	timed_out: "No answer in time. Don't ask in chat; ask again only if it is still needed.",

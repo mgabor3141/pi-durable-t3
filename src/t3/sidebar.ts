@@ -77,7 +77,7 @@ export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, no
 }
 
 /** T3's `isSnoozed`, as clients show it: snoozed until a time still ahead, unless a run failed after it was snoozed. */
-export function isSnoozed(shell: OrchestrationV2ThreadShell, now: number): boolean {
+function isSnoozed(shell: OrchestrationV2ThreadShell, now: number): boolean {
 	const until = ms(shell.snoozedUntil);
 	if (until === null || until <= now) return false;
 	if (shell.pendingRuntimeRequest !== null) return false;

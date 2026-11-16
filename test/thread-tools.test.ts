@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { Orchestration } from "../src/t3/orchestration.ts";
@@ -15,7 +14,7 @@ import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks
 import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
-import { createNamed, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 type Msg = { role: string; content: unknown };
@@ -75,7 +74,7 @@ async function setup() {
 	const create = createNamed(f.threads, f.harness, f.model);
 	await create({ threadId: "a", projectId: "p", title: "Parent" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-threads-"));
-	bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+	bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	orchestration.start();

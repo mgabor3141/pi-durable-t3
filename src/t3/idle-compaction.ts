@@ -10,7 +10,7 @@ export const IDLE_COMPACTION_MIN_TOKENS = 200_000;
 export const IDLE_COMPACTION_LEAD_MS = 2 * 60_000;
 
 /** What decides it besides the projection: the thread's record, and what the bridge knows is still coming to it. */
-export type IdleThread = {
+type IdleThread = {
 	/** A fork's conversation waits to be brought back with the next message (T3's pending merge-back). */
 	readonly mergeBackPending: boolean;
 	/** Children that still work report into the thread's next turn; a compaction would swallow their place. */

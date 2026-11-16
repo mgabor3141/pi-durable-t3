@@ -53,8 +53,6 @@ describe("rewind keeps exactly the mapped turns", () => {
 		};
 		return { threads, harness, model, projects, head: t.head, runs, view, counts };
 	}
-	const view2 = async (harness: import("@earendil-works/pi-durable").Harness, id: number) =>
-		(await conversation(harness, id).then((c) => c.context(BACKGROUND_CONTEXT))).entries;
 
 	it("undo to cp2 keeps runs 1–2 (replies and messages) and drops run 3 entirely", async () => {
 		const { threads, head, runs, counts } = await threeTurns();
@@ -70,7 +68,6 @@ describe("rewind keeps exactly the mapped turns", () => {
 
 	it("baseline undo leaves an empty conversation in the same dir with the same model", async () => {
 		const { threads, harness, model, projects, head, runs } = await threeTurns();
-		const create = createNamed(threads, harness, model);
 		const target = undoTarget(runs, "cp-baseline");
 		if ("entryId" in target === false) throw new Error("expected a fork target");
 		const next = await threads.rewind({ threadId: "t", expectedHead: head, entryId: target.entryId, requestId: "u" });
@@ -83,7 +80,6 @@ describe("rewind keeps exactly the mapped turns", () => {
 
 	it("the next prompt after an undo gets a normal reply", async () => {
 		const { threads, harness, model, head, runs, counts, view } = await threeTurns();
-		const create = createNamed(threads, harness, model);
 		const target = undoTarget(runs, `cp${runs[0]!.userEntryId}`);
 		if ("entryId" in target === false) throw new Error("expected a fork target");
 		const next = await threads.rewind({ threadId: "t", expectedHead: head, entryId: target.entryId, requestId: "u" });

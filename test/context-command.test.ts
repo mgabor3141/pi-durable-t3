@@ -8,11 +8,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
-import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { contextReport, type ContextReportView } from "../src/t3/context-report.ts";
 import { object } from "../src/t3/schema.ts";
-import { conversation, createNamed, idle, makeThreads } from "./threads-harness.ts";
+import { conversation, createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
 
 const usage = (input: number, cacheRead: number, output: number) => ({ input, output, cacheRead, cacheWrite: 0, totalTokens: input + cacheRead + output, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
@@ -74,7 +73,7 @@ it("/context is answered in the thread and written nowhere: no entry, no request
 	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-context-"));
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
-	const bridge = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(scratch), corsOrigins: [], staticDir: undefined, registry: f.registry }, { info: () => {}, warn: () => {} }, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), quietLog, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();

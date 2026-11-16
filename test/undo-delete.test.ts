@@ -5,7 +5,6 @@
 // thread" wrote a row parented to the deleted thread — with the deleted thread's runs inside the fork,
 // surviving every later adoption. The bridge's per-thread lock seals the T3 web wire; the raw chord surface
 // (`PiThreads.remove` ∥ `PiTranscript.rewind`) shares no lock, and the threads layer owns the rule.
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Threads } from "../src/threads.ts";

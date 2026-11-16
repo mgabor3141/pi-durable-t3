@@ -3,7 +3,7 @@
 // nothing but the small documents the shell reads. Everything it shows is derived from stored state: the head's view,
 // the history above a compaction, and the runs the head's undos rolled back.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Cursor, EntryId, Harness, WatchHandle } from "@earendil-works/pi-durable";
+import type { Conversation, ConversationId, Harness, WatchHandle } from "@earendil-works/pi-durable";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { AppliedUndo } from "../threads.ts";
 import { CommandError } from "./errors.ts";
@@ -13,6 +13,7 @@ import { type ProjectionResult, projectThread, type ThreadMeta } from "./project
 import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
 import { type RolledBackRun, rolledBackRuns, undoneHeads } from "./undo.ts";
+import { messageOf } from "../host-errors.ts";
 
 /** What a thread subscriber is sent: a whole projection (formatted per subscriber), or events. */
 export type StreamUpdate =
@@ -20,7 +21,7 @@ export type StreamUpdate =
 	| { readonly kind: "events"; readonly items: readonly ThreadStreamItem[] };
 
 /** The stream as subscribers were last brought to it. */
-export type StreamState = { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection };
+type StreamState = { readonly sequence: number; readonly projection: OrchestrationV2ThreadProjection };
 
 /** A model the host offers, with what it accepts. */
 export type CatalogEntry = {
@@ -33,7 +34,7 @@ export type CatalogEntry = {
 };
 
 /** The head conversation's model and thinking level. */
-export type Configuration = { model: ModelRef | null; thinkingLevel: string };
+type Configuration = { model: ModelRef | null; thinkingLevel: string };
 
 /** What a thread view needs from the host. */
 export interface ThreadViewHost {
@@ -345,7 +346,7 @@ export class ThreadView {
 			});
 			await this.#setView(head, watch.value, conversation, current);
 		} catch (error) {
-			this.#host.log.warn("could not follow a thread's head", { threadId: this.threadId, head, error: error instanceof Error ? error.message : String(error) });
+			this.#host.log.warn("could not follow a thread's head", { threadId: this.threadId, head, error: messageOf(error) });
 		}
 	}
 

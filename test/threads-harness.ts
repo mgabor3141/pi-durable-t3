@@ -16,6 +16,8 @@ import { testRegistry } from "./test-registry.ts";
 import { splitTranscript } from "../src/t3/thread-view.ts";
 import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { ProjectRegistry } from "../src/registry.ts";
+import { ServerSettingsStore } from "../src/settings.ts";
+import type { BridgeConfig } from "../src/t3/config.ts";
 import { createScriptedModel, type ScriptedModel } from "./fake-model.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -174,3 +176,14 @@ export async function viewOf(harness: Harness, id: number): Promise<Conversation
 	await watch.stop();
 	return { ...view, entries: splitTranscript(view.entries as unknown as EntryRecord[]).active } as ConversationView;
 }
+
+/**
+ * A `Bridge`'s config for a test: loopback, a free port, nothing served, settings read from `stateDir` unless given.
+ * Anything else a test is about (`messageContext`, `undo`, `scratchDir`) is passed along as it is.
+ */
+export function bridgeConfig(options: Pick<BridgeConfig, "stateDir" | "registry"> & Partial<BridgeConfig>): BridgeConfig {
+	return { host: "127.0.0.1", port: 0, label: "t", scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(options.stateDir), corsOrigins: [], staticDir: undefined, ...options };
+}
+
+/** A log that says nothing. */
+export const quietLog = { info: () => {}, warn: () => {} };

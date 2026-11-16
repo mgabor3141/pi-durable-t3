@@ -5,8 +5,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Equal, Schema } from "effect";
 import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ServerSettings, type ProviderInstanceConfig, type ProviderInstanceMutation, type ServerSettingsPatch } from "@t3tools/contracts";
-import { ConfigError, fail } from "./config.ts";
+import { fail } from "./config.ts";
 import { writeJsonAtomic } from "./t3/json-store.ts";
+import { messageOf } from "./host-errors.ts";
 
 /** T3's server settings document, in the state dir: prefixed, as the one file there in T3's format rather than ours. */
 export const SETTINGS_FILE = "t3-settings.json";
@@ -147,7 +148,7 @@ export class ProviderInstanceExists extends Error {
 /** The settings file changed under the store and cannot be read: T3's `read-file` refusal. */
 export class SettingsReadError extends Error {
 	constructor(cause: unknown) {
-		super(`The settings file cannot be read: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+		super(`The settings file cannot be read: ${messageOf(cause)}`, { cause });
 	}
 }
 
@@ -155,8 +156,6 @@ export class SettingsReadError extends Error {
  * persisted, and announced. Missing is the defaults; unparseable is a fatal `ConfigError` naming the file (state.md). */
 export class ServerSettingsStore {
 	readonly #file: string;
-	/** Exactly the file's content: the sparse document. */
-	#raw: Record<string, unknown>;
 	/** The stored document decoded over the defaults — the merge base. The provider facts are answers, not bytes. */
 	#full: Record<string, unknown>;
 	/** The settings the document answers, provider facts included. */
@@ -170,7 +169,6 @@ export class ServerSettingsStore {
 	private constructor(file: string, raw: Record<string, unknown>, text: string | undefined) {
 		this.#text = text;
 		this.#file = file;
-		this.#raw = raw;
 		this.#full = decodeSettings(raw);
 		this.#settings = withProviderFacts(this.#full, raw);
 	}
@@ -254,7 +252,6 @@ export class ServerSettingsStore {
 			throw new SettingsReadError(error);
 		}
 		this.#text = text;
-		this.#raw = raw;
 		this.#full = full;
 		this.#settings = withProviderFacts(full, raw);
 	}
@@ -270,7 +267,6 @@ export class ServerSettingsStore {
 		writeJsonAtomic(this.#file, sparse);
 		this.#text = `${JSON.stringify(sparse, null, 2)}
 `;
-		this.#raw = sparse;
 		this.#full = full;
 		this.#settings = withProviderFacts(full, sparse);
 		for (const listener of this.#listeners) listener();

@@ -9,7 +9,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { createNamed, gated, makeThreads } from "./threads-harness.ts";
+import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,12 +24,6 @@ async function until(what: string, test: () => boolean | Promise<boolean>): Prom
 
 afterEach(() => vi.restoreAllMocks());
 
-/** The bridge's 30 s idle release, shortened to 20 ms. */
-function shortIdle(): void {
-	const realSetTimeout = globalThis.setTimeout;
-	vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => realSetTimeout(fn, ms === 30_000 ? 20 : ms)) as typeof setTimeout);
-}
-
 async function fixture() {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
 	const create = createNamed(f.threads, f.harness, f.model);
@@ -37,7 +31,7 @@ async function fixture() {
 	const settings = ServerSettingsStore.open(scratch);
 	const bridges: Bridge[] = [];
 	const bridge = (): Bridge => {
-		const made = new Bridge({ host: "127.0.0.1", port: 0, label: "t", stateDir: scratch, scratchDir: undefined, tokenTtlSeconds: 60, settings, corsOrigins: [], staticDir: undefined, registry: f.registry }, log, f.threads, f.model.models);
+		const made = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, settings }), log, f.threads, f.model.models);
 		bridges.push(made);
 		return made;
 	};
