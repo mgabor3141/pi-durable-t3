@@ -1,4 +1,4 @@
-// `/thread`: every line a thread has had, as a tree of turns, with a way to go to any of them.
+// `/tree`: every line a thread has had, as a tree of turns, with a way to go to any of them.
 //
 // A thread's head is one conversation. An undo moves the head to a fork that ends earlier and leaves the old
 // conversation whole, and a thread forked from another starts as a fork of its conversation: so a thread that was
@@ -197,7 +197,23 @@ export function turnTree(lines: Lines): TurnTree {
 			above = node;
 			after = [];
 		}
-		if (!joined && above !== undefined) roots.push(above);
+		// What a line has before its first message (work an agent began, with no message of the user's): a turn too,
+		// so that nothing a line has is left out of the tree.
+		const before = after.find((each) => each.work);
+		if (!joined && before !== undefined) {
+			const key = `before:${after.at(-1)!.id}:${before.id}`;
+			let node = nodes.get(key);
+			if (node === undefined) {
+				node = { key, text: "", answer: after.find((each) => each.work && each.text !== "")?.text ?? "", at: undefined, compacted: after.some((each) => each.compaction), end: { conversation, entryId: after[0]!.id }, parent: undefined, children: [], current, here: current && above === undefined, threads: [] };
+				nodes.set(key, node);
+				roots.push(node);
+			}
+			if (above !== undefined) {
+				above.parent = node;
+				node.children.push(above);
+			}
+			last ??= node;
+		} else if (!joined && above !== undefined) roots.push(above);
 		if (other !== undefined) last?.threads.push(other);
 		if (last !== undefined && lines.own?.has(conversation) !== false) {
 			let root = last;
@@ -285,7 +301,7 @@ document.addEventListener("click", (event) => {
 	fetch(new URL(${JSON.stringify(THREAD_NAV_PATH)}, location.href), { method: "POST", mode: "no-cors", headers: { "content-type": "text/plain" }, body: JSON.stringify({ token: ${JSON.stringify(token)}, action: button.dataset.action, node: button.dataset.node }) }).catch(() => {});
 	setTimeout(() => {
 		status.className = "failed";
-		status.textContent = "Nothing happened: this view has expired, or the host cannot be reached. Run /thread again.";
+		status.textContent = "Nothing happened: this view has expired, or the host cannot be reached. Run /tree again.";
 		for (const each of buttons) each.disabled = false;
 	}, ${PAGE_WAIT_MS});
 });
@@ -327,18 +343,20 @@ export function treePage(tree: TurnTree, window: Window, token: string, notice?:
 	const from = near(Math.max(0, Math.max(0, here) - AROUND - window.earlier));
 	const to = main.length - near(Math.max(0, main.length - (here + 1 + AROUND + window.later)));
 	const body = [
-		from > 0 ? more("earlier", undefined, from, "earlier") : branches(tree.roots, main[0]),
+		// The lines that share no turn with this one are always shown: nothing leads to them but this.
+		branches(tree.roots, main[0]),
+		from > 0 ? more("earlier", undefined, from, "earlier") : "",
 		...main.slice(from, to).map((node, index) => row(node) + branches(node.children, main[from + index + 1])),
 		to < main.length ? more("later", undefined, main.length - to, "later") : "",
 	].join("");
-	const said = notice ?? (here < 0 ? "The thread is at its start, before the first message." : "Each row is a message and its answer. Indented rows are other lines: what an undo left, and other threads forked from here, named where they are.");
+	const said = notice ?? (here < 0 ? "The thread is at its start, before the first message." : "Each row is a message and its answer. Indented rows are other lines: what an undo left, and other threads forked from here, named where they are. Lines at the top share no turn with this one.");
 	return { html: `<!doctype html><html><head><meta charset="utf-8"><style>${STYLE}</style></head><body><div id="tree">${body}</div><div id="status">${escape(said)}</div><script>${script(token)}</script></body></html>`, rows };
 }
 
 type Deps = {
 	readonly store: Threads;
 	readonly log: Logger;
-	/** Where pages are kept, and what they are written through; without them `/thread` is refused. */
+	/** Where pages are kept, and what they are written through; without them `/tree` is refused. */
 	readonly attachments: Attachments | undefined;
 	readonly env: ExecutionEnv | undefined;
 	/** Show the command's answer in the thread (`ThreadCommands.show`): the same message again replaces it. */
@@ -348,7 +366,7 @@ type Deps = {
 };
 
 /** A page whose buttons work: what its token stands for. */
-type View = { readonly threadId: string; readonly messageId: string; tree: TurnTree; window: Window; expires: number; published: number; files: string[]; busy: Promise<void> };
+type View = { readonly threadId: string; readonly messageId: string; readonly command: string; tree: TurnTree; window: Window; expires: number; published: number; files: string[]; busy: Promise<void> };
 
 const emptyWindow = (): Window => ({ earlier: 0, later: 0, more: new Map() });
 
@@ -365,18 +383,18 @@ export class ThreadNavigator {
 		return turnTree(await readLines(this.#deps.store.harness, await this.#deps.store.linesOf(threadId)));
 	}
 
-	/** `/thread`: show the thread's tree as the command's answer. */
-	async open(threadId: string, messageId: string): Promise<void> {
+	/** `/tree`: show the thread's tree as the command's answer. */
+	async open(threadId: string, messageId: string, command: string): Promise<void> {
 		const tree = await this.tree(threadId);
 		if (tree.nodes.size === 0) {
-			this.#deps.show(threadId, { messageId, command: "/thread", answer: "There is nothing to show yet: this thread has no turns. Shown here only: not sent to the model, not saved." });
+			this.#deps.show(threadId, { messageId, command, answer: "There is nothing to show yet: this thread has no turns. Shown here only: not sent to the model, not saved." });
 			return;
 		}
 		const now = Date.now();
 		for (const [token, view] of this.#views) if (view.expires < now) this.#views.delete(token);
 		for (const token of [...this.#views.keys()].slice(0, Math.max(0, this.#views.size + 1 - MAX_VIEWS))) this.#views.delete(token);
 		const token = randomBytes(24).toString("base64url");
-		const view: View = { threadId, messageId, tree, window: emptyWindow(), expires: now + VIEW_TTL_MS, published: 0, files: [], busy: Promise.resolve() };
+		const view: View = { threadId, messageId, command, tree, window: emptyWindow(), expires: now + VIEW_TTL_MS, published: 0, files: [], busy: Promise.resolve() };
 		await this.#publish(token, view);
 		this.#views.set(token, view);
 	}
@@ -384,7 +402,7 @@ export class ThreadNavigator {
 	/** Write the view's page and show it in the thread, in place of the one before. */
 	async #publish(token: string, view: View, notice?: string): Promise<void> {
 		const { attachments, env } = this.#deps;
-		if (attachments === undefined || env === undefined) throw new Error("/thread shows a page, and this host keeps none (attachT3's attachmentsDir).");
+		if (attachments === undefined || env === undefined) throw new Error("/tree shows a page, and this host keeps none (attachT3's attachmentsDir).");
 		const { html, rows } = treePage(view.tree, view.window, token, notice);
 		const page = await preparePublish(env, { html, title: "Thread", height: 40 + rows * 46 }, undefined, BACKGROUND_CONTEXT);
 		// A new file each time: the frame shows a page again when its address changes.
@@ -395,7 +413,7 @@ export class ThreadNavigator {
 		const turns = view.tree.nodes.size;
 		this.#deps.show(view.threadId, {
 			messageId: view.messageId,
-			command: "/thread",
+			command: view.command,
 			htmlRender: { attachmentId, title: page.title, height: page.height } as HtmlRenderReference,
 			answer: `${count(turns, "turn")} on ${count(view.tree.lines, "line")}${view.tree.threads === 1 ? "" : `, with ${count(view.tree.threads - 1, "other thread")} forked from them`}. Each row has "Go here", which moves this thread to the end of that turn, and "Fork", which opens it as a new thread. Shown here only: not sent to the model, not saved.`,
 		});
@@ -458,7 +476,7 @@ export class ThreadNavigator {
 					notice = "The thread had changed since this view was made: this is how it stands now. Nothing was moved.";
 				} else {
 					status = 500;
-					this.#deps.log.warn("/thread: an action failed", { threadId: view.threadId, action, error: messageOf(error) });
+					this.#deps.log.warn("/tree: an action failed", { threadId: view.threadId, action, error: messageOf(error) });
 					notice = `That did not work: ${messageOf(error)}`;
 				}
 			}
@@ -481,7 +499,7 @@ export class ThreadNavigator {
 		try {
 			return answer(await this.act(input as Record<string, unknown>));
 		} catch (error) {
-			this.#deps.log.warn("/thread: a page could not be shown again", { error: messageOf(error) });
+			this.#deps.log.warn("/tree: a page could not be shown again", { error: messageOf(error) });
 			return answer(500);
 		}
 	}

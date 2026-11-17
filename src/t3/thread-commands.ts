@@ -1,4 +1,4 @@
-// The slash commands this host answers itself: `/context`, `/undo`, `/redo`, `/thread`, `/continue` (and T3's Resume,
+// The slash commands this host answers itself: `/context`, `/undo`, `/redo`, `/tree`, `/continue` (and T3's Resume,
 // which is the last one). All but `/continue` are shown in the thread and kept nowhere (`ShownExchange`).
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -38,8 +38,9 @@ export class ThreadCommands {
 		else if (text === "/context") await this.context(threadId, messageId, state, head);
 		else if (undo !== null) await this.undo(threadId, messageId, state, head, undo[1]?.trim() ?? "");
 		else if (text === "/redo") await this.redo(threadId, messageId, state, head);
-		// `/thread`: every line the thread has had, as a tree to move in (`thread-navigator.ts`).
-		else if (text === "/thread") await this.#bridge.navigator.open(threadId, messageId);
+		// `/tree` (and `/thread`, its first name): every line the thread has had, as a tree to move in
+		// (`thread-navigator.ts`).
+		else if (text === "/tree" || text === "/thread") await this.#bridge.navigator.open(threadId, messageId, text);
 		else if (/^\/redo\s+fork$/.test(text)) await this.redoFork(threadId, messageId, state, head);
 		// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
 		else if (text === "/continue") await this.continue(threadId, `continue:${messageId}`, head, { messageId });

@@ -1,4 +1,4 @@
-// `/thread`: a thread's lines as a tree of turns, and moving in it (`thread-navigator.ts`). The lines an undo left
+// `/tree`: a thread's lines as a tree of turns, and moving in it (`thread-navigator.ts`). The lines an undo left
 // share the turns before they part; "Go here" makes any turn of any line the thread's last, "Fork" opens it as a new
 // thread, and a long thread is shown a window at a time. A page cannot read an answer, so every action shows it again.
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -72,6 +72,31 @@ describe("the tree of turns", () => {
 		expect(treePage(tree, { earlier: 0, later: 0, more: new Map() }, "t").html).toMatch(/class="thread"[^>]*>C<.*class="thread"[^>]*>B</s);
 	});
 
+	it("leaves nothing a line has out: work before the first message is a turn, and a line that shares no turn is shown first", () => {
+		// The thread (line 1) was begun by an agent's work (a1 a2) before the user's first message u3. Line 2 is one it
+		// left that starts on its own: u10 a11.
+		const tree = turnTree(
+			lines(1, { 1: 4, 2: 11 }, [
+				[1, "a"],
+				[2, "a", 1],
+				[3, "u", 2],
+				[4, "a", 3],
+				[10, "u"],
+				[11, "a", 10],
+			]),
+		);
+		expect(tree.roots.map((root) => [root.text, root.answer, root.end.entryId, root.current, root.children.map((child) => child.text)])).toEqual([
+			["", "a2", 2, true, ["u3"]],
+			["u10", "a11", 11, false, []],
+		]);
+		// However far down the thread is, the other line is on the page.
+		const sketch: [number, "u" | "a", number?][] = [[100, "u"], [101, "a", 100]];
+		for (let turn = 0; turn < 30; turn++) sketch.push([turn * 2 + 1, "u", turn === 0 ? undefined : turn * 2], [turn * 2 + 2, "a", turn * 2 + 1]);
+		const html = treePage(turnTree(lines(1, { 1: 60, 2: 101 }, sketch)), { earlier: 0, later: 0, more: new Map() }, "t").html;
+		expect(html.indexOf(">u100<")).toBeGreaterThan(0);
+		expect(html.indexOf(">u100<")).toBeLessThan(html.indexOf('data-action="earlier"'));
+	});
+
 	it("shows a window around where the thread is, and the first turns of a line that parts", () => {
 		// Forty turns in a row; the thread was taken back to the twentieth, and a line of ten parts after the fifth.
 		const sketch: [number, "u" | "a", number?][] = [];
@@ -120,7 +145,7 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	const keyOf = (html: string, text: string) => new RegExp(`class="text">${text}<.*?data-node="([\\d:]+)"`, "s").exec(html)![1]!;
 
 	// Nothing to show before the first turn.
-	await say("/thread");
+	await say("/tree");
 	expect(await readdir(home).catch(() => [])).toEqual([]);
 
 	await say("apples");
@@ -132,7 +157,7 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	// Two lines that share "apples": the one the thread is on, and the one the undos left.
 	expect(await tree()).toEqual([["apples*", ["pears", ["plums"]], ["cherries*!"]]]);
 
-	const command = await say("/thread");
+	const command = await say("/tree");
 	const first = await page(command, 1);
 	const token = /token: "([\w-]+)"/.exec(first)![1]!;
 	expect(first).toContain("you are here");
@@ -178,6 +203,17 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	expect(await tree()).toEqual([["apples*", ["pears*+1", ["plums"], ["quinces*!"]], ["cherries"]]]);
 	// The fork is a thread of the same tree: from it, this thread is the one named.
 	expect(outline((await bridge.navigator.tree(fork.threadId)).roots)).toEqual([["apples*", ["pears*!", ["plums"], ["quinces+1"]], ["cherries"]]]);
+
+	// A line no record names is found by the conversations' own fork links: with the thread's undos forgotten, the
+	// lines they left are still in its tree.
+	await f.threads.updateRecord("t", (record) => void (record.undos = []));
+	expect(await tree()).toEqual([["apples*", ["pears*+1", ["plums"], ["quinces*!"]], ["cherries"]]]);
+	// A deleted thread's line stays gone.
+	await f.threads.remove(fork.threadId);
+	f.model.respond(fauxAssistantMessage("answer"));
+	expect(await tree()).toEqual([["apples*", ["pears*", ["plums"], ["quinces*!"]], ["cherries"]]]);
+	// `/thread`, the command's first name, still answers.
+	expect(await page(await say("/thread"), 1)).toContain("you are here");
 
 	// What a page's button posts: the token in the body is all a caller needs, and all that is checked.
 	const post = (body: string) => bridge.navigator.handle(new Request(`http://host${THREAD_NAV_PATH}`, { method: "POST", headers: { "content-type": "text/plain" }, body }));

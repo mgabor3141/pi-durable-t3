@@ -214,7 +214,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   then the run that ends does what it says before the messages behind it go on: the context is compacted, or the next
   message's request renders the system prompt again. Without the extension, with no run to wait behind, or sent any
   other way, each is answered at once. It relies on pi-durable placing queued messages one at a time (`followUpMode`,
-  the default). The other commands (`/context`, `/undo`, `/redo`, `/thread`, `/continue`) are answered when they arrive.
+  the default). The other commands (`/context`, `/undo`, `/redo`, `/tree`, `/continue`) are answered when they arrive.
 - `t3.messageContext(hook)` (an extension to install on the Harness's registry): context for the model about each
   message that starts or steers a turn, such as memories recalled for it. The message itself is taken at once; the run
   that answers it asks the hook before its next request, so a slow recall delays the model's answer, not the sender,

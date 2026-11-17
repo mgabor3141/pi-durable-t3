@@ -464,7 +464,7 @@ export function makeServerLayer(deps: {
 				return connection;
 			}),
 		),
-		// What `/thread`'s page posts to, and the integrator's own routes (`HostRoute`): web-standard handlers, public,
+		// What `/tree`'s page posts to, and the integrator's own routes (`HostRoute`): web-standard handlers, public,
 		// checked by themselves.
 		...[{ method: "POST" as const, path: THREAD_NAV_PATH, handle: (request: Request) => bridge.navigator.handle(request) }, ...(bridge.config.routes ?? [])].map((route) =>
 			HttpRouter.add(

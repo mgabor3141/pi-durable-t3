@@ -386,7 +386,7 @@ export class Attachments {
 		return this.pathOf(record);
 	}
 
-	/** Remove a file the host made and no longer shows (a `/thread` page that was shown again). */
+	/** Remove a file the host made and no longer shows (a `/tree` page that was shown again). */
 	async removeGenerated(attachmentId: string): Promise<void> {
 		const removed = await this.#env.remove(this.pathOf({ id: attachmentId, mimeType: "", name: "" } as AttachmentRecord), { force: true }, this.#context);
 		if (!removed.ok) throw new Error(`Cannot remove ${attachmentId}: ${removed.error.message}`);

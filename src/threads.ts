@@ -1141,6 +1141,11 @@ export class Threads {
 	 * threads with its root (the threads forked from it, the one it was forked from, their forks), each thread's
 	 * current head before the ones its undos, redos and moves left or made, as far back as its record holds them
 	 * (`MAX_UNDOS`). A conversation is listed once, for the first thread that has it.
+	 *
+	 * And every conversation forked from one of those, or one of those from it, that no record names: a line a thread
+	 * left more than `MAX_UNDOS` moves ago, or one whose record was not written. Found by the conversations' own fork
+	 * links, which no record has to be right for; listed as the asking thread's, since they are no other's. Left out:
+	 * a conversation a run made for itself (it has an owner), and one a deleted thread was on.
 	 */
 	async linesOf(threadId: string): Promise<{ readonly conversation: number; readonly threadId: string; readonly title: string; readonly head: boolean }[]> {
 		const threads = await this.list();
@@ -1148,17 +1153,36 @@ export class Threads {
 		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
 		const family = [thread, ...threads.filter((candidate) => candidate !== thread && candidate.lineage.rootThreadId === thread.lineage.rootThreadId)];
 		const seen = new Set<number>();
-		return family.flatMap((each) =>
+		const lines = family.flatMap((each) =>
 			[each.head, ...each.undos.flatMap((undo) => [undo.head, undo.from]).reverse()].flatMap((conversation) => {
 				if (seen.has(conversation)) return [];
 				seen.add(conversation);
 				return [{ conversation, threadId: each.threadId, title: each.title, head: conversation === each.head }];
 			}),
 		);
+		const records = await this.#harness.commit((tx) => scanConversations(tx), BACKGROUND_CONTEXT);
+		const parents = new Map(records.map((record) => [record.id as number, record.parent?.conversationId as number | undefined]));
+		const rootOf = (conversation: number): number => {
+			for (let current = conversation; ; ) {
+				const parent = parents.get(current);
+				if (parent === undefined) return current;
+				current = parent;
+			}
+		};
+		const roots = new Set(lines.map((line) => rootOf(line.conversation)));
+		for (const record of records) {
+			const conversation = record.id as number;
+			if (seen.has(conversation) || record.owner !== undefined || !roots.has(rootOf(conversation))) continue;
+			// A conversation that was a thread's head is that thread's: a live one's is named, a deleted one's stays gone.
+			const owner = this.#directory.heads[String(conversation)];
+			const named = owner === undefined ? thread : threads.find((candidate) => candidate.threadId === owner);
+			if (named !== undefined) lines.push({ conversation, threadId: named.threadId, title: named.title, head: conversation === named.head });
+		}
+		return lines;
 	}
 
 	/**
-	 * Move a thread to any point of any line it has had (`/thread`): its head becomes a fork of `conversation` that
+	 * Move a thread to any point of any line it has had (`/tree`): its head becomes a fork of `conversation` that
 	 * ends with `entryId`. Recorded as an undo is, so `/redo` goes back while nothing new is written, and the line
 	 * that is left stays one of the thread's (`linesOf`). Refused when the thread is no longer on `expectedHead`
 	 * (`not_rewindable`) and while a turn is owed (`turn_running`).

@@ -149,7 +149,7 @@ export interface ShownExchange {
 	readonly messageId: string;
 	readonly command?: string;
 	readonly answer: string;
-	/** A page shown above the answer (`/thread`), as `html_render` shows one. */
+	/** A page shown above the answer (`/tree`), as `html_render` shows one. */
 	readonly htmlRender?: HtmlRenderReference;
 	readonly at: number;
 	/** The newest entry the thread had when the command was answered; none: -1. */

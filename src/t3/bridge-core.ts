@@ -13,7 +13,7 @@ export interface BridgeCore {
 	readonly config: BridgeConfig;
 	readonly log: Logger;
 	readonly store: Threads;
-	/** `/thread`: the tree of a thread's lines. */
+	/** `/tree`: the tree of a thread's lines. */
 	readonly navigator: ThreadNavigator;
 	/** True once the bridge is closing: nothing new is started. */
 	closed(): boolean;

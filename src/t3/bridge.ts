@@ -174,7 +174,7 @@ export class Bridge {
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
 	#memoryTimer: NodeJS.Timeout | undefined;
-	/** `/thread`: the tree of a thread's lines, and what its page posts to. */
+	/** `/tree`: the tree of a thread's lines, and what its page posts to. */
 	readonly navigator: ThreadNavigator;
 	/** The commands that wait in the queue (`T3Attachment.queuedCommands`). */
 	readonly queuedCommands = new QueuedCommands();
@@ -1226,7 +1226,7 @@ export class Bridge {
 				return;
 			}
 			if (await this.#queuesCommand(input, state, head)) return;
-			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/thread`, `/continue`).
+			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/tree`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;
