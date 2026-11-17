@@ -1,7 +1,7 @@
 // Pure mapping from a pi conversation (the head's `ConversationView` plus the thread's directory row) to T3's thread
 // projection and shell: one user turn per run (`runs.ts`), one synthetic "ready" checkpoint per settled run plus a
 // baseline (`undo.ts`'s ids), and an aborted assistant partial hidden when a later entry of the run supersedes it.
-import { HTML_RENDER_MESSAGE, HTML_RENDER_TOOL_NAME } from "./html-render.ts";
+import { HTML_RENDER_MESSAGE, HTML_RENDER_TOOL_NAME, type HtmlRenderReference } from "./html-render.ts";
 import type {
 	OrchestrationV2Checkpoint,
 	OrchestrationV2CheckpointScope,
@@ -149,6 +149,8 @@ export interface ShownExchange {
 	readonly messageId: string;
 	readonly command?: string;
 	readonly answer: string;
+	/** A page shown above the answer (`/thread`), as `html_render` shows one. */
+	readonly htmlRender?: HtmlRenderReference;
 	readonly at: number;
 	/** The newest entry the thread had when the command was answered; none: -1. */
 	readonly after: number;
@@ -498,6 +500,10 @@ function shownAnswer(b: Build, shown: ShownExchange, ordinal: number): void {
 	const { threadId, providerThreadId, messages, turnItems, shownIds } = b;
 	const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
 	const at = shown.at + 1;
+	if (shown.htmlRender !== undefined) {
+		const reference = shown.htmlRender;
+		turnItems.push({ id: id(`ti-shown-h${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: HTML_RENDER_TOOL_NAME, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "dynamic_tool", toolName: HTML_RENDER_TOOL_NAME, input: { title: reference.title, height: reference.height }, output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }) } as Any);
+	}
 	turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
 	messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
 	shownIds.add(answerId);

@@ -1,5 +1,5 @@
-// The slash commands this host answers itself: `/context`, `/undo`, `/redo`, `/continue` (and T3's Resume, which is
-// the last one). `/context`, `/undo` and `/redo` are shown in the thread and kept nowhere (`ShownExchange`).
+// The slash commands this host answers itself: `/context`, `/undo`, `/redo`, `/thread`, `/continue` (and T3's Resume,
+// which is the last one). All but `/continue` are shown in the thread and kept nowhere (`ShownExchange`).
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId } from "@earendil-works/pi-durable";
@@ -15,7 +15,7 @@ import type { ThreadView } from "./thread-view.ts";
 /** How many answered commands a thread shows (`ShownExchange`). */
 const MAX_SHOWN = 20;
 
-type Core = Pick<BridgeCore, "config" | "log" | "store" | "thread" | "meta">;
+type Core = Pick<BridgeCore, "config" | "log" | "store" | "thread" | "meta" | "navigator">;
 
 export class ThreadCommands {
 	readonly #bridge: Core;
@@ -38,6 +38,8 @@ export class ThreadCommands {
 		else if (text === "/context") await this.context(threadId, messageId, state, head);
 		else if (undo !== null) await this.undo(threadId, messageId, state, head, undo[1]?.trim() ?? "");
 		else if (text === "/redo") await this.redo(threadId, messageId, state, head);
+		// `/thread`: every line the thread has had, as a tree to move in (`thread-navigator.ts`).
+		else if (text === "/thread") await this.#bridge.navigator.open(threadId, messageId);
 		else if (/^\/redo\s+fork$/.test(text)) await this.redoFork(threadId, messageId, state, head);
 		// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
 		else if (text === "/continue") await this.continue(threadId, `continue:${messageId}`, head, { messageId });
@@ -80,7 +82,7 @@ export class ThreadCommands {
 	}
 
 	/** Show a command the host answered itself (`ShownExchange`); one sent again replaces its earlier answer. */
-	show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "answer"> & { readonly command?: string }): void {
+	show(threadId: string, state: ThreadView, said: Pick<ShownExchange, "messageId" | "answer" | "command" | "htmlRender">): void {
 		const exchange: ShownExchange = { ...said, at: Date.now(), after: state.transcript.at(-1)?.id ?? -1 };
 		const shown = [...(this.#shown.get(threadId) ?? []).filter((each) => each.messageId !== exchange.messageId), exchange];
 		this.#shown.set(threadId, shown.slice(-MAX_SHOWN));

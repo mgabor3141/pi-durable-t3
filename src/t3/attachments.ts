@@ -386,6 +386,12 @@ export class Attachments {
 		return this.pathOf(record);
 	}
 
+	/** Remove a file the host made and no longer shows (a `/thread` page that was shown again). */
+	async removeGenerated(attachmentId: string): Promise<void> {
+		const removed = await this.#env.remove(this.pathOf({ id: attachmentId, mimeType: "", name: "" } as AttachmentRecord), { force: true }, this.#context);
+		if (!removed.ok) throw new Error(`Cannot remove ${attachmentId}: ${removed.error.message}`);
+	}
+
 	async #write(record: AttachmentRecord, bytes: Uint8Array): Promise<void> {
 		const made = await this.#env.createDir(this.#dir, { recursive: true }, this.#context);
 		if (!made.ok) throw new Error(`Cannot create the attachment directory ${this.#dir}: ${made.error.message}`);

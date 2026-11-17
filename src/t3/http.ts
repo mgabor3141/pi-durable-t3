@@ -51,6 +51,7 @@ import type { PreviewSessions } from "./preview.ts";
 import { makePreviewStreamHandler } from "./preview-http.ts";
 import { McpOAuth } from "./mcp-oauth.ts";
 import { messageOf } from "../host-errors.ts";
+import { THREAD_NAV_PATH } from "./thread-navigator.ts";
 
 /** The T3 release at our pin (`T3_TAG` in dev/t3-pin.sh). Never the client's version: T3's update banner then says
  * truthfully how far the pin is behind the app. */
@@ -463,8 +464,9 @@ export function makeServerLayer(deps: {
 				return connection;
 			}),
 		),
-		// The integrator's own routes (`HostRoute`): web-standard handlers, public, checked by themselves.
-		...(bridge.config.routes ?? []).map((route) =>
+		// What `/thread`'s page posts to, and the integrator's own routes (`HostRoute`): web-standard handlers, public,
+		// checked by themselves.
+		...[{ method: "POST" as const, path: THREAD_NAV_PATH, handle: (request: Request) => bridge.navigator.handle(request) }, ...(bridge.config.routes ?? [])].map((route) =>
 			HttpRouter.add(
 				route.method,
 				route.path,

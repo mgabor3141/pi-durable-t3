@@ -11,7 +11,7 @@
 // so the thread shows it. A crash before that commit leaves the messages queued and the hook is asked again; after
 // it, the commands are done or under way.
 //
-// The other commands this host answers (`/context`, `/undo`, `/redo`, `/continue`) are answered when they arrive:
+// The other commands this host answers (`/context`, `/undo`, `/redo`, `/thread`, `/continue`) are answered when they arrive:
 // they say something about the thread as it is, or need it to be at rest.
 import type { JsonValue } from "@earendil-works/chord/json";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";

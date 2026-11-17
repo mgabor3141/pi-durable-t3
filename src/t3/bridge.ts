@@ -48,6 +48,7 @@ import { undoTarget } from "./undo.ts";
 
 import { CommandError } from "./errors.ts";
 import { MessageContexts } from "./message-contexts.ts";
+import { ThreadNavigator } from "./thread-navigator.ts";
 import { queuedCommand, QueuedCommands } from "./queued-commands.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
@@ -169,6 +170,8 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
+	/** `/thread`: the tree of a thread's lines, and what its page posts to. */
+	readonly navigator: ThreadNavigator;
 	/** The commands that wait in the queue (`T3Attachment.queuedCommands`). */
 	readonly queuedCommands = new QueuedCommands();
 	/** Context for the model about each message, from the integrator (`T3Attachment.messageContext`). */
@@ -193,10 +196,19 @@ export class Bridge {
 			nextSequence: () => bridge.nextSequence(),
 			projected: (view, change) => this.#projected(view, change),
 		};
+		this.navigator = new ThreadNavigator({
+			store,
+			log,
+			attachments,
+			env: config.env,
+			show: (threadId, said) => this.#commands.show(threadId, this.#viewOf(threadId), said),
+			moved: async (threadId, head) => void (await this.#viewOf(threadId).shows(head)),
+		});
 		this.#core = {
 			config,
 			log,
 			store,
+			navigator: this.navigator,
 			closed: () => this.#closed,
 			thread: (threadId) => this.#summary(threadId),
 			threads: () => this.#directory,
@@ -1202,7 +1214,7 @@ export class Bridge {
 				return;
 			}
 			if (await this.#queuesCommand(input, state, head)) return;
-			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/continue`).
+			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/thread`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
 			const busy = live?.run !== undefined;

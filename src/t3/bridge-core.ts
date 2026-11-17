@@ -5,6 +5,7 @@ import type { Thread, Threads } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
 import type { ProjectionResult, ThreadMeta } from "./projection.ts";
+import type { ThreadNavigator } from "./thread-navigator.ts";
 import type { ThreadView } from "./thread-view.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 
@@ -12,6 +13,8 @@ export interface BridgeCore {
 	readonly config: BridgeConfig;
 	readonly log: Logger;
 	readonly store: Threads;
+	/** `/thread`: the tree of a thread's lines. */
+	readonly navigator: ThreadNavigator;
 	/** True once the bridge is closing: nothing new is started. */
 	closed(): boolean;
 	/** A thread's row of the directory, current after any awaited write. */

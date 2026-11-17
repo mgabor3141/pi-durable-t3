@@ -1130,6 +1130,38 @@ export class Threads {
 	}
 
 	/**
+	 * Every conversation a thread has had as its head, the current one first: the head, and the ones its undos, redos
+	 * and moves left or made, as far back as the record holds them (`MAX_UNDOS`).
+	 */
+	async linesOf(threadId: string): Promise<number[]> {
+		const thread = await this.thread(threadId);
+		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
+		return [...new Set([thread.head, ...thread.undos.flatMap((undo) => [undo.head, undo.from]).reverse()])];
+	}
+
+	/**
+	 * Move a thread to any point of any line it has had (`/thread`): its head becomes a fork of `conversation` that
+	 * ends with `entryId`. Recorded as an undo is, so `/redo` goes back while nothing new is written, and the line
+	 * that is left stays one of the thread's (`linesOf`). Refused when the thread is no longer on `expectedHead`
+	 * (`not_rewindable`) and while a turn is owed (`turn_running`).
+	 */
+	async moveTo(input: { readonly threadId: string; readonly expectedHead: number; readonly conversation: number; readonly entryId: number; readonly requestId: string }): Promise<number> {
+		return this.#commit(async (tx, writes) => {
+			const thread = await writes.live(input.threadId);
+			if (thread.head !== input.expectedHead) throw hostError("not_rewindable", "the thread has moved on");
+			if (await owedIn(tx, input.expectedHead as ConversationId)) throw hostError("turn_running", "a turn is running");
+			const fork = await tx.forkConversation(input.conversation as ConversationId, input.entryId as EntryId, { ownership: { kind: "ownerless" } });
+			thread.head = fork.id;
+			thread.undos = [...thread.undos, { requestId: input.requestId, head: fork.id, from: input.expectedHead, at: input.entryId }].slice(-MAX_UNDOS);
+			await writes.putRecord(thread);
+			const directory = await writes.readDirectory();
+			directory.heads[String(fork.id)] = thread.threadId;
+			await writes.putDirectory(directory);
+			return fork.id;
+		});
+	}
+
+	/**
 	 * T3's `thread.fork`: a new thread whose head is a fork of `sourceThreadId`'s head at `entryId` (inclusive), so a
 	 * response can be continued in its own thread. The target id is the client's, so a retried fork returns the same row.
 	 */
