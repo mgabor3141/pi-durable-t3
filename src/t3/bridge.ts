@@ -543,6 +543,7 @@ export class Bridge {
 			...(thread?.summary === undefined ? {} : { summary: thread.summary }),
 			model,
 			...(this.config.maxRetries === undefined ? {} : { maxRetries: this.config.maxRetries }),
+			...(this.config.promptUpdateTitle === undefined ? {} : { promptUpdateTitle: this.config.promptUpdateTitle }),
 			...(this.messageContexts.pending.size === 0 ? {} : { pendingContexts: this.messageContexts.pending }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
 			...(listed === undefined ? {} : { contextWindow: listed.contextWindow, ...(listed.promptCache === undefined ? {} : { promptCache: listed.promptCache }) }),

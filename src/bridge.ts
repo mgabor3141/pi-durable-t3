@@ -14,6 +14,8 @@ import type { ConversationId, Extension, Harness } from "@earendil-works/pi-dura
 import type { SecretSink } from "./t3/secret-sink.ts";
 export type { SecretSink } from "./t3/secret-sink.ts";
 export type { HostRoute } from "./t3/host-route.ts";
+export type { SectionChange as PromptSectionChange } from "./t3/prompt-updates.ts";
+import type { SectionChange as PromptSectionChange } from "./t3/prompt-updates.ts";
 import { ProjectRegistry } from "./registry.ts";
 import { ServerSettingsStore } from "./settings.ts";
 import { type ThreadOrigin, Threads } from "./threads.ts";
@@ -121,6 +123,13 @@ type AttachT3Options = {
 	 * shows the count alone. The bridge only shows this number: the Harness's settings decide what is retried.
 	 */
 	readonly maxRetries?: number;
+	/**
+	 * Your words for a change of the system prompt while a thread goes on (an AGENTS.md that was edited, a skill that
+	 * was added), given the sections that differ from what the model had, each with its text before and after. The
+	 * thread shows it as a quiet row among the run's work, where the change was written; opened, the row lists the
+	 * lines that differ. Absent, or answering nothing: "System prompt updated: " and the sections' keys.
+	 */
+	readonly promptUpdateTitle?: (changes: readonly PromptSectionChange[]) => string | undefined;
 	/**
 	 * Your host's own versions and how it updates: what runs, the newest there is, an install, a restart. T3 then shows
 	 * them as the `pi` provider's version and its update, in Settings → Providers, the sidebar and "Update everything",
@@ -295,6 +304,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.titleThread === undefined ? {} : { titleThread: options.titleThread }),
 		...(options.webhookOrigin === undefined ? {} : { webhookOrigin: options.webhookOrigin }),
 		...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+		...(options.promptUpdateTitle === undefined ? {} : { promptUpdateTitle: options.promptUpdateTitle }),
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),

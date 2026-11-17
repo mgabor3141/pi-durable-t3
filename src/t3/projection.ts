@@ -31,7 +31,7 @@ import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
 import { contextEdits as messageContextEdits } from "./message-contexts.ts";
-import { systemPromptUpdates } from "./prompt-updates.ts";
+import { type SectionChange, systemPromptUpdates, updateDetails, updateTitle } from "./prompt-updates.ts";
 import { sentTokens, sizeAfterCompaction } from "./context-size.ts";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
 
@@ -176,6 +176,8 @@ export interface ThreadMeta {
 	/** How many times the harness sends a failed request again (its `settings.retry.maxRetries`), for the retry row's
 	 * "3/64". Absent, the row shows the count alone. */
 	readonly maxRetries?: number;
+	/** The host's words for a change of its system prompt, for the row that says so (`BridgeConfig.promptUpdateTitle`). */
+	readonly promptUpdateTitle?: (changes: readonly SectionChange[]) => string | undefined;
 	/** The Session's thinking level, reported back as the selection's `thinking` option. */
 	readonly thinkingLevel?: string;
 	/** The selected model's context window, for T3's context meter. */
@@ -1052,7 +1054,8 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 			shownAnswer(b, shown, ordinal);
 		}
 	};
-	// A system prompt that changed while the thread went on (`systemPromptUpdates`): T3's notice row, where it did.
+	// A system prompt that changed while the thread went on (`systemPromptUpdates`): a row among the run's work, where
+	// it did, that opens to the lines that changed. Not T3's notice row, which is a warning, and this is none.
 	// Its entry is no step of the run, so the rows are placed by entry id, among this run's.
 	const nextRun = b.drafts[b.drafts.indexOf(draft) + 1]?.userEntry.id ?? Number.POSITIVE_INFINITY;
 	const updates = b.promptUpdates.filter((update) => update.id > u.id && update.id < nextRun);
@@ -1061,7 +1064,14 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 			const update = updates.shift()!;
 			const at = update.at ?? requestedAt;
 			pushCards(at);
-			turnItems.push({ ...base(`ti-s${update.id}`, at, "completed", true), type: "system_notice", message: `System prompt updated: ${update.sections.join(", ")}` } as Any);
+			turnItems.push({
+				...base(`ti-s${update.id}`, at, "completed", true),
+				title: meta.promptUpdateTitle?.(update.sections) ?? updateTitle(update),
+				type: "dynamic_tool",
+				toolName: "system_prompt",
+				input: {},
+				output: `The agent was given these sections as they are now. Shown here only: the lines that differ from what it had.\n\n${updateDetails(update)}`,
+			} as Any);
 		}
 	};
 	draft.steps.forEach((step, stepIndex) => {

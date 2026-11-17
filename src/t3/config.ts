@@ -9,6 +9,7 @@ import type { TitleThread } from "./title-thread.ts";
 import type { PreviewBrowserConfig } from "./preview-config.ts";
 import type { RpcLog } from "./logging.ts";
 import type { HostRoute } from "./host-route.ts";
+import type { SectionChange } from "./prompt-updates.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
@@ -41,6 +42,8 @@ interface FacetConfig {
 	readonly titleThread?: TitleThread;
 	/** The Harness's `settings.retry.maxRetries`, for the retry row's "3/64". */
 	readonly maxRetries?: number;
+	/** The host's words for a change of its system prompt. Absent: "System prompt updated: " and the sections' keys. */
+	readonly promptUpdateTitle?: (changes: readonly SectionChange[]) => string | undefined;
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	readonly routes?: readonly HostRoute[];
