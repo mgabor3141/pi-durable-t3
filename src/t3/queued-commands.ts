@@ -5,17 +5,17 @@
 //
 // pi-durable places the next queued message in the commit that ends a run, so nothing outside the run can get between
 // the two. An `afterRun` hook can: the tasks it asks for are the run's last work, and the queue waits for them. The
-// hook asks for a task of the command's when the next queued message is one. In one commit that task takes the
-// message out of the queue and writes the command where it ran, as the command sent now is written; a compaction's
-// also starts pi-durable's compaction as its child, listed as a live compaction so the thread shows it. A crash
-// before that commit leaves the message queued and the hook is asked again; after it, the command is done or under
-// way.
+// hook asks for `QueuedCommandsTask` when the next queued message is a command. In one commit that task takes the
+// command and every command directly behind it out of the queue and writes each where it ran, as the command sent
+// now is written; for a `/compact` it also starts pi-durable's compaction as its child, listed as a live compaction
+// so the thread shows it. A crash before that commit leaves the messages queued and the hook is asked again; after
+// it, the commands are done or under way.
 //
 // The other commands this host answers (`/context`, `/undo`, `/redo`, `/continue`) are answered when they arrive:
 // they say something about the thread as it is, or need it to be at rest.
 import type { JsonValue } from "@earendil-works/chord/json";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, InboxDoc, LiveDoc, runEndTask, type CompactionInput, type ConversationId, type Extension, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
+import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, InboxDoc, LiveDoc, runEndTask, type CompactionInput, type ContextView, type ConversationId, type Extension, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
 import { readQueuedInputs } from "./queued.ts";
 import { APP_COMPACT_ENTRY, APP_RELOAD_ENTRY } from "./runs.ts";
 
@@ -33,74 +33,83 @@ export function queuedCommand(text: string): QueuedCommand | undefined {
 	return match === null ? undefined : { command: "compact", guidance: match[1]?.trim() ?? "" };
 }
 
-/**
- * Take the queued message `submissionId` out of the queue, if it still is the command `command`: not removed, edited
- * into something else or sent as a steer since the hook looked.
- */
-async function takeQueued(tx: Tx, conversationId: ConversationId, submissionId: number, command: QueuedCommand["command"]): Promise<boolean> {
-	const inbox = await tx.doc(InboxDoc, conversationId);
-	const at = inbox.items.findIndex((item) => item.id === (submissionId as SubmissionId));
-	if (at < 0 || inbox.items[at]!.mode !== "followUp" || queuedCommand(readQueuedInputs([inbox.items[at]])[0]?.text ?? "")?.command !== command) return false;
-	inbox.items.splice(at, 1);
-	tx.settleSubmission(submissionId as SubmissionId, { status: "unanswered", reason: "started" });
-	return true;
-}
-
-type Input = { readonly submissionId: number; readonly messageId: string; readonly guidance: string };
-type Checkpoint = { phase: "start" } | { phase: "wait"; compaction: number };
+type Input = { readonly submissionId: number };
+/** `reloads`: the `/reload`s taken with a compaction, by message id, written once it has ended. */
+type Checkpoint = { phase: "start" } | { phase: "wait"; compaction: number; reloads: string[] };
 
 const DONE = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 
-const QueuedCompactionTask = defineTask<Input, Checkpoint, null>({
-	name: "t3.queued-compaction",
+/**
+ * The commands at the front of the queue, taken out of it: the message `submissionId` if it still is a queued command
+ * (not removed, edited into a message or sent as a steer since the hook looked) and every command directly behind it.
+ * All of them, since the run asks its hooks once: a command left behind another would be the next message placed,
+ * as a prompt.
+ */
+async function takeCommands(tx: Tx, conversationId: ConversationId, submissionId: number): Promise<(QueuedCommand & { readonly messageId: string })[]> {
+	const inbox = await tx.doc(InboxDoc, conversationId);
+	const taken: (QueuedCommand & { readonly messageId: string })[] = [];
+	for (let at = inbox.items.findIndex((item) => item.id === (submissionId as SubmissionId)); at >= 0 && at < inbox.items.length; ) {
+		const item = inbox.items[at]!;
+		const [queued] = readQueuedInputs([item]);
+		const command = item.mode !== "followUp" || queued === undefined ? undefined : queuedCommand(queued.text);
+		if (queued === undefined || command === undefined) break;
+		inbox.items.splice(at, 1);
+		tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
+		taken.push({ ...command, messageId: queued.messageId });
+	}
+	return taken;
+}
+
+/** The sections a `/reload` removes: those the prompt shows, when a request was prepared since the context began.
+ * After a compaction that has prepared none there is nothing to remove: that preparation writes the whole prompt. */
+function shownSections(view: ContextView): string[] {
+	const head = view.head;
+	const prepared = view.entries.some((entry) => entry.kind === "pi.system" && (head === undefined || entry.id > head.id));
+	return prepared ? Object.keys(getCurrentSystemMessage(view.messages)?.sections ?? {}) : [];
+}
+
+/** A `/reload` where it ran, as `Threads.reload` writes one sent now: the command, and every shown section removed,
+ * so the request of the message behind it renders them all afresh. */
+async function writeReloads(tx: Tx, conversationId: ConversationId, messageIds: readonly string[], shown: readonly string[]): Promise<void> {
+	for (const messageId of messageIds) await tx.appendEntry(conversationId, { kind: APP_RELOAD_ENTRY, data: { messageId, text: "/reload", timestamp: Date.now() } as JsonValue });
+	if (messageIds.length > 0 && shown.length > 0) {
+		await tx.appendEntry(conversationId, { kind: "pi.system", model: [{ role: "system", content: "", sections: Object.fromEntries(shown.map((key) => [key, null])), timestamp: Date.now() }] });
+	}
+}
+
+const QueuedCommandsTask = defineTask<Input, Checkpoint, null>({
+	name: "t3.queued-commands",
 	version: 1,
 	initial: () => ({ phase: "start" }),
 	phases: {
 		start: async (task, runtime, context) => {
+			const shown = shownSections(await runtime.context(runtime.conversationId, context));
 			await runtime.commit(async (tx) => {
-				if (!(await takeQueued(tx, runtime.conversationId, task.input.submissionId, "compact"))) return DONE;
+				const commands = await takeCommands(tx, runtime.conversationId, task.input.submissionId);
+				const reloads = commands.flatMap((command) => (command.command === "reload" ? [command.messageId] : []));
+				// One compaction for however many were queued in a row: a second would summarize the summary.
+				const compact = commands.find((command) => command.command === "compact");
+				if (compact?.command !== "compact") {
+					await writeReloads(tx, runtime.conversationId, reloads, shown);
+					return DONE;
+				}
 				// The command, shown where it ran. No model message: the model never sees `/compact` as a prompt.
-				await tx.appendEntry(runtime.conversationId, { kind: APP_COMPACT_ENTRY, data: { messageId: task.input.messageId, compact: true, text: "/compact", timestamp: Date.now() } as JsonValue });
-				const input: CompactionInput = { reason: "manual", ...(task.input.guidance === "" ? {} : { instructions: task.input.guidance }) };
+				await tx.appendEntry(runtime.conversationId, { kind: APP_COMPACT_ENTRY, data: { messageId: compact.messageId, compact: true, text: "/compact", timestamp: Date.now() } as JsonValue });
+				const input: CompactionInput = { reason: "manual", ...(compact.guidance === "" ? {} : { instructions: compact.guidance }) };
 				const compaction = await tx.createTask(CompactionTask, input, { ownership: { kind: "task", taskId: runtime.taskId } });
 				// As pi-durable lists a compaction it starts itself: the thread shows it, and its task takes it off.
 				const live = await tx.doc(LiveDoc, runtime.conversationId);
 				(live.compactions ??= []).push({ taskId: compaction, trigger: "manual", blocking: true, attempt: 1 });
-				return { status: "waiting", checkpoint: { phase: "wait", compaction: compaction as number }, on: [compaction], policy: "allSettled" };
+				return { status: "waiting", checkpoint: { phase: "wait", compaction: compaction as number, reloads }, on: [compaction], policy: "allSettled" };
 			}, context);
 		},
-		// The compaction ended, with a summary or without: the queue goes on either way.
-		wait: async (_task, runtime, context) => {
-			await runtime.commit(() => DONE, context);
-		},
-	},
-	abort: async (_task, runtime, context) => {
-		await runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted", reason: "aborted" } }) as never, context);
-	},
-});
-
-/**
- * A queued `/reload`: the command where it ran, and every shown section of the system prompt removed, so the request
- * of the message behind it renders them all afresh. What `Threads.reload` writes for a `/reload` sent now.
- */
-const QueuedReloadTask = defineTask<{ readonly submissionId: number; readonly messageId: string }, { phase: "start" }, null>({
-	name: "t3.queued-reload",
-	version: 1,
-	initial: () => ({ phase: "start" }),
-	phases: {
-		start: async (task, runtime, context) => {
-			const view = await runtime.context(runtime.conversationId, context);
-			const head = view.head;
-			// After a compaction that has prepared no request yet there is nothing to remove: that preparation writes
-			// the whole prompt anyway.
-			const prepared = view.entries.some((entry) => entry.kind === "pi.system" && (head === undefined || entry.id > head.id));
-			const shown = prepared ? Object.keys(getCurrentSystemMessage(view.messages)?.sections ?? {}) : [];
+		// The compaction ended, with a summary or without: the reloads queued with it are written behind it, and the
+		// queue goes on either way.
+		wait: async (task, runtime, context) => {
+			const reloads = task.state.checkpoint.reloads;
+			const shown = reloads.length === 0 ? [] : shownSections(await runtime.context(runtime.conversationId, context));
 			await runtime.commit(async (tx) => {
-				if (!(await takeQueued(tx, runtime.conversationId, task.input.submissionId, "reload"))) return DONE;
-				await tx.appendEntry(runtime.conversationId, { kind: APP_RELOAD_ENTRY, data: { messageId: task.input.messageId, text: "/reload", timestamp: Date.now() } as JsonValue });
-				if (shown.length > 0) {
-					await tx.appendEntry(runtime.conversationId, { kind: "pi.system", model: [{ role: "system", content: "", sections: Object.fromEntries(shown.map((key) => [key, null])), timestamp: Date.now() }] });
-				}
+				await writeReloads(tx, runtime.conversationId, reloads, shown);
 				return DONE;
 			}, context);
 		},
@@ -123,7 +132,7 @@ export class QueuedCommands {
 		this.#installed = true;
 		return defineExtension({
 			name: "t3-queued-commands",
-			tasks: [QueuedCompactionTask, QueuedReloadTask],
+			tasks: [QueuedCommandsTask],
 			hooks: [
 				hook(GenerationTask, {
 					afterRun: async (_run, api, context) => {
@@ -133,8 +142,7 @@ export class QueuedCommands {
 						const next = queued.find((item) => item.mode === "steer") ?? queued[0];
 						const command = next === undefined || next.mode !== "followUp" ? undefined : queuedCommand(next.text);
 						if (next === undefined || command === undefined) return undefined;
-						const named = { submissionId: next.submissionId, messageId: next.messageId };
-						return { tasks: [command.command === "reload" ? runEndTask(QueuedReloadTask, named) : runEndTask(QueuedCompactionTask, { ...named, guidance: command.guidance })] };
+						return { tasks: [runEndTask(QueuedCommandsTask, { submissionId: next.submissionId })] };
 					},
 				}),
 			],

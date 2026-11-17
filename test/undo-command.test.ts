@@ -304,7 +304,7 @@ it("/redo fork opens what the undo took as a new thread, when the thread has gon
 	expect(await context()).toEqual(here);
 
 	// The thread has gone on: a redo is refused, and says what works.
-	await expect(send("/redo")).rejects.toThrow("The thread has gone on since the undo, so it cannot be taken back here. `/redo fork` opens what the undo took as a new thread.");
+	await expect(send("/redo")).rejects.toThrow("The thread has gone on since the undo, so it cannot be taken back here. /redo fork opens what the undo took as a new thread.");
 	const command = await send("/redo fork");
 	expect(await context(), "this thread is as it was").toEqual(here);
 	const threads = await f.threads.list();

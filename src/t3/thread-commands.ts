@@ -187,7 +187,7 @@ export class ThreadCommands {
 			await state.shows(redone.head);
 			kept = redone.kept;
 		} catch (error) {
-			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back here. `/redo fork` opens what the undo took as a new thread." : "There is no undo to take back.");
+			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back here. /redo fork opens what the undo took as a new thread." : "There is no undo to take back.");
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Send or remove the queued messages before redoing.");
 			throw error;
 		}

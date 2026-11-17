@@ -145,12 +145,13 @@ it("a queued /compact left behind a stopped run compacts when the queue is resum
 	await send("two");
 	await until("the run", () => requests.length === 3);
 	await send("/compact", "queue");
+	await send("/reload", "queue");
 	await send("three", "queue");
 	// Stop: the run ends without an answer, so nothing asks its end for a compaction; the queue is held.
 	const stopped = f.threads.queue.abort({ threadId: "t", conversationId: thread.head });
 	working.release();
 	await stopped;
-	expect(await queued()).toEqual(["m4", "m5"]);
+	expect(await queued()).toEqual(["m4", "m5", "m6"]);
 	expect(await kinds()).not.toContain("app.compact");
 	// T3's Resume starts the first queued message: the command, which compacts instead of being sent.
 	await bridge.startQueued("t", undefined, "resume-1");
@@ -158,8 +159,9 @@ it("a queued /compact left behind a stopped run compacts when the queue is resum
 	await idle(f.harness, thread.head);
 	const all = await kinds();
 	expect(all.indexOf("pi.compaction")).toBeLessThan(all.lastIndexOf("app.user"));
-	expect(requests.flat().some((line) => line.startsWith("user:/compact"))).toBe(false);
+	expect(requests.flat().some((line) => /^user:\/(compact|reload)/.test(line)), "the reload behind the compaction was no prompt either").toBe(false);
 	expect(requests.at(-1)!.at(-1)).toBe("user:three");
+	expect(all).toContain("app.reload");
 });
 
 it("a queued /reload renders the system prompt again for the message behind it, and not before", { timeout: 60_000 }, async () => {
@@ -188,4 +190,59 @@ it("a queued /reload renders the system prompt again for the message behind it, 
 	expect(requests.flat().some((line) => line.startsWith("user:/reload")), "never a prompt").toBe(false);
 	const { projection } = await bridge.projection("t");
 	expect(projection.messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual(["one", "two", "/reload", "three"]);
+});
+
+it("commands queued one behind another are answered together: none is left to be placed as a prompt", { timeout: 60_000 }, async () => {
+	let rule = "Rule one.";
+	const prompted = defineExtension({ name: "rules", sections: [section("rules", (input) => input.shown["rules"] ?? rule, { tag: false })] });
+	const { f, bridge, thread, send, answer, requests, kinds, queued } = await setup(true, [prompted]);
+	f.model.respond(answer("zero" + long), answer("one" + long));
+	await send("zero");
+	await idle(f.harness, thread.head);
+	await send("one");
+	await idle(f.harness, thread.head);
+	const working = gated("two");
+	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"), answer("three"));
+	await send("two");
+	await until("the run", () => requests.length === 3);
+	rule = "Rule two.";
+	// A run asks its end's hooks once, so everything at the front of the queue is taken then.
+	await send("/compact", "queue");
+	await send("/reload", "queue");
+	await send("/compact again", "queue");
+	await send("three", "queue");
+	expect(await queued()).toEqual(["m4", "m5", "m6", "m7"]);
+	working.release();
+	await until("the queue to empty", async () => (await queued()).length === 0 && requests.at(-1)?.at(-1) === "user:three");
+	await idle(f.harness, thread.head);
+	// One compaction for the two that were queued, the reload behind it, then the message.
+	expect((await kinds()).slice(-6)).toEqual(["pi.assistant", "app.compact", "pi.compaction", "app.reload", "app.user", "pi.assistant"]);
+	expect(requests.flat().some((line) => /^user:\/(compact|reload)/.test(line)), "none was a prompt").toBe(false);
+	const { projection } = await bridge.projection("t");
+	expect(projection.messages.filter((message) => message.role === "user").map((message) => message.text).slice(-3)).toEqual(["/compact", "/reload", "three"]);
+});
+
+it("a message sent to a thread whose held queue starts with a command: the command is answered, not placed", { timeout: 60_000 }, async () => {
+	const { f, thread, send, answer, requests, kinds, queued } = await setup();
+	f.model.respond(answer("zero" + long), answer("one" + long));
+	await send("zero");
+	await idle(f.harness, thread.head);
+	await send("one");
+	await idle(f.harness, thread.head);
+	const working = gated("two");
+	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"), answer("new"), answer("three"));
+	await send("two");
+	await until("the run", () => requests.length === 3);
+	await send("/compact", "queue");
+	await send("three", "queue");
+	const stopped = f.threads.queue.abort({ threadId: "t", conversationId: thread.head });
+	working.release();
+	await stopped;
+	expect(await queued()).toEqual(["m4", "m5"]);
+	// Not Resume: a new message, which releases a held queue.
+	await send("new");
+	await until("everything answered", async () => (await queued()).length === 0 && requests.some((request) => request.at(-1) === "user:three") && requests.some((request) => request.at(-1) === "user:new"));
+	await idle(f.harness, thread.head);
+	expect(await kinds()).toContain("pi.compaction");
+	expect(requests.flat().some((line) => line.startsWith("user:/compact"))).toBe(false);
 });

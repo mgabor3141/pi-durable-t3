@@ -3,7 +3,7 @@
 // withdraws whatever is queued, so the operations that abort hold the queue aside for the length of that commit
 // (`#aroundQueue`), in a document, so a host that dies in between does not lose it.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, type Harness, InboxDoc, LiveDoc, type LiveState, type Submission, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
+import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type Submission, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
 import { HeldQueueDoc, type Thread } from "./thread-records.ts";
@@ -13,6 +13,23 @@ import { queuedCommand, type QueuedCommand } from "./t3/queued-commands.ts";
 import type { MessageInput } from "./threads.ts";
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+type TakenCommand = QueuedCommand & { readonly messageId: string };
+
+/** Take the queued commands that stand one behind another from `at` out of an inbox: up to the first message. */
+function takeCommands(tx: Tx, items: InboxItem[], at: number): TakenCommand[] {
+	const commands: TakenCommand[] = [];
+	while (at >= 0 && at < items.length) {
+		const item = items[at]!;
+		const [queued] = readQueuedInputs([item]);
+		const command = queued === undefined ? undefined : queuedCommand(queued.text);
+		if (queued === undefined || command === undefined) break;
+		tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
+		items.splice(at, 1);
+		commands.push({ ...command, messageId: queued.messageId });
+	}
+	return commands;
+}
 
 /** What the queue uses of the threads layer. */
 type QueueHost = {
@@ -91,28 +108,23 @@ export class ThreadQueue {
 			if (target === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
 			const [input] = readQueuedInputs([target]);
 			if (input === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is not a user message`);
-			// A queued command (`/compact`, `/reload`) is never a prompt: it leaves the queue and is answered, and the
-			// others stay queued.
-			const command = queuedCommand(input.text);
-			if (command !== undefined) {
-				tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
-				inbox.items.splice(inbox.items.indexOf(target), 1);
-				return { command: { ...command, messageId: input.messageId }, input, rest: [], awaitsContext: false };
-			}
+			// A queued command (`/compact`, `/reload`) is never a prompt: it leaves the queue and is answered, with every
+			// command directly behind it, since a compaction places the next queued message when its summary lands. The
+			// messages stay queued.
+			if (queuedCommand(input.text) !== undefined) return { commands: takeCommands(tx, inbox.items, inbox.items.indexOf(target)), input, rest: [], awaitsContext: false };
 			const rest = candidates.filter((item) => item.id !== target.id).map((item) => copy(item));
 			// The selected submission becomes the new run; the others keep their queued submissions while they wait.
 			tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
 				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
 			}
-			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true, command: undefined };
+			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true, commands: undefined };
 		}, BACKGROUND_CONTEXT);
 		if (held === undefined) return;
-		if (held.command !== undefined) {
-			await this.#answer(threadId, held.command);
+		if (held.commands !== undefined) {
 			// A compaction places the messages behind it when its summary lands. A reload starts nothing: a queue that
 			// was resumed goes on with the message behind it.
-			if (held.command.command === "reload" && runId === undefined) await this.startQueued(threadId, undefined, `${requestId}:next`);
+			if (!(await this.#answerAll(threadId, held.commands)) && runId === undefined) await this.startQueued(threadId, undefined, `${requestId}:next`);
 			return;
 		}
 		const content = held.input.content;
@@ -176,6 +188,31 @@ export class ThreadQueue {
 			return { ...queued, messageId: input.messageId };
 		}, BACKGROUND_CONTEXT);
 		if (command !== undefined) await this.#answer(threadId, command);
+	}
+
+	/**
+	 * Answer the commands at the front of a queue that no run works on, before something makes pi-durable place what
+	 * is queued: a message sent to the thread releases a held queue, and a compaction places the next queued message
+	 * when its summary lands. A run that ends does this itself (`t3/queued-commands.ts`).
+	 */
+	async answerLeading(threadId: string): Promise<void> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		const commands = await this.#threads.harness.commit(async (tx) => {
+			if ((await tx.doc(LiveDoc, conversationId)).run !== undefined) return [];
+			const inbox = await tx.doc(InboxDoc, conversationId);
+			const first = inbox.items.findIndex((item) => item.mode !== "write");
+			return first < 0 ? [] : takeCommands(tx, inbox.items, first);
+		}, BACKGROUND_CONTEXT);
+		await this.#answerAll(threadId, commands);
+	}
+
+	/** Answer commands that left the queue together: the reloads, then one compaction for however many were queued in
+	 * a row. Whether a compaction was started. */
+	async #answerAll(threadId: string, commands: readonly TakenCommand[]): Promise<boolean> {
+		for (const command of commands) if (command.command === "reload") await this.#answer(threadId, command);
+		const compact = commands.find((command) => command.command === "compact");
+		if (compact !== undefined) await this.#answer(threadId, compact);
+		return compact !== undefined;
 	}
 
 	/** Answer a command that left the queue, as the command sent now is answered. */

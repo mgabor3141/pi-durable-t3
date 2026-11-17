@@ -1187,6 +1187,10 @@ export class Bridge {
 				await this.#commands.continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
 				return;
 			}
+			// Commands left at the front of a queue that no run works on are answered before this message makes
+			// pi-durable place what is queued: placed, a `/compact` would be a prompt.
+			const resting = state.view?.docs as { "pi.live"?: { run?: unknown }; "pi.inbox"?: { items?: readonly unknown[] } } | undefined;
+			if (resting?.["pi.live"]?.run === undefined && (resting?.["pi.inbox"]?.items?.length ?? 0) > 0) await this.#store.queue.answerLeading(input.threadId);
 			// A `/compact` or `/reload` sent as a queued message waits its turn behind the run that works
 			// (`queued-commands.ts`); with no run to wait behind, or sent any other way, it is answered now.
 			if (input.mode === "queue" && this.queuedCommands.active && queuedCommand(input.text) !== undefined) {
