@@ -3,8 +3,8 @@
 // A thread's head is one conversation. An undo moves the head to a fork that ends earlier and leaves the old
 // conversation whole, and a thread forked from another starts as a fork of its conversation: so a thread that was
 // undone, written on again and forked is a tree, whose lines share their entries up to where they part. `readLines`
-// reads every conversation the thread and the threads of its family have had as a head, each only down to the first
-// entry another has too, and `turnTree` makes the tree of their turns, with the other threads named where they are.
+// reads every conversation that shares history with the thread (`Threads.linesOf`), each only down to the first entry
+// another has too, and `turnTree` makes the tree of their turns, with the other threads named where they are.
 //
 // The command shows the tree as a page in T3's inline HTML frame, shown as a command's answer is: kept nowhere, not
 // sent to the model. The frame has an opaque origin and no session, so its buttons cannot use the API the app uses.
@@ -53,7 +53,7 @@ export type LineEntry = {
 	readonly compaction: boolean;
 };
 
-/** Another thread of the family, named on the turn it is at. */
+/** Another thread, named on the turn it is at. */
 export type OtherThread = { readonly threadId: string; readonly title: string };
 
 export type Lines = {
@@ -62,9 +62,7 @@ export type Lines = {
 	/** Each conversation's newest entry (`undefined`: it has none), the thread's own conversations first. */
 	readonly tips: ReadonlyMap<number, number | undefined>;
 	readonly entries: ReadonlyMap<number, LineEntry>;
-	/** The thread's own conversations: the tree is the turns these share a start with. Absent: every one. */
-	readonly own?: ReadonlySet<number>;
-	/** The conversations other threads of the family are on. */
+	/** The conversations other threads are on. */
 	readonly others?: ReadonlyMap<number, OtherThread>;
 };
 
@@ -84,7 +82,7 @@ export type TurnNode = {
 	current: boolean;
 	/** The thread's last turn: where it is. */
 	here: boolean;
-	/** The other threads of the family whose last turn this is. */
+	/** The other threads whose last turn this is. */
 	readonly threads: OtherThread[];
 };
 
@@ -111,15 +109,14 @@ function lineEntry(entry: EntryRecord): LineEntry {
 }
 
 /**
- * The entries of a thread's lines and its family's (`Threads.linesOf`: the thread's head first), each read from its
- * newest entry down to the first one already read: a fork has its parent's entries up to where it was made, under the
- * same ids.
+ * The entries of the lines that share history with a thread (`Threads.linesOf`: the thread's head first), each read
+ * from its newest entry down to the first one already read: a fork has its parent's entries up to where it was made,
+ * under the same ids.
  */
 export async function readLines(harness: Harness, lines: Awaited<ReturnType<Threads["linesOf"]>>): Promise<Lines> {
 	const entries = new Map<number, LineEntry>();
 	const tips = new Map<number, number | undefined>();
-	const own = new Set(lines.filter((line) => line.threadId === lines[0]!.threadId).map((line) => line.conversation));
-	const others = new Map(lines.filter((line) => line.head && !own.has(line.conversation)).map((line) => [line.conversation, { threadId: line.threadId, title: line.title }]));
+	const others = new Map(lines.slice(1).flatMap((line) => (line.thread === undefined ? [] : [[line.conversation, line.thread] as const])));
 	for (const { conversation: id } of lines) {
 		const conversation = await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) continue;
@@ -142,19 +139,17 @@ export async function readLines(harness: Harness, lines: Awaited<ReturnType<Thre
 			cursor = page.next;
 		} while (!joined && cursor !== undefined);
 	}
-	return { head: lines[0]!.conversation, tips, entries, own, others };
+	return { head: lines[0]!.conversation, tips, entries, others };
 }
 
 /**
  * The lines' turns as one tree. A turn is the same in two lines when it starts with the same message and its work
  * ends with the same entry; the turns before it are then the same too, so a line is walked from its newest turn down
- * to the first one the tree has. Of the family's lines, the ones that share no turn with the thread's own are left
- * out: a thread started beside it, not from it.
+ * to the first one the tree has.
  */
 export function turnTree(lines: Lines): TurnTree {
 	const nodes = new Map<string, TurnNode>();
 	const roots: TurnNode[] = [];
-	const shared = new Set<TurnNode>();
 	// The thread's own line first: its turns are the ones marked, and a turn is made by the first line that has it.
 	for (const [conversation, tip] of [...lines.tips].sort(([a], [b]) => Number(b === lines.head) - Number(a === lines.head))) {
 		const current = conversation === lines.head;
@@ -215,29 +210,14 @@ export function turnTree(lines: Lines): TurnTree {
 			last ??= node;
 		} else if (!joined && above !== undefined) roots.push(above);
 		if (other !== undefined) last?.threads.push(other);
-		if (last !== undefined && lines.own?.has(conversation) !== false) {
-			let root = last;
-			while (root.parent !== undefined) root = root.parent;
-			shared.add(root);
-		}
 	}
-	// What the thread's own lines do not reach is no part of its tree.
-	const kept = roots.filter((root) => shared.has(root));
-	const reached = new Map<string, TurnNode>();
-	const reach = (list: readonly TurnNode[]): void => {
-		for (const node of list) {
-			reached.set(node.key, node);
-			reach(node.children);
-		}
-	};
-	reach(kept);
 	const order = (list: TurnNode[]): void => {
 		list.sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || a.end.entryId - b.end.entryId);
 		for (const node of list) order(node.children);
 	};
-	order(kept);
-	const all = [...reached.values()];
-	return { head: lines.head, roots: kept, nodes: reached, lines: Math.max(1, all.filter((node) => node.children.length === 0).length), threads: 1 + new Set(all.flatMap((node) => node.threads.map((thread) => thread.threadId))).size };
+	order(roots);
+	const all = [...nodes.values()];
+	return { head: lines.head, roots, nodes, lines: Math.max(1, all.filter((node) => node.children.length === 0).length), threads: 1 + new Set(all.flatMap((node) => node.threads.map((thread) => thread.threadId))).size };
 }
 
 /** Which rows of the tree a page shows: more of each as its buttons are used. */
@@ -366,7 +346,7 @@ type Deps = {
 };
 
 /** A page whose buttons work: what its token stands for. */
-type View = { readonly threadId: string; readonly messageId: string; readonly command: string; tree: TurnTree; window: Window; expires: number; published: number; files: string[]; busy: Promise<void> };
+type View = { readonly threadId: string; readonly messageId: string; tree: TurnTree; window: Window; expires: number; published: number; files: string[]; busy: Promise<void> };
 
 const emptyWindow = (): Window => ({ earlier: 0, later: 0, more: new Map() });
 
@@ -378,23 +358,23 @@ export class ThreadNavigator {
 		this.#deps = deps;
 	}
 
-	/** The tree of a thread's turns, its family's with them. */
+	/** The tree of a thread's turns, and of every line that shares history with it. */
 	async tree(threadId: string): Promise<TurnTree> {
 		return turnTree(await readLines(this.#deps.store.harness, await this.#deps.store.linesOf(threadId)));
 	}
 
 	/** `/tree`: show the thread's tree as the command's answer. */
-	async open(threadId: string, messageId: string, command: string): Promise<void> {
+	async open(threadId: string, messageId: string): Promise<void> {
 		const tree = await this.tree(threadId);
 		if (tree.nodes.size === 0) {
-			this.#deps.show(threadId, { messageId, command, answer: "There is nothing to show yet: this thread has no turns. Shown here only: not sent to the model, not saved." });
+			this.#deps.show(threadId, { messageId, command: "/tree", answer: "There is nothing to show yet: this thread has no turns. Shown here only: not sent to the model, not saved." });
 			return;
 		}
 		const now = Date.now();
 		for (const [token, view] of this.#views) if (view.expires < now) this.#views.delete(token);
 		for (const token of [...this.#views.keys()].slice(0, Math.max(0, this.#views.size + 1 - MAX_VIEWS))) this.#views.delete(token);
 		const token = randomBytes(24).toString("base64url");
-		const view: View = { threadId, messageId, command, tree, window: emptyWindow(), expires: now + VIEW_TTL_MS, published: 0, files: [], busy: Promise.resolve() };
+		const view: View = { threadId, messageId, tree, window: emptyWindow(), expires: now + VIEW_TTL_MS, published: 0, files: [], busy: Promise.resolve() };
 		await this.#publish(token, view);
 		this.#views.set(token, view);
 	}
@@ -413,7 +393,7 @@ export class ThreadNavigator {
 		const turns = view.tree.nodes.size;
 		this.#deps.show(view.threadId, {
 			messageId: view.messageId,
-			command: view.command,
+			command: "/tree",
 			htmlRender: { attachmentId, title: page.title, height: page.height } as HtmlRenderReference,
 			answer: `${count(turns, "turn")} on ${count(view.tree.lines, "line")}${view.tree.threads === 1 ? "" : `, with ${count(view.tree.threads - 1, "other thread")} forked from them`}. Each row has "Go here", which moves this thread to the end of that turn, and "Fork", which opens it as a new thread. Shown here only: not sent to the model, not saved.`,
 		});

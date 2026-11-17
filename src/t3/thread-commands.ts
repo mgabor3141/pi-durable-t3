@@ -38,9 +38,8 @@ export class ThreadCommands {
 		else if (text === "/context") await this.context(threadId, messageId, state, head);
 		else if (undo !== null) await this.undo(threadId, messageId, state, head, undo[1]?.trim() ?? "");
 		else if (text === "/redo") await this.redo(threadId, messageId, state, head);
-		// `/tree` (and `/thread`, its first name): every line the thread has had, as a tree to move in
-		// (`thread-navigator.ts`).
-		else if (text === "/tree" || text === "/thread") await this.#bridge.navigator.open(threadId, messageId, text);
+		// `/tree`: every line the thread has had, as a tree to move in (`thread-navigator.ts`).
+		else if (text === "/tree") await this.#bridge.navigator.open(threadId, messageId);
 		else if (/^\/redo\s+fork$/.test(text)) await this.redoFork(threadId, messageId, state, head);
 		// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
 		else if (text === "/continue") await this.continue(threadId, `continue:${messageId}`, head, { messageId });

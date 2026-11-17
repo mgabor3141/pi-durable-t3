@@ -1137,29 +1137,18 @@ export class Threads {
 	}
 
 	/**
-	 * Every conversation a thread and its family have had as a head: the thread's own first, then those of the other
-	 * threads with its root (the threads forked from it, the one it was forked from, their forks), each thread's
-	 * current head before the ones its undos, redos and moves left or made, as far back as its record holds them
-	 * (`MAX_UNDOS`). A conversation is listed once, for the first thread that has it.
-	 *
-	 * And every conversation forked from one of those, or one of those from it, that no record names: a line a thread
-	 * left more than `MAX_UNDOS` moves ago, or one whose record was not written. Found by the conversations' own fork
-	 * links, which no record has to be right for; listed as the asking thread's, since they are no other's. Left out:
-	 * a conversation a run made for itself (it has an owner), and one a deleted thread was on.
+	 * Every conversation that shares history with a thread: the ones the thread has had as its head (the current one
+	 * first, then those its undos, redos and moves left or made, as far back as its record holds them), and every
+	 * conversation forked from one of those, or they from it, however it came to be: another thread's, one a thread
+	 * left long ago, one whose thread was deleted, one no record names. Found by the conversations' own fork links
+	 * (one scan of their records), which no thread record has to be right for. `thread`: the live thread whose head a
+	 * conversation is.
 	 */
-	async linesOf(threadId: string): Promise<{ readonly conversation: number; readonly threadId: string; readonly title: string; readonly head: boolean }[]> {
+	async linesOf(threadId: string): Promise<{ readonly conversation: number; readonly thread?: { readonly threadId: string; readonly title: string } }[]> {
 		const threads = await this.list();
 		const thread = threads.find((candidate) => candidate.threadId === threadId);
 		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
-		const family = [thread, ...threads.filter((candidate) => candidate !== thread && candidate.lineage.rootThreadId === thread.lineage.rootThreadId)];
-		const seen = new Set<number>();
-		const lines = family.flatMap((each) =>
-			[each.head, ...each.undos.flatMap((undo) => [undo.head, undo.from]).reverse()].flatMap((conversation) => {
-				if (seen.has(conversation)) return [];
-				seen.add(conversation);
-				return [{ conversation, threadId: each.threadId, title: each.title, head: conversation === each.head }];
-			}),
-		);
+		const own = [...new Set([thread.head, ...thread.undos.flatMap((undo) => [undo.head, undo.from]).reverse()])];
 		const records = await this.#harness.commit((tx) => scanConversations(tx), BACKGROUND_CONTEXT);
 		const parents = new Map(records.map((record) => [record.id as number, record.parent?.conversationId as number | undefined]));
 		const rootOf = (conversation: number): number => {
@@ -1169,16 +1158,14 @@ export class Threads {
 				current = parent;
 			}
 		};
-		const roots = new Set(lines.map((line) => rootOf(line.conversation)));
-		for (const record of records) {
-			const conversation = record.id as number;
-			if (seen.has(conversation) || record.owner !== undefined || !roots.has(rootOf(conversation))) continue;
-			// A conversation that was a thread's head is that thread's: a live one's is named, a deleted one's stays gone.
-			const owner = this.#directory.heads[String(conversation)];
-			const named = owner === undefined ? thread : threads.find((candidate) => candidate.threadId === owner);
-			if (named !== undefined) lines.push({ conversation, threadId: named.threadId, title: named.title, head: conversation === named.head });
-		}
-		return lines;
+		const roots = new Set(own.map(rootOf));
+		const heads = new Map(threads.map((each) => [each.head, { threadId: each.threadId, title: each.title }]));
+		const related = records.map((record) => record.id as number).filter((conversation) => !own.includes(conversation) && roots.has(rootOf(conversation)));
+		// Threads first: a turn two lines share is made by the first that has it, and a thread's is the one to go to.
+		return [...own, ...related.filter((conversation) => heads.has(conversation)), ...related.filter((conversation) => !heads.has(conversation))].map((conversation) => {
+			const named = heads.get(conversation);
+			return named === undefined ? { conversation } : { conversation, thread: named };
+		});
 	}
 
 	/**

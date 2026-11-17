@@ -47,23 +47,18 @@ describe("the tree of turns", () => {
 		expect(tree.lines).toBe(2);
 	});
 
-	it("names the family's other threads where they are, and leaves out the ones that share no turn", () => {
-		// The thread (line 1): u1 a2. A fork of it (line 2) went on: u3 a4. Another (line 3) forked and wrote nothing. A
-		// thread of the family that began on its own (line 4): u10 a11.
+	it("names the other threads where they are", () => {
+		// The thread (line 1): u1 a2. A fork of it (line 2) went on: u3 a4. Another (line 3) forked and wrote nothing.
 		const family: Lines = {
-			...lines(1, { 1: 2, 2: 4, 3: 2, 4: 11 }, [
+			...lines(1, { 1: 2, 2: 4, 3: 2 }, [
 				[1, "u"],
 				[2, "a", 1],
 				[3, "u", 2],
 				[4, "a", 3],
-				[10, "u"],
-				[11, "a", 10],
 			]),
-			own: new Set([1]),
 			others: new Map([
 				[2, { threadId: "b", title: "B" }],
 				[3, { threadId: "c", title: "C" }],
-				[4, { threadId: "d", title: "D" }],
 			]),
 		};
 		const tree = turnTree(family);
@@ -208,12 +203,15 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	// lines they left are still in its tree.
 	await f.threads.updateRecord("t", (record) => void (record.undos = []));
 	expect(await tree()).toEqual([["apples*", ["pears*+1", ["plums"], ["quinces*!"]], ["cherries"]]]);
-	// A deleted thread's line stays gone.
+	// Whatever shares history with the thread is in its tree, however it came to be: what a thread that was deleted
+	// wrote is still a line, with no thread to name on it. A thread that began on its own is not.
+	f.model.respond(fauxAssistantMessage("answer to figs"));
+	await f.threads.submit({ threadId: fork.threadId, conversationId: fork.head, requestId: "figs", message: "figs" }, undefined);
+	await idle(f.harness, fork.head);
+	expect(await tree()).toEqual([["apples*", ["pears*", ["plums"], ["quinces*!"], ["figs+1"]], ["cherries"]]]);
 	await f.threads.remove(fork.threadId);
-	f.model.respond(fauxAssistantMessage("answer"));
-	expect(await tree()).toEqual([["apples*", ["pears*", ["plums"], ["quinces*!"]], ["cherries"]]]);
-	// `/thread`, the command's first name, still answers.
-	expect(await page(await say("/thread"), 1)).toContain("you are here");
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "beside", projectId: "p" });
+	expect(await tree()).toEqual([["apples*", ["pears*", ["plums"], ["quinces*!"], ["figs"]], ["cherries"]]]);
 
 	// What a page's button posts: the token in the body is all a caller needs, and all that is checked.
 	const post = (body: string) => bridge.navigator.handle(new Request(`http://host${THREAD_NAV_PATH}`, { method: "POST", headers: { "content-type": "text/plain" }, body }));
