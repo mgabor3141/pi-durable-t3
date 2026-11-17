@@ -31,8 +31,9 @@ import { HostError, hostError } from "./host-errors.ts";
 import type { Project } from "./config.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { APP_COMPACT_ENTRY, APP_CONTINUE_ENTRY, APP_NOTE_ENTRY, APP_RELOAD_ENTRY } from "./t3/runs.ts";
+import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
+import { shownPromptSections } from "./t3/queued-commands.ts";
 import type { Message } from "@earendil-works/pi-ai";
-import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import { type ProjectRegistry, projectsInCommit } from "./registry.ts";
@@ -606,7 +607,7 @@ export class Threads {
 		}
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
-		if (input.awaitsContext === true) data.awaitsContext = true;
+		if (input.awaitsContext === true) data[AWAITS_CONTEXT] = true;
 		// A note reaches the model's context without starting a turn: a write whose entry carries the user message. Idle,
 		// it is appended at once; busy, pi-durable places it at the run's next boundary.
 		if (input.note === true) {
@@ -861,11 +862,8 @@ export class Threads {
 			const data = { messageId, text: "/reload", timestamp: Date.now() };
 			await conversation.submit({ type: "write", requestId: `reload-command:${messageId}`, entry: { kind: APP_RELOAD_ENTRY, data } }, BACKGROUND_CONTEXT);
 		}
-		const view = await conversation.context(BACKGROUND_CONTEXT);
-		const head = view.head;
-		const prepared = view.entries.some((entry) => entry.kind === "pi.system" && (head === undefined || entry.id > head.id));
-		const shown = Object.keys(getCurrentSystemMessage(view.messages)?.sections ?? {});
-		if (!prepared || shown.length === 0) return;
+		const shown = shownPromptSections(await conversation.context(BACKGROUND_CONTEXT));
+		if (shown.length === 0) return;
 		const message = { role: "system" as const, content: "", sections: Object.fromEntries(shown.map((key) => [key, null])), timestamp: Date.now() };
 		await conversation.submit(
 			{ type: "write", ...(messageId === undefined ? {} : { requestId: `reload:${messageId}` }), entry: { kind: "pi.system", model: [message] } },

@@ -15,7 +15,7 @@
 // they say something about the thread as it is, or need it to be at rest.
 import type { JsonValue } from "@earendil-works/chord/json";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, InboxDoc, LiveDoc, runEndTask, type CompactionInput, type ContextView, type ConversationId, type Extension, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
+import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, InboxDoc, LiveDoc, runEndTask, type CompactionInput, type ContextView, type ConversationId, type Extension, type InboxItem, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
 import { readQueuedInputs } from "./queued.ts";
 import { APP_COMPACT_ENTRY, APP_RELOAD_ENTRY } from "./runs.ts";
 
@@ -23,7 +23,7 @@ import { APP_COMPACT_ENTRY, APP_RELOAD_ENTRY } from "./runs.ts";
 const COMPACT_COMMAND = /^\/compact(?:\s+([\s\S]*))?$/;
 
 /** A command that can wait in the queue. `guidance`: what follows `/compact` (`""` for nothing). */
-export type QueuedCommand = { readonly command: "compact"; readonly guidance: string } | { readonly command: "reload" };
+type QueuedCommand = { readonly command: "compact"; readonly guidance: string } | { readonly command: "reload" };
 
 /** The queueable command `text` is, or `undefined` for a message. */
 export function queuedCommand(text: string): QueuedCommand | undefined {
@@ -39,21 +39,22 @@ type Checkpoint = { phase: "start" } | { phase: "wait"; compaction: number; relo
 
 const DONE = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 
+/** A command that left the queue, with the id of the message it was. */
+export type TakenCommand = QueuedCommand & { readonly messageId: string };
+
 /**
- * The commands at the front of the queue, taken out of it: the message `submissionId` if it still is a queued command
- * (not removed, edited into a message or sent as a steer since the hook looked) and every command directly behind it.
- * All of them, since the run asks its hooks once: a command left behind another would be the next message placed,
- * as a prompt.
+ * Take the queued commands that stand one behind another from `at` out of an inbox's items: up to the first message.
+ * All of them, since a run asks its end's hooks once and a compaction places the next queued message when its
+ * summary lands: a command left behind another would be the next message placed, as a prompt.
  */
-async function takeCommands(tx: Tx, conversationId: ConversationId, submissionId: number): Promise<(QueuedCommand & { readonly messageId: string })[]> {
-	const inbox = await tx.doc(InboxDoc, conversationId);
-	const taken: (QueuedCommand & { readonly messageId: string })[] = [];
-	for (let at = inbox.items.findIndex((item) => item.id === (submissionId as SubmissionId)); at >= 0 && at < inbox.items.length; ) {
-		const item = inbox.items[at]!;
+export function takeCommands(tx: Tx, items: InboxItem[], at: number): TakenCommand[] {
+	const taken: TakenCommand[] = [];
+	while (at >= 0 && at < items.length) {
+		const item = items[at]!;
 		const [queued] = readQueuedInputs([item]);
-		const command = item.mode !== "followUp" || queued === undefined ? undefined : queuedCommand(queued.text);
+		const command = queued === undefined ? undefined : queuedCommand(queued.text);
 		if (queued === undefined || command === undefined) break;
-		inbox.items.splice(at, 1);
+		items.splice(at, 1);
 		tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
 		taken.push({ ...command, messageId: queued.messageId });
 	}
@@ -62,7 +63,7 @@ async function takeCommands(tx: Tx, conversationId: ConversationId, submissionId
 
 /** The sections a `/reload` removes: those the prompt shows, when a request was prepared since the context began.
  * After a compaction that has prepared none there is nothing to remove: that preparation writes the whole prompt. */
-function shownSections(view: ContextView): string[] {
+export function shownPromptSections(view: ContextView): string[] {
 	const head = view.head;
 	const prepared = view.entries.some((entry) => entry.kind === "pi.system" && (head === undefined || entry.id > head.id));
 	return prepared ? Object.keys(getCurrentSystemMessage(view.messages)?.sections ?? {}) : [];
@@ -83,9 +84,12 @@ const QueuedCommandsTask = defineTask<Input, Checkpoint, null>({
 	initial: () => ({ phase: "start" }),
 	phases: {
 		start: async (task, runtime, context) => {
-			const shown = shownSections(await runtime.context(runtime.conversationId, context));
+			const shown = shownPromptSections(await runtime.context(runtime.conversationId, context));
 			await runtime.commit(async (tx) => {
-				const commands = await takeCommands(tx, runtime.conversationId, task.input.submissionId);
+				// The message the hook saw, if it still is a queued command: not removed, edited into a message or sent
+				// as a steer since.
+				const inbox = await tx.doc(InboxDoc, runtime.conversationId);
+				const commands = takeCommands(tx, inbox.items, inbox.items.findIndex((item) => item.id === (task.input.submissionId as SubmissionId) && item.mode === "followUp"));
 				const reloads = commands.flatMap((command) => (command.command === "reload" ? [command.messageId] : []));
 				// One compaction for however many were queued in a row: a second would summarize the summary.
 				const compact = commands.find((command) => command.command === "compact");
@@ -107,7 +111,7 @@ const QueuedCommandsTask = defineTask<Input, Checkpoint, null>({
 		// queue goes on either way.
 		wait: async (task, runtime, context) => {
 			const reloads = task.state.checkpoint.reloads;
-			const shown = reloads.length === 0 ? [] : shownSections(await runtime.context(runtime.conversationId, context));
+			const shown = reloads.length === 0 ? [] : shownPromptSections(await runtime.context(runtime.conversationId, context));
 			await runtime.commit(async (tx) => {
 				await writeReloads(tx, runtime.conversationId, reloads, shown);
 				return DONE;

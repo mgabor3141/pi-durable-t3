@@ -3,33 +3,17 @@
 // withdraws whatever is queued, so the operations that abort hold the queue aside for the length of that commit
 // (`#aroundQueue`), in a document, so a host that dies in between does not lose it.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type Submission, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { type ConversationId, type Harness, InboxDoc, LiveDoc, type LiveState, type Submission, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
+import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
 import { HeldQueueDoc, type Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
-import { queuedCommand, type QueuedCommand } from "./t3/queued-commands.ts";
+import { queuedCommand, takeCommands, type TakenCommand } from "./t3/queued-commands.ts";
 import type { MessageInput } from "./threads.ts";
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-
-type TakenCommand = QueuedCommand & { readonly messageId: string };
-
-/** Take the queued commands that stand one behind another from `at` out of an inbox: up to the first message. */
-function takeCommands(tx: Tx, items: InboxItem[], at: number): TakenCommand[] {
-	const commands: TakenCommand[] = [];
-	while (at >= 0 && at < items.length) {
-		const item = items[at]!;
-		const [queued] = readQueuedInputs([item]);
-		const command = queued === undefined ? undefined : queuedCommand(queued.text);
-		if (queued === undefined || command === undefined) break;
-		tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
-		items.splice(at, 1);
-		commands.push({ ...command, messageId: queued.messageId });
-	}
-	return commands;
-}
 
 /** What the queue uses of the threads layer. */
 type QueueHost = {
@@ -118,7 +102,7 @@ export class ThreadQueue {
 			for (let index = inbox.items.length - 1; index >= 0; index--) {
 				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
 			}
-			return { input, rest, awaitsContext: input.entry?.data?.["awaitsContext"] === true, commands: undefined };
+			return { input, rest, awaitsContext: input.entry?.data?.[AWAITS_CONTEXT] === true, commands: undefined };
 		}, BACKGROUND_CONTEXT);
 		if (held === undefined) return;
 		if (held.commands !== undefined) {
@@ -216,7 +200,7 @@ export class ThreadQueue {
 	}
 
 	/** Answer a command that left the queue, as the command sent now is answered. */
-	async #answer(threadId: string, command: QueuedCommand & { readonly messageId: string }): Promise<void> {
+	async #answer(threadId: string, command: TakenCommand): Promise<void> {
 		if (command.command === "reload") await this.#threads.reload(threadId, command.messageId);
 		else await this.#threads.compact(threadId, command.guidance === "" ? undefined : command.guidance, command.messageId);
 	}

@@ -16,7 +16,7 @@ const MAX_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 const ARRIVAL_MS = 5_000;
 
 /** How a call ended, in its result's details, for the card. */
-export type UserInputStatus = "answered" | "dismissed" | "cancelled" | "timed_out";
+type UserInputStatus = "answered" | "dismissed" | "cancelled" | "timed_out";
 
 /** What the agent reads when its card ends without an answer. */
 const UNANSWERED_NOTE: Record<Exclude<UserInputStatus, "answered">, string> = {
@@ -26,7 +26,7 @@ const UNANSWERED_NOTE: Record<Exclude<UserInputStatus, "answered">, string> = {
 };
 
 /** One question as T3's card takes it (`OrchestrationV2UserInputQuestion`). */
-export type UserInputQuestion = {
+type UserInputQuestion = {
 	readonly id: string;
 	readonly header: string;
 	readonly question: string;

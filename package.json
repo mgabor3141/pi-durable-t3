@@ -1,6 +1,6 @@
 {
   "name": "@mgabor3141/pi-durable-t3",
-  "version": "0.2.45",
+  "version": "0.2.46",
   "description": "T3 Code as a frontend for a pi-durable Harness: attachT3(harness, options).",
   "license": "MIT",
   "repository": {

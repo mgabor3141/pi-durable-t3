@@ -1151,6 +1151,20 @@ export class Bridge {
 		}
 	}
 
+	/**
+	 * The queue's commands, before a message is taken (`queued-commands.ts`). Commands left at the front of a queue
+	 * that no run works on are answered first: the message is about to make pi-durable place what is queued, and
+	 * placed, a `/compact` would be a prompt. And a `/compact` or `/reload` sent as a queued message waits its turn
+	 * behind the run that works; `true` when this message is one and was queued. With no run to wait behind, or sent
+	 * any other way, it is answered now, as any command is.
+	 */
+	async #queuesCommand(input: { readonly threadId: string; readonly commandId: string; readonly messageId: string; readonly text: string; readonly mode: string }, state: ThreadView, head: number): Promise<boolean> {
+		const resting = state.view?.docs as { "pi.live"?: { run?: unknown }; "pi.inbox"?: { items?: readonly unknown[] } } | undefined;
+		if (resting?.["pi.live"]?.run === undefined && (resting?.["pi.inbox"]?.items?.length ?? 0) > 0) await this.#store.queue.answerLeading(input.threadId);
+		if (input.mode !== "queue" || !this.queuedCommands.active || queuedCommand(input.text) === undefined) return false;
+		return this.#store.queueBehindRun({ conversationId: head, requestId: input.commandId, message: input.text.trim(), messageId: input.messageId });
+	}
+
 	async sendMessage(input: {
 		threadId: string;
 		commandId: string;
@@ -1187,15 +1201,7 @@ export class Bridge {
 				await this.#commands.continue(input.threadId, input.commandId, head, { resumed: { state, runId: input.continuationOf } });
 				return;
 			}
-			// Commands left at the front of a queue that no run works on are answered before this message makes
-			// pi-durable place what is queued: placed, a `/compact` would be a prompt.
-			const resting = state.view?.docs as { "pi.live"?: { run?: unknown }; "pi.inbox"?: { items?: readonly unknown[] } } | undefined;
-			if (resting?.["pi.live"]?.run === undefined && (resting?.["pi.inbox"]?.items?.length ?? 0) > 0) await this.#store.queue.answerLeading(input.threadId);
-			// A `/compact` or `/reload` sent as a queued message waits its turn behind the run that works
-			// (`queued-commands.ts`); with no run to wait behind, or sent any other way, it is answered now.
-			if (input.mode === "queue" && this.queuedCommands.active && queuedCommand(input.text) !== undefined) {
-				if (await this.#store.queueBehindRun({ conversationId: head, requestId: input.commandId, message: input.text.trim(), messageId: input.messageId })) return;
-			}
+			if (await this.#queuesCommand(input, state, head)) return;
 			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
 			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;

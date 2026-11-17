@@ -14,6 +14,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineExtension, GenerationTask, hook, type ConversationId, type EntryRecord as DurableEntry, type Extension, type Harness } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
+import { sentTokens } from "./context-size.ts";
 import type { Logger } from "./logging.ts";
 import type { MessageContext, MessageContextAnswer } from "./message-context.ts";
 import type { ContentBlock } from "./model-types.ts";
@@ -23,7 +24,7 @@ import { messageOf } from "../host-errors.ts";
 /** How long a run's request waits for the integrator's context for a message before it goes on without it. */
 export const MESSAGE_CONTEXT_TIMEOUT_MS = 5_000;
 /** The entry whose context edit adds a message's context to it. No model messages of its own. */
-export const APP_MESSAGE_CONTEXT_ENTRY = "app.message-context";
+const APP_MESSAGE_CONTEXT_ENTRY = "app.message-context";
 /** In a user entry's data: the message gets the integrator's context before a request answers it. */
 export const AWAITS_CONTEXT = "awaitsContext";
 /** How far back a request looks for messages it is the first to answer: a run's tool results lie between. */
@@ -59,8 +60,7 @@ function withContext<M extends { content: unknown }>(message: M, block: ContentB
 	return { ...message, content };
 }
 
-const answered = (entry: DurableEntry): boolean =>
-	(entry.model ?? []).some((message) => message.role === "assistant" && (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.cacheWrite ?? 0) > 0);
+const answered = (entry: DurableEntry): boolean => (entry.model ?? []).some((message) => message.role === "assistant" && sentTokens(message.usage) > 0);
 
 /** The context blocks context edits gave to messages, by the message's entry: what `entries` hold of them. */
 export function contextEdits(entries: readonly { readonly kind: string; readonly edits?: readonly { readonly target: number; readonly messages?: readonly { readonly content?: unknown }[] }[] }[]): Map<number, ContentBlock[]> {

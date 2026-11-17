@@ -41,7 +41,15 @@ async function setup(install = true, extensions: readonly Extension[] = []) {
 	}) as never;
 	const kinds = async () => (await (await conversation(f.harness, thread.head)).entries({ order: "ascending" }, 200, undefined, BACKGROUND_CONTEXT)).items.map((entry) => entry.kind).filter((kind) => kind !== "pi.system");
 	const queued = async () => (await bridge.projection("t")).projection.runs.filter((run) => run.status === "queued").map((run) => (run as unknown as { userMessageId: string }).userMessageId);
-	return { f, bridge, thread, send, answer, requests, raw, kinds, queued };
+	/** Two long answers, so a compaction has something to cut (it keeps the last 20k tokens). */
+	const twoLongTurns = async () => {
+		f.model.respond(answer("zero" + long), answer("one" + long));
+		for (const text of ["zero", "one"]) {
+			await send(text);
+			await idle(f.harness, thread.head);
+		}
+	};
+	return { f, bridge, thread, send, answer, requests, raw, kinds, queued, twoLongTurns };
 }
 
 it("waits behind the run and the messages queued before it, compacts, and then the messages behind it go on", { timeout: 60_000 }, async () => {
@@ -105,13 +113,8 @@ it("compacts at once with no run to wait behind, when it is sent as a steer, and
 });
 
 it("a queued /compact that is removed does nothing; one sent now compacts beside the run", { timeout: 60_000 }, async () => {
-	const { f, bridge, thread, send, answer, requests, kinds, queued } = await setup();
-	// Two long answers, so a compaction has something to cut (it keeps the last 20k tokens).
-	f.model.respond(answer("zero" + long), answer("one" + long));
-	await send("zero");
-	await idle(f.harness, thread.head);
-	await send("one");
-	await idle(f.harness, thread.head);
+	const { f, bridge, thread, send, answer, requests, kinds, queued, twoLongTurns } = await setup();
+	await twoLongTurns();
 	const working = gated("two" + long);
 	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"));
 	await send("two");
@@ -134,12 +137,8 @@ it("a queued /compact that is removed does nothing; one sent now compacts beside
 });
 
 it("a queued /compact left behind a stopped run compacts when the queue is resumed, and the rest follow it", { timeout: 60_000 }, async () => {
-	const { f, bridge, thread, send, answer, requests, kinds, queued } = await setup();
-	f.model.respond(answer("zero" + long), answer("one" + long));
-	await send("zero");
-	await idle(f.harness, thread.head);
-	await send("one");
-	await idle(f.harness, thread.head);
+	const { f, bridge, thread, send, answer, requests, kinds, queued, twoLongTurns } = await setup();
+	await twoLongTurns();
 	const working = gated("two");
 	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"), answer("three"));
 	await send("two");
@@ -195,12 +194,8 @@ it("a queued /reload renders the system prompt again for the message behind it, 
 it("commands queued one behind another are answered together: none is left to be placed as a prompt", { timeout: 60_000 }, async () => {
 	let rule = "Rule one.";
 	const prompted = defineExtension({ name: "rules", sections: [section("rules", (input) => input.shown["rules"] ?? rule, { tag: false })] });
-	const { f, bridge, thread, send, answer, requests, kinds, queued } = await setup(true, [prompted]);
-	f.model.respond(answer("zero" + long), answer("one" + long));
-	await send("zero");
-	await idle(f.harness, thread.head);
-	await send("one");
-	await idle(f.harness, thread.head);
+	const { f, bridge, thread, send, answer, requests, kinds, queued, twoLongTurns } = await setup(true, [prompted]);
+	await twoLongTurns();
 	const working = gated("two");
 	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"), answer("three"));
 	await send("two");
@@ -223,12 +218,8 @@ it("commands queued one behind another are answered together: none is left to be
 });
 
 it("a message sent to a thread whose held queue starts with a command: the command is answered, not placed", { timeout: 60_000 }, async () => {
-	const { f, thread, send, answer, requests, kinds, queued } = await setup();
-	f.model.respond(answer("zero" + long), answer("one" + long));
-	await send("zero");
-	await idle(f.harness, thread.head);
-	await send("one");
-	await idle(f.harness, thread.head);
+	const { f, thread, send, answer, requests, kinds, queued, twoLongTurns } = await setup();
+	await twoLongTurns();
 	const working = gated("two");
 	f.model.respond(answer(working.step as never), answer("## Goal\nsummarized"), answer("new"), answer("three"));
 	await send("two");

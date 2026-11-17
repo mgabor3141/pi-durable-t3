@@ -77,7 +77,7 @@ const HookDoc = defineDocFamily<{ hook: JsonValue | null }, { hook: JsonValue | 
 });
 
 /** T3's `verifyWebhookSignature`: HMAC-SHA256 over the raw body, compared in constant time. */
-export function verifyWebhookSignature(input: { readonly signature: ScheduledTaskWebhookSignature; readonly secret: string; readonly headers: Readonly<Record<string, string>>; readonly body: Uint8Array }): boolean {
+function verifyWebhookSignature(input: { readonly signature: ScheduledTaskWebhookSignature; readonly secret: string; readonly headers: Readonly<Record<string, string>>; readonly body: Uint8Array }): boolean {
 	const received = input.headers[input.signature.header.toLowerCase()];
 	if (received === undefined) return false;
 	const value = received.trim();

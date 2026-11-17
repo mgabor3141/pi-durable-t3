@@ -21,13 +21,13 @@ type IdleThread = {
 };
 
 /** When a thread is compacted, or why it is not (for the log and the tests). */
-export type IdleCompactionWindow = { readonly runId: string; readonly startMs: number; readonly endMs: number } | { readonly skip: string };
+type IdleCompactionWindow = { readonly runId: string; readonly startMs: number; readonly endMs: number } | { readonly skip: string };
 
 /**
  * When an idle thread should be compacted, or why not (T3's `idleCompactionWindow`, for any provider that says how
  * long its prompt cache lives). The window ends when the cache of the run's last request expires.
  */
-export function idleCompactionWindow(
+function idleCompactionWindow(
 	projection: OrchestrationV2ThreadProjection,
 	thread: IdleThread,
 	nowMs: number,
