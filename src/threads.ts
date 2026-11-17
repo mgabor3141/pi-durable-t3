@@ -1130,13 +1130,24 @@ export class Threads {
 	}
 
 	/**
-	 * Every conversation a thread has had as its head, the current one first: the head, and the ones its undos, redos
-	 * and moves left or made, as far back as the record holds them (`MAX_UNDOS`).
+	 * Every conversation a thread and its family have had as a head: the thread's own first, then those of the other
+	 * threads with its root (the threads forked from it, the one it was forked from, their forks), each thread's
+	 * current head before the ones its undos, redos and moves left or made, as far back as its record holds them
+	 * (`MAX_UNDOS`). A conversation is listed once, for the first thread that has it.
 	 */
-	async linesOf(threadId: string): Promise<number[]> {
-		const thread = await this.thread(threadId);
+	async linesOf(threadId: string): Promise<{ readonly conversation: number; readonly threadId: string; readonly title: string; readonly head: boolean }[]> {
+		const threads = await this.list();
+		const thread = threads.find((candidate) => candidate.threadId === threadId);
 		if (thread === undefined) throw hostError("unknown_thread", `no such thread: ${threadId}`);
-		return [...new Set([thread.head, ...thread.undos.flatMap((undo) => [undo.head, undo.from]).reverse()])];
+		const family = [thread, ...threads.filter((candidate) => candidate !== thread && candidate.lineage.rootThreadId === thread.lineage.rootThreadId)];
+		const seen = new Set<number>();
+		return family.flatMap((each) =>
+			[each.head, ...each.undos.flatMap((undo) => [undo.head, undo.from]).reverse()].flatMap((conversation) => {
+				if (seen.has(conversation)) return [];
+				seen.add(conversation);
+				return [{ conversation, threadId: each.threadId, title: each.title, head: conversation === each.head }];
+			}),
+		);
 	}
 
 	/**

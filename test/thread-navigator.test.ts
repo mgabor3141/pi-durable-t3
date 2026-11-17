@@ -14,8 +14,8 @@ import { Bridge } from "../src/t3/bridge.ts";
 import { type LineEntry, type Lines, THREAD_NAV_PATH, treePage, turnTree, type TurnNode } from "../src/t3/thread-navigator.ts";
 import { bridgeConfig, conversation, createNamed, idle, makeThreads, quietLog } from "./threads-harness.ts";
 
-/** The tree as nested lists: `*` on the line the thread is on, `!` where it is. */
-const outline = (nodes: readonly TurnNode[]): unknown[] => nodes.map((node) => [`${node.text}${node.current ? "*" : ""}${node.here ? "!" : ""}`, ...outline(node.children)]);
+/** The tree as nested lists: `*` on the line the thread is on, `!` where it is, `+n` where n other threads are. */
+const outline = (nodes: readonly TurnNode[]): unknown[] => nodes.map((node) => [`${node.text}${node.current ? "*" : ""}${node.here ? "!" : ""}${node.threads.length === 0 ? "" : `+${node.threads.length}`}`, ...outline(node.children)]);
 
 describe("the tree of turns", () => {
 	/** Lines from a sketch: `u` starts a turn, `a` is a response, `x` is bookkeeping (a fork's own entry); `[id, kind, prev]`. */
@@ -45,6 +45,31 @@ describe("the tree of turns", () => {
 			["a6", { conversation: 2, entryId: 6 }],
 		]);
 		expect(tree.lines).toBe(2);
+	});
+
+	it("names the family's other threads where they are, and leaves out the ones that share no turn", () => {
+		// The thread (line 1): u1 a2. A fork of it (line 2) went on: u3 a4. Another (line 3) forked and wrote nothing. A
+		// thread of the family that began on its own (line 4): u10 a11.
+		const family: Lines = {
+			...lines(1, { 1: 2, 2: 4, 3: 2, 4: 11 }, [
+				[1, "u"],
+				[2, "a", 1],
+				[3, "u", 2],
+				[4, "a", 3],
+				[10, "u"],
+				[11, "a", 10],
+			]),
+			own: new Set([1]),
+			others: new Map([
+				[2, { threadId: "b", title: "B" }],
+				[3, { threadId: "c", title: "C" }],
+				[4, { threadId: "d", title: "D" }],
+			]),
+		};
+		const tree = turnTree(family);
+		expect(outline(tree.roots)).toEqual([["u1*!+1", ["u3+1"]]]);
+		expect([tree.nodes.size, tree.lines, tree.threads]).toEqual([2, 1, 3]);
+		expect(treePage(tree, { earlier: 0, later: 0, more: new Map() }, "t").html).toMatch(/class="thread"[^>]*>C<.*class="thread"[^>]*>B</s);
 	});
 
 	it("shows a window around where the thread is, and the first turns of a line that parts", () => {
@@ -124,12 +149,15 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	const fork = (await f.threads.list()).find((thread) => thread.threadId !== "t")!;
 	expect(await context(fork.head)).toEqual(["apples", "pears"]);
 	expect(await head()).toBe(before);
-	expect(await page(command, 2)).toContain("Opened &quot;pears&quot; as a new thread");
+	const forked = await page(command, 2);
+	expect(forked).toContain("Opened &quot;pears&quot; as a new thread");
+	// The page shown again names the new thread on the turn it is at.
+	expect(forked).toMatch(/class="text">pears<.*?class="thread"[^>]*>[^<]*\(from pears\)</s);
 
 	// Go to "plums" on the line that was left: the thread is there, and what it left is still one of its lines.
 	expect(await act("go", keyOf(first, "plums"))).toBe(200);
 	expect(await context(await head())).toEqual(["apples", "pears", "plums"]);
-	expect(await tree()).toEqual([["apples*", ["pears*", ["plums*!"]], ["cherries"]]]);
+	expect(await tree()).toEqual([["apples*", ["pears*+1", ["plums*!"]], ["cherries"]]]);
 	const moved = await page(command, 3);
 	expect(moved).toContain("Moved this thread to &quot;plums&quot;. /redo goes back");
 	// The page before the last is removed: only the last two are kept.
@@ -147,7 +175,9 @@ it("shows every line; go moves the thread to any turn of any line, fork opens it
 	expect(await act("go", keyOf(stale, "pears"))).toBe(200);
 	await say("quinces");
 	expect(await context(await head())).toEqual(["apples", "pears", "quinces"]);
-	expect(await tree()).toEqual([["apples*", ["pears*", ["plums"], ["quinces*!"]], ["cherries"]]]);
+	expect(await tree()).toEqual([["apples*", ["pears*+1", ["plums"], ["quinces*!"]], ["cherries"]]]);
+	// The fork is a thread of the same tree: from it, this thread is the one named.
+	expect(outline((await bridge.navigator.tree(fork.threadId)).roots)).toEqual([["apples*", ["pears*!", ["plums"], ["quinces+1"]], ["cherries"]]]);
 
 	// What a page's button posts: the token in the body is all a caller needs, and all that is checked.
 	const post = (body: string) => bridge.navigator.handle(new Request(`http://host${THREAD_NAV_PATH}`, { method: "POST", headers: { "content-type": "text/plain" }, body }));
