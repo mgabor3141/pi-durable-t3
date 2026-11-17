@@ -121,6 +121,15 @@ the browser-session cookie — the one credential a page can ride — authentica
 credentials: it reads the public descriptor and spends the pairing rate limit, and nothing else
 (`test/auth-boundary.test.ts`).
 
+## Open threads in memory
+
+An open thread keeps its whole transcript for the projection, without image data: each image block says where its
+data is stored, and T3's `tool-output-image` asset reads it from there when a client shows the image
+(`src/t3/image-data.ts`). pi-durable's view holds its window as stored, so the watch's window is the newest 20 to 40
+entries; the view joins each window to the transcript it keeps (pi-durable's `ConversationTranscript`), reading its
+start on open and any gap a stall left. A long thread of screenshots held hundreds of megabytes when the window was
+the whole transcript. A `memory` line in the log (when a client disconnects, and every 30 minutes) gives the sizes.
+
 ## Thread stream
 
 `subscribeThread` is T3's: a bounded first snapshot (T3's `THREAD_HISTORY_PAGE_POLICY` over T3's windowed read, with

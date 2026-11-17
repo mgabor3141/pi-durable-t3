@@ -1,6 +1,7 @@
 // The plain-data mirrors of pi-durable's view shapes that the facet reads — no service or transport API lives here;
 // writes go through the threads layer in `../threads.ts`. The `provider/model` slug helpers live here too: a leaf both
 // sides may import keeps that shared code off a facet→host edge.
+import type { ImageAt } from "./image-data.ts";
 
 /** A `{ provider, modelId }` reference (pi-durable `ModelRef`). */
 export interface ModelRef {
@@ -43,7 +44,8 @@ export type ContentBlock =
 			data?: unknown;
 	  }
 	| { type: "thinking"; thinking: string }
-	| { type: "image"; data: string; mimeType: string }
+	/** `data` is left in the store in what a thread view keeps (`image-data.ts`): `omitted` says where it is. */
+	| { type: "image"; data?: string; mimeType: string; omitted?: ImageAt }
 	| { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> };
 
 /** pi-ai's per-response token and cost accounting (`Usage` in `@earendil-works/pi-ai`), the subset the usage view

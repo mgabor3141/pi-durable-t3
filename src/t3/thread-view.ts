@@ -4,7 +4,8 @@
 // the history above a compaction, and the runs the head's undos rolled back.
 import { entryChars, type ViewMemory } from "./memory-report.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Conversation, ConversationId, Harness, WatchHandle } from "@earendil-works/pi-durable";
+import { type Conversation, type ConversationId, ConversationTranscript, type Harness, type TranscriptView, type WatchHandle } from "@earendil-works/pi-durable";
+import { type ImageAt, imageDataOf, withoutImageData } from "./image-data.ts";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { AppliedUndo } from "../threads.ts";
 import { CommandError } from "./errors.ts";
@@ -63,6 +64,11 @@ interface StreamSubscriber {
 interface Follower {
 	head: number | undefined;
 	watch: WatchHandle<ConversationView> | undefined;
+	/** The head's whole transcript, image data left in the store: what the watch's window showed, and pages read before it. */
+	transcript: ConversationTranscript | undefined;
+	/** The transcript's items last turned into entries, and those entries. */
+	itemsOf: readonly unknown[] | undefined;
+	entries: EntryRecord[];
 	/** Bumped on every head switch, so a callback of a superseded watch changes nothing. */
 	generation: number;
 	/** Bumped on every view, so a slow history load cannot overwrite a newer view. */
@@ -87,11 +93,13 @@ const IDLE_MS = 30_000;
 const EMPTY_VIEW = { conversation: {}, entries: [], docs: {} } as unknown as ConversationView;
 
 /**
- * The view's window: the whole transcript. pi-durable's view holds a window over the transcript (the newest 50 to 100
- * entries by default); the projection reads all of it, as it did when the view was the active context and the history
- * above a compaction was loaded beside it, so the window is made large enough never to drop an entry.
+ * The watch's window: the newest entries, for what changes. The projection reads the whole transcript, which the view
+ * keeps itself (`Follower.transcript`), without image data (`image-data.ts`); pi-durable's view holds its window as
+ * stored, so a window over the whole transcript would keep every image's data in memory while the thread is open.
  */
-const WHOLE_TRANSCRIPT = { min: 1_000_000_000, max: 2_000_000_000 };
+const LIVE_WINDOW = { min: 20, max: 40 };
+/** Entries read per page when the transcript is filled in: its start on open, and a gap after a stall. */
+const PAGE_SIZE = 500;
 
 /**
  * The transcript as the projection reads it: the active context (from the newest compaction's first kept entry, every
@@ -100,16 +108,33 @@ const WHOLE_TRANSCRIPT = { min: 1_000_000_000, max: 2_000_000_000 };
  * The projection shows each summary there, as T3 shows any provider's compaction at the moment it happened; earlier
  * summaries stay in the history the same way.
  */
-/** A conversation's whole transcript, oldest first: the fork-aware history a watch over `WHOLE_TRANSCRIPT` shows. */
+/** A conversation's whole transcript, oldest first, without image data: its fork-aware history. */
 async function wholeTranscript(conversation: Conversation): Promise<EntryRecord[]> {
 	const entries: EntryRecord[] = [];
 	let cursor: Parameters<Conversation["entries"]>[2];
 	do {
-		const page = await conversation.entries({ order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
-		entries.push(...(page.items as unknown as EntryRecord[]));
+		const page = await conversation.entries({ order: "ascending" }, PAGE_SIZE, cursor, BACKGROUND_CONTEXT);
+		entries.push(...(page.items as unknown as EntryRecord[]).map(withoutImageData));
 		cursor = page.next;
 	} while (cursor !== undefined);
 	return entries;
+}
+
+/** A transcript of `conversation` that keeps what it reads without image data. */
+function transcriptOf(conversation: Conversation): ConversationTranscript {
+	return new ConversationTranscript(
+		async (query, limit, context) => {
+			const page = await conversation.entries(query, limit, undefined, context);
+			return { ...page, items: page.items.map((entry) => withoutImageData(entry as unknown as EntryRecord)) as unknown as typeof page.items };
+		},
+		{ pageSize: PAGE_SIZE },
+	);
+}
+
+/** A window's value without image data. */
+function withoutWindowImages(view: ConversationView): ConversationView {
+	const entries = view.entries.map(withoutImageData);
+	return entries.every((entry, index) => entry === view.entries[index]) ? view : { ...view, entries };
 }
 
 export function splitTranscript(entries: readonly EntryRecord[]): { active: EntryRecord[]; history: EntryRecord[] } {
@@ -266,7 +291,7 @@ export class ThreadView {
 			this.#idleTimer = undefined;
 		}
 		if (this.#follower !== undefined) return;
-		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, splitOf: undefined, active: [], history: [], agentKey: undefined, closed: false };
+		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, transcript: undefined, itemsOf: undefined, entries: [], splitOf: undefined, active: [], history: [], agentKey: undefined, closed: false };
 		this.#catalog = this.#host.catalog();
 		const head = this.#host.head(this.threadId);
 		if (head !== undefined) void this.#follow(head);
@@ -332,6 +357,9 @@ export class ThreadView {
 		const generation = ++follower.generation;
 		const previous = follower.watch;
 		follower.watch = undefined;
+		follower.transcript = undefined;
+		follower.itemsOf = undefined;
+		follower.entries = [];
 		follower.splitOf = undefined;
 		follower.active = [];
 		follower.history = [];
@@ -348,16 +376,26 @@ export class ThreadView {
 				await this.#setView(head, EMPTY_VIEW, undefined, current);
 				return;
 			}
-			const watch = (await conversation.watch(BACKGROUND_CONTEXT, WHOLE_TRANSCRIPT)) as unknown as WatchHandle<ConversationView>;
+			const watch = (await conversation.watch(BACKGROUND_CONTEXT, LIVE_WINDOW)) as unknown as WatchHandle<ConversationView>;
 			if (!current()) {
 				await watch.stop().catch(() => {});
 				return;
 			}
 			follower.watch = watch;
+			follower.transcript = transcriptOf(conversation);
+			// One value at a time, in order: filling the transcript in waits on reads, and a later value must not be
+			// overtaken by an earlier one still reading.
+			let line = Promise.resolve();
+			const take = (value: ConversationView): Promise<void> =>
+				(line = line.then(async () => {
+					if (!current()) return;
+					const view = await this.#whole(follower, value, current);
+					if (view !== undefined) await this.#setView(head, view, conversation, current);
+				}));
 			watch.start(async (call) => {
-				if (call.kind === "value" && current()) await this.#setView(head, call.value, conversation, current);
+				if (call.kind === "value") await take(call.value);
 			});
-			await this.#setView(head, watch.value, conversation, current);
+			await take(watch.value);
 		} catch (error) {
 			this.#host.log.warn("could not follow a thread's head", { threadId: this.threadId, head, error: messageOf(error) });
 		}
@@ -384,6 +422,35 @@ export class ThreadView {
 			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
 		}
 		return [...runs.values()];
+	}
+
+	/**
+	 * A value of the watch with the whole transcript as its entries: its window joins the transcript, and what the
+	 * transcript lacks (its start, on open; a gap, after a stall) is read. `undefined` once the head moved on.
+	 */
+	async #whole(follower: Follower, value: ConversationView, current: () => boolean): Promise<ConversationView | undefined> {
+		const transcript = follower.transcript!;
+		let view: TranscriptView = transcript.merge(withoutWindowImages(value) as never);
+		for (;;) {
+			const missing = view.items.find((item) => item.kind !== "entry");
+			if (missing === undefined) break;
+			view = missing.kind === "earlier" ? await transcript.loadEarlier(BACKGROUND_CONTEXT) : await transcript.fillGap(missing, BACKGROUND_CONTEXT);
+			if (!current()) return undefined;
+		}
+		if (view.items !== follower.itemsOf) {
+			follower.itemsOf = view.items;
+			follower.entries = view.items.map((item) => (item as { entry: EntryRecord }).entry);
+		}
+		return { ...value, entries: follower.entries };
+	}
+
+	/** The data of an image this view shows without it, read from the head's transcript as stored. */
+	async imageData(at: ImageAt): Promise<string | undefined> {
+		const head = this.#conversationId;
+		const conversation = head === undefined ? undefined : await this.#host.harness.conversation(head as ConversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) return undefined;
+		const page = await conversation.entries({ minEntryId: at.entryId as never, maxEntryId: at.entryId as never }, 1, undefined, BACKGROUND_CONTEXT);
+		return imageDataOf(page.items[0] as unknown as EntryRecord | undefined, at);
 	}
 
 	/** One view of the head: the history above its compaction cut (loaded once per cut), its configuration (re-read only

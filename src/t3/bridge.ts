@@ -40,7 +40,7 @@ import { ThreadTitles } from "./thread-titles.ts";
 import { UserInputRequests } from "./user-input.ts";
 import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, type ToolImage, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { USER_ENTRY_KINDS } from "./runs.ts";
 import { messageOf } from "../host-errors.ts";
@@ -925,10 +925,20 @@ export class Bridge {
 
 	/** T3's `tool-output-image` asset: the `index`th image a tool row shows (its output's image markers, in order), as
 	 * the model was given it. `null`: the thread has no such row or image. */
-	async toolOutputImage(threadId: string, itemId: string, index: number): Promise<ToolImage | null> {
+	async toolOutputImage(threadId: string, itemId: string, index: number): Promise<{ readonly data: string; readonly mimeType: string } | null> {
 		if (!this.hasThread(threadId)) return null;
 		const { toolImages } = await this.projection(threadId);
-		return toolImages.get(itemId)?.[index] ?? null;
+		const image = toolImages.get(itemId)?.[index];
+		if (image === undefined) return null;
+		if (image.data !== undefined) return { data: image.data, mimeType: image.mimeType };
+		if (image.at === undefined) return null;
+		const release = this.acquire(threadId);
+		try {
+			const data = await this.#viewOf(threadId).imageData(image.at);
+			return data === undefined ? null : { data, mimeType: image.mimeType };
+		} finally {
+			release();
+		}
 	}
 
 	/**

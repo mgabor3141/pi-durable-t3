@@ -28,6 +28,7 @@ import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
+import { type ImageAt, omittedImage } from "./image-data.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
 import { DISPLAY_ONLY_RULE } from "./message-context.ts";
 import { contextEdits as messageContextEdits } from "./message-contexts.ts";
@@ -291,9 +292,10 @@ export interface ProjectionResult {
 	readonly toolImages: ReadonlyMap<string, readonly ToolImage[]>;
 }
 
-/** An image a tool returned, as the model was given it. */
+/** An image a tool returned, as the model was given it: its data, or where the store has it (`image-data.ts`). */
 export interface ToolImage {
-	readonly data: string;
+	readonly data?: string;
+	readonly at?: ImageAt;
 	readonly mimeType: string;
 }
 
@@ -304,8 +306,10 @@ function toolImagesOf(content: ContentBlock[] | string | undefined): ToolImage[]
 	const images: ToolImage[] = [];
 	for (const block of content) {
 		const image = readToolOutputImage(block);
-		if (image?.data === undefined || image.data.length > MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH) continue;
-		images.push({ data: image.data, mimeType: image.mimeType });
+		const at = omittedImage(block);
+		const length = at?.length ?? image?.data?.length;
+		if (image === null || length === undefined || length > MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH) continue;
+		images.push(at === undefined ? { data: image.data!, mimeType: image.mimeType } : { at, mimeType: image.mimeType });
 		if (images.length === MAX_TOOL_OUTPUT_IMAGES) break;
 	}
 	return images;
