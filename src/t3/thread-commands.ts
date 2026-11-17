@@ -2,10 +2,8 @@
 // the last one). `/context`, `/undo` and `/redo` are shown in the thread and kept nowhere (`ShownExchange`).
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { JsonValue } from "@earendil-works/chord/json";
-import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import { HostError } from "../host-errors.ts";
-import type { AppliedUndo } from "../threads.ts";
 import type { BridgeCore } from "./bridge-core.ts";
 import { contextReport, type ContextReportView } from "./context-report.ts";
 import { CommandError } from "./errors.ts";
@@ -13,10 +11,7 @@ import { modelSlug } from "./model-types.ts";
 import type { ShownExchange } from "./projection.ts";
 import { isAssistantEntry, isUserEntry, stopReason } from "./runs.ts";
 import type { ThreadView } from "./thread-view.ts";
-import type { UndoHookAnswer } from "./undo-hooks.ts";
 
-/** How long an undo or a redo waits for the integrator's `undo` hooks. */
-const UNDO_HOOK_TIMEOUT_MS = 30_000;
 /** How many answered commands a thread shows (`ShownExchange`). */
 const MAX_SHOWN = 20;
 
@@ -109,8 +104,6 @@ export class ThreadCommands {
 		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before undoing.");
 		if (projection.runs.some((run) => run.status === "queued")) throw new CommandError("Send or remove the queued messages before undoing.");
 		const entries = new Map(state.transcript.map((entry) => [entry.id, entry]));
-		const before = this.#bridge.thread(threadId)?.undos ?? [];
-		let kept: string | undefined;
 		// The turns a user's message began: a `/compact` or a note that opened a run is not a turn to take back.
 		const turns = runs.filter((run) => {
 			const entry = entries.get(run.userEntryId);
@@ -141,14 +134,13 @@ export class ThreadCommands {
 			// A head that moved meanwhile is left alone, and the fork became a thread of its own (`Threads.rewind`).
 			if ((await this.#bridge.store.thread(threadId))?.head !== fork) throw new CommandError("The thread changed while it was being undone; what was asked for is a new thread beside it.");
 			await state.shows(fork);
-			kept = await this.undone(threadId, `undo:${messageId}`, before, head, entryId);
 		} catch (error) {
 			if (error instanceof HostError && error.code === "not_rewindable") throw new CommandError("That is before a compaction, which cannot be undone past.");
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Stop the current turn before undoing.");
 			throw error;
 		}
 		this.#bridge.log.info("undid", { threadId, steps, count });
-		this.show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\n${kept === undefined ? "" : `${kept}\n\n`}Files and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
+		this.show(threadId, state, { messageId, command: `/undo${argument === "" ? "" : ` ${argument}`}`, answer: `${said} \`/redo\` brings it back, until something new is written.\n\nFiles and anything done outside the conversation are as they were left. Shown here only: not sent to the model, not saved.` });
 	}
 
 	/**
@@ -181,74 +173,30 @@ export class ThreadCommands {
 	async redo(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
 		const { projection } = await state.projection(30_000);
 		if (projection.runs.some((run) => run.status === "running")) throw new CommandError("Stop the current turn before redoing.");
-		let kept: JsonValue | undefined;
 		try {
-			const redone = await this.#bridge.store.redo({ threadId, expectedHead: head });
-			await state.shows(redone.head);
-			kept = redone.kept;
+			await state.shows(await this.#bridge.store.redo({ threadId, expectedHead: head }));
 		} catch (error) {
 			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError(error.message === "the thread has gone on since the undo" ? "The thread has gone on since the undo, so it cannot be taken back here. /redo fork opens what the undo took as a new thread." : "There is no undo to take back.");
 			if (error instanceof HostError && error.code === "turn_running") throw new CommandError("Send or remove the queued messages before redoing.");
 			throw error;
 		}
 		this.#bridge.log.info("redid", { threadId });
-		const hooks = this.#bridge.config.undo;
-		const note = hooks === undefined ? undefined : (await this.#hook(threadId, "redo", (signal) => hooks.redone({ threadId, kept, signal })))?.note;
-		this.show(threadId, state, { messageId, command: "/redo", answer: `Brought back what the last undo took.${note === undefined ? " " : `\n\n${note}\n\n`}Shown here only: not sent to the model, not saved.` });
+		this.show(threadId, state, { messageId, command: "/redo", answer: `Brought back what the last undo took. Shown here only: not sent to the model, not saved.` });
 	}
 
 	/**
 	 * `/redo fork`: what the last undo took, opened as a new thread (`Threads.forkUndone`). This thread stays as it
-	 * is, so it works when the thread has gone on since the undo and `/redo` is refused. What the integrator keeps of
-	 * the undone turns comes back with them, as after a redo.
+	 * is, so it works when the thread has gone on since the undo and `/redo` is refused.
 	 */
 	async redoFork(threadId: string, messageId: string, state: ThreadView, head: number): Promise<void> {
-		let forked: Awaited<ReturnType<Core["store"]["forkUndone"]>>;
+		let fork: Awaited<ReturnType<Core["store"]["forkUndone"]>>;
 		try {
-			forked = await this.#bridge.store.forkUndone({ threadId, expectedHead: head, targetThreadId: randomUUID() });
+			fork = await this.#bridge.store.forkUndone({ threadId, expectedHead: head, targetThreadId: randomUUID() });
 		} catch (error) {
 			if (error instanceof HostError && error.code === "nothing_to_redo") throw new CommandError("There is no undo to take back.");
 			throw error;
 		}
-		this.#bridge.log.info("forked what an undo took", { threadId, fork: forked.record.threadId });
-		const hooks = this.#bridge.config.undo;
-		const note = hooks === undefined ? undefined : (await this.#hook(forked.record.threadId, "redo", (signal) => hooks.redone({ threadId: forked.record.threadId, kept: forked.kept, signal })))?.note;
-		this.show(threadId, state, { messageId, command: "/redo fork", answer: `Opened what the last undo took as a new thread: "${forked.record.title}". This thread is as it was.${note === undefined ? " " : `\n\n${note}\n\n`}Shown here only: not sent to the model, not saved.` });
-	}
-
-	/**
-	 * One of the integrator's `undo` hooks: at most `UNDO_HOOK_TIMEOUT_MS`. The undo or the redo stands whatever it
-	 * does, so a failure is logged and becomes the note: the user is told that what the host keeps did not follow.
-	 */
-	async #hook<T extends UndoHookAnswer>(threadId: string, what: "undo" | "redo", run: (signal: AbortSignal) => Promise<T | undefined>): Promise<T | UndoHookAnswer | undefined> {
-		const signal = AbortSignal.timeout(UNDO_HOOK_TIMEOUT_MS);
-		try {
-			return await Promise.race([
-				run(signal),
-				new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error(`no answer within ${UNDO_HOOK_TIMEOUT_MS / 1000} seconds`)), { once: true })),
-			]);
-		} catch (error) {
-			const message = (error as Error).message || String(error);
-			this.#bridge.log.warn(`the host's ${what} hook failed`, { threadId, error: message });
-			return { note: `What this host keeps of these turns outside the conversation did not follow the ${what}: ${message}` };
-		}
-	}
-
-	/**
-	 * Tell the integrator of an undo that was applied (`UndoHooks.undone`), and keep what it hands back with the undo
-	 * for its redo. `before`: the thread's undos before this one; a command that arrives again is not told twice.
-	 * Returns the integrator's note for the user.
-	 */
-	async undone(threadId: string, requestId: string, before: readonly AppliedUndo[], from: number, entryId: number): Promise<string | undefined> {
-		const hooks = this.#bridge.config.undo;
-		if (hooks === undefined || before.some((undo) => undo.requestId === requestId)) return undefined;
-		// The thread's own conversations: every head it has had, the one it just left first.
-		const conversations = [...new Set([from, ...before.flatMap((undo) => [undo.head, undo.from]).reverse()])] as ConversationId[];
-		const answer = await this.#hook(threadId, "undo", (signal) => hooks.undone({ threadId, conversations, entryId: entryId as EntryId, signal }));
-		if (answer !== undefined && "kept" in answer && answer.kept !== undefined) {
-			const { kept } = answer;
-			await this.#bridge.store.keepWithUndo(threadId, requestId, kept).catch((error: unknown) => this.#bridge.log.warn("what the host handed back for a redo was not kept", { threadId, error: String(error) }));
-		}
-		return answer?.note;
+		this.#bridge.log.info("forked what an undo took", { threadId, fork: fork.threadId });
+		this.show(threadId, state, { messageId, command: "/redo fork", answer: `Opened what the last undo took as a new thread: "${fork.title}". This thread is as it was. Shown here only: not sent to the model, not saved.` });
 	}
 }

@@ -12,18 +12,17 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import { object } from "../src/t3/schema.ts";
-import type { UndoHooks } from "../src/t3/undo-hooks.ts";
 import { conversation, createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
 
 type Item = { id: string; type: string; runId: string | null; text?: string };
 
-async function setup(undo?: UndoHooks) {
+async function setup() {
 	const echo = defineTool({ name: "echo", description: "answers", parameters: object({}), execute: async () => ({ output: [{ type: "text" as const, text: "tool output" }] }) });
 	const f = await makeThreads({ projects: [{ id: "p" }], extensions: [defineExtension({ name: "echo", tools: [echo] })] });
 	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-undo-"));
 	onTestFinished(() => rm(scratch, { recursive: true, force: true }));
-	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, ...(undo === undefined ? {} : { undo }) }), quietLog, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), quietLog, f.threads, f.model.models);
 	bridge.start();
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();
@@ -178,73 +177,6 @@ it("/redo also takes back T3's own Revert", { timeout: 60_000 }, async () => {
 	expect(await context()).toEqual(["user:one", "assistant:answer one", "user:two", "assistant:answer two"]);
 });
 
-// What the integrator keeps of turns outside the conversation (memories) follows: it is told of every undo that was
-// applied, by the command or by T3's Revert, with the thread's own conversations and the entry everything was taken
-// back from; what it hands back is kept with the undo and given to it when a redo returns the turns. Its note is shown.
-it("the integrator's undo hooks are told of an undo and of its redo, and their notes are shown", { timeout: 60_000 }, async () => {
-	const told: string[] = [];
-	const hooks: UndoHooks = {
-		undone: async (event) => {
-			told.push(`undone ${event.conversations.join(",")} from ${event.entryId}`);
-			return { note: "Memory: the notes of that turn were removed.", kept: { turns: [event.entryId] } };
-		},
-		redone: async (event) => {
-			told.push(`redone ${JSON.stringify(event.kept)}`);
-			return { note: "Memory: the notes are being written again." };
-		},
-	};
-	const { f, bridge, send, say, head, shown } = await setup(hooks);
-	f.model.respond(fauxAssistantMessage("answer one"), fauxAssistantMessage("answer two"));
-	await say("one");
-	await say("two");
-	const first = await head();
-	const [one, two] = (await bridge.projection("t")).runs;
-
-	const undo = await send("/undo");
-	expect(told).toEqual([`undone ${first} from ${two!.userEntryId}`]);
-	const left = await head();
-	const note = (await shown(["completed", "rolled_back"])).items.find((item) => item.id === `ti-shown-a${undo}`)!.text!;
-	expect(note).toContain("Took back your last message");
-	expect(note).toContain("Memory: the notes of that turn were removed.");
-	// The same command arriving again is not told twice.
-	await bridge.sendMessage({ threadId: "t", commandId: "again", messageId: undo, text: "/undo", mode: "start" });
-	expect(told).toHaveLength(1);
-
-	const redo = await send("/redo");
-	expect(told[1]).toBe(`redone {"turns":[${two!.userEntryId}]}`);
-	expect((await shown(["completed", "completed"])).items.find((item) => item.id === `ti-shown-a${redo}`)!.text).toContain("Memory: the notes are being written again.");
-
-	// T3's own Revert sends no message to answer: the note is a reply of no run. The thread's own conversations are the
-	// head it leaves and every one it had before, the fork the redo left included: a turn may have run in any of them.
-	const fork = (await f.threads.thread("t"))!.head;
-	expect(fork).toBe(first);
-	await send("/undo");
-	const second = await head();
-	told.length = 0;
-	await bridge.rollback({ threadId: "t", commandId: "revert-1", checkpointId: "cp-baseline", restoreFiles: false });
-	expect(told).toEqual([`undone ${second},${first},${left} from ${one!.userEntryId}`]);
-	const after = await shown(["rolled_back", "rolled_back"]);
-	expect(after.items.find((item) => item.id === "ti-shown-arevert-revert-1")).toMatchObject({ type: "assistant_message", runId: null, text: expect.stringContaining("Memory: the notes of that turn were removed.") });
-	expect(after.items.some((item) => item.id === "ti-shown-urevert-revert-1")).toBe(false);
-});
-
-it("an undo hook that fails does not undo the undo: the user is told what did not follow", { timeout: 60_000 }, async () => {
-	const { f, send, say, context, shown } = await setup({
-		undone: async () => {
-			throw new Error("memory is unreachable");
-		},
-		redone: async () => undefined,
-	});
-	f.model.respond(fauxAssistantMessage("answer one"));
-	await say("one");
-	const undo = await send("/undo");
-	expect(await context()).toEqual([]);
-	expect((await shown(["rolled_back"])).items.find((item) => item.id === `ti-shown-a${undo}`)!.text).toContain("What this host keeps of these turns outside the conversation did not follow the undo: memory is unreachable");
-	// A redo with nothing kept still tells the integrator, with nothing.
-	await send("/redo");
-	expect(await context()).toEqual(["user:one", "assistant:answer one"]);
-});
-
 // T3's client keeps only the newest rows of a long thread, and takes a new row whose ordinal is not above the highest
 // it has seen for history it has not loaded: it drops it (`shouldDropMissingPartialTurnItem`). An undo takes rows away,
 // so numbering the rows that are left by their place would hand the next new row an ordinal the client has seen: the
@@ -289,11 +221,7 @@ it("a row that is new after an undo is numbered above every row a client has see
 });
 
 it("/redo fork opens what the undo took as a new thread, when the thread has gone on and when it has not", { timeout: 60_000 }, async () => {
-	const told: { threadId: string; kept: unknown }[] = [];
-	const { f, send, say, head, context, shown } = await setup({
-		undone: async () => ({ kept: { turns: 1 } }),
-		redone: async (event) => (told.push({ threadId: event.threadId, kept: event.kept }), { note: "Memory: the notes are written again." }),
-	});
+	const { f, send, say, head, context, shown } = await setup();
 	f.model.respond(fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer"), fauxAssistantMessage("another answer"));
 	await say("one");
 	await say("two");
@@ -313,11 +241,8 @@ it("/redo fork opens what the undo took as a new thread, when the thread has gon
 	expect(fork).toMatchObject({ title: "Before undo", lineage: { parentThreadId: "t", relationshipToParent: "fork" } });
 	const forked = (await (await conversation(f.harness, fork.head)).context(BACKGROUND_CONTEXT)).messages.filter((message) => message.role !== "system").map((message) => `${message.role}:${typeof message.content === "string" ? message.content : message.content.map((block) => (block.type === "text" ? block.text : "")).join("")}`);
 	expect(forked, "what the undo took, whole").toEqual(["user:one", "assistant:first answer", "user:two", "assistant:second answer"]);
-	// What the integrator keeps of the undone turns comes back for the new thread.
-	expect(told).toEqual([{ threadId: fork.threadId, kept: { turns: 1 } }]);
 	const answer = (await shown(["completed", "completed", "rolled_back"])).items.find((item) => item.id === `ti-shown-a${command}`)!.text;
 	expect(answer).toContain('Opened what the last undo took as a new thread: "Before undo". This thread is as it was.');
-	expect(answer).toContain("Memory: the notes are written again.");
 	// The fork is a thread like any other.
 	f.model.respond(fauxAssistantMessage("third answer"));
 	await f.threads.submit({ threadId: fork.threadId, conversationId: fork.head, requestId: "rf", message: "three" }, undefined);

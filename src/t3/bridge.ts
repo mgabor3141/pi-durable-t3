@@ -1460,16 +1460,10 @@ export class Bridge {
 			if ("unknown" in target) return `Unknown checkpoint ${input.checkpointId}.`;
 			if ("nothing" in target) return "Nothing to revert.";
 			const expectedHead = await state.head();
-			const before = this.#summary(input.threadId)?.undos ?? [];
 			// The commandId is the rewind's requestId, so the host dedups a retry to one fork (design.md, Invariants).
 			const fork = await this.#store.rewind({ threadId: input.threadId, expectedHead, entryId: target.entryId, requestId: input.commandId });
 			// Shown before it is answered, so a message sent next is not given the conversation the thread just left.
-			if ((await this.#store.thread(input.threadId))?.head === fork) {
-				await state.shows(fork);
-				// T3's Revert sends no message to answer: what the integrator has to say is a reply of no run.
-				const note = await this.#commands.undone(input.threadId, input.commandId, before, expectedHead, target.entryId);
-				if (note !== undefined) this.#commands.show(input.threadId, state, { messageId: `revert-${input.commandId}`, answer: `${note}\n\nShown here only: not sent to the model, not saved.` });
-			}
+			if ((await this.#store.thread(input.threadId))?.head === fork) await state.shows(fork);
 			this.#log.info("rewound thread", { threadId: input.threadId, checkpointId: input.checkpointId });
 			return null;
 		})().catch((error: unknown) => (error as Error).message || "Rewind failed.");

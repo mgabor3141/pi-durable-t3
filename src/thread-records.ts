@@ -90,8 +90,6 @@ export type AppliedUndo = {
 	at?: number | null;
 	/** Taken back by a redo: the thread is on `from` again. */
 	redone?: true;
-	/** What the integrator handed back when it was told of the undo (`UndoHooks.undone`), for the redo. */
-	kept?: JsonValue;
 };
 /**
  * T3's limit recovery: a provider's limit ended the run `runId` and resets at `resetAt`. With `autoResume` the host

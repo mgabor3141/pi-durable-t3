@@ -1094,7 +1094,7 @@ export class Threads {
 	 * (`AppliedUndo.at`), and owe no turn. One redo per undo, newest first; anything written after an undo ends the
 	 * chance to take it back, as in an editor. Returns the head the thread is on again.
 	 */
-	async redo(input: { readonly threadId: string; readonly expectedHead: number }): Promise<{ readonly head: number; readonly kept: JsonValue | undefined }> {
+	async redo(input: { readonly threadId: string; readonly expectedHead: number }): Promise<number> {
 		const head = await this.#harness.conversation(input.expectedHead as ConversationId, BACKGROUND_CONTEXT);
 		if (head === undefined) throw hostError("unknown_thread", `no such conversation: ${input.expectedHead}`);
 		const newest = (await head.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT)).items[0]?.id ?? null;
@@ -1110,7 +1110,7 @@ export class Threads {
 			const directory = await writes.readDirectory();
 			directory.heads[String(undo.from)] = thread.threadId;
 			await writes.putDirectory(directory);
-			return { head: undo.from, kept: undo.kept };
+			return undo.from;
 		});
 	}
 
@@ -1119,24 +1119,14 @@ export class Threads {
 	 * the thread keeps what was written since and the new thread has what was taken back. Works where `redo` does
 	 * not: when the thread has gone on. The new thread is a fork of this one, as T3 shows a fork.
 	 */
-	async forkUndone(input: { readonly threadId: string; readonly expectedHead: number; readonly targetThreadId: string }): Promise<{ readonly record: ThreadRecord; readonly kept: JsonValue | undefined }> {
+	async forkUndone(input: { readonly threadId: string; readonly expectedHead: number; readonly targetThreadId: string }): Promise<ThreadRecord> {
 		const thread = await this.thread(input.threadId);
 		const undo = thread?.undos.findLast((candidate) => candidate.redone !== true && candidate.head === thread.head);
 		if (thread === undefined || thread.head !== input.expectedHead || undo === undefined) throw hostError("nothing_to_redo", "there is no undo to take back");
 		const left = await this.#harness.conversation(undo.from as ConversationId, BACKGROUND_CONTEXT);
 		const newest = (await left?.entries({ order: "descending" }, 1, undefined, BACKGROUND_CONTEXT))?.items[0]?.id;
 		if (newest === undefined) throw hostError("nothing_to_redo", "there is no undo to take back");
-		const record = await this.fork({ sourceThreadId: input.threadId, targetThreadId: input.targetThreadId, entryId: newest as number, conversation: undo.from, title: thread.title === "" ? "Before undo" : `${thread.title} (before undo)` });
-		return { record, kept: undo.kept };
-	}
-
-	/** Keep with an applied undo what the integrator handed back for its redo (`AppliedUndo.kept`). */
-	async keepWithUndo(threadId: string, requestId: string, kept: JsonValue): Promise<void> {
-		await this.updateRecord(threadId, (record) => {
-			const undo = record.undos.find((candidate) => candidate.requestId === requestId);
-			if (undo === undefined) return false;
-			undo.kept = kept;
-		});
+		return this.fork({ sourceThreadId: input.threadId, targetThreadId: input.targetThreadId, entryId: newest as number, conversation: undo.from, title: thread.title === "" ? "Before undo" : `${thread.title} (before undo)` });
 	}
 
 	/**
