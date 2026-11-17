@@ -9,6 +9,7 @@ import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
+import { autoSettleAt } from "../src/t3/sidebar.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, makeThreads, bridgeConfig, gated } from "./threads-harness.ts";
 
@@ -214,4 +215,19 @@ it("tags: added once, in order, removed; in the shell only when there are some; 
 	await dispatch(bridge, { type: "thread.tag.set", threadId: "t", tag: "work", tagged: false });
 	await dispatch(bridge, { type: "thread.tag.set", threadId: "t", tag: "Urgent", tagged: false });
 	expect("tags" in bridge.archivedShellSnapshot().threads[0]!).toBe(false);
+});
+
+// A fork starts on its source's turns: its newest message and run are as old as they were there. Being made is what
+// was last done with it, so it is not settled the minute it is made, and it goes quiet as of then.
+it("a thread made from old turns counts as active from when it was made", () => {
+	const day = 24 * 60 * 60 * 1000;
+	const now = Date.UTC(2026, 10, 17);
+	const at = (ms: number) => DateTime.makeUnsafe(ms);
+	const old = at(now - 30 * day);
+	const fork = (createdAt: number) =>
+		({ archivedAt: null, settledOverride: null, pendingRuntimeRequest: null, status: "completed", createdAt: at(createdAt), latestUserMessageAt: old, latestRunRequestedAt: old, latestRunStartedAt: old, latestRunCompletedAt: old }) as unknown as Parameters<typeof autoSettleAt>[0];
+	expect(autoSettleAt(fork(now - 60_000), 7, now)).toBeNull();
+	expect(autoSettleAt(fork(now - 8 * day), 7, now)).toBe(now - 8 * day);
+	// A thread older than its messages is as before: quiet since the newest of them.
+	expect(autoSettleAt(fork(now - 60 * day), 7, now)).toBe(now - 30 * day);
 });

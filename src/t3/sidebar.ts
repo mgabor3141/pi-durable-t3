@@ -61,6 +61,9 @@ const ms = (value: DateTime.Utc | null | undefined): number | null => (value == 
  * When a thread settles by itself (T3's `resolveAutoSettlementAt` without pull requests and snoozes): a thread nobody
  * settled, pinned or kept active, with no run going, whose last activity is more than `days` old. It settles as of that
  * activity, not as of now, so it sorts among the settled by when it went quiet. `null`: it does not settle.
+ *
+ * Unlike T3's, the thread being made is activity whatever messages it has: a fork starts on its source's turns, so the
+ * newest message and run it has can be weeks old the moment it is made.
  */
 export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, now: number, lastSnoozeWakeAt?: number): number | null {
 	if (shell.archivedAt !== null || shell.settledOverride !== null) return null;
@@ -68,7 +71,7 @@ export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, no
 	if (shell.pendingRuntimeRequest !== null || shell.activityRunStatus != null || shell.status === "running") return null;
 	if (isSnoozed(shell, now)) return null;
 	const times = [shell.latestUserMessageAt, shell.latestRunRequestedAt, shell.latestRunStartedAt, shell.latestRunCompletedAt].map(ms).filter((value) => value !== null);
-	const activityAt = times.length === 0 ? DateTime.toEpochMillis(shell.createdAt) : Math.max(...times);
+	const activityAt = Math.max(DateTime.toEpochMillis(shell.createdAt), ...times);
 	// A snooze that woke the thread (ended early, or ran out) counts as activity, as in T3.
 	const snoozedUntil = ms(shell.snoozedUntil);
 	const timerWakeAt = snoozedUntil !== null && snoozedUntil <= now ? snoozedUntil : null;
