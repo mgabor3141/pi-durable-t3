@@ -49,6 +49,7 @@ import { undoTarget } from "./undo.ts";
 import { CommandError } from "./errors.ts";
 import { MessageContexts } from "./message-contexts.ts";
 import { ThreadNavigator } from "./thread-navigator.ts";
+import { memoryReport } from "./memory-report.ts";
 import { queuedCommand, QueuedCommands } from "./queued-commands.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
@@ -128,6 +129,8 @@ export type ProjectMutation = {
 /** How often T3 sweeps for threads to settle (`ThreadSettlementService`: every minute). */
 /** How long Stop waits for its abort before it answers; the run's end follows on its own. */
 const STOP_ADMIT_MS = 1_000;
+/** How often the memory log is written (`Bridge.memory`); it is also written when a client disconnects. */
+const MEMORY_LOG_MS = 30 * 60_000;
 
 export class Bridge {
 	readonly config: BridgeConfig;
@@ -170,6 +173,7 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
+	#memoryTimer: NodeJS.Timeout | undefined;
 	/** `/thread`: the tree of a thread's lines, and what its page posts to. */
 	readonly navigator: ThreadNavigator;
 	/** The commands that wait in the queue (`T3Attachment.queuedCommands`). */
@@ -247,6 +251,8 @@ export class Bridge {
 		// The threads layer announces every committed change before the write returns: the directory is current after any
 		// awaited write, with no read of its own.
 		this.#changeStop = this.#store.onChange((threadIds) => this.#applyDirectory(threadIds));
+		this.#memoryTimer = setInterval(() => this.#log.info("memory", this.memory()), MEMORY_LOG_MS);
+		this.#memoryTimer.unref();
 		void this.#store
 			.load()
 			.then(() => {
@@ -767,6 +773,11 @@ export class Bridge {
 		if (view === undefined) return;
 		this.#views.delete(threadId);
 		view.forget(error);
+	}
+
+	/** What the host holds in memory, in numbers: the process's own, and the largest open threads. No content. */
+	memory(): Record<string, unknown> {
+		return memoryReport([...this.#views.values()].map((view) => view.memory()), this.#store.searchChars());
 	}
 
 	/** Keep a thread open while `hold` runs or a subscriber exists. */
@@ -1645,6 +1656,7 @@ export class Bridge {
 		// Shutdown cancels the title work it started: the hook's model call stops, and nothing lands on a closed host.
 		this.#titles.close();
 		this.#stops.close();
+		clearInterval(this.#memoryTimer);
 		this.#closed = true;
 		this.sidebar.close();
 		this.#idle.close();

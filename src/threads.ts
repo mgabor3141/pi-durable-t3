@@ -424,6 +424,13 @@ export class Threads {
 	 * the ones written since the last. The whole transcript, not the model's context: T3 searches every message, and a
 	 * compaction takes none of them out of what the thread shows.
 	 */
+	/** The characters search keeps of the threads it has read (the memory log). */
+	searchChars(): number {
+		let chars = 0;
+		for (const read of this.#searched.values()) for (const candidate of read.candidates) chars += candidate.text.length;
+		return chars;
+	}
+
 	readonly #searched = new Map<number, { last: EntryId | undefined; updatedAt: number; candidates: SearchCandidate[] }>();
 
 	async #searchable(thread: Thread): Promise<{ updatedAt: number; candidates: readonly SearchCandidate[] } | undefined> {

@@ -2,6 +2,7 @@
 // read. It lives while it is held (a command, a read, a subscriber) and for a short idle time after; released, it keeps
 // nothing but the small documents the shell reads. Everything it shows is derived from stored state: the head's view,
 // the history above a compaction, and the runs the head's undos rolled back.
+import { entryChars, type ViewMemory } from "./memory-report.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation, ConversationId, Harness, WatchHandle } from "@earendil-works/pi-durable";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
@@ -184,6 +185,12 @@ export class ThreadView {
 	/** The stream's state as subscribers were last brought to it, without a flush (a slow subscriber's catch-up). */
 	get stream(): StreamState | undefined {
 		return this.#stream;
+	}
+
+	/** What this view holds, in numbers (`memoryReport`). */
+	memory(): ViewMemory {
+		const all = [...(this.#history ?? []), ...(this.#view?.entries ?? [])];
+		return { threadId: this.threadId, holds: this.#holds, subscribers: this.#subscribers.size, entries: this.#view?.entries.length ?? 0, history: this.#history?.length ?? 0, rolledBack: this.#rolledBack.length, logEvents: this.#log.length, ...entryChars(all) };
 	}
 
 	// ---- lifetime ---------------------------------------------------------------------------------------------

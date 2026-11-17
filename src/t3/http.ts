@@ -457,8 +457,8 @@ export function makeServerLayer(deps: {
 						}),
 					() => Effect.sync(() => {
 						auth.markDisconnected(tokenHash);
-						const memory = process.memoryUsage();
-						log.info("client disconnected", { ...client, durationMs: Date.now() - connectedAt, heapUsed: memory.heapUsed, rss: memory.rss });
+						log.info("client disconnected", { ...client, durationMs: Date.now() - connectedAt });
+						log.info("memory", bridge.memory());
 					}),
 				);
 				return connection;
