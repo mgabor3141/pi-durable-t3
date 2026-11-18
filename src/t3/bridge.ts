@@ -1440,6 +1440,11 @@ export class Bridge {
 		}
 	}
 
+	/** The messages waiting in a thread's inbox, steers among them (`ThreadQueue.waiting`). */
+	waitingMessages(threadId: string) {
+		return this.#store.queue.waiting(threadId);
+	}
+
 	async cancelQueued(threadId: string, runId: string): Promise<void> {
 		const release = this.acquire(threadId);
 		try {

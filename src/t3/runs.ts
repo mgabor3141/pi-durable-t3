@@ -69,6 +69,23 @@ export const USER_ENTRY_KINDS: ReadonlySet<string> = new Set(["pi.user", "app.us
 export const APP_NOTE_ENTRY = "app.note";
 export const isNoteEntry = (entry: EntryRecord) => (entry.kind === APP_NOTE_ENTRY || COMMAND_NOTE_KINDS.has(entry.kind)) && firstMessage(entry)?.role === "user";
 export const isUserEntry = (entry: EntryRecord) => USER_ENTRY_KINDS.has(entry.kind) && firstMessage(entry)?.role === "user";
+/**
+ * How a message was sent, recorded on its entry (`Threads.submit`): what pi-durable was told to do with it if a run was
+ * working — steer that run or follow it — and when it was sent. A queued message promoted to a steer
+ * (`ThreadQueue.promoteQueued`) is then a steer, `promoted`. The projection labels a message by this record, as T3
+ * labels a message by how it was delivered; entries written before it have none, and are labelled by where they landed.
+ */
+export interface SentAs {
+	readonly whenBusy: "steer" | "followUp";
+	readonly promoted: boolean;
+	readonly sentAt: number | undefined;
+}
+export const sentAs = (data: unknown): SentAs | undefined => {
+	if (!isRecord(data) || (data.whenBusy !== "steer" && data.whenBusy !== "followUp")) return undefined;
+	return { whenBusy: data.whenBusy, promoted: data.promoted === true, sentAt: typeof data.sentAt === "number" ? data.sentAt : undefined };
+};
+/** The task that wrote an entry, or placed it (pi-durable's `byTaskId`); none for a message placed by its own admission. */
+const placedBy = (entry: EntryRecord | undefined): number | undefined => (entry as { byTaskId?: number } | undefined)?.byTaskId;
 /** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
 export const messageIdOf = (entry: EntryRecord): string | undefined => {
 	const data = entry.data;
@@ -214,9 +231,19 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			const current = runs.at(-1);
 			// Messages a run's end placed together (a steer and the message queued behind it) begin one run: the answer
 			// that follows is to both. Each alone would leave the first a run that nothing answered, shown as interrupted.
-			const placedBy = (placed: EntryRecord) => (placed as { byTaskId?: unknown }).byTaskId;
 			const together = current !== undefined && current.steps.length === 0 && current.synthetic !== true && isUserEntry(current.userEntry) && placedBy(entry) !== undefined && placedBy(entry) === placedBy(current.userEntry);
-			if (current !== undefined && (together || (steerable && endsWithCompletedToolRound(current.steps)))) current.steps.push(entry);
+			const atToolRound = current !== undefined && steerable && endsWithCompletedToolRound(current.steps);
+			const sent = sentAs(entry.data);
+			// A steer is a step of the run it was sent into whenever that run placed it: at a tool round, or at its end,
+			// where pi goes on with the steer in the same run (the task that wrote the run's last answer placed it). A
+			// message placed by its own admission started a run of its own. Sent to follow, a message is a run of its own.
+			// An entry with no record is a steer only where it landed: at a completed tool round.
+			const steers =
+				current !== undefined &&
+				(sent === undefined
+					? atToolRound
+					: sent.whenBusy === "steer" && placedBy(entry) !== undefined && (atToolRound || placedBy(entry) === placedBy(current.steps.findLast(isAssistantEntry))));
+			if (current !== undefined && (together || steers)) current.steps.push(entry);
 			else {
 				runs.push({ userEntry: entry, steps: [], ...(pendingCard === undefined ? {} : { card: pendingCard }) });
 				pendingCard = undefined;

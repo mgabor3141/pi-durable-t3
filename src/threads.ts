@@ -631,14 +631,11 @@ export class Threads {
 		const compacting = (live?.compactions?.length ?? 0) > 0;
 		// `waits`: the thread waits for a provider's limit to reset (`LimitRecovery`). Nothing runs, and the message is
 		// queued as it would be behind a run: a steer joins the run when it is continued, the others follow it.
+		// How it was sent, on its entry (`SentAs`): the projection labels it a steer or a queued message by this.
+		const sent = (mode: "steer" | "followUp") => ({ ...data, whenBusy: mode, sentAt: Date.now() });
 		if (compacting || (waits && live?.run === undefined)) {
-			const queued = await this.#enqueueInput(
-				input.conversationId as ConversationId,
-				input.requestId,
-				content,
-				Object.keys(data).length === 0 ? undefined : { kind: APP_USER_ENTRY, data },
-				waits && !compacting && whenBusy === "steer" ? "steer" : "followUp",
-			);
+			const mode = waits && !compacting && whenBusy === "steer" ? "steer" : "followUp";
+			const queued = await this.#enqueueInput(input.conversationId as ConversationId, input.requestId, content, { kind: APP_USER_ENTRY, data: sent(mode) }, mode);
 			await this.#rememberInput(input);
 			return queued;
 		}
@@ -648,7 +645,7 @@ export class Threads {
 				requestId: input.requestId,
 				content,
 				...(whenBusy === undefined ? {} : { whenBusy }),
-				...(Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }),
+				...(whenBusy !== undefined ? { entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } } : Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }),
 			},
 			BACKGROUND_CONTEXT,
 		);

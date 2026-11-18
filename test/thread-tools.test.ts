@@ -280,11 +280,12 @@ it("a busy parent gets its children's reports in its turn, joined into one messa
 		await settled(children[["b1", "b2", "b3"].indexOf(name)]!);
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
-	// One message, steered at the running turn, which the next two joined; it waits for the turn's next boundary.
+	// One message, steered at the running turn, which the next two joined; it waits in that turn, to be read at its
+	// next boundary, and is never queued.
 	const during = await bridge.waitFor("a", (projection) => {
-		const queued = projection.runs.filter((run) => run.status === "queued");
-		const message = queued.length === 1 ? projection.messages.find((candidate) => candidate.id === queued[0]!.userMessageId) : undefined;
-		return message !== undefined && message.text.includes("released b3") ? { queued, message } : undefined;
+		const waiting = projection.turnItems.filter((item) => item.type === "user_message" && item.status === "pending") as { messageId: string }[];
+		const message = waiting.length === 1 ? projection.messages.find((candidate) => candidate.id === waiting[0]!.messageId) : undefined;
+		return message !== undefined && message.text.includes("released b3") && !projection.runs.some((run) => run.status === "queued") ? { message } : undefined;
 	}, 10_000);
 	expect(during, "one pending message holding all three").toBeDefined();
 	expect(during!.message.text).toContain("[AGENT]: released b1");
@@ -308,11 +309,8 @@ it("a report the parent collects while it still waits in its queue is taken out,
 	await settled(first!);
 	gate("r2").release();
 	await settled(second!);
-	const pendingMessage = () =>
-		bridge.projection("a").then(({ projection }) => {
-			const run = projection.runs.find((candidate) => candidate.status === "queued" && (candidate.userMessageId as string).startsWith("n-"));
-			return run === undefined ? undefined : projection.messages.find((message) => message.id === run.userMessageId);
-		});
+	// The report message waiting in the parent's turn: a steer not read yet.
+	const pendingMessage = () => bridge.waitingMessages("a").then((waiting) => waiting.find((message) => message.messageId.startsWith("n-")));
 	await bridge.waitFor("a", (projection) => (projection.messages.some((message) => message.text.includes("released r2") && message.text.includes("released r1")) ? true : undefined), 10_000);
 	// The parent reads the first child itself: that report leaves the message; the other stays.
 	await orchestration.read("a", { threadId: first! });
@@ -515,18 +513,21 @@ it("an agent reads, edits, cancels and promotes another thread's queued messages
 	expect(cancelled).toMatchObject({ sequence: expect.any(Number) });
 	expect(after.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);
 	expect(promoted).toMatchObject({ sequence: expect.any(Number) });
-	// A steer waits for the turn's next boundary, and stays in the queue (editable, removable) until then.
+	// Promoted, it leaves the queue, as in T3: it waits in the running turn for its next boundary.
 	const waiting = await ask("a", { name: "t3_queue", args: { threadId: busy, action: "list" } }).then(() => sawAll(2 + steps.length)).then((all) => all.at(-1));
-	expect(waiting.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);
+	expect(waiting.items).toEqual([]);
+	const inTurn = await bridge.waitFor(busy, (projection) => projection.turnItems.find((item) => item.type === "user_message" && item.text === "first, edited"), 10_000);
+	expect(inTurn).toMatchObject({ status: "pending", inputIntent: "promoted_queued_to_steer", runId: running });
 	gate("q1").release();
-	// Placed when the turn reaches a boundary: here the held answer ends the turn, so pi starts it as the next turn.
+	// Placed when the turn reaches a boundary: here the end of the held answer, where pi goes on with it in that turn.
 	const steered = await bridge.waitFor(
 		busy,
 		(projection) =>
-			projection.runs.every((run) => run.status !== "queued") && projection.turnItems.some((item) => item.type === "user_message" && item.text === "first, edited") ? projection : undefined,
+			projection.runs.every((run) => run.status !== "queued") && projection.turnItems.some((item) => item.type === "user_message" && item.text === "first, edited" && item.status === "completed") ? projection : undefined,
 		10_000,
 	);
 	expect(steered, "the promoted message left the queue when pi placed it, as edited").toBeDefined();
+	expect(steered!.turnItems.find((item) => item.type === "user_message" && item.text === "first, edited")).toMatchObject({ status: "completed", runId: running });
 });
 
 it("an agent runs a scheduled task now", { timeout: 60_000 }, async () => {

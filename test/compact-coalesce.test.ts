@@ -76,7 +76,9 @@ describe("manual compact", () => {
 		await compacting;
 		await idle(harness, thread.head);
 		const all = await (await conversation(harness, thread.head)).entries({ order: "ascending" }, 300, undefined, BACKGROUND_CONTEXT);
-		expect(all.items.some((entry) => entry.kind === "pi.user" && JSON.stringify(entry.model ?? "").includes("queued while compacting"))).toBe(true);
+		// Its entry records that it was queued (`SentAs`), so it is the host's `app.user`.
+		const placed = all.items.find((entry) => JSON.stringify(entry.model ?? "").includes("queued while compacting"));
+		expect(placed).toMatchObject({ kind: "app.user", data: { whenBusy: "followUp" } });
 		expect(all.items.some((entry) => entry.kind === "pi.assistant" && JSON.stringify(entry.model ?? "").includes("queued reply"))).toBe(true);
 	});
 });

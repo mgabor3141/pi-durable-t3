@@ -9,7 +9,7 @@ import { hostError } from "./host-errors.ts";
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
 import { HeldQueueDoc, type Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
-import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
+import { type QueuedInput, readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import { queuedCommand, takeCommands, type TakenCommand } from "./t3/queued-commands.ts";
 import type { MessageInput } from "./threads.ts";
 
@@ -57,6 +57,14 @@ export class ThreadQueue {
 		const value = runId.startsWith("q") ? runId.slice(1) : runId;
 		if (!/^[0-9]+$/.test(value)) throw hostError("unknown_queued_message", `not a queued message: ${runId}`);
 		return Number(value) as unknown as SubmissionId;
+	}
+
+	/** The messages waiting in a thread's inbox, steers and queued follow-ups, in inbox order. A steer is no queued run
+	 * while a run takes it (T3 shows it in that run), so this, not the queue rows, names every message not placed yet; a
+	 * waiting message is addressed by its submission id. */
+	async waiting(threadId: string): Promise<QueuedInput[]> {
+		const { conversationId } = await this.#queueTarget(threadId);
+		return readQueuedInputs((await this.#threads.harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT))?.items);
 	}
 
 	/** Cancel a queued follow-up: withdraw its submission, which removes it from the inbox and the queue row. */
@@ -166,7 +174,12 @@ export class ThreadQueue {
 			// A queued command sent now is answered now, beside the run, as one typed without queueing is.
 			const [input] = readQueuedInputs([item]);
 			const queued = input === undefined ? undefined : queuedCommand(input.text);
-			if (input === undefined || queued === undefined) return void (item.mode = "steer");
+			if (input === undefined || queued === undefined) {
+				item.mode = "steer";
+				// The record the projection labels it by (`SentAs`): a steer now, one that was queued first.
+				if (item.entry !== undefined) item.entry = { ...item.entry, data: { ...((item.entry.data as Record<string, never> | undefined) ?? {}), whenBusy: "steer", promoted: true } };
+				return;
+			}
 			tx.settleSubmission(item.id, { status: "unanswered", reason: "started" });
 			inbox.items.splice(inbox.items.indexOf(item), 1);
 			return { ...queued, messageId: input.messageId };

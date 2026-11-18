@@ -266,17 +266,13 @@ export class Orchestration {
 	 * queued follow-up); cancel a message left with none. One placed meanwhile stays, as T3 leaves a delivered notice. */
 	async #retract(caller: string, child: string): Promise<void> {
 		if (this.#bridge.threadRecord(caller) === undefined) return;
-		const projection = await this.#projection(caller);
-		for (const run of projection.runs) {
-			if (run.status !== "queued" || !(run.userMessageId as string).startsWith("n-")) continue;
-			const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
-			if (message === undefined) continue;
+		for (const message of await this.#waitingReports(caller)) {
 			const blocks = reportBlocks(message.text);
 			const kept = blocks.filter((block) => reportChild(block) !== child);
 			if (kept.length === blocks.length) continue;
 			try {
-				if (kept.length === 0) await this.#bridge.cancelQueued(caller, run.id as string);
-				else await this.#bridge.editQueued(caller, run.id as string, kept.join("\n\n"));
+				if (kept.length === 0) await this.#bridge.cancelQueued(caller, String(message.submissionId));
+				else await this.#bridge.editQueued(caller, String(message.submissionId), kept.join("\n\n"));
 				this.#log.info("thread report taken back", { from: child, to: caller, emptied: kept.length === 0 });
 			} catch {
 				// Placed meanwhile: the caller has it in its turn.
@@ -548,11 +544,6 @@ export class Orchestration {
 	 * holds its report (sent before a crash) is only dropped. */
 	async #deliver(caller: string, items: readonly OutboxItem[], projection: OrchestrationV2ThreadProjection): Promise<void> {
 		const ordered = items.toSorted((left, right) => left.request.createdAt - right.request.createdAt);
-		const queuedReport = (messageId: string) => {
-			const message = projection.messages.find((candidate) => (candidate.id as string) === messageId);
-			const run = message === undefined ? undefined : projection.runs.find((candidate) => candidate.id === message.runId);
-			return message !== undefined && run?.status === "queued" && (run.userMessageId as string) === messageId ? { message, runId: run.id as string } : undefined;
-		};
 		const sent: OutboxItem[] = [];
 		const fresh: OutboxItem[] = [];
 		// Reports a stopped process put in a message it never sent: that message, sent now under its id.
@@ -569,15 +560,12 @@ export class Orchestration {
 		if (fresh.length > 0) {
 			const text = fresh.map(({ child, report }) => `${reportHeader(report.title, child, report.verdict)}\n${report.text}`).join("\n\n");
 			// T3 adds a sibling to its queued completion notice; ours is the newest report message still queued.
-			const pending = projection.runs
-				.filter((run) => run.status === "queued" && (run.userMessageId as string).startsWith("n-"))
-				.map((run) => queuedReport(run.userMessageId as string))
-				.findLast((candidate) => candidate !== undefined);
+			const pending = (await this.#waitingReports(caller)).at(-1);
 			let delivered = false;
 			if (pending !== undefined) {
-				await this.#mark(fresh, pending.message.id as string);
+				await this.#mark(fresh, pending.messageId);
 				delivered = await this.#bridge
-					.editQueued(caller, pending.runId, `${pending.message.text}\n\n${text}`)
+					.editQueued(caller, String(pending.submissionId), `${pending.text}\n\n${text}`)
 					.then(() => true)
 					.catch(() => false);
 			}
@@ -609,6 +597,12 @@ export class Orchestration {
 			automatic: true,
 		});
 		this.#log.info("thread reports delivered", { to: caller, from: items.map((item) => item.child), verdicts: items.map((item) => item.report.verdict), steer });
+	}
+
+	/** The report messages still waiting in `caller`'s inbox, not placed yet: a steer its running turn has not read, or
+	 * a queued message. */
+	async #waitingReports(caller: string) {
+		return (await this.#bridge.waitingMessages(caller)).filter((message) => message.messageId.startsWith("n-"));
 	}
 
 	/** Write the message a report goes into on its request, before it is sent. */

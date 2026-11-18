@@ -23,7 +23,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, stopReason, authorOf } from "./runs.ts";
+import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, sentAs, stopReason, authorOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
@@ -709,7 +709,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		completedAt: done ? time(end) : null,
 		updatedAt: time(end),
 	});
-	const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer") => {
+	const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer" | "promoted_queued_to_steer") => {
 		const message = firstMessage(entry)!;
 		const messageId = messageIdOf(entry) ?? `m${entry.id}`;
 		// The compaction anchor is shown as the card, not as the summary in a bubble: report the prompt the clients
@@ -731,7 +731,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		const idle = isCompactCommandEntry(entry) && (entry.data as { idleCompaction?: unknown } | undefined)?.idleCompaction === "beforeCacheExpires" ? { idleCompaction: "beforeCacheExpires" as const } : {};
 		const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
 		turnItems.push({
-			...base(`ti-u${entry.id}`, at, "completed", true),
+			...base(userItemId(entry.data, messageId) ?? `ti-u${entry.id}`, at, "completed", true),
 			...author,
 			...sender,
 			type: "user_message",
@@ -1084,7 +1084,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
 		if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 		if (isUserEntry(step) || isNoteEntry(step)) {
-			pushUser(step, "steer");
+			pushUser(step, sentAs(step.data)?.promoted === true ? "promoted_queued_to_steer" : "steer");
 			return;
 		}
 		// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
@@ -1144,6 +1144,31 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		);
 	}
 	pushShown(Infinity);
+	// The steers pi has not placed yet: in the run they steer, waiting to be read, as T3 shows a steer its provider
+	// holds until the agent reads it (`steer.updated` pending). pi reads one at the run's next boundary: after the tool
+	// calls in flight, or at the end of the answer. The row is the one the placed steer keeps (`userItemId`), so it
+	// stays where it is and only stops waiting; the run's newer rows come after it until it is placed among them.
+	if (draft === steeredDraft(b)) {
+		for (const steer of waitingSteers(b)) {
+			const sent = sentAs(steer.entry?.data);
+			const at = sent?.sentAt ?? requestedAt;
+			const { senderThreadId, ...author } = authorOf(steer.entry?.data);
+			const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
+			const context = contextOf(steer.entry as EntryRecord) ?? contextFromText(steer.text, steer.attachments);
+			turnItems.push({
+				...base(userItemId(steer.entry?.data, steer.messageId) ?? `ti-w${steer.submissionId}`, at, "pending", false),
+				...author,
+				...sender,
+				type: "user_message",
+				messageId: id(steer.messageId),
+				inputIntent: sent?.promoted === true ? "promoted_queued_to_steer" : "steer",
+				text: steer.text,
+				attachments: [...steer.attachments],
+				...(context === undefined ? {} : { context }),
+			} as Any);
+			messages.push({ ...author, ...sender, id: id(steer.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: steer.text, attachments: [...steer.attachments], ...(context === undefined ? {} : { context }), streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
+		}
+	}
 	// A Stop the run has not answered yet: its end removes this, as a run that ends removes T3's banner.
 	const stop = running ? meta.stop : undefined;
 	if (stop !== undefined) {
@@ -1197,15 +1222,29 @@ function projectLiveCompactions(b: Build): void {
 	}
 }
 
+/** A user message's turn item, keyed by its message id as T3 keys one (`userTurnItem({ messageId })`) when the entry
+ * records how it was sent: a steer's row is the same while it waits and once it is placed. Older entries keep theirs. */
+const userItemId = (data: unknown, messageId: string): string | undefined => (sentAs(data) === undefined ? undefined : `ti-m${messageId}`);
+
+const inboxOf = (b: Build) => readQueuedInputs((b.view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items);
+
+/** The run a waiting steer is shown in: the agent's run while it works. Nothing runs (a Stop, a failure, a wait for a
+ * limit): the steer waits in the queue, held, as pi keeps it. A manual compaction is no run a steer joins. */
+const steeredDraft = (b: Build): RunDraft | undefined =>
+	b.live?.run !== undefined && b.manualCompactionRunId === null && b.newestDraft?.markerOnly !== true ? b.newestDraft : undefined;
+
+const waitingSteers = (b: Build) => inboxOf(b).filter((item) => item.mode === "steer");
+
 function projectQueued(b: Build): void {
-	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, runs, messages } = b;
-	// Queued follow-ups and steers live in pi's inbox until a boundary places them: a steer at the running turn's next
-	// boundary (after the tool call in flight, which may be a long script), a follow-up when the turn ends. T3's queue
-	// reads them as runs, so project each as a queued run now, steers first, as pi places them: T3 offers edit and remove
-	// on a queued run, and nothing on a steer it believes delivered (a provider of its own steers at once). It disappears
-	// from here when the inbox item is placed: a steer then shows in the turn, a follow-up as its own run.
-	const inbox = readQueuedInputs((view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined)?.items);
-	const queued = [...inbox.filter((item) => item.mode === "steer"), ...inbox.filter((item) => item.mode === "followUp")];
+	const { meta, threadId, providerThreadId, modelSelection, drafts, busy, runs, messages } = b;
+	// Queued messages live in pi's inbox until a boundary places them: a follow-up when the turn ends, a steer at the
+	// running turn's next boundary. T3's queue reads queued messages as runs, so project each follow-up as a queued run,
+	// with edit and remove; it disappears from here when it is placed, as a run of its own. A steer is shown in the run
+	// it steers, waiting to be read (`steeredDraft`), as T3 shows a steer: never in the queue. Only when no run takes it
+	// (stopped, failed, waiting for a limit) is it queued here, first, as pi places it, and held until the thread goes on.
+	const inbox = inboxOf(b);
+	const steers = steeredDraft(b) === undefined ? inbox.filter((item) => item.mode === "steer") : [];
+	const queued = [...steers, ...inbox.filter((item) => item.mode === "followUp")];
 	queued.forEach((item, index) => {
 		const ordinal = drafts.length + index + 1;
 		const queuedRunId = `q${item.submissionId}`;

@@ -77,7 +77,9 @@ them, on a contributor's `pnpm install`, in a consumer's install from git, and b
 
 The code shows what each operation does. These are the rules it cannot show on its own.
 
-- **A run is one user turn.** A user message that arrives while a run is in progress steers that run.
+- **A run is one user turn.** A message sent to steer a run is a step of that run when the run placed it (at a tool
+  round, or at the end of its answer, where pi goes on with it); a message sent to follow starts a run of its own.
+  The entry records how it was sent (`SentAs` in `runs.ts`), and pi-durable's `byTaskId` which run placed it.
 - **Retries are answered from state.** A prompt's command id becomes pi-durable's request id, so a resent
   prompt runs once, even across a restart. A resent project create finds the entry it already wrote and
   answers with it.

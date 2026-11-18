@@ -79,6 +79,31 @@ describe("groupRuns: where a run ends and a steer begins (F3)", () => {
 		expect(new Set(messages.map((message) => message.runId)).size, "one run owns both user messages").toBe(1);
 	});
 
+	it("a message that records how it was sent is labelled by that: a steer is the steer of the run that placed it, a queued message a run of its own", () => {
+		// `byTaskId`: the task that wrote an entry or placed it. pi places a steer with the task that wrote the run's
+		// latest answer; a message sent while nothing runs is placed by its own admission, with none.
+		const by = (entry: EntryRecord, task: number | undefined) => ({ ...entry, ...(task === undefined ? {} : { byTaskId: task }) }) as EntryRecord;
+		const sent = (id: number, text: string, whenBusy: "steer" | "followUp", task: number | undefined, promoted = false) =>
+			by({ ...user(id, text), data: { messageId: `u${id}`, whenBusy, sentAt: id, ...(promoted ? { promoted: true } : {}) } } as unknown as EntryRecord, task);
+		// At the end of an answer: a steer stays in its run (pi goes on with it there), a follow-up starts one.
+		const atEnd = [user(1, "go"), by(answered(2, "one"), 7), sent(3, "steer", "steer", 7), sent(4, "follow", "followUp", 7), by(answered(5, "both"), 8)];
+		expect(shape(atEnd)).toEqual([{ user: 1, steps: [2, 3] }, { user: 4, steps: [5] }]);
+		expect(intents(atEnd)).toEqual(["turn_start", "steer", "turn_start"]);
+		// The same entries with no record: labelled by where they landed, as before.
+		const unrecorded = [user(1, "go"), by(answered(2, "one"), 7), by(user(3, "steer"), 7), by(user(4, "follow"), 7), by(answered(5, "both"), 8)];
+		expect(shape(unrecorded)).toEqual([{ user: 1, steps: [2] }, { user: 3, steps: [4, 5] }]);
+		// A steer sent while nothing ran (a run stopped after its tool round) starts a run: no run placed it.
+		const afterStop = [user(1, "go"), by(toolAsk(2, "call-1"), 7), by(toolAnswer(3, "call-1"), 9), sent(4, "next", "steer", undefined)];
+		expect(shape(afterStop)).toEqual([{ user: 1, steps: [2, 3] }, { user: 4, steps: [] }]);
+		// At a tool round, and promoted from the queue first.
+		const promoted = [user(1, "go"), by(toolAsk(2, "call-1"), 7), by(toolAnswer(3, "call-1"), 9), sent(4, "now", "steer", 7, true)];
+		expect(shape(promoted)).toEqual([{ user: 1, steps: [2, 3, 4] }]);
+		expect(intents(promoted)).toEqual(["turn_start", "promoted_queued_to_steer"]);
+		// Its row is keyed by its message id, the row it had while it waited.
+		const ids = projectThread(meta, viewOf(promoted), { rolledBack: [] }).projection.turnItems.filter((item) => item.type === "user_message").map((item) => item.id);
+		expect(ids).toEqual(["ti-u1", "ti-mu4"]);
+	});
+
 	it("run status follows the last stop reason: answered, failed, interrupted", () => {
 		expect(statuses([user(1, "a"), answered(2, "ok")])).toEqual(["completed"]);
 		expect(statuses([user(1, "a"), failed(2, "boom")])).toEqual(["failed"]);

@@ -3,7 +3,7 @@
 import type { UserAttachment } from "./runs.ts";
 
 /** One queued follow-up or steer, with the inbox fields a queued-message edit or promotion changes. */
-interface QueuedInput {
+export interface QueuedInput {
 	readonly submissionId: number;
 	readonly mode: "steer" | "followUp";
 	readonly messageId: string;
