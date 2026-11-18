@@ -9,7 +9,7 @@ import { hostError } from "./host-errors.ts";
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
 import { HeldQueueDoc, type Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
-import { type QueuedInput, readQueuedInputs, withQueuedText } from "./t3/queued.ts";
+import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import { queuedCommand, takeCommands, type TakenCommand } from "./t3/queued-commands.ts";
 import type { MessageInput } from "./threads.ts";
 
@@ -23,6 +23,15 @@ type QueueHost = {
 	compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void>;
 	reload(threadId: string, messageId?: string): Promise<void>;
 };
+
+/** A message waiting in a thread's inbox (`ThreadQueue.waiting`): a queued-message command addresses it by its
+ * submission id. */
+export interface WaitingMessage {
+	readonly submissionId: number;
+	readonly mode: "steer" | "followUp";
+	readonly messageId: string;
+	readonly text: string;
+}
 
 export class ThreadQueue {
 	readonly #threads: QueueHost;
@@ -62,9 +71,10 @@ export class ThreadQueue {
 	/** The messages waiting in a thread's inbox, steers and queued follow-ups, in inbox order. A steer is no queued run
 	 * while a run takes it (T3 shows it in that run), so this, not the queue rows, names every message not placed yet; a
 	 * waiting message is addressed by its submission id. */
-	async waiting(threadId: string): Promise<QueuedInput[]> {
+	async waiting(threadId: string): Promise<WaitingMessage[]> {
 		const { conversationId } = await this.#queueTarget(threadId);
-		return readQueuedInputs((await this.#threads.harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT))?.items);
+		const items = readQueuedInputs((await this.#threads.harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT))?.items);
+		return items.map(({ submissionId, mode, messageId, text }) => ({ submissionId, mode, messageId, text }));
 	}
 
 	/** Cancel a queued follow-up: withdraw its submission, which removes it from the inbox and the queue row. */
