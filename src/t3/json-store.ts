@@ -1,18 +1,8 @@
-// One writer for the facet's JSON files: read tolerantly, write atomically and owner-only, one host per state dir.
+// One writer for the facet's JSON files: write atomically and owner-only, one host per state dir.
 // The unique temp name, the `wx` create and the 0600 chmod are design.md's invariant (the files the host writes
 // always parse); a rename is atomic, but a crash after it publishes a zero-length file unless the bytes are fsynced first.
-import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, lstatSync, openSync, readlinkSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-
-/** Read a JSON file, tolerantly: missing or unparseable is the caller's fallback — the rule for the facet's OWN
- * credential state. The UI's documents are parsed STRICTLY by their readers (design.md, state.md). */
-export function readJson<T>(path: string, fallback: T): T {
-	try {
-		return JSON.parse(readFileSync(path, "utf8")) as T;
-	} catch {
-		return fallback;
-	}
-}
 
 let tempCounter = 0;
 

@@ -4,9 +4,11 @@
 // revokes them over the Connections endpoints (`./http.ts`), which read and write this one store.
 import { AuthStandardClientScopes, type AuthMcpClientAccess, mcpClientScopes } from "@t3tools/contracts";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJsonAtomic } from "./json-store.ts";
+import { fail } from "../config.ts";
+import { messageOf } from "../host-errors.ts";
+import { writeJsonAtomic } from "./json-store.ts";
 
 /** The subject T3 hides from the pairing-links list: the host's own startup credential. `mintPairingCode` mints a
  * link a *user* copies by hand, so it is a one-time token, and it shows — like `t3 auth pairing create`. */
@@ -72,9 +74,9 @@ interface AuthFile {
 	environmentId: string;
 	pairings: StoredPairing[];
 	tokens: StoredToken[];
-	/** The HMAC key (base64url, 32 bytes) that signs attachment-upload and asset-access tokens. Generated on first
-	 * read and persisted here, so a minted link survives a restart (one host per dir). */
-	assetKey?: string;
+	/** The HMAC key (base64url, 32 bytes) that signs attachment-upload and asset-access tokens. Generated with the
+	 * file and persisted here, so a minted link survives a restart (one host per dir). */
+	assetKey: string;
 }
 
 /** One change to the access state, as the `subscribeAuthAccess` stream projects it. The record rides along: a
@@ -108,43 +110,37 @@ const newSecret = (bytes = 24) => randomBytes(bytes).toString("base64url");
 const newAuthFile = (): AuthFile => ({ environmentId: `pi-${newSecret(9)}`, pairings: [], tokens: [], assetKey: newSecret(32) });
 const standardScopes = () => [...AuthStandardClientScopes];
 
-/** Entries written before links and sessions carried ids, scopes and client metadata get them once, on read, and
- * the file is rewritten (`#read`): a minted id must stay stable, so a migration is persisted, not re-derived.
- * A legacy pairing came from the host's `pair` command, so it is a one-time token with the standard grant; a
- * legacy token was exchanged from one, so it carries the same subject and scopes. */
-function normalize(data: AuthFile): { file: AuthFile; migrated: boolean } {
-	let migrated = false;
-	const pairings = data.pairings.map((pairing) => {
-		const raw = pairing as Partial<StoredPairing>;
-		if (typeof raw.id === "string" && raw.id.length > 0 && Array.isArray(raw.scopes) && typeof raw.subject === "string") return pairing;
-		migrated = true;
-		return {
-			id: randomUUID(),
-			hash: pairing.hash,
-			subject: ONE_TIME_TOKEN_SUBJECT,
-			scopes: standardScopes(),
-			createdAt: pairing.expiresAt - PAIRING_CODE_TTL_SECONDS * 1000,
-			expiresAt: pairing.expiresAt,
-		};
-	});
-	const tokens = data.tokens.map((token) => {
-		const raw = token as Partial<StoredToken>;
-		if (typeof raw.id === "string" && raw.id.length > 0 && Array.isArray(raw.scopes) && typeof raw.subject === "string") return token;
-		migrated = true;
-		return {
-			id: randomUUID(),
-			hash: token.hash,
-			subject: ONE_TIME_TOKEN_SUBJECT,
-			scopes: standardScopes(),
-			method: "bearer-access-token" as const,
-			deviceType: "unknown" as DeviceType,
-			...(token.label === undefined ? {} : { label: token.label }),
-			createdAt: token.createdAt,
-			expiresAt: token.expiresAt,
-			...(token.lastConnectedAt === undefined ? {} : { lastConnectedAt: token.lastConnectedAt }),
-		};
-	});
-	return { file: { ...data, pairings, tokens }, migrated };
+/** The fields each list's entries must carry; the others are optional. */
+const REQUIRED_FIELDS = {
+	pairings: ["id", "hash", "subject", "scopes", "createdAt", "expiresAt"],
+	tokens: ["id", "hash", "subject", "scopes", "method", "deviceType", "createdAt", "expiresAt"],
+} as const;
+
+/** Parse auth.json strictly: a file of another shape is refused, naming the file and the field, and never filled in
+ * (design.md, Migrations). Only presence and type are checked: the values are the store's own writing. */
+function parseAuthFile(file: string, text: string): AuthFile {
+	let data: unknown;
+	try {
+		data = JSON.parse(text);
+	} catch (error) {
+		fail(file, messageOf(error));
+	}
+	const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+	if (!isRecord(data)) fail(file, "the file must contain a JSON object");
+	for (const key of ["environmentId", "assetKey"]) if (typeof data[key] !== "string" || data[key] === "") fail(file, `${key} must be a non-empty string`);
+	for (const [list, fields] of Object.entries(REQUIRED_FIELDS)) {
+		const entries = data[list];
+		if (!Array.isArray(entries)) fail(file, `${list} must be an array`);
+		entries.forEach((entry: unknown, at) => {
+			if (!isRecord(entry)) fail(file, `${list}[${at}] must be an object`);
+			for (const field of fields) {
+				const value = entry[field];
+				const valid = field === "scopes" ? Array.isArray(value) : field.endsWith("At") ? typeof value === "number" : typeof value === "string";
+				if (!valid) fail(file, `${list}[${at}].${field} is missing or of the wrong type`);
+			}
+		});
+	}
+	return data as unknown as AuthFile;
 }
 
 export class AuthStore {
@@ -165,24 +161,20 @@ export class AuthStore {
 		this.#read();
 	}
 
-	// A store that is missing (deleted after start) or unparseable starts over, persisted at once so the environmentId
-	// does not change on every read. The UI's documents are parsed strictly (`json-store.ts`); this one is the facet's own.
+	// A missing store (a first run, or deleted after start) starts over, persisted at once so the environmentId does
+	// not change on every read. Anything else that cannot be read is a ConfigError naming the file, and the file is left
+	// alone: starting over would unpair every device and give T3 a new environment.
 	#read(): AuthFile {
-		const stored = readJson<AuthFile | undefined>(this.#file, undefined);
-		if (stored === undefined) {
+		let text: string;
+		try {
+			text = readFileSync(this.#file, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			const fresh = newAuthFile();
 			this.#write(fresh);
 			return fresh;
 		}
-		const { file, migrated } = normalize(stored);
-		// A store written before asset signing gets a key once, persisted: a minted link must not change across reads.
-		if (typeof file.assetKey !== "string" || file.assetKey.length === 0) {
-			file.assetKey = newSecret(32);
-			this.#write(file);
-			return file;
-		}
-		if (migrated) this.#write(file);
-		return file;
+		return parseAuthFile(this.#file, text);
 	}
 
 	#write(data: AuthFile): void {
@@ -509,7 +501,7 @@ export class AuthStore {
 	/** Sign a token payload with the store's asset key (HMAC-SHA256, base64url) — the `<payload>.<signature>`
 	 * format T3 mints for attachment-upload and asset-access URLs (`auth/utils.ts` at the pin). */
 	signPayload(payload: string): string {
-		return createHmac("sha256", Buffer.from(this.#read().assetKey!, "base64url")).update(payload).digest("base64url");
+		return createHmac("sha256", Buffer.from(this.#read().assetKey, "base64url")).update(payload).digest("base64url");
 	}
 
 	/** Verify a token's signature, in constant time, against its canonical encoding: a signature that differs only
