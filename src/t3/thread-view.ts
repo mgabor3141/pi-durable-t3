@@ -384,14 +384,18 @@ export class ThreadView {
 			follower.watch = watch;
 			follower.transcript = transcriptOf(conversation);
 			// One value at a time, in order: filling the transcript in waits on reads, and a later value must not be
-			// overtaken by an earlier one still reading.
+			// overtaken by an earlier one still reading. A value that fails is logged and the line goes on: a rejected line
+			// would skip every later value (and end the watch), leaving the thread frozen as it was; the next value is
+			// projected from the whole view again.
 			let line = Promise.resolve();
 			const take = (value: ConversationView): Promise<void> =>
-				(line = line.then(async () => {
-					if (!current()) return;
-					const view = await this.#whole(follower, value, current);
-					if (view !== undefined) await this.#setView(head, view, conversation, current);
-				}));
+				(line = line
+					.then(async () => {
+						if (!current()) return;
+						const view = await this.#whole(follower, value, current);
+						if (view !== undefined) await this.#setView(head, view, conversation, current);
+					})
+					.catch((error: unknown) => this.#host.log.warn("could not project a thread's view", { threadId: this.threadId, head, error: messageOf(error) })));
 			watch.start(async (call) => {
 				if (call.kind === "value") await take(call.value);
 			});

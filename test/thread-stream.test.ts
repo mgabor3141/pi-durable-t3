@@ -211,3 +211,28 @@ it("a rollback streams as events, and leaves the client where the web app's reve
 	const again = watcher.current()!;
 	expect(Object.fromEntries(again.runs.map((run) => [run.id, run.status]))).toEqual({ [first!.id]: "completed", [second!.id]: "rolled_back", [third.id]: "rolled_back" });
 });
+
+it("one projection that throws does not freeze an open thread: the next value of its head is shown", { timeout: 60_000 }, async () => {
+	const { f, bridge, idle, send } = await open();
+	const watcher = client(bridge);
+	f.model.respond(fauxAssistantMessage("first"));
+	await send(1, "hello");
+	await idle();
+	// One throw while a view of the head is projected (here: the approvals read the metadata makes).
+	const shown = bridge.approvals.shown.bind(bridge.approvals);
+	let armed = true;
+	(bridge.approvals as unknown as { shown: typeof shown }).shown = (threadId: string) => {
+		if (!armed) return shown(threadId);
+		armed = false;
+		throw new Error("transient");
+	};
+	f.model.respond(fauxAssistantMessage("second"));
+	await send(2, "again");
+	await idle();
+	await sleep(150);
+	expect(armed, "the projection threw once").toBe(false);
+	const { projection } = await bridge.projection("t");
+	expect(projection.runs.map((run) => run.status)).toEqual(["completed", "completed"]);
+	expect(projection.messages.some((message) => message.text === "second")).toBe(true);
+	expect(watcher.current()!.runs.map((run) => run.status)).toEqual(["completed", "completed"]);
+});
