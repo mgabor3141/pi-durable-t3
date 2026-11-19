@@ -164,7 +164,7 @@ export class Orchestration {
 	}
 
 	#existing(threadId: string, caller: string | undefined): string {
-		if (!this.#bridge.hasThread(threadId) || this.#bridge.threadRecord(threadId) === undefined) throw new ThreadToolError(`No thread ${threadId}.`);
+		if (!this.#bridge.hasThread(threadId)) throw new ThreadToolError(`No thread ${threadId}.`);
 		if (threadId === caller) throw new ThreadToolError("A thread cannot prompt itself.");
 		return threadId;
 	}
@@ -472,7 +472,7 @@ export class Orchestration {
 				while (!this.#closed) {
 					const box = this.#outbox.get(caller);
 					if (box === undefined || box.size === 0) return;
-					const callerGone = this.#bridge.threadRecord(caller) === undefined || !this.#bridge.hasThread(caller);
+					const callerGone = !this.#bridge.hasThread(caller);
 					// Read before the outbox is: a report handed over meanwhile is then seen with the projection it is judged on.
 					const projection = callerGone ? undefined : await this.#projection(caller);
 					// As the records hold them now: withdrawn ones are gone, and a message written before a crash is kept.

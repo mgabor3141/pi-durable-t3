@@ -190,10 +190,10 @@ export class Bridge {
 				return store.harness;
 			},
 			log,
-			head: (threadId) => this.#summary(threadId)?.head,
-			undos: (threadId) => this.#summary(threadId)?.undos ?? [],
+			head: (threadId) => this.#thread(threadId)?.head,
+			undos: (threadId) => this.#thread(threadId)?.undos ?? [],
 			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow, ...(model.promptCache === undefined ? {} : { promptCache: model.promptCache }) })),
-			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
+			meta: (threadId, view) => this.#meta(threadId, this.#thread(threadId), view),
 			nextSequence: () => bridge.nextSequence(),
 			projected: (view, change) => this.#projected(view, change),
 		};
@@ -211,14 +211,14 @@ export class Bridge {
 			store,
 			navigator: this.navigator,
 			closed: () => this.#closed,
-			thread: (threadId) => this.#summary(threadId),
+			thread: (threadId) => this.#thread(threadId),
 			threads: () => this.#directory,
 			acquire: (threadId) => this.acquire(threadId),
 			projection: (threadId) => this.projection(threadId),
 			shell: (threadId) => this.#shellFor(threadId),
 			view: (threadId) => this.#viewOf(threadId),
 			republish: (threadId) => this.#republish(threadId),
-			meta: (threadId, view) => this.#meta(threadId, this.#summary(threadId), view),
+			meta: (threadId, view) => this.#meta(threadId, this.#thread(threadId), view),
 			hasThread: (threadId) => this.hasThread(threadId),
 			textGenerationModel: () => this.textGenerationModel(),
 		};
@@ -486,14 +486,14 @@ export class Bridge {
 
 	// ---- shell ------------------------------------------------------------------------------------------------
 
-	#summary(threadId: string): Thread | undefined {
+	#thread(threadId: string): Thread | undefined {
 		return this.#directory.find((thread) => thread.threadId === threadId);
 	}
 
 	/** Does this host know the thread? A thread absent from the threads document is the typed not-found on every path
 	 * (design.md, Invariants): REST 404, WS the contract's typed error. */
 	hasThread(threadId: string): boolean {
-		return this.#summary(threadId) !== undefined;
+		return this.#thread(threadId) !== undefined;
 	}
 
 	/** Resolves once the thread list has loaded. */
@@ -502,7 +502,7 @@ export class Bridge {
 	}
 
 	threadProjectId(threadId: string): string | undefined {
-		return this.#summary(threadId)?.projectId;
+		return this.#thread(threadId)?.projectId;
 	}
 
 	#meta(threadId: string, thread: Thread | undefined, state: ThreadView | undefined): ThreadMeta {
@@ -571,7 +571,7 @@ export class Bridge {
 	#shellFor(threadId: string): OrchestrationV2ThreadShell {
 		const view = this.#views.get(threadId);
 		if (view?.result !== undefined) return view.result.shell;
-		return projectThread(this.#meta(threadId, this.#summary(threadId), view), undefined, { rolledBack: view?.rolledBack ?? [] }).shell;
+		return projectThread(this.#meta(threadId, this.#thread(threadId), view), undefined, { rolledBack: view?.rolledBack ?? [] }).shell;
 	}
 
 	/**
@@ -581,7 +581,7 @@ export class Bridge {
 	workspaceRoots(): string[] {
 		const roots = new Set(this.#configured().map((project) => project.path));
 		for (const thread of this.#directory) {
-			const meta = this.#meta(thread.threadId, this.#summary(thread.threadId), this.#views.get(thread.threadId));
+			const meta = this.#meta(thread.threadId, this.#thread(thread.threadId), this.#views.get(thread.threadId));
 			if (meta.projectPath !== undefined && meta.cwd.startsWith(`${meta.projectPath}/`)) roots.add(meta.cwd);
 		}
 		return [...roots];
@@ -653,7 +653,7 @@ export class Bridge {
 		this.#shells.set(threadId, shell);
 		this.#emitShell({ kind: "thread.updated", sequence: this.nextSequence(), location: "active", thread: shell });
 		// A child's change is its parent's card: an open parent re-projects.
-		const parent = this.#summary(threadId)?.spawn === undefined ? undefined : this.#summary(threadId)?.lineage.parentThreadId;
+		const parent = this.#thread(threadId)?.spawn === undefined ? undefined : this.#thread(threadId)?.lineage.parentThreadId;
 		if (parent != null) this.#views.get(parent)?.recompute();
 	}
 
@@ -695,7 +695,7 @@ export class Bridge {
 
 	/** A child's run settled: keep its outcome on its record, so its parent's card is right after the child's view closes. */
 	#recordOutcome(view: ThreadView): void {
-		const spawn = this.#summary(view.threadId)?.spawn;
+		const spawn = this.#thread(view.threadId)?.spawn;
 		const projection = view.result?.projection;
 		if (spawn === undefined || projection === undefined) return;
 		const run = projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
@@ -719,7 +719,7 @@ export class Bridge {
 
 	/** A live thread's record with its summary, from memory. */
 	threadRecord(threadId: string): Thread | undefined {
-		return this.#summary(threadId);
+		return this.#thread(threadId);
 	}
 
 	/** Every live thread, in creation order. */
@@ -773,7 +773,7 @@ export class Bridge {
 	#projected(view: ThreadView, change: { readonly loaded: boolean; readonly settled: boolean }): void {
 		// A load writes the first snapshot; a run boundary writes the assistant reply without a per-token document write.
 		const run = this.#keptRun(view);
-		const kept = this.#summary(view.threadId)?.summary?.latestRun;
+		const kept = this.#thread(view.threadId)?.summary?.latestRun;
 		const runChanged = run !== undefined && JSON.stringify(run) !== JSON.stringify(kept ?? null);
 		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
@@ -1044,7 +1044,7 @@ export class Bridge {
 		const project = this.config.registry.list().find((p) => p.id === options.projectId);
 		if (project === undefined) throw new CommandError(`Unknown project: ${options.projectId}`);
 		const id = options.threadId !== undefined && SESSION_ID.test(options.threadId) ? options.threadId : randomUUID();
-		if (this.#summary(id) !== undefined) return id;
+		if (this.#thread(id) !== undefined) return id;
 		const scratchRoot = this.config.scratchDir;
 		let cwd: string | undefined;
 		if (options.launchText !== undefined && scratchRoot !== undefined && isScratchRoot(project.cwd, scratchRoot)) {
@@ -1206,7 +1206,7 @@ export class Bridge {
 			const head = await state.head();
 			// T3's Orchestrator wakes a settled thread on new activity; the explicit override is cleared before the run. A
 			// message someone sent also ends a snooze; an automatic one (a note, a child's report) does not.
-			const record = this.#summary(input.threadId);
+			const record = this.#thread(input.threadId);
 			const snooze = input.automatic !== true && input.note !== true && record?.snoozedUntil !== undefined;
 			if (record?.settledOverride !== undefined || snooze) {
 				await this.#store.wake(input.threadId, snooze);
@@ -1225,7 +1225,7 @@ export class Bridge {
 			// A side chat's own rows start empty (its inherited history is not shown), so its first message seeds its title, as
 			// T3's side chat has no messages before it.
 			const seeded = seed !== undefined && seed !== "" && (!this.#hasMessages(state) || record?.pendingContext?.type === "side_chat");
-			const previousTitle = this.#summary(input.threadId)?.title ?? "";
+			const previousTitle = this.#thread(input.threadId)?.title ?? "";
 			if (seeded) {
 				this.#titles.cancel(input.threadId);
 				await this.#titles.store(input.threadId, seed);
@@ -1284,7 +1284,7 @@ export class Bridge {
 				if (seeded) {
 					void this.#titles.complete(input.threadId, input.commandId, undefined);
 					// T3 stores the seed and the message in one command: a message that did not land leaves no seed title.
-					if (this.#summary(input.threadId)?.title === seed) void this.#titles.store(input.threadId, previousTitle).catch(() => {});
+					if (this.#thread(input.threadId)?.title === seed) void this.#titles.store(input.threadId, previousTitle).catch(() => {});
 				}
 				throw error;
 			});
@@ -1462,7 +1462,7 @@ export class Bridge {
 		try {
 			await this.#store.queue.startQueued(threadId, runId, requestId);
 			// The queue was started by hand: the thread no longer waits for a limit to reset.
-			if (this.#summary(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
+			if (this.#thread(threadId)?.limitRecovery !== undefined) await this.#store.updateRecord(threadId, (record) => void delete record.limitRecovery);
 		} finally {
 			release();
 		}
@@ -1517,7 +1517,7 @@ export class Bridge {
 		const sideChat = input.sideChat === true;
 		if (sideChat) {
 			// T3's ThreadForkService: side chats do not nest, and a subagent starts none.
-			const record = this.#summary(input.sourceThreadId);
+			const record = this.#thread(input.sourceThreadId);
 			if (record === undefined) throw new CommandError(`Thread ${input.sourceThreadId} was deleted.`);
 			if (record.lineage.sideChat === true) throw new CommandError("A side chat cannot start another side chat.");
 			if (record.lineage.relationshipToParent === "subagent") throw new CommandError("A subagent cannot start a side chat.");
@@ -1570,12 +1570,12 @@ export class Bridge {
 	async mergeBack(input: { sourceThreadId: string; targetThreadId: string; sourcePoint: { type: "latest_stable" } | { type: "run"; runId: string } | { type: "checkpoint"; checkpointId: string } }): Promise<void> {
 		const release = this.acquire(input.targetThreadId);
 		try {
-			const source = this.#summary(input.sourceThreadId);
+			const source = this.#thread(input.sourceThreadId);
 			if (source === undefined) throw new CommandError(`Unknown thread: ${input.sourceThreadId}`);
 			if (source.lineage.relationshipToParent !== "fork" || source.lineage.parentThreadId !== input.targetThreadId) {
 				throw new CommandError(`Thread ${input.sourceThreadId} is not a fork of ${input.targetThreadId}.`);
 			}
-			const target = this.#summary(input.targetThreadId);
+			const target = this.#thread(input.targetThreadId);
 			if (target === undefined) throw new CommandError(`Unknown thread: ${input.targetThreadId}`);
 			const { projection: targetProjection } = await this.projection(input.targetThreadId);
 			if (targetProjection.runs.some(isActiveRun)) {
@@ -1608,7 +1608,7 @@ export class Bridge {
 	/** The context a thread's pending transfer gives its next message, as a hidden block shown as a row, or nothing when
 	 * there is none. A fork brought back that is gone since gives nothing, and the transfer is dropped. */
 	async #pendingContext(threadId: string): Promise<{ readonly pending: PendingContext; readonly block: ContentBlock | undefined } | undefined> {
-		const record = this.#summary(threadId);
+		const record = this.#thread(threadId);
 		const pending = record?.pendingContext;
 		if (record === undefined || pending === undefined) return undefined;
 		const forkedFromRun = (thread: Thread) => (thread.forkedFrom?.type === "run" ? thread.forkedFrom.runId : undefined);
@@ -1619,8 +1619,8 @@ export class Bridge {
 			const { projection } = await this.projection(parentId);
 			return { pending, block: block(sideChatNote(parentId, projection, forkedFromRun(record)), SIDE_CHAT_ROW, { threadId: parentId, title: projection.thread.title }) };
 		}
-		const source = this.#summary(pending.sourceThreadId);
-		if (source === undefined || !this.hasThread(pending.sourceThreadId)) {
+		const source = this.#thread(pending.sourceThreadId);
+		if (source === undefined) {
 			this.#log.warn("the fork brought back is gone; nothing is added", { threadId, from: pending.sourceThreadId });
 			return { pending, block: undefined };
 		}
