@@ -572,8 +572,6 @@ export class Bridge {
 						lineage: thread.lineage,
 						forkedFrom: thread.forkedFrom,
 						...(thread.forkEntryId === undefined ? {} : { forkEntryId: thread.forkEntryId }),
-						...(thread.linkOrigin === undefined ? {} : { linkOrigin: thread.linkOrigin }),
-						...(thread.delegatedFrom === undefined ? {} : { delegatedFrom: thread.delegatedFrom }),
 					}),
 			...(thread?.settledOverride === undefined ? {} : { settledOverride: thread.settledOverride }),
 			...(thread?.settledAt === undefined ? {} : { settledAt: thread.settledAt }),
@@ -1551,11 +1549,11 @@ export class Bridge {
 		if (SESSION_ID.test(input.targetThreadId) === false) throw new CommandError(`Invalid thread id: ${input.targetThreadId}`);
 		const sideChat = input.sideChat === true;
 		if (sideChat) {
-			// T3's ThreadForkService: side chats do not nest, and a subagent (or a task delegated here) starts none.
+			// T3's ThreadForkService: side chats do not nest, and a subagent starts none.
 			const record = this.#summary(input.sourceThreadId);
 			if (record === undefined) throw new CommandError(`Thread ${input.sourceThreadId} was deleted.`);
 			if (record.lineage.sideChat === true) throw new CommandError("A side chat cannot start another side chat.");
-			if (record.lineage.relationshipToParent === "subagent" || record.delegatedFrom !== undefined) throw new CommandError("A subagent cannot start a side chat.");
+			if (record.lineage.relationshipToParent === "subagent") throw new CommandError("A subagent cannot start a side chat.");
 		}
 		const source = await this.projection(input.sourceThreadId);
 		// T3's `latest_stable` for a side chat is the newest completed run; one opened during the first turn has none.

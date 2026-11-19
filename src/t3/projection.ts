@@ -196,8 +196,6 @@ export interface ThreadMeta {
 	/** The threads this one started (`thread_prompt` with `new`), each shown as a card in the run that started it (T3's
 	 * app-owned subagent: a real thread that takes messages). */
 	readonly children?: readonly ChildCard[];
-	readonly linkOrigin?: { readonly sessionId: string; readonly label: string; readonly access?: string };
-	readonly delegatedFrom?: { readonly environmentId: string; readonly threadId: string; readonly title: string };
 	/** T3's manual settlement, durable on the thread row. */
 	readonly settledOverride?: "settled" | "active";
 	readonly settledAt?: number;
@@ -1454,8 +1452,6 @@ function projectRows(b: Build) {
 		activeProviderThreadId: drafts.length === 0 ? null : id(providerThreadId),
 		lineage: lineage(),
 		forkedFrom: forkedFrom(),
-		...(meta.linkOrigin === undefined ? {} : { linkOrigin: meta.linkOrigin }),
-		...(meta.delegatedFrom === undefined ? {} : { delegatedFrom: { ...meta.delegatedFrom, environmentId: id(meta.delegatedFrom.environmentId), threadId: id(meta.delegatedFrom.threadId) } }),
 		createdAt: time(meta.createdAt),
 		updatedAt,
 		settledOverride: meta.settledOverride ?? null,

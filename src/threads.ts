@@ -46,7 +46,7 @@ const APP_USER_ENTRY = "app.user";
 const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
 
 import { ThreadQueue } from "./thread-queue.ts";
-import { type Provenance, USER_WEB, type ThreadLineage, type Spawn, type ThreadSummary, type ThreadRecord, type Thread, ThreadsDoc, type LinkOrigin, type DelegatedFrom, type StoredSummary, NO_SUMMARY, MAX_UNDOS, MAX_RECEIPTS, ThreadRecordDoc, ThreadSummaryDoc, type Directory, ReceiptsDoc } from "./thread-records.ts";
+import { type Provenance, USER_WEB, type ThreadLineage, type Spawn, type ThreadSummary, type ThreadRecord, type Thread, ThreadsDoc, type StoredSummary, NO_SUMMARY, MAX_UNDOS, MAX_RECEIPTS, ThreadRecordDoc, ThreadSummaryDoc, type Directory, ReceiptsDoc } from "./thread-records.ts";
 export type { Provenance, ThreadLineage, PendingContext, NotifyRequest, Spawn, SummaryRun, ThreadSummary, AppliedUndo, LimitRecovery, ThreadRecord, ThreadOpens, Thread, ThreadOrigin } from "./thread-records.ts";
 export { USER_WEB, HeldQueueDoc, ThreadsDoc } from "./thread-records.ts";
 
@@ -72,8 +72,6 @@ type CreateInput = {
 	readonly lineage?: ThreadLineage;
 	readonly forkedFrom?: ThreadRecord["forkedFrom"];
 	readonly spawn?: Spawn;
-	readonly linkOrigin?: LinkOrigin;
-	readonly delegatedFrom?: DelegatedFrom;
 };
 export type MessageInput = {
 	readonly threadId: string;
@@ -468,8 +466,6 @@ export class Threads {
 		lineage?: ThreadLineage;
 		forkedFrom?: ThreadRecord["forkedFrom"];
 		spawn?: Spawn;
-		linkOrigin?: LinkOrigin;
-		delegatedFrom?: DelegatedFrom;
 	}): ThreadRecord {
 		return {
 			threadId: input.threadId,
@@ -482,8 +478,6 @@ export class Threads {
 			lineage: input.lineage ?? { parentThreadId: null, relationshipToParent: null, rootThreadId: input.threadId },
 			forkedFrom: input.forkedFrom ?? null,
 			...(input.spawn === undefined ? {} : { spawn: input.spawn }),
-			...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
-			...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			deletedAt: null,
 			undos: [],
 			revision: 0,
@@ -510,7 +504,6 @@ export class Threads {
 			title: via?.title ?? "",
 			provenance: via === undefined ? USER_WEB : { createdBy: via.createdBy, creationSource: via.creationSource },
 			lineage: { parentThreadId: viaThreadId, relationshipToParent: "fork", rootThreadId: via?.lineage.rootThreadId ?? viaThreadId },
-			...(via?.linkOrigin === undefined ? {} : { linkOrigin: via.linkOrigin }),
 		});
 	}
 
@@ -567,8 +560,6 @@ export class Threads {
 				...(input.lineage === undefined ? {} : { lineage: input.lineage }),
 				...(input.forkedFrom === undefined ? {} : { forkedFrom: input.forkedFrom }),
 				...(input.spawn === undefined ? {} : { spawn: input.spawn }),
-				...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
-				...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
 			});
 			await this.#addThread(writes, record);
 			return record;
@@ -1249,7 +1240,6 @@ export class Threads {
 							? null
 							: { type: "run", threadId: source.threadId, runId: input.runId },
 				...(input.child === undefined ? {} : { spawn: input.child.spawn }),
-				...(source.linkOrigin === undefined ? {} : { linkOrigin: source.linkOrigin }),
 			});
 			if (input.sideChat === true) {
 				record.pendingContext = { type: "side_chat" };

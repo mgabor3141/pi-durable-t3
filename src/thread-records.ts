@@ -26,10 +26,6 @@ export type ThreadLineage = {
 /** Context a thread's next message carries to the model (T3's pending context transfer), built when that message is
  * sent: a side chat's note about its main thread, or a fork's conversation brought back (`thread.merge_back`). */
 export type PendingContext = { type: "side_chat" } | { type: "merge_back"; sourceThreadId: string; runId: string };
-/** T3's `OrchestrationV2LinkOrigin`: the linked environment's session whose agent started this work here. Set once. */
-export type LinkOrigin = { sessionId: string; label: string; access?: string };
-/** T3's `OrchestrationV2DelegatedFrom`: the thread in a linked environment that delegated this one. */
-export type DelegatedFrom = { environmentId: string; threadId: string; title: string };
 /**
  * A message that asked to be answered (`thread_prompt`'s `notify`): when the activity it started or joined in this thread
  * settles, the activity's report is posted into `threadId`, the sender's thread. Kept on the receiving thread's record
@@ -129,8 +125,6 @@ export type ThreadRecord = {
 	pendingContext?: PendingContext;
 	/** A side chat's fork entry: its rows are the entries after it (T3: a side chat shows only its own rows). */
 	forkEntryId?: number;
-	linkOrigin?: LinkOrigin;
-	delegatedFrom?: DelegatedFrom;
 	/** T3's manual settlement: `settled` hides the thread in the sidebar until it is un-settled. */
 	settledOverride?: "settled" | "active";
 	settledAt?: number;

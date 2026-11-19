@@ -210,6 +210,5 @@ for when we build it:
 - **Remote delegation:** `delegate_task` can target a linked environment; the parent records `remoteChild`, and a
   follower completes the task when the remote child settles.
 
-Our side already has the server half: `/mcp` with T3's tool surface, OAuth with pairing-code approval, and thread
-records with `linkOrigin` and `delegatedFrom`. What is missing is the client half (T3's `PeerLinks`,
-`PeerMcpClient`, `PeerForwarding`).
+Our side already has the server half: `/mcp` with T3's tool surface and OAuth with pairing-code approval. What is
+missing is the client half (T3's `PeerLinks`, `PeerMcpClient`, `PeerForwarding`).

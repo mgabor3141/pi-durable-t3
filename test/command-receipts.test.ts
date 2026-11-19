@@ -85,6 +85,6 @@ it("a client's thread.create is the user's, and cannot claim a link origin or a 
 	await dispatchCommand(bridge, forged, clientProvenance(forged), log);
 	const record = (await f.threads.list()).find((thread) => thread.threadId === "t-forged")!;
 	expect({ createdBy: record.createdBy, creationSource: record.creationSource }).toEqual({ createdBy: "user", creationSource: "mcp" });
-	expect(record.linkOrigin).toBeUndefined();
-	expect(record.delegatedFrom).toBeUndefined();
+	expect("linkOrigin" in record).toBe(false);
+	expect("delegatedFrom" in record).toBe(false);
 }, 30_000);
