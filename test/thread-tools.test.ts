@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
+import { dispatchCommand } from "../src/t3/dispatch.ts";
+import { USER_WEB } from "../src/threads.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { Orchestration } from "../src/t3/orchestration.ts";
 import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
@@ -533,6 +535,8 @@ it("an agent reads, edits, cancels and promotes another thread's queued messages
 	expect(edited).toMatchObject({ sequence: expect.any(Number) });
 	expect(read).toEqual({ queuedRunId: firstId, text: "first, edited", truncated: false });
 	expect(reorder.error).toContain("reorder is not supported by pi-durable-t3");
+	// T3's own reorder command is refused for the same reason, by name.
+	await expect(dispatchCommand(bridge, { type: "queued-run.reorder", commandId: "reorder-1", threadId: busy, runId: secondId, beforeRunId: firstId } as never, USER_WEB, log)).rejects.toThrow("the queue keeps the order messages were sent in");
 	expect(wrongTarget.error).toContain("is not the running turn");
 	expect(cancelled).toMatchObject({ sequence: expect.any(Number) });
 	expect(after.items.map((item: { queuedRunId: string }) => item.queuedRunId)).toEqual([firstId]);

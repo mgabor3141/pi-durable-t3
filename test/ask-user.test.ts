@@ -74,7 +74,9 @@ it("asks with T3's card, and the answer is what the call returns", { timeout: 60
 
 	// An answer from another thread, with a decision instead of answers, or with files, is refused.
 	await expect(command({ type: "runtime-request.respond", threadId: "other", requestId: "uq-call-1", answers: { q1: "SQLite" } })).rejects.toThrow(/no longer pending|Unknown thread/);
-	await expect(command({ type: "runtime-request.respond", requestId: "uq-call-1", decision: "accept" })).rejects.toThrow("pi runs without approvals");
+	await expect(command({ type: "runtime-request.respond", requestId: "uq-call-1", decision: "accept" })).rejects.toThrow("A question is answered, not approved");
+	// A card this host does not hold (any more) is refused as no longer pending.
+	await expect(command({ type: "runtime-request.respond", requestId: "rr-gone", answers: { q1: "SQLite" } })).rejects.toThrow("Runtime request rr-gone is no longer pending.");
 	await expect(command({ type: "runtime-request.respond", requestId: "uq-call-1", answers: { q1: "SQLite" }, attachmentsByQuestionId: { q1: [{ type: "image", id: "a", name: "a.png", mimeType: "image/png", sizeBytes: 1 }] } })).rejects.toThrow(/attachmentsByQuestionId is not supported/);
 
 	await command({ type: "runtime-request.respond", requestId: "uq-call-1", answers: { q1: "SQLite", regions: ["EU", "US"], q3: "ledger", stray: "not asked" } });

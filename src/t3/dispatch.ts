@@ -181,7 +181,8 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 					bridge.approvals.respond({ threadId: command.threadId, requestId: command.requestId, decision: command.decision, ...(command.feedback === undefined ? {} : { feedback: command.feedback }) });
 					break;
 				}
-				if (command.answers === undefined || !bridge.userInput.owns(command.requestId)) throw new CommandError(unsupportedMessage(command.type));
+				if (!bridge.userInput.owns(command.requestId)) throw new CommandError(`Runtime request ${command.requestId} is no longer pending.`);
+				if (command.answers === undefined) throw new CommandError("A question is answered, not approved: send answers, not a decision.");
 				if (Object.values(command.attachmentsByQuestionId ?? {}).some((attached) => attached.length > 0)) {
 					throw new CommandError("attachmentsByQuestionId is not supported by pi-durable-t3: an answer is text. Send the file as a message.");
 				}
@@ -200,7 +201,7 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 				break;
 			default:
 				if (!SIDEBAR_NO_OPS.has(command.type)) throw new CommandError(unsupportedMessage(command.type));
-				// Sidebar bookkeeping (pin, visit, …) has no host state yet; accepting it changes nothing visible.
+				// A delivery receipt for a push this host never sent: accepting it changes nothing.
 				log.info("command accepted without effect", { type: command.type });
 		}
 		return bridge.nextSequence();
