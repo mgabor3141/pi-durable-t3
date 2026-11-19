@@ -1,6 +1,6 @@
 // T3's server settings, stored as T3's server stores them (the replication is design.md's rule and state.md). The
-// bridge interprets none of it — it answers what the client wrote — except `HOST_PROVIDER_FACTS`, which answer the
-// provider instances a fresh document leaves silent.
+// store answers what the client wrote, except `HOST_PROVIDER_FACTS`, which answer the provider instances a fresh
+// document leaves silent. The few settings the host acts on are read where they are used (capabilities.md, Settings).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Equal, Schema } from "effect";
@@ -112,7 +112,7 @@ function stripDefaults(current: unknown, defaults: unknown): unknown | undefined
 }
 
 /** The document to write: T3's default-stripping. `clientWroteInstances` keeps a client-mutated instance map whole, so
- * a deleted instance stays deleted (design.md: the bridge interprets nothing in the file). */
+ * a deleted instance stays deleted. */
 function persisted(merged: Record<string, unknown>, clientWroteInstances: boolean): Record<string, unknown> {
 	const sparse = (stripDefaults(merged, PERSISTED_DEFAULTS) ?? {}) as Record<string, unknown>;
 	if (clientWroteInstances) sparse.providerInstances = merged.providerInstances ?? {};

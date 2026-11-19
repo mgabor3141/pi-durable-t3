@@ -134,7 +134,7 @@ export const authDescriptor: ServerConfig["auth"] = {
 
 /** A browser session cookie: `HttpOnly`, `Path=/`, `SameSite=Lax`, and the session's expiry — exactly the cookie
  * T3 sets (`Cookies.set` with those options), so a re-pair replaces it in place. No `Secure`: the cookie arrives over
- * the loopback http listener — behind Serve too, since Serve terminates TLS and forwards plain http. */
+ * the loopback http listener — behind a proxy that terminates TLS too, since it forwards plain http. */
 function sessionCookieHeader(token: string, expiresAtMs: number): string {
 	return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${new Date(expiresAtMs).toUTCString()}`;
 }

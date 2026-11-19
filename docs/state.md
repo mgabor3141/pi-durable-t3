@@ -21,9 +21,11 @@ Projections are rebuilt from it on every change.
 | A deleted thread's record, with `deletedAt` | A deleted thread could come back: the record is the tombstone that keeps a late prompt to its head from promoting it |
 | One sidebar summary per thread (`pi-durable-t3.thread-summary`): its latest visible message, latest user message and latest settled run, so a closed thread shows as an open one does | An unopened thread previews and sorts as new until it is opened. A summary written before runs were kept has none until the thread next runs or is opened |
 | Command receipts (`pi-durable-t3.command-receipts`): the last 1,000 commands the host accepted and the sequence each was answered with (T3's `CommandReceiptStore`: a retried `commandId` gets the first answer, across restarts). A prompt's command id is also its pi-durable request id, so a resent prompt is sent once whatever path it comes by | A retried command runs again |
+| The queue held aside (`pi-durable-t3.held-queue`): a conversation's queued messages while a Stop's abort has them out of its inbox for one commit, by conversation id; empty otherwise | Messages queued in a thread whose host died in that instant |
 | The directory (`pi-durable-t3.threads`): live thread ids in creation order, and every head ever by conversation id | Empty sidebar |
 | The project registry (`pi-durable-t3.projects`): id, path, title per project. A thread's project is checked in the commit that writes the thread | Project names; threads keep their `cwd` |
 | Scheduled tasks (`pi-durable-t3.scheduled-tasks`), as T3's schema encodes them: trigger, prompt, project/thread, model, provenance, run state (`nextRunAt`, last run, count). Read strictly at boot: a task this version cannot decode stops the host | The tasks; the threads they made stay |
+| One webhook document per webhook task (`pi-durable-t3.scheduled-task-webhook`): its token and signing secret, its last deliveries, replay keys and open coalescing windows | The task's URL answers as an unknown hook until the task is saved again, which gives it a new URL (and asks for the secret again); its delivery log |
 
 Every document is checkpointed on every write, so each is one stored row. The hot write — a summary, at each prompt, run boundary
 and change of the latest run — touches only its thread's summary. The threads layer is the only writer of these documents and keeps them
@@ -47,7 +49,7 @@ the Harness's storage: settings, pairings and uploads not yet sent.
 The JSON files are written atomically, mode 0600, and so are uploads; a symlinked file is written through its
 link, which stays. The scratch dir is agent work output, not bridge state. Like T3, a settings save merges into the
 file as it is on disk, so a hand edit made while the host runs is kept, and a file that no longer parses is refused
-(`read-file`) and left alone. Unlike T3, the file is not watched: clients see a hand edit at the next save or restart. The bridge interprets nothing in `t3-settings.json`. Its one deviation from T3's
+(`read-file`) and left alone. Unlike T3, the file is not watched: clients see a hand edit at the next save or restart. The bridge reads a few settings: to act on them as T3's server does (idle compaction, auto-resume at a limit's reset, the text-generation model, title guidance, the settlement sweep's days, linked environments), and the hidden models for the integrator (capabilities.md, Settings). It answers the rest as stored. Its one deviation from T3's
 defaults: when the file doesn't say otherwise, the `pi` provider is enabled and T3's other providers are off,
 because this host serves only pi.
 

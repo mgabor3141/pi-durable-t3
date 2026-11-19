@@ -74,7 +74,7 @@ const t3 = await attachT3(harness, {
 	webhookOrigin, // optional: () => "https://host", where a webhook's sender reaches this host: the URL a webhook task shows
 	preview,       // optional: { cdpUrl, token?, storageStatePath? } for T3's Browser panel; absent = preview.* stays unsupported
 	rpcLog,        // optional: { onSuccess, onFailure, onStubbed } per-call debug sink for the T3 wire
-	// optional: context, label, corsOrigins, tokenTtlSeconds, log
+	// optional: context, label, corsOrigins, tokenTtlSeconds, log, maxRetries, updates, promptUpdateTitle, routes, commands (below)
 });
 await t3.setTitle(threadId, "Release notes");   // a user rename: durable, cancels a pending generation
 harness.resume();                            // yours to call, after attaching
@@ -131,7 +131,7 @@ T3's server discovers these on its own machine; this host is told.
 ## What works
 
 Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, archive, snooze, unread across devices, live order and status for threads nobody is looking at), inline HTML pages the agent publishes (`T3Attachment.htmlTools`: T3's `html_render`, and `html_preview` with `preview`), interrupts, per-thread model and thinking level, undo,
-crash resume, T3's settings (star, hide and reorder models in the picker), adding, renaming, repointing and removing projects (an agent too, with T3's project tools), image attachments, thread search, the Usage page, scheduled tasks (interval and fixed time), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
+crash resume, T3's settings (star, hide and reorder models in the picker), adding, renaming, repointing and removing projects (an agent too, with T3's project tools), image attachments, thread search, the Usage page, scheduled tasks (interval, fixed time, one-time and webhook triggers), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
 nests under its parent as a full thread; the example agent has them),
 and Connections (pairing links, paired devices, revoking), plus a route you run advertised to T3 (`remoteAccess`: the
 URL paired clients learn as the one `directEndpoint`, and the SSH host for "Open in VS Code" and file links). T3's file panel works through the execution environment: browse, open, edit and save in any folder the agent can see (writes stay on a project root; the agent may edit the same file, last write wins), with quick-open and content search. Search walks the environment.
@@ -161,14 +161,13 @@ Known limitations:
   banner up, "Agent not responding to Stop" after 10 seconds, until it returns. There is no Force stop: pi-durable
   cannot end a task that is still running. A run whose tasks ended outside pi-durable (task records changed in the
   database, the thread's live state left showing a run) has nothing left to abort; Stop ends it, and logs that it did.
-- Settings `compactIdleThreads` ("Compact idle Claude threads"), `autoResumeLimitedThreads`,
-  `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
+- Settings `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
 - Search has no index: each query reads every thread.
-- Scheduled tasks: webhook triggers are refused (the form still offers them). Worktree workspaces are refused
-  (T3's form defaults to one; pick "Use the project checkout").
-- Behind Serve every request arrives from 127.0.0.1, so the pairing rate limiter's buckets are shared across the
-  tailnet — it fails closed: a legitimate user on a busy tailnet can be told to wait a minute, and one tailnet peer
-  can lock out local pairing for that minute.
+- Scheduled tasks: worktree workspaces are refused (T3's form defaults to one; pick "Use the project checkout").
+- Behind a proxy (the route you run for `remoteAccess`) every request arrives from the proxy's address, so the pairing
+  rate limiter's buckets are shared by everyone who comes through it — it fails closed: a legitimate user can be told
+  to wait a minute, and one client can lock out the others' pairing for that minute (pairing on this machine too, when
+  the proxy connects over loopback).
 - A page that rebinds a hostname to the port gets no credentials, but can read the public descriptor and spend the
   pairing rate limit.
 
@@ -199,12 +198,11 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 
 `"."` is the only entry point.
 
-- `attachT3(harness, options): Promise<T3Attachment>` and the `AttachT3Options` type (options are documented in the
-  type's comments).
+- `attachT3(harness, options): Promise<T3Attachment>` (the options are documented in the comments of its options type,
+  which has no exported name).
 - `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, `threadTools(options)`, `htmlTools(options)` (needs
-  `attachmentsDir`), `secretRequests(sink)`, `askUser()`, `textGenerationModel()`, and (when `preview` is configured)
-  `previewBrowser.open(conversationId, url)`.
-- `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
+  `attachmentsDir`), `secretRequests(sink)` (a `SecretSink`), `askUser()`, `textGenerationModel()`, and (when `preview`
+  is configured) `previewBrowser.open(conversationId, url)`, whose session has `id`, `page`, `touch()` and `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
 - `abortable(tool)`: a tool whose call returns the moment Stop aborts it, for a tool that does not listen for
   `context.abortSignal` itself. pi-durable ends a run only when its tool calls have returned, so one such tool holds
@@ -246,10 +244,23 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   what a failed request left is not shown once the request is sent again. A 429 is shown as T3's usage limit: a
   warning, and once the run has given up, T3's banner with Resume. The bridge only shows the number you pass; without
   it the row counts alone.
+- `requestApproval(ask, signal?)` (on the attachment): a tool of yours asks the user to approve what it is about to do,
+  on T3's approval card in the thread of the call's conversation, and gets the decision (`ApprovalAsk`,
+  `ApprovalOption`, `ApprovalDecision`, `ApprovalOutcome`). A message the user types meanwhile declines it, as feedback;
+  Stop, a timeout (30 minutes unless you say) or a restart ends it without a decision.
+- `threadOrigin(threadId)` (on the attachment): `threadOf` by thread id, for walking up to a thread's parent.
+- `routes` (an `attachT3` option, `HostRoute`): HTTP routes of your own under `/host/` on the host's listener, such as
+  an OAuth callback. They are public, so they check their callers.
+- `commands` (an `attachT3` option, `HostCommand`): slash commands of your own, listed in T3's composer after this
+  host's and answered in the thread they are sent in, shown there only. A name this host answers itself is refused.
+- `promptUpdateTitle` (an `attachT3` option): your words for a change of the system prompt while a thread goes on,
+  given the sections that differ (`PromptSectionChange`); T3 shows it as a quiet row in the run.
 - `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
   tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every
   later request fail. Install it on the Harness's registry.
-- `ConfigError`, `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`, `TitleThreadRequest`, `DESKTOP_APP_ORIGIN`.
+- `ConfigError`, and the types `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`,
+  `TitleThreadRequest`, `TextGenerationModel`, `ThreadOrigin`, `MessageContext`, `MessageContextRequest`,
+  `MessageContextAnswer`, `HostUpdates`, `RemoteAccess` and `RemoteAccessState`.
 
 T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,
 exact dependencies, so the bridge and the bundled contracts share one Effect: do not override `effect`.

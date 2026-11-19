@@ -106,7 +106,7 @@ export function startFacet(deps: {
 	const ready = new Promise<number>((resolve, reject) => {
 		httpServer.once("listening", () => {
 			const address = httpServer.address();
-			// A listener that is up has an address; anything else is a broken contract, not a port to hand to Serve.
+			// A listener that is up has an address; anything else is a broken contract, not a port to report.
 			if (typeof address === "object" && address !== null) resolve(address.port);
 			else reject(new Error("HTTP server is listening with no bound address."));
 		});
