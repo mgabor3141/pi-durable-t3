@@ -1,5 +1,6 @@
 // The slash commands this host answers itself: `/context`, `/undo`, `/redo`, `/tree`, `/continue` (and T3's Resume,
-// which is the last one). All but `/continue` are shown in the thread and kept nowhere (`ShownExchange`).
+// which is the last one), and the integrator's own (`HostCommand`). All but `/continue` are shown in the thread and
+// kept nowhere (`ShownExchange`).
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId } from "@earendil-works/pi-durable";
@@ -43,7 +44,14 @@ export class ThreadCommands {
 		else if (/^\/redo\s+fork$/.test(text)) await this.redoFork(threadId, messageId, state, head);
 		// `/continue`: the agent goes on from the context as it is, with no new message (`Threads.continue`).
 		else if (text === "/continue") await this.continue(threadId, `continue:${messageId}`, head, { messageId });
-		else return false;
+		else {
+			// The integrator's own (`HostCommand`), answered as `/context` is.
+			const named = /^\/([a-z0-9-]+)(?:\s+([\s\S]*))?$/.exec(text);
+			const command = named === null ? undefined : this.#bridge.config.commands?.find((candidate) => candidate.name === named[1]);
+			if (command === undefined) return false;
+			const answer = await command.run({ threadId, argument: named![2]?.trim() ?? "" }).catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+			this.show(threadId, state, { messageId, command: text, answer });
+		}
 		return true;
 	}
 

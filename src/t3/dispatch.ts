@@ -174,9 +174,13 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			case "thread.merge_back":
 				await bridge.mergeBack({ sourceThreadId: command.sourceThreadId, targetThreadId: command.targetThreadId, sourcePoint: command.sourcePoint });
 				break;
-			// T3's answer to a card. The only cards here are the agent's questions (`ask_user`): pi runs tools without
-			// approvals, so a decision has nothing to decide.
+			// T3's answer to a card: the agent's questions (`ask_user`), or an approval a host's tool asked for
+			// (`approvals.ts`). pi runs tools without approvals of its own.
 			case "runtime-request.respond": {
+				if (command.decision !== undefined && bridge.approvals.owns(command.requestId)) {
+					bridge.approvals.respond({ threadId: command.threadId, requestId: command.requestId, decision: command.decision, ...(command.feedback === undefined ? {} : { feedback: command.feedback }) });
+					break;
+				}
 				if (command.answers === undefined || !bridge.userInput.owns(command.requestId)) throw new CommandError(unsupportedMessage(command.type));
 				if (Object.values(command.attachmentsByQuestionId ?? {}).some((attached) => attached.length > 0)) {
 					throw new CommandError("attachmentsByQuestionId is not supported by pi-durable-t3: an answer is text. Send the file as a message.");

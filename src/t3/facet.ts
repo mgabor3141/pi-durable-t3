@@ -1,4 +1,5 @@
 // Boot the T3 facet: the auth store, model catalog and bridge (over the threads layer), then the Effect HTTP/`/ws` server.
+import type { ApprovalAsk, ApprovalOutcome } from "./approvals.ts";
 import { createServer } from "node:http";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -59,6 +60,10 @@ type FacetHandle = {
 	hiddenModels(): ReadonlySet<string>;
 	/** The thread a conversation belongs to (`Bridge.threadOf`). */
 	threadOf(conversationId: number): ThreadOrigin | undefined;
+	/** A thread's origin by its id (`Bridge.threadOrigin`). */
+	threadOrigin(threadId: string): ThreadOrigin | undefined;
+	/** An approval a host's tool asks for (`approvals.ts`). */
+	requestApproval(ask: ApprovalAsk, signal?: AbortSignal): Promise<ApprovalOutcome>;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -162,6 +167,8 @@ export function startFacet(deps: {
 		textGenerationModel: () => bridge.textGenerationModel(),
 		hiddenModels: () => bridge.hiddenModels(),
 		threadOf: (conversationId) => bridge.threadOf(conversationId),
+		threadOrigin: (threadId) => bridge.threadOrigin(threadId),
+		requestApproval: (ask, signal) => bridge.approvals.request(ask, signal),
 		close: async () => {
 			closing = true;
 			orchestration.close();

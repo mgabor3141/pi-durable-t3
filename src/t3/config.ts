@@ -9,6 +9,7 @@ import type { TitleThread } from "./title-thread.ts";
 import type { PreviewBrowserConfig } from "./preview-config.ts";
 import type { RpcLog } from "./logging.ts";
 import type { HostRoute } from "./host-route.ts";
+import type { HostCommand } from "./host-command.ts";
 import type { SectionChange } from "./prompt-updates.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
@@ -47,6 +48,8 @@ interface FacetConfig {
 	/** A Chromium CDP endpoint for T3's server preview panel. Absent: `preview.*` stays unsupported. */
 	readonly preview?: PreviewBrowserConfig;
 	readonly routes?: readonly HostRoute[];
+	/** Slash commands of the integrator's own (`HostCommand`). */
+	readonly commands?: readonly HostCommand[];
 	/** Optional per-call RPC observation for debugging the wire. Absent: nothing is called. */
 	readonly rpcLog?: RpcLog;
 }

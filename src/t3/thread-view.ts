@@ -417,7 +417,7 @@ export class ThreadView {
 			const { active, history } = splitTranscript(await wholeTranscript(conversation));
 			const view = { conversation: {}, entries: active, docs: {} } as unknown as ConversationView;
 			// Without what is shown only (`ShownExchange`): that stands in the head's own runs, not in the ones it left.
-			const { shown: _shown, ...meta } = this.#host.meta(this.threadId, this);
+			const { shown: _shown, approvals: _approvals, ...meta } = this.#host.meta(this.threadId, this);
 			const { projection } = projectThread(meta, view, { rolledBack: [], history });
 			for (const run of rolledBackRuns(projection)) if (!runs.has(run.run.id)) runs.set(run.run.id, run);
 		}
@@ -481,7 +481,6 @@ export class ThreadView {
 		this.#history = follower.history;
 		this.#conversationId = head;
 		this.recompute();
-		this.#signal();
 	}
 
 	/** The head's configuration was just written: show it now, and re-read it on the next view. */
@@ -502,6 +501,8 @@ export class ThreadView {
 		if (loaded) this.#loaded = true;
 		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history, ordinals: this.#ordinals });
 		this.#host.projected(this, { loaded, settled: wasRunning && this.#result.shell.status !== "running" });
+		// A change of what is kept in memory only (an answered command, an approval card) wakes a wait as a new view does.
+		this.#signal();
 		if (this.#subscribers.size === 0 || this.#flushTimer !== undefined) return;
 		this.#flushTimer = setTimeout(() => {
 			this.#flushTimer = undefined;

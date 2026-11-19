@@ -14,6 +14,8 @@ import type { ConversationId, Extension, Harness } from "@earendil-works/pi-dura
 import type { SecretSink } from "./t3/secret-sink.ts";
 export type { SecretSink } from "./t3/secret-sink.ts";
 export type { HostRoute } from "./t3/host-route.ts";
+export type { HostCommand } from "./t3/host-command.ts";
+export type { ApprovalAsk, ApprovalDecision, ApprovalOption, ApprovalOutcome } from "./t3/approvals.ts";
 export type { SectionChange as PromptSectionChange } from "./t3/prompt-updates.ts";
 import type { SectionChange as PromptSectionChange } from "./t3/prompt-updates.ts";
 import { ProjectRegistry } from "./registry.ts";
@@ -23,6 +25,8 @@ import { AuthStore } from "./t3/auth.ts";
 import type { BridgeConfig } from "./t3/config.ts";
 import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/host-route.ts";
+import type { HostCommand } from "./t3/host-command.ts";
+import type { ApprovalAsk, ApprovalOutcome } from "./t3/approvals.ts";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { MessageContext } from "./t3/message-context.ts";
 import type { RemoteAccess } from "./t3/remote-access.ts";
@@ -141,6 +145,11 @@ type AttachT3Options = {
 	/** HTTP routes of your own on the host's listener (an OAuth callback): public, so they check their callers. */
 	readonly routes?: readonly HostRoute[];
 	/**
+	 * Slash commands of your own (`HostCommand`): listed in T3's composer menu after this host's, and answered in the
+	 * thread they are sent in, shown there only. A name this host answers itself is refused.
+	 */
+	readonly commands?: readonly HostCommand[];
+	/**
 	 * Optional per-call observation for debugging the T3 wire: `onSuccess` for a request handler that succeeds or a
 	 * stream that opens, `onFailure` for a failing request, and `onStubbed` for a method this host does not implement.
 	 * The callbacks run synchronously and their exceptions are caught and logged, so a debug sink never breaks a call.
@@ -223,6 +232,16 @@ export type T3Attachment = {
 	 * thread's head (one an undo left, or the integrator's own) and until the threads are read at startup.
 	 */
 	threadOf(conversationId: ConversationId): ThreadOrigin | undefined;
+	/** A thread's origin by its id (`threadOf`), for walking up to its parent. */
+	threadOrigin(threadId: string): ThreadOrigin | undefined;
+	/**
+	 * Ask the user to approve something a tool of yours is about to do, on T3's approval card in the thread of the call's
+	 * conversation, and wait for the decision. Every thread here is full-access, so T3 explains the card as a check the
+	 * host makes of its own. The card offers `options` (T3's decisions, in your words); a message the user types
+	 * meanwhile declines it, with that text as `feedback`. Ends without a decision when `signal` aborts (Stop), after
+	 * `timeoutMs` (default 30 minutes), or for a conversation that is no thread's head. In memory: a restart ends it.
+	 */
+	requestApproval(ask: ApprovalAsk, signal?: AbortSignal): Promise<ApprovalOutcome>;
 	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
@@ -284,6 +303,12 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 	const listen = options.listen ?? DEFAULT_LISTEN;
 	const webApp = options.webApp ?? bundledWebApp();
 	if (webApp === undefined) log.warn("no web app to serve (`web/` is missing; in a checkout, run `pnpm setup:t3`)");
+	const builtIn = catalog.slashCommandNames();
+	for (const command of options.commands ?? []) {
+		if (!/^[a-z0-9-]+$/.test(command.name)) throw new ConfigError(`a command's name is lowercase letters, digits and dashes, not ${JSON.stringify(command.name)}`);
+		if (builtIn.has(command.name) || (options.commands ?? []).filter((other) => other.name === command.name).length > 1) throw new ConfigError(`the command /${command.name} is already taken`);
+	}
+	catalog.hostCommands = options.commands ?? [];
 	for (const route of options.routes ?? []) {
 		if (!/^\/host\/[A-Za-z0-9._~\/-]+$/.test(route.path)) throw new ConfigError(`a host route's path must be a plain path under /host/, not ${JSON.stringify(route.path)}`);
 	}
@@ -309,6 +334,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
 		...(options.routes === undefined ? {} : { routes: options.routes }),
+		...(options.commands === undefined ? {} : { commands: options.commands }),
 	};
 	const facet = startFacet({ threads, models: options.models, catalog, log, config });
 	// Resolve only once LISTENING and loaded: a bind failure (a port in use) or unreadable tasks reject here, after the
@@ -335,6 +361,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),
+		threadOrigin: (threadId) => facet.threadOrigin(threadId),
+		requestApproval: (ask, signal) => facet.requestApproval(ask, signal),
 		...(facet.preview === undefined
 			? {}
 			: {

@@ -38,6 +38,7 @@ import { Stops } from "./stops.ts";
 import { ThreadCommands } from "./thread-commands.ts";
 import { ThreadTitles } from "./thread-titles.ts";
 import { UserInputRequests } from "./user-input.ts";
+import { ApprovalRequests } from "./approvals.ts";
 import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
@@ -173,6 +174,8 @@ export class Bridge {
 	readonly sidebar: SidebarState;
 	/** The questions agents ask with `ask_user`, waiting for T3's answer (`runtime-request.respond`). */
 	readonly userInput: UserInputRequests;
+	/** The approvals a host's tools ask for (`approvals.ts`), waiting for T3's decision (`runtime-request.respond`). */
+	readonly approvals: ApprovalRequests;
 	#memoryTimer: NodeJS.Timeout | undefined;
 	/** `/tree`: the tree of a thread's lines, and what its page posts to. */
 	readonly navigator: ThreadNavigator;
@@ -232,6 +235,13 @@ export class Bridge {
 		this.sidebar = new SidebarState(this.#core, this.#titles);
 		this.#limits = new ProviderLimits(this.#core, this.sidebar);
 		this.userInput = new UserInputRequests((conversationId) => this.threadIdForConversation(conversationId));
+		this.approvals = new ApprovalRequests({
+			threadOf: (conversationId) => this.threadIdForConversation(conversationId),
+			place: (threadId) => {
+				const view = this.#viewOf(threadId);
+				return { after: view.transcript.at(-1)?.id ?? -1, recompute: () => view.recompute() };
+			},
+		});
 		this.messageContexts = new MessageContexts({
 			get harness() {
 				return store.harness;
@@ -537,6 +547,7 @@ export class Bridge {
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
 		const stop = this.#stops.of(threadId, state);
 		const shown = this.#commands.shown(threadId);
+		const approvals = this.approvals.shown(threadId);
 		const listed = model === null ? undefined : state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId);
 		return {
 			threadId,
@@ -584,6 +595,7 @@ export class Bridge {
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			...(stop === undefined ? {} : { stop }),
 			...(shown === undefined ? {} : { shown }),
+			...(approvals === undefined ? {} : { approvals }),
 			titleRegeneration: this.#titles.pending(threadId),
 		};
 	}
@@ -1354,7 +1366,15 @@ export class Bridge {
 
 	/** The thread whose conversation this is now (its head), and where that thread came from. */
 	threadOf(conversationId: number): ThreadOrigin | undefined {
-		const thread = this.#directory.find((candidate) => candidate.head === conversationId && candidate.deletedAt === null);
+		return this.#origin(this.#directory.find((candidate) => candidate.head === conversationId && candidate.deletedAt === null));
+	}
+
+	/** A thread's origin by its id (`threadOf`). */
+	threadOrigin(threadId: string): ThreadOrigin | undefined {
+		return this.#origin(this.#directory.find((candidate) => candidate.threadId === threadId && candidate.deletedAt === null));
+	}
+
+	#origin(thread: ThreadRecord | undefined): ThreadOrigin | undefined {
 		if (thread === undefined) return undefined;
 		const { parentThreadId, relationshipToParent, sideChat } = thread.lineage;
 		return { threadId: thread.threadId, createdBy: thread.createdBy, creationSource: thread.creationSource, parentThreadId, relationshipToParent, sideChat: sideChat === true };
@@ -1571,6 +1591,7 @@ export class Bridge {
 		await this.#store.remove(threadId);
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
 		this.#commands.forget(threadId);
+		this.approvals.forget(threadId);
 		for (const listener of this.#deletedListeners) listener(threadId);
 		for (const sideChat of sideChats) if (this.hasThread(sideChat)) await this.deleteThread(sideChat);
 	}

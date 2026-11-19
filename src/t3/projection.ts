@@ -27,6 +27,7 @@ import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMes
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
+import type { ShownApproval } from "./approvals.ts";
 import { BASELINE_CHECKPOINT_ID, type RolledBackRun } from "./undo.ts";
 import { type ImageAt, omittedImage } from "./image-data.ts";
 import { REQUEST_SECRET_TOOL } from "./secret-requests.ts";
@@ -230,6 +231,8 @@ export interface ThreadMeta {
 	readonly pendingContexts?: ReadonlyMap<number, ContentBlock>;
 	/** Commands answered on the spot (`/context`): shown in the thread, in memory only (`ShownExchange`). */
 	readonly shown?: readonly ShownExchange[];
+	/** The approvals a host's tools asked for (`approvals.ts`): waiting, or how they ended. In memory only. */
+	readonly approvals?: readonly ShownApproval[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
 }
@@ -516,6 +519,11 @@ function shownAnswer(b: Build, shown: ShownExchange, ordinal: number): void {
 	// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
 	b.lastActivity = Math.max(b.lastActivity, at);
 }
+
+/** The run something the host shows stands in (`ShownExchange`, `ShownApproval`): the latest a user's message began
+ * by the entry it stands after. */
+const shownDraft = (b: Build, after: number): RunDraft | undefined =>
+	b.drafts.findLast((candidate) => candidate.synthetic !== true && isUserEntry(candidate.userEntry) && candidate.userEntry.id <= after);
 
 /** One run: its rows, then its turn items in the order they happened. A draft that is only a compaction card has neither. */
 function projectRun(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, index: number): void {
@@ -1043,6 +1051,43 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 	// items of the entries there were then and before those of any written since (a run goes on after a `/continue`,
 	// and one that runs was asked `/context`). T3 numbers items in this order.
 	const shownHere = [...(shownIn.get(draft) ?? [])];
+	// The approvals a host's tool asked for in this run (`approvals.ts`), where they were asked, as answered commands
+	// stand: T3's approval card, waiting or decided, with the runtime request it answers.
+	const approvalsHere = (meta.approvals ?? []).filter((card) => shownDraft(b, card.after) === draft);
+	const pushApprovals = (before: number) => {
+		for (const card of approvalsHere.filter((each) => each.after < before)) {
+			approvalsHere.splice(approvalsHere.indexOf(card), 1);
+			const waiting = card.status === "pending";
+			const end = card.resolvedAt ?? card.at;
+			turnItems.push({
+				...base(`ti-${card.requestId}`, card.at, waiting ? "waiting" : card.status === "resolved" ? "completed" : "cancelled", !waiting, end),
+				title: card.appName ?? "Approval",
+				type: "approval_request",
+				requestId: id(card.requestId),
+				requestKind: "permission",
+				prompt: card.prompt,
+				...(card.reason === undefined ? {} : { reason: card.reason }),
+				// Every thread here is full-access: the card is a check the host makes of its own, which T3 explains.
+				fullAccessOverride: "provider_check",
+				...(card.appName === undefined ? {} : { appName: card.appName }),
+				options: card.options,
+			} as Any);
+			runtimeRequests.push({
+				id: id(card.requestId),
+				nodeId: id(nodeId),
+				providerTurnId: id(turnId),
+				nativeRequestRef: null,
+				kind: "permission",
+				status: card.status,
+				// The asking tool waits for the decision; a message typed meanwhile is its feedback.
+				responseCapability: { type: "live", providerSessionId: id(`ps-${threadId}`), supportsFeedback: true },
+				createdAt: time(card.at),
+				resolvedAt: waiting ? null : time(end),
+				...(card.decision === undefined ? {} : { decision: card.decision }),
+				...(card.feedback === undefined ? {} : { feedback: card.feedback }),
+			} as Any);
+		}
+	};
 	const pushShown = (before: number) => {
 		for (const shown of shownHere.splice(0)) {
 			if (shown.after >= before) {
@@ -1081,6 +1126,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 	draft.steps.forEach((step, stepIndex) => {
 		pushUpdates(step.id);
 		pushShown(step.id);
+		pushApprovals(step.id);
 		// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
 		if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 		if (isUserEntry(step) || isNoteEntry(step)) {
@@ -1144,6 +1190,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		);
 	}
 	pushShown(Infinity);
+	pushApprovals(Infinity);
 	// The steers pi has not placed yet: in the run they steer, waiting to be read, as T3 shows a steer its provider
 	// holds until the agent reads it (`steer.updated` pending). pi reads one at the run's next boundary: after the tool
 	// calls in flight, or at the end of the answer. The row is the one the placed steer keeps (`userItemId`), so it
@@ -1495,7 +1542,14 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 			if (latestRun === undefined && keptRun?.status === "failed" && keptRun.errorClass !== undefined) return { lastErrorClass: keptRun.errorClass, usageLimitResetAt: keptRun.resetAt ?? null };
 			return {};
 		})(),
-		pendingRuntimeRequest: null,
+		// T3's `pendingRuntimeRequest`: the newest request that waits, an approval before a question, which the sidebar
+		// shows ("Needs approval", "Needs input") and a parent shows for its child.
+		pendingRuntimeRequest: (() => {
+			const pending = b.runtimeRequests
+				.filter((request) => request.status === "pending")
+				.toSorted((left, right) => Number(left.kind === "user_input") - Number(right.kind === "user_input") || DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt))[0];
+			return pending === undefined ? null : { id: pending.id, kind: pending.kind, createdAt: pending.createdAt, blocking: pending.responseCapability.type !== "message" };
+		})(),
 		latestVisibleMessage:
 			lastVisibleMessage === undefined
 				? (meta.summary?.latestVisibleMessage === null || meta.summary?.latestVisibleMessage === undefined
@@ -1546,7 +1600,7 @@ export function projectThread(
 	const shownIn = new Map<RunDraft, ShownExchange[]>();
 	const shownAlone: ShownExchange[] = [];
 	for (const shown of meta.shown ?? []) {
-		const draft = drafts.findLast((candidate) => candidate.synthetic !== true && isUserEntry(candidate.userEntry) && candidate.userEntry.id <= shown.after);
+		const draft = shownDraft(b, shown.after);
 		if (draft === undefined) shownAlone.push(shown);
 		else shownIn.set(draft, [...(shownIn.get(draft) ?? []), shown]);
 	}

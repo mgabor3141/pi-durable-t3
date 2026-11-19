@@ -50,6 +50,17 @@ function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapab
 	};
 }
 
+/** The slash commands this host answers itself (`thread-commands.ts`), as T3's composer lists them. */
+const BUILT_IN_COMMANDS = [
+	{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } },
+	{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
+	{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
+	{ name: "undo", description: "Take back your last message and what the agent did for it", input: { hint: "n, or: step [n] for the agent's last steps only" } },
+	{ name: "redo", description: "Bring back what the last undo took, while nothing new was written; /redo fork opens it as a new thread" },
+	{ name: "tree", description: "Show every line this thread has had, undone ones too, as a tree: go to any turn, or open it as a new thread" },
+	{ name: "continue", description: "Let the agent go on from where the conversation stands, with no new message" },
+] as const;
+
 export class ModelCatalog {
 	#models: CatalogModel[] = [];
 	readonly #listeners = new Set<() => void>();
@@ -69,6 +80,14 @@ export class ModelCatalog {
 		this.#source = source;
 		this.#update = update;
 		this.#log = log;
+	}
+
+	/** The integrator's slash commands (`HostCommand`), listed after this host's own. */
+	hostCommands: readonly { readonly name: string; readonly description: string; readonly hint?: string }[] = [];
+
+	/** The names of the slash commands this host answers itself. */
+	slashCommandNames(): ReadonlySet<string> {
+		return new Set(BUILT_IN_COMMANDS.map((command) => command.name));
 	}
 
 	/** The host's own version and updates, when the integrator has them: the provider's version advisory and its Update. */
@@ -176,13 +195,8 @@ export class ModelCatalog {
 					capabilities: thinkingCapabilities(model.thinkingLevels),
 				})),
 				slashCommands: [
-					{ name: "compact", description: "Summarize the conversation and reduce context usage", input: { hint: "Optional guidance" } },
-					{ name: "reload", description: "Reload the system prompt: AGENTS.md, skills, MCP servers and tools" },
-					{ name: "context", description: "Show what fills the context window; shown here only, not sent to the model" },
-					{ name: "undo", description: "Take back your last message and what the agent did for it", input: { hint: "n, or: step [n] for the agent's last steps only" } },
-					{ name: "redo", description: "Bring back what the last undo took, while nothing new was written; /redo fork opens it as a new thread" },
-					{ name: "tree", description: "Show every line this thread has had, undone ones too, as a tree: go to any turn, or open it as a new thread" },
-					{ name: "continue", description: "Let the agent go on from where the conversation stands, with no new message" },
+					...BUILT_IN_COMMANDS,
+					...this.hostCommands.map((command) => ({ name: command.name, description: command.description, ...(command.hint === undefined ? {} : { input: { hint: command.hint } }) })),
 				],
 				skills: [],
 			} as unknown as ServerProvider,
