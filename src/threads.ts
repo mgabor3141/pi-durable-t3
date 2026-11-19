@@ -418,11 +418,6 @@ export class Threads {
 		return searchThreads(candidates, threadUpdatedAt, query, limit);
 	}
 
-	/**
-	 * Each head's messages as search reads them, kept between searches: entries do not change, so a search reads only
-	 * the ones written since the last. The whole transcript, not the model's context: T3 searches every message, and a
-	 * compaction takes none of them out of what the thread shows.
-	 */
 	/** The characters search keeps of the threads it has read (the memory log). */
 	searchChars(): number {
 		let chars = 0;
@@ -430,6 +425,11 @@ export class Threads {
 		return chars;
 	}
 
+	/**
+	 * Each head's messages as search reads them, kept between searches: entries do not change, so a search reads only
+	 * the ones written since the last. The whole transcript, not the model's context: T3 searches every message, and a
+	 * compaction takes none of them out of what the thread shows.
+	 */
 	readonly #searched = new Map<number, { last: EntryId | undefined; updatedAt: number; candidates: SearchCandidate[] }>();
 
 	async #searchable(thread: Thread): Promise<{ updatedAt: number; candidates: readonly SearchCandidate[] } | undefined> {
@@ -780,7 +780,6 @@ export class Threads {
 		});
 	}
 
-	/** T3's `thread.settle`: a durable manual settlement, keeping the first stamp when it is already settled. */
 	/** Keep the outcome of a rollback on the thread (T3's `rollbackRequestId` / `rollbackFailure`). */
 	async recordRollback(threadId: string, requestId: string, failure: string | null): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
@@ -791,6 +790,7 @@ export class Threads {
 		});
 	}
 
+	/** T3's `thread.settle`: a durable manual settlement, keeping the first stamp when it is already settled. */
 	async settle(threadId: string, settledAt?: number): Promise<void> {
 		const at = settledAt ?? Date.now();
 		await this.#commit(async (_tx, writes) => {
@@ -851,12 +851,6 @@ export class Threads {
 		return { thread, conversationId: thread.head as ConversationId };
 	}
 
-
-	/** T3's `/compact`: start a manual compaction and return at once.
-	 * The prompt request must not stay open for the whole summary: that serializes the bridge and makes a prompt sent
-	 * during compaction time out. The live compaction is projected as the command's run, so T3 still shows the work;
-	 * prompts submitted while it runs are queued and land at the summary boundary. A repeated call while a compaction
-	 * is live is a no-op. */
 	/**
 	 * `/reload`: render the system prompt afresh at the next request. A `pi.system` write removes every section in effect,
 	 * so the next preparation renders all of them again; a host that keeps its prompt fixed for a thread (claw) renders
@@ -881,6 +875,11 @@ export class Threads {
 		);
 	}
 
+	/** T3's `/compact`: start a manual compaction and return at once.
+	 * The prompt request must not stay open for the whole summary: that serializes the bridge and makes a prompt sent
+	 * during compaction time out. The live compaction is projected as the command's run, so T3 still shows the work;
+	 * prompts submitted while it runs are queued and land at the summary boundary. A repeated call while a compaction
+	 * is live is a no-op. */
 	async compact(threadId: string, guidance: string | undefined, messageId?: string, idle?: true): Promise<void> {
 		const running = this.#compacting.get(threadId);
 		if (running !== undefined) return running;

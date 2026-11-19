@@ -67,7 +67,6 @@ const USER_STOP_REASON = "Stopped by user";
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
 const id = (value: string): Any => value;
-/** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
 /**
  * When the prompt cache a request wrote expires (T3's `promptCacheTtlMs` and `promptCacheExpiresAt`): the provider
  * says which lifetime it wrote (Anthropic's one-hour tokens, or the short default), the model how long each is, and the
@@ -79,6 +78,7 @@ function promptCacheOf(usage: { cacheWrite?: number; cacheWrite1h?: number }, re
 	return { promptCacheTtlMs: seconds * 1000, ...(requestedAt === undefined ? {} : { promptCacheExpiresAt: new Date(requestedAt + seconds * 1000).toISOString() }) };
 }
 
+/** Where a message ends: pi stamps an assistant message when its stream starts, and pi-ai's stream adds `durationMs`. */
 const endOf = (message: { role?: string; timestamp?: number; durationMs?: number } | undefined, fallback: number): number =>
 	(message?.timestamp ?? fallback) + (message?.role === "assistant" ? (message.durationMs ?? 0) : 0);
 /**

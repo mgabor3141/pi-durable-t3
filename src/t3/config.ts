@@ -31,7 +31,7 @@ interface FacetConfig {
 	readonly scratchDir: string | undefined;
 	readonly tokenTtlSeconds: number;
 	readonly corsOrigins: readonly string[];
-	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: none, as before. */
+	/** A built T3 web app's directory, served at `/` with the SPA fallback (T3's static route). `undefined`: no web app is served. */
 	readonly staticDir: string | undefined;
 	/** A route the integrator runs (its own tailnet node, an SSH relay), advertised to T3. Absent: none. */
 	readonly remoteAccess?: RemoteAccess;

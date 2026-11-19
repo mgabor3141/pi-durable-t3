@@ -97,9 +97,6 @@ export const messageIdOf = (entry: EntryRecord): string | undefined => {
 /** A persisted image or file on a message, as the projection reports it (T3's `ChatAttachment`). */
 export type UserAttachment = { type: "image" | "file"; id: string; name: string; mimeType: string; sizeBytes: number };
 
-/** The images a user entry carries in its `data` (`app.user` entries set them — `Threads.submit`); empty for a
- * message with none. The projection reports these as the message's attachments, so the thread shows them after a
- * restart (the record is durable; the bytes live in the bridge's attachment store). */
 /** Who sent a user-role entry, from its `data` (T3's creation fields); a person in the web app when it names no one. */
 export function authorOf(data: unknown): { createdBy: "user" | "agent" | "system"; creationSource: "web" | "mobile" | "mcp" | "provider" | "server"; senderThreadId?: string } {
 	const value = (typeof data === "object" && data !== null ? data : {}) as { createdBy?: unknown; creationSource?: unknown; senderThreadId?: unknown };
@@ -111,6 +108,9 @@ export function authorOf(data: unknown): { createdBy: "user" | "agent" | "system
 	return { createdBy, creationSource, ...(typeof value.senderThreadId === "string" ? { senderThreadId: value.senderThreadId } : {}) };
 }
 
+/** The images and files a user entry carries in its `data` (`app.user` entries set them — `Threads.submit`); empty
+ * for a message with none. The projection reports these as the message's attachments, so the thread shows them after a
+ * restart (the record is durable; the files live in `attachmentsDir`). An old record with no type is an image. */
 export const attachmentsOf = (entry: Pick<EntryRecord, "data">): UserAttachment[] => {
 	const data = entry.data;
 	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return [];

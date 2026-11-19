@@ -55,9 +55,6 @@ import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost }
 export { CommandError, type StreamUpdate };
 
 
-/** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
- * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
- * attachment is still recorded on the entry for display. pi-ai accepts image content only for image-input models. */
 /** Rebind the context's attachment ids to the adopted copies, so its inline image/file references keep resolving
  * after the client deletes the pending upload. */
 function rebindContext(
@@ -75,6 +72,9 @@ function rebindContext(
 	};
 }
 
+/** The image blocks a prompt carries, gated on the model's capabilities: ONLY a model whose catalog `input` includes
+ * "image" receives the bytes; a model that does not (or one absent from the catalog) gets the text alone — the
+ * attachment is still recorded on the entry for display. pi-ai accepts image content only for image-input models. */
 export function selectImageBlocks(
 	catalog: readonly { provider: string; modelId: string; input: string[] }[],
 	model: { provider: string; modelId: string } | null,
@@ -122,7 +122,6 @@ export type ProjectMutation = {
 
 
 
-/** How often T3 sweeps for threads to settle (`ThreadSettlementService`: every minute). */
 /** How long Stop waits for its abort before it answers; the run's end follows on its own. */
 const STOP_ADMIT_MS = 1_000;
 /** How often the memory log is written (`Bridge.memory`); it is also written when a client disconnects. */
@@ -371,7 +370,7 @@ export class Bridge {
 		return this.config.registry.list().map((entry) => this.#projectResult(entry, null));
 	}
 
-		/**
+	/**
 	 * One project mutation, answered from the state — no receipt store (design.md, Invariants).
 	 */
 	mutateProject(mutation: ProjectMutation): Promise<WsSuccess<"projects.mutate">> {
@@ -1059,7 +1058,6 @@ export class Bridge {
 			...(options.title === undefined ? {} : { title: options.title }),
 			...(options.child === undefined ? {} : { lineage: options.child.lineage, forkedFrom: { type: "node" as const, nodeId: options.child.nodeId }, spawn: options.child.spawn }),
 		});
-		// Read the document back before answering: the next thread-existence check must see the new row.
 		return id;
 	}
 

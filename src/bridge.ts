@@ -35,10 +35,10 @@ import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
 import { startFacet } from "./t3/facet.ts";
-
-/** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 import { ConfigError } from "./config.ts";
 import { messageOf } from "./host-errors.ts";
+
+/** Thrown (rejected) when a file in the state dir doesn't parse; its message names the file and is meant for the user. */
 export { ConfigError };
 export type { Logger, RpcCall, RpcCallFailure, RpcCallStub, RpcLog } from "./t3/logging.ts";
 export type { TextGenerationModel, TitleThread, TitleThreadRequest } from "./t3/title-thread.ts";

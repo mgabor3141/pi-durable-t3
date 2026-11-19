@@ -9,8 +9,8 @@ import type { JsonValue } from "@earendil-works/chord/json";
 type Actor = "user" | "agent" | "system";
 /** Where it came from (T3's `OrchestrationV2CreationSource`). */
 type CreationSource = "web" | "mobile" | "mcp" | "provider" | "server";
-/** T3's creation fields: a thread's, and a user-role message's. */
-/** Who wrote something, and for a message one thread sends another, the sending thread (T3's `senderThreadId`). */
+/** T3's creation fields, a thread's and a user-role message's: who wrote something, and for a message one thread sends
+ * another, the sending thread (T3's `senderThreadId`). */
 export type Provenance = { readonly createdBy: Actor; readonly creationSource: CreationSource; readonly senderThreadId?: string };
 /** What a write that names no provenance gets: a person in T3's web app, as T3's own server assumes. */
 export const USER_WEB: Provenance = { createdBy: "user", creationSource: "web" };
@@ -26,14 +26,11 @@ export type ThreadLineage = {
 /** Context a thread's next message carries to the model (T3's pending context transfer), built when that message is
  * sent: a side chat's note about its main thread, or a fork's conversation brought back (`thread.merge_back`). */
 export type PendingContext = { type: "side_chat" } | { type: "merge_back"; sourceThreadId: string; runId: string };
-/**
- * A message that asked to be answered (`thread_prompt`'s `notify`): when the activity it started or joined in this thread
- * settles, the activity's report is posted into `threadId`, the sender's thread. Kept on the receiving thread's record
- * until it is delivered; the delivery's command id is `id`, so a retry after a crash is answered from its receipt.
- */
-/** A request to be answered with a thread's report: `threadId` is the caller. `wake`: T3's completionWake, `always` (a
- * child started without waiting) or `settled_only` (asked when a wait ran out: not while `runId`, the caller's turn that
- * asked, still runs). `batch`: the message it went into, written before the send, so a restart does not send it twice. */
+/** A request to be answered with a thread's report (`thread_prompt`'s `notify`): when the activity it started or joined
+ * in this thread settles, the report is posted into `threadId`, the caller's thread. Kept on the receiving thread's
+ * record until it is delivered. `wake`: T3's completionWake, `always` (a child started without waiting) or
+ * `settled_only` (asked when a wait ran out: not while `runId`, the caller's turn that asked, still runs). `batch`: the
+ * message it went into, written before the send, so a restart does not send it twice. */
 export type NotifyRequest = { id: string; threadId: string; messageId: string; createdAt: number; wake?: "always" | "settled_only"; runId?: string; batch?: string };
 /** How a child thread was started: the parent's run (where its card is), the message, and how its latest run ended
  * (written when it settles, so the card is right while the child's thread is closed). */
@@ -74,9 +71,9 @@ export type StoredSummary = ThreadSummary & { revision: number };
 /** A thread with no summary yet (revision 0: never written). */
 export const NO_SUMMARY: StoredSummary = { updatedAt: 0, latestVisibleMessage: null, latestUserMessageAt: null, latestRun: null, itemCount: 0, visibleItemCount: 0, revision: 0 };
 
-/** An applied undo, so a retried `requestId` returns the same fork instead of forking again. */
-/** An undo this thread applied: the head it moved to and the head it left. The runs the left head has and the new one
- * does not are the undo's rolled-back runs (`undoneHeads`): nothing about them is stored but this pair. */
+/** An undo this thread applied: the head it moved to and the head it left, kept so a retried `requestId` returns the
+ * same fork instead of forking again. The runs the left head has and the new one does not are the undo's rolled-back
+ * runs (`undoneHeads`): nothing about them is stored but this pair. */
 export type AppliedUndo = {
 	requestId: string;
 	head: number;

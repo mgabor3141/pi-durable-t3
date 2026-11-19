@@ -101,13 +101,6 @@ const LIVE_WINDOW = { min: 20, max: 40 };
 /** Entries read per page when the transcript is filled in: its start on open, and a gap after a stall. */
 const PAGE_SIZE = 500;
 
-/**
- * The transcript as the projection reads it: the active context (from the newest compaction's first kept entry, every
- * later entry) and the history before it, for display only, both in entry order. The view lists the fork-aware history
- * in entry order with each compaction summary where it was written: after the entries it keeps, where it took effect.
- * The projection shows each summary there, as T3 shows any provider's compaction at the moment it happened; earlier
- * summaries stay in the history the same way.
- */
 /** A conversation's whole transcript, oldest first, without image data: its fork-aware history. */
 async function wholeTranscript(conversation: Conversation): Promise<EntryRecord[]> {
 	const entries: EntryRecord[] = [];
@@ -137,6 +130,13 @@ function withoutWindowImages(view: ConversationView): ConversationView {
 	return entries.every((entry, index) => entry === view.entries[index]) ? view : { ...view, entries };
 }
 
+/**
+ * The transcript as the projection reads it: the active context (from the newest compaction's first kept entry, every
+ * later entry) and the history before it, for display only, both in entry order. The view lists the fork-aware history
+ * in entry order with each compaction summary where it was written: after the entries it keeps, where it took effect.
+ * The projection shows each summary there, as T3 shows any provider's compaction at the moment it happened; earlier
+ * summaries stay in the history the same way.
+ */
 export function splitTranscript(entries: readonly EntryRecord[]): { active: EntryRecord[]; history: EntryRecord[] } {
 	const marker = entries.findLast((entry) => entry.kind === "pi.compaction" && entry.head !== undefined);
 	if (marker === undefined) return { active: [...entries], history: [] };
