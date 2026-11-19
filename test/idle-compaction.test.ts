@@ -20,6 +20,9 @@ type Usage = { usedTokens: number; promptCacheTtlMs?: number; promptCacheExpires
 
 // Long enough that a compaction has something to cut (it keeps the last 20k tokens).
 const long = "x".repeat(120_000);
+// A compaction's reply. It is queued with the second turn's answer, so a compaction that starts at any time after that
+// turn succeeds and is counted: one that finds no reply fails without writing a compaction, and is not retried.
+const summary = "## Goal\nsummarized";
 
 async function setup(settings: object) {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
@@ -36,9 +39,9 @@ async function setup(settings: object) {
 	onTestFinished(() => bridge.close());
 	await bridge.loaded();
 	let sent = 0;
-	const turn = async (text: string, answer: string) => {
+	const turn = async (text: string, answer: string, ...later: string[]) => {
 		const n = ++sent;
-		f.model.append(fauxAssistantMessage(answer));
+		f.model.append(...[answer, ...later].map((reply) => fauxAssistantMessage(reply)));
 		await bridge.sendMessage({ threadId: "t", commandId: `c${n}`, messageId: `m${n}`, text, mode: "start" });
 		await idle(f.harness, thread.head);
 	};
@@ -51,16 +54,14 @@ it("compacts an idle thread shortly before its prompt cache expires, once, and s
 	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
 	const { f, bridge, thread, turn, compactions, logged } = await setup({ idleCompaction: "beforeCacheExpires" });
 	await turn("one", "first" + long);
-	await turn("two", "second" + long);
+	await turn("two", "second" + long, summary);
 	// T3 is told when the cache of the run's last request expires: five minutes after it, the lifetime it was written with.
 	const usage = (await bridge.projection("t")).projection.providerTurns.at(-1)!.tokenUsage as unknown as Usage;
 	expect(usage.promptCacheTtlMs).toBe(300_000);
 	const expires = Date.parse(usage.promptCacheExpiresAt!);
 	expect(expires).toBeGreaterThan(Date.now() + 290_000);
 	expect(expires).toBeLessThan(Date.now() + 300_000);
-	expect(await compactions()).toBe(0);
 
-	f.model.append(fauxAssistantMessage("## Goal\nsummarized"));
 	await expect.poll(compactions, { timeout: 20_000 }).toBe(1);
 	await idle(f.harness, thread.head);
 	const messages = (await bridge.projection("t")).projection.messages as unknown as Message[];
@@ -72,9 +73,10 @@ it("compacts an idle thread shortly before its prompt cache expires, once, and s
 	expect(after.usedTokens).toBeGreaterThan(0);
 	expect(after.usedTokens).toBeLessThan((usage as unknown as { usedTokens: number }).usedTokens);
 	expect(Date.parse(after.updatedAt)).toBeGreaterThanOrEqual(Date.parse((usage as unknown as { updatedAt: string }).updatedAt));
-	// A compaction is not compacted: one idle spell, one compaction.
+	// A compaction is not compacted: one idle spell, one compaction. The log counts every start, even one that would fail.
 	await sleep(2500);
 	expect(await compactions()).toBe(1);
+	expect(logged.filter((line) => line.startsWith("compacting an idle thread")).length).toBe(1);
 	expect(logged.filter((line) => line.startsWith("WARN"))).toEqual([]);
 });
 
@@ -83,7 +85,7 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	// T3's default is "When you return", which its web app does for Claude threads only: nothing happens here.
 	const off = await setup({});
 	await off.turn("one", "first" + long);
-	await off.turn("two", "second" + long);
+	await off.turn("two", "second" + long, summary);
 	await sleep(2500);
 	expect(await off.compactions()).toBe(0);
 
@@ -91,7 +93,7 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	IdleCompaction.limits = { minTokens: 10_000_000, leadMs: 299_000 };
 	const small = await setup({ idleCompaction: "beforeCacheExpires" });
 	await small.turn("one", "first" + long);
-	await small.turn("two", "second" + long);
+	await small.turn("two", "second" + long, summary);
 	await sleep(2500);
 	expect(await small.compactions()).toBe(0);
 
@@ -100,10 +102,9 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	const busy = await setup({ idleCompaction: "beforeCacheExpires" });
 	await busy.turn("one", "first" + long);
 	await sleep(1200);
-	await busy.turn("two", "second" + long);
+	await busy.turn("two", "second" + long, summary);
 	await sleep(1500);
 	expect(await busy.compactions(), "2.5 seconds after the first run, 1.5 after the second").toBe(0);
-	busy.f.model.append(fauxAssistantMessage("## Goal\nsummarized"));
 	await expect.poll(busy.compactions, { timeout: 20_000 }).toBe(1);
 
 	// A snoozed thread is left alone.
@@ -119,12 +120,11 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 
 it("turning the setting on covers a thread that is idle already, as a start of the bridge does", { timeout: 60_000 }, async () => {
 	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
-	const { f, turn, compactions, store } = await setup({});
+	const { turn, compactions, store } = await setup({});
 	await turn("one", "first" + long);
-	await turn("two", "second" + long);
+	await turn("two", "second" + long, summary);
 	await sleep(1500);
 	expect(await compactions()).toBe(0);
-	f.model.append(fauxAssistantMessage("## Goal\nsummarized"));
 	// The same look the bridge takes when it starts: the threads whose latest run completed within the cache's lifetime.
 	store.update({ idleCompaction: "beforeCacheExpires" });
 	await expect.poll(compactions, { timeout: 20_000 }).toBe(1);
