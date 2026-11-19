@@ -39,7 +39,6 @@
   "dependencies": {
     "@effect/platform-node": "4.0.5",
     "@effect/platform-node-shared": "4.0.5",
-    "@ff-labs/fff-node": "0.11.0",
     "effect": "4.0.5",
     "playwright-core": "1.64.1"
   },
