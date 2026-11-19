@@ -1,6 +1,6 @@
 // T3's inline HTML: html_render keeps a page as an attachment and shows it in the caller's thread as T3's html_render
 // tool item (which T3's timeline renders inline), html_preview renders it in the host's browser first. The page rules are
-// T3's. The browser tests run where Chromium can be launched and are skipped elsewhere.
+// T3's. The browser tests run in the Chrome that `CHROMIUM` names (CI passes the runner's) and are skipped without one.
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -202,7 +202,9 @@ it("a page is given inline or as an .html file in the environment, exactly one o
 	await expect(source({ path: dir }), "a folder").rejects.toThrow(unreadable);
 });
 
-const browser: Browser | undefined = await chromium.launch({ headless: true }).catch(() => undefined);
+// playwright-core has no browser of its own. A Chrome that is named but does not start fails the file, not skips it.
+const chrome = process.env["CHROMIUM"];
+const browser: Browser | undefined = chrome === undefined ? undefined : await chromium.launch({ headless: true, executablePath: chrome, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 
 describe.skipIf(browser === undefined)("in a browser", () => {
 	it("previews a page: a PNG at the width asked, its content height, its console, and the images it could not inline", { timeout: 60_000 }, async () => {

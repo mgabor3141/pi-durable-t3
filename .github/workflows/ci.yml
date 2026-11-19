@@ -26,7 +26,8 @@ jobs:
       - run: pnpm install --frozen-lockfile   # runs `prepare`: T3's contracts and web app at the pin (network), then the build
       - run: pnpm typecheck
       # The transfer budgets (`test/transfer-budget.test.ts`) write what they observed; the run's summary shows it.
-      - run: pnpm test
+      # html-render's browser test runs in the runner's preinstalled Chrome, as the smokes below do.
+      - run: CHROMIUM="$(command -v google-chrome)" pnpm test
         env:
           TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/transfer-budget.md
       - if: always()
