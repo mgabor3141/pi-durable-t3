@@ -1406,7 +1406,7 @@ export class Bridge {
 			this.#stops.requested(threadId, state);
 			// The abort resolves once every task it marked has ended, so a tool that does not listen would hold the answer.
 			// Its failure surfaces when it fails at once; a later one is logged.
-			const aborting = this.#store.queue.abort(input).then(
+			const aborting = this.#store.queue.abort(input, true).then(
 				() => undefined,
 				(error: unknown) => (error instanceof Error ? error : new Error(String(error))),
 			);

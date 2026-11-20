@@ -7,11 +7,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
-import { bridgeConfig, createNamed, gated, makeThreads, quietLog } from "./threads-harness.ts";
+import { bridgeConfig, conversation, createNamed, gated, makeThreads, quietLog } from "./threads-harness.ts";
 
 type Projection = OrchestrationV2ThreadProjection;
 
@@ -107,17 +108,37 @@ it("a queued message promoted to a steer leaves the queue and waits in the run, 
 	expect(row(done, "m2")).toEqual({ id: "ti-mm2", status: "completed", intent: "promoted_queued_to_steer", run: "m1" });
 });
 
-it("a steer waiting when the run is stopped is kept, and waits in the queue, held, until the thread goes on", { timeout: 60_000 }, async () => {
+it("a steer waiting when the run is stopped is cancelled where it waited, with T3's notice that it may not have been delivered", { timeout: 60_000 }, async () => {
 	const { f, bridge, send, until } = await setup();
 	const held = gated("never finished");
-	f.model.respond(held.step, fauxAssistantMessage("the steer, answered"));
+	f.model.respond(held.step, fauxAssistantMessage("to the queued one"), fauxAssistantMessage("to the next one"));
 	await send("m1", "go", "start");
 	await until((projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined));
 	await send("m2", "a steer", "steer");
+	await send("m3", "queued", "queue");
 	await until((projection) => (row(projection, "m2")?.status === "pending" ? true : undefined));
 	await bridge.interrupt("t");
 	held.release();
-	const stopped = await until((projection) => (queuedRuns(projection).includes("m2") && !projection.runs.some((run) => run.status === "running") ? projection : undefined));
-	expect(row(stopped, "m2"), "no longer shown in the stopped run").toBeUndefined();
-	expect(stopped.runs.find((run) => run.userMessageId === "m2")).toMatchObject({ status: "queued", queueHeld: true });
+	const stopped = await until((projection) => (row(projection, "m2")?.status === "cancelled" && !projection.runs.some((run) => run.status === "running") ? projection : undefined));
+	expect(row(stopped, "m2"), "the same row, in the stopped run").toEqual({ id: "ti-mm2", status: "cancelled", intent: "steer", run: "m1" });
+	const notices = stopped.turnItems.filter((item) => item.type === "system_notice");
+	expect(notices).toEqual([
+		expect.objectContaining({
+			status: "completed",
+			runId: stopped.runs.find((run) => run.userMessageId === "m1")!.id,
+			title: "Steer delivery not confirmed",
+			message: 'The agent did not confirm reading your steer before Stop. It may not have been delivered. Resend it if needed: "a steer"',
+		}),
+	]);
+	expect(queuedRuns(stopped), "not queued; the queued message stays queued, held").toEqual(["m3"]);
+	expect(stopped.runs.find((run) => run.userMessageId === "m3")).toMatchObject({ queueHeld: true });
+
+	// The next message goes on with the queue; the dropped steer never reaches the model.
+	await send("m4", "next", "start");
+	const done = await until((projection) => (projection.runs.length === 3 && settled(projection) ? projection : undefined));
+	expect(done.runs.map((run) => [String(run.userMessageId), run.status])).toEqual([["m1", "interrupted"], ["m3", "completed"], ["m4", "completed"]]);
+	const head = (await f.threads.thread("t"))!.head;
+	const context = await (await conversation(f.harness, head)).context(BACKGROUND_CONTEXT);
+	expect(JSON.stringify(context.messages)).not.toContain("a steer");
+	expect(row(done, "m2")?.status).toBe("cancelled");
 });

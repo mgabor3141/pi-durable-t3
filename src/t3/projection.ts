@@ -23,7 +23,7 @@ import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
-import { APP_CONTINUE_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, sentAs, stopReason, authorOf } from "./runs.ts";
+import { APP_CONTINUE_ENTRY, APP_UNREAD_STEER_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, sentAs, stopReason, authorOf, unreadSteerOf } from "./runs.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
@@ -571,7 +571,8 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 					: "interrupted";
 	}
 	// A compaction card is not a place to fork at or a run's last message: the run's own last entry is.
-	const lastEntry = draft.steps.findLast((step) => !isCompactionEntry(step)) ?? u;
+	// Nor is a steer Stop found unread, written once the run had ended.
+	const lastEntry = draft.steps.findLast((step) => !isCompactionEntry(step) && step.kind !== APP_UNREAD_STEER_ENTRY) ?? u;
 	// The run ends where its last entry's message ends (`endOf`, the same value the assistant message and its item carry).
 	const lastMessage = firstMessage(lastEntry);
 	// Never before it was asked for: a message stamped earlier (a clock step, a reply made ahead) still ends the run then.
@@ -1145,6 +1146,37 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				toolName: HTML_RENDER_TOOL_NAME,
 				input: { title: reference.title, height: reference.height },
 				output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }),
+			} as Any);
+			return;
+		}
+		// A steer Stop found unread: T3's `requeueUnreadSteers` marks its row cancelled where it waited, and says so in a
+		// notice with the text, to be sent again if needed.
+		const unread = unreadSteerOf(step);
+		if (unread !== undefined) {
+			const sent = sentAs(step.data);
+			const at = sent?.sentAt ?? unread.cancelledAt;
+			const attachments = attachmentsOf(step);
+			const context = contextOf(step) ?? contextFromText(unread.text, attachments);
+			const { senderThreadId, ...author } = authorOf(step.data);
+			const sender = senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) };
+			pushCards(unread.cancelledAt);
+			turnItems.push({
+				...base(userItemId(step.data, unread.messageId) ?? `ti-u${step.id}`, at, "cancelled", true, unread.cancelledAt),
+				...author,
+				...sender,
+				type: "user_message",
+				messageId: id(unread.messageId),
+				inputIntent: sent?.promoted === true ? "promoted_queued_to_steer" : "steer",
+				text: unread.text,
+				attachments,
+				...(context === undefined ? {} : { context }),
+			} as Any);
+			messages.push({ ...author, ...sender, id: id(unread.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: unread.text, attachments, ...(context === undefined ? {} : { context }), streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
+			turnItems.push({
+				...base(`ti-unread-steer-${unread.messageId}`, unread.cancelledAt, "completed", true),
+				type: "system_notice",
+				title: "Steer delivery not confirmed",
+				message: `The agent did not confirm reading your steer before Stop. It may not have been delivered. Resend it if needed: "${unread.text}"`,
 			} as Any);
 			return;
 		}

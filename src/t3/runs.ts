@@ -31,6 +31,19 @@ const COMMAND_NOTE_KINDS: ReadonlySet<string> = new Set([APP_RELOAD_ENTRY, APP_C
  * tool item. Its data is T3's `HtmlRenderReference` and when it was published. */
 export const APP_HTML_RENDER_ENTRY = "app.html-render";
 
+/** A steer a Stop found unread (`ThreadQueue.abort`): display-only, written where the stopped run ends, and shown there
+ * as T3 shows a steer Stop dropped, cancelled with a "Steer delivery not confirmed" notice. Its data is the steer's own
+ * entry data, with the text it was sent with and when it was cancelled. */
+export const APP_UNREAD_STEER_ENTRY = "app.unread-steer";
+
+/** The steer an unread-steer entry records, if it is one. */
+export function unreadSteerOf(entry: EntryRecord): { messageId: string; text: string; cancelledAt: number } | undefined {
+	if (entry.kind !== APP_UNREAD_STEER_ENTRY) return undefined;
+	const data = entry.data as Record<string, unknown> | undefined;
+	if (data === undefined || typeof data.messageId !== "string" || typeof data.text !== "string" || typeof data.cancelledAt !== "number") return undefined;
+	return { messageId: data.messageId, text: data.text, cancelledAt: data.cancelledAt };
+}
+
 /** The reference an html-render entry carries, if it is one. */
 export function htmlRenderOf(entry: EntryRecord): { attachmentId: string; title: string; height: number; heights?: [number, number][]; createdAt: number } | undefined {
 	if (entry.kind !== APP_HTML_RENDER_ENTRY) return undefined;
@@ -251,7 +264,7 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 			}
 			continue;
 		}
-		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result" || entry.kind === APP_HTML_RENDER_ENTRY) runs.at(-1)?.steps.push(entry);
+		if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result" || entry.kind === APP_HTML_RENDER_ENTRY || entry.kind === APP_UNREAD_STEER_ENTRY) runs.at(-1)?.steps.push(entry);
 		// A note joins the run it lands in; one before any run opens a run of its own (it is the thread's first message).
 		else if (isNoteEntry(entry)) {
 			const current = runs.at(-1);
