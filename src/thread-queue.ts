@@ -108,12 +108,16 @@ export class ThreadQueue {
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${conversationId}`);
 		await this.#threads.watermark(threadId);
 		const started = await this.#threads.harness.commit(async (tx) => {
-			// A read of the live run first: a Send now while a turn is live would only queue the message again.
+			// A request seen before started its message then: another would be taken from the queue and never started.
+			if ((await tx.submissionByRequest(conversationId, requestId)) !== undefined) return undefined;
+			// A read of the live run first: a Send now while a turn is live would only queue the message again. A manual
+			// compaction is no run to pi-durable, which would start one beside the summary; the summary places the queue.
 			const live = await tx.doc(LiveDoc, conversationId);
 			const inbox = await tx.doc(InboxDoc, conversationId);
+			const busy = live.run !== undefined || (live.compactions?.length ?? 0) > 0;
 			// `queue.resume` behind a live run (T3 sends it after its Resume continued the run): the queue follows that run.
-			if (live.run !== undefined && runId === undefined) return undefined;
-			if (live.run !== undefined) throw hostError("turn_running", "a turn is running");
+			if (busy && runId === undefined) return undefined;
+			if (busy) throw hostError("turn_running", "a turn is running");
 			const candidates = inbox.items.filter((item) => item.mode !== "write");
 			if (candidates.length === 0) {
 				// `queue.resume` may arrive with nothing queued; there is nothing to do.

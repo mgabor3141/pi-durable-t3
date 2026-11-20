@@ -663,7 +663,7 @@ export class Threads {
 		} catch (error) {
 			this.#onWarn(`prompt committed but its thread promote failed (the run lives; the next promote of this conversation adopts it): ${String(error)}`, error);
 		}
-		// The sidebar preview must show the prompt before the run starts; the run boundary updates the assistant reply.
+		// The sidebar preview shows the prompt at once; the run boundary updates the assistant reply.
 		await this.#rememberInput(input);
 	}
 

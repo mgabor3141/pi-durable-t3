@@ -88,6 +88,22 @@ describe("starting a queued message", () => {
 		expect(sent).toEqual(["m-a", "m-B", "m-C"]);
 	});
 
+	it("a Send now repeated with the same request id starts nothing more", async () => {
+		const first = failsWhenReleased();
+		const fixture = await makeThreads({ projects: [{ id: "p" }], responses: [first.step, fauxAssistantMessage("", { stopReason: "error", errorMessage: "boom again" })] });
+		const thread = await createNamed(fixture.threads, fixture.harness, fixture.model)({ threadId: "t", projectId: "p" });
+		const head = thread.head;
+		await fixture.threads.submit({ threadId: "t", conversationId: head, requestId: "first", message: "first" }, undefined);
+		for (const name of ["A", "B"]) await fixture.threads.submit({ threadId: "t", conversationId: head, requestId: name, message: name, messageId: `m-${name}` }, "followUp");
+		first.release();
+		await idle(fixture.harness, head);
+		// A's run fails too, so B is still queued when the same request comes again.
+		await fixture.threads.queue.startQueued("t", undefined, "resume-1");
+		await idle(fixture.harness, head);
+		await fixture.threads.queue.startQueued("t", undefined, "resume-1");
+		expect(await fixture.threads.queue.waiting("t")).toMatchObject([{ messageId: "m-B" }]);
+	});
+
 	it("the messages queued behind a restart's message follow it however soon its run ends", async () => {
 		const first = gated("never");
 		const fixture = await makeThreads({ projects: [{ id: "p" }], responses: [first.step, fauxAssistantMessage("now"), fauxAssistantMessage("b")] });

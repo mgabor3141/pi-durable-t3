@@ -81,6 +81,37 @@ describe("manual compact", () => {
 		expect(placed).toMatchObject({ kind: "app.user", data: { whenBusy: "followUp" } });
 		expect(all.items.some((entry) => entry.kind === "pi.assistant" && JSON.stringify(entry.model ?? "").includes("queued reply"))).toBe(true);
 	});
+
+	it("refuses Send now on a message queued behind a running compaction, which places it when its summary lands", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const thread = await createNamed(threads, harness, model)({ threadId: "t", projectId: "p" });
+		const long = "x".repeat(120_000);
+		for (const [index, text] of ["one", "two"].entries()) {
+			model.respond(fauxAssistantMessage(text + long));
+			await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "p" + String(index), message: text }, undefined);
+			await idle(harness, thread.head);
+		}
+		const summary = gated("summary");
+		model.respond(summary.step);
+		const compacting = threads.compact("t", undefined);
+		for (let tries = 0; tries < 100; tries++) {
+			const live = await harness.snapshot(LiveDoc, thread.head as ConversationId, BACKGROUND_CONTEXT);
+			if ((live?.compactions?.length ?? 0) > 0) break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		model.respond(fauxAssistantMessage("queued reply"));
+		const queued = await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "queued", message: "queued while compacting", messageId: "m-q" }, "followUp");
+		await expect(threads.queue.startQueued("t", `q${queued.id}`, "start")).rejects.toMatchObject({ code: "turn_running" });
+		// Resume has nothing to start meanwhile: the summary places the queue.
+		await threads.queue.startQueued("t", undefined, "resume");
+		expect((await harness.snapshot(LiveDoc, thread.head as ConversationId, BACKGROUND_CONTEXT))?.run).toBeUndefined();
+		expect(await threads.queue.waiting("t")).toMatchObject([{ messageId: "m-q" }]);
+		summary.release();
+		await compacting;
+		await idle(harness, thread.head);
+		const all = await (await conversation(harness, thread.head)).entries({ order: "ascending" }, 300, undefined, BACKGROUND_CONTEXT);
+		expect(all.items.some((entry) => entry.kind === "pi.assistant" && JSON.stringify(entry.model ?? "").includes("queued reply"))).toBe(true);
+	});
 });
 
 // `/compact` is not only for an idle thread: pi-durable summarizes while the run goes on and places the summary at
