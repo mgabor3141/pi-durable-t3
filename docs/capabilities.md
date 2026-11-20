@@ -187,7 +187,7 @@ Without the path, the browser is ephemeral. There is no T3 profile picker: `repo
 
 ### The host's own updates
 
-On this host the provider `pi` is the integrator's agent, so the advisory is the host's. The provider's `version` says the host's own version and then what it is built on, "claw 680f25f, pi 1.5.2, t3 0.1.11" (the integrator's `name` and version, the pi release, the pinned T3 release; without `updates`, the last two). The integrator's comes first because T3's provider list shows about a dozen characters of a version; the provider's own panel shows it whole.
+On this host the provider `pi` is the integrator's agent, so the advisory is the host's. The provider's `version` says the host's own version and then what it is built on, "claw 680f25f, pi 1.6.0, t3 0.1.11" (the integrator's `name` and version, the pi release, the pinned T3 release; without `updates`, the last two). The integrator's comes first because T3's provider list shows about a dozen characters of a version; the provider's own panel shows it whole.
 
 The advisory carries the integrator's version alone: the one that runs, the newest there is (asked of the integrator at start, hourly, and on Settings' Refresh), and the command a person would run. `server.updateProvider` asks the integrator to install, answers T3's provider payload with the update state (`running` on the config stream, then `succeeded`, `unchanged` or `failed` with what the install printed), and a second later asks it to restart; clients reconnect to the new version. Without `updates` the call is refused and the provider carries no advisory.
 

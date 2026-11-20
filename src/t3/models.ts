@@ -95,7 +95,7 @@ export class ModelCatalog {
 
 	/**
 	 * What this host is built on, in the provider's version: the pi release, and the T3 release `attachT3` adds. The
-	 * integrator's own version comes first when it has updates, "claw 680f25f, pi 1.5.2, t3 0.1.9": it is the part
+	 * integrator's own version comes first when it has updates, "claw 680f25f, pi 1.6.0, t3 0.1.11": it is the part
 	 * that changes, and T3's provider list shows about a dozen characters of a version.
 	 */
 	platform = `pi ${PI_AI_VERSION}`;
