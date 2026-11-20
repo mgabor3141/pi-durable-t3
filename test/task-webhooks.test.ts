@@ -42,6 +42,7 @@ async function fixture(options: { dir?: string; launch?: ScheduledTaskDispatch["
 		thread: async () => ({ projectId: "p", archived: false }),
 		queuedOccurrence: async () => null,
 		runOutcome: async () => null,
+		isNonGitProject: async () => false,
 	};
 	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 	harnesses.push(harness);

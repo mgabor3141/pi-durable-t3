@@ -124,3 +124,23 @@ it("a scheduled run is followed to its end by its message: completed, failed wit
 		await rm(scratch, { recursive: true, force: true });
 	}
 });
+
+it("a project folder that is not a Git repository is told apart from one that is (T3's isNonGitProject)", { timeout: 30_000 }, async () => {
+	const { execFileSync } = await import("node:child_process");
+	const f = await makeThreads({ projects: [{ id: "plain" }, { id: "repo" }, { id: "gone" }] });
+	const [, repo, gone] = f.projects;
+	execFileSync("git", ["init", "-q", repo!.cwd]);
+	await rm(gone!.cwd, { recursive: true });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-git-"));
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	try {
+		const dispatch = scheduledTaskDispatch(bridge);
+		expect(await dispatch.isNonGitProject("plain")).toBe(true);
+		expect(await dispatch.isNonGitProject("repo")).toBe(false);
+		expect(await dispatch.isNonGitProject("gone"), "a folder that is not there holds no repository").toBe(true);
+		expect(await dispatch.isNonGitProject("unknown"), "an unknown project is not known to be anything").toBe(false);
+	} finally {
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	}
+});

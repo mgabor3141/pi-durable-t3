@@ -4,9 +4,10 @@
 // in its database. A run is recorded when it is dispatched — a new thread with the prompt as its first message, or the
 // prompt queued on the task's thread — and then followed to its end, which can fail the task or use up a one-time one.
 import { randomUUID } from "node:crypto";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
 import { type OrchestrationV2ThreadProjection, ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskThreadMode, type ScheduledTaskUpsertInput, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -59,6 +60,8 @@ export interface ScheduledTaskDispatch {
 	 * (the thread is gone, no run carries the message, it did not end within `timeoutMs`, `signal` aborted, or the message
 	 * moved into another run). */
 	runOutcome(threadId: string, messageId: string, timeoutMs: number, signal: AbortSignal): Promise<ScheduledRunOutcome | null>;
+	/** T3's `ThreadLaunchService.isNonGitProject`: the project's folder is known and is not in a Git repository. */
+	isNonGitProject(projectId: string): Promise<boolean>;
 }
 
 /**
@@ -439,10 +442,11 @@ export class ScheduledTasks {
 		if (!this.#ready) await this.load();
 		// This host's `request_secret` gives a name, not T3's one-use reference: refused by name, before anything is saved.
 		if (input.schedule.type === "webhook" && input.schedule.signature?.secretRef !== undefined) throw taskError(SECRET_REF_UNSUPPORTED, input.id);
-		// T3 stores a Scratch project's worktree request as the root (ScheduledTaskService.upsert). Any other worktree
-		// request is refused: every run here is at the project root, so it would silently run somewhere else.
+		// T3 stores a worktree request on a folder that cannot hold a worktree, Scratch or one that is not a Git
+		// repository, as the root (ScheduledTaskService.upsert). Any other worktree request is refused: every run here is
+		// at the project root, so it would silently run somewhere else.
 		const workspaceStrategy: Task["workspaceStrategy"] =
-			input.workspaceStrategy.type === "worktree" && this.#dispatch.isScratchProject(input.projectId) ? { type: "root" } : input.workspaceStrategy;
+			input.workspaceStrategy.type === "worktree" && (this.#dispatch.isScratchProject(input.projectId) || (await this.#dispatch.isNonGitProject(input.projectId))) ? { type: "root" } : input.workspaceStrategy;
 		if (workspaceStrategy.type !== "root") throw taskError(WORKTREES_UNSUPPORTED, input.id);
 		// pi's only modes, as the thread commands answer them (rpc.ts): a task must not run in a mode it did not ask for.
 		if (input.runtimeMode !== "full-access") throw taskError(FULL_ACCESS_ONLY, input.id);
@@ -663,6 +667,10 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 				throw error;
 			}
 		},
+		isNonGitProject: async (projectId) => {
+			const project = bridge.config.registry.list().find((candidate) => candidate.id === projectId);
+			return project !== undefined && !(await isGitRepository(bridge.config.env, project.cwd, bridge.config.context ?? BACKGROUND_CONTEXT));
+		},
 	};
 }
 
@@ -681,3 +689,21 @@ export function scheduledRunOutcome(projection: OrchestrationV2ThreadProjection,
 	return { status: run.status, error: latestRootProviderFailure(run, projection.turnItems)?.message ?? null };
 }
 
+/**
+ * T3's `CheckpointStore.isGitRepository` (GitVcsDriver's work-tree probe), through the environment: a folder in a work
+ * tree is one. Git missing, a folder that is not there, "not a git repository", a bare repository or the inside of a
+ * `.git` are not; any other failure is not an answer, and reads as a repository, as T3's caller reads it.
+ */
+async function isGitRepository(env: ExecutionEnv, cwd: string, context: Context): Promise<boolean> {
+	let stdout = "";
+	let stderr = "";
+	const run = await env.exec(
+		["git", "rev-parse", "--is-inside-work-tree"],
+		{ cwd, env: { LC_ALL: "C" }, timeout: 5_000, onOutput: (text, _context, info) => void (info.stream === "stdout" ? (stdout += text) : (stderr += text)) },
+		context,
+	);
+	if (!run.ok) return run.error.code !== "spawn_error";
+	if (run.value.exitCode === 0) return stdout.trim() === "true";
+	const missing = await env.exists(cwd, context);
+	return !(stdout.startsWith("false") || /^fatal: (?:not a git repository|cannot use bare repository)/m.test(stderr) || (missing.ok && !missing.value));
+}

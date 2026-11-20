@@ -81,6 +81,7 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 		thread: options.dispatch?.thread ?? (async () => ({ projectId: "p", archived: false })),
 		queuedOccurrence: options.dispatch?.queuedOccurrence ?? (async () => null),
 		runOutcome: options.dispatch?.runOutcome ?? (async () => null),
+		isNonGitProject: options.dispatch?.isNonGitProject ?? (async () => false),
 	};
 	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 	harnesses.push(harness);
@@ -476,10 +477,19 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(reopened.list().tasks[0]).toMatchObject({ id: task.id, lastRunStatus: "failed", lastRunError: INTERRUPTED_BY_RESTART, runCount: 1, nextRunAt: "2026-07-01T12:01:00.000Z" });
 	});
 
-	it("a worktree workspace is refused: every run is at the project root", async () => {
+	it("a worktree workspace on a Git repository is refused: every run is at the project root", async () => {
 		const { tasks } = await fixture();
 		await expect(tasks.upsert(input({ workspaceStrategy: { type: "worktree", baseRef: "main" } as never }))).rejects.toThrow(WORKTREES_UNSUPPORTED);
 		expect(tasks.list().tasks).toHaveLength(0);
+	});
+
+	it("a worktree asked of a folder that is not a Git repository is stored as the root, as T3 0.1.11 does", async () => {
+		const asked: string[] = [];
+		const { tasks } = await fixture({ dispatch: { isNonGitProject: async (projectId) => (asked.push(projectId), projectId === "plain") } });
+		const { task } = await tasks.upsert(input({ projectId: "plain" as never, workspaceStrategy: { type: "worktree", baseRef: "main" } as never }));
+		expect(task.workspaceStrategy).toEqual({ type: "root" });
+		await tasks.upsert(input({ projectId: "plain" as never }));
+		expect(asked, "only a worktree request asks").toEqual(["plain"]);
 	});
 
 	it("a worktree asked of the Scratch project is stored as the root, as T3 does", async () => {

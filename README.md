@@ -163,7 +163,8 @@ Known limitations:
   database, the thread's live state left showing a run) has nothing left to abort; Stop ends it, and logs that it did.
 - Settings `snoozeLimitedThreads` and `easDeviceHosts` are stored but act on nothing here.
 - Search has no index: each query reads every thread.
-- Scheduled tasks: worktree workspaces are refused (T3's form defaults to one; pick "Use the project checkout").
+- Scheduled tasks: worktree workspaces are refused on a Git repository (T3's form defaults to one; pick "Use the project
+  checkout"); elsewhere they are stored as the project root, as T3 does.
 - Behind a proxy (the route you run for `remoteAccess`) every request arrives from the proxy's address, so the pairing
   rate limiter's buckets are shared by everyone who comes through it — it fails closed: a legitimate user can be told
   to wait a minute, and one client can lock out the others' pairing for that minute (pairing on this machine too, when
