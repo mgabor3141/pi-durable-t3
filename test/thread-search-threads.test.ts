@@ -103,4 +103,16 @@ describe("Threads.search", () => {
 		expect((await threads.search("quokka", 50)).map((hit) => hit.snippet)).toEqual(["then, the quokka"]);
 		expect(await threads.search("earlier work", 50), "a summary is not a message").toEqual([]);
 	});
+
+	it("searches that overlap read each message once", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const thread = await createNamed(threads, harness, model)({ threadId: "t", projectId: "p" });
+		// More than one page of messages, so that the searches page through the head at the same time.
+		await harness.commit(async (tx) => {
+			for (let i = 0; i < 1500; i++) await tx.appendEntry(thread.head as never, { kind: "app.user", data: { messageId: `m${i}` }, model: [{ role: "user", content: `message number ${i}`, timestamp: 1000 + i }] } as never);
+		}, BACKGROUND_CONTEXT);
+		await Promise.all([threads.search("number", 10), threads.search("numbe", 10), threads.search("numb", 10)]);
+		const chars = Array.from({ length: 1500 }, (_, i) => `message number ${i}`.length).reduce((sum, length) => sum + length, 0);
+		expect(threads.searchChars()).toBe(chars);
+	});
 });

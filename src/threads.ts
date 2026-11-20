@@ -441,6 +441,8 @@ export class Threads {
 		do {
 			const page = await conversation.entries({ ...from, order: "ascending" }, 500, cursor, BACKGROUND_CONTEXT);
 			for (const entry of page.items as unknown as readonly import("./t3/model-types.ts").EntryRecord[]) {
+				// A search that overlaps this one may have read it already: they share `read`, and each pages on its own.
+				if (read.last !== undefined && entry.id <= (read.last as number)) continue;
 				read.last = entry.id as EntryId;
 				const candidate = searchCandidate(entry, thread.threadId, thread.projectId);
 				if (candidate === undefined) continue;
