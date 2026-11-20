@@ -113,6 +113,10 @@ it("waits with a timeout, interrupts a running turn, and refuses to steer an idl
 	const { f, ops } = await setup({ tokensPerSecond: 20 });
 	const caller = client;
 	expect(await failureOf(() => ops.send(caller, { threadId: tid("b"), message: "x", mode: "steer" }))).toBe("thread_not_sendable");
+	// T3 0.1.11 says how to start a turn instead.
+	await expect(ops.send(caller, { threadId: tid("b"), message: "x", mode: "restart" })).rejects.toThrow(
+		'Thread b has no running turn that can be restarted. Send with mode: "auto" or "queue" to start a new turn there.',
+	);
 	f.model.respond(fauxAssistantMessage("slow ".repeat(200)));
 	const sent = await ops.send(caller, { threadId: tid("b"), message: "long task" });
 	const early = await ops.wait(caller, { threadId: tid("b"), timeoutMs: 200 });
@@ -263,4 +267,42 @@ it("reports a project's default model from the settings' override for it, and sc
 		["on the environment's", "faux/everywhere"],
 		["on the project's", "faux/override"],
 	]);
+});
+
+it("lists and reads a thread's pin and snooze as they are; an agent's pin lands at the top of Pinned (T3 0.1.11)", { timeout: 60_000 }, async () => {
+	const { bridge, ops } = await setup();
+	const listed = () => ops.list(client, { allProjects: true }).threads;
+	const row = (threadId: string) => listed().find((thread) => thread.threadId === threadId)!;
+	expect(row("a")).toMatchObject({ pinned: false, snoozed: false, snoozedUntil: null, blockedOnThreadWait: false, pendingBackgroundTasks: [] });
+
+	// Each pin gets T3's order key, before every pin there is, as a client's pin does.
+	await ops.organize(client, { threadId: "a", action: "pin" });
+	await ops.organize(client, { threadId: "b", action: "pin" });
+	const keyOf = (threadId: string) => bridge.threadRecord(threadId)!.pinOrderKey;
+	expect(keyOf("a")).toEqual(expect.any(String));
+	expect(keyOf("b")! < keyOf("a")!, "the newer pin sorts first").toBe(true);
+	expect(row("a").pinned).toBe(true);
+
+	const until = new Date(Date.now() + 3_600_000).toISOString();
+	await ops.organize(client, { threadId: "c", action: "snooze", snoozedUntil: until });
+	const result = ops.list(client, { allProjects: true });
+	encodes(OrchestratorMcpThreadListResult, result);
+	expect(result.threads.find((thread) => thread.threadId === "c")).toMatchObject({ snoozed: true, snoozedUntil: until, pinned: false });
+	expect(ops.list(client, { allProjects: true, snoozed: true }).threads.map((thread) => thread.threadId)).toEqual(["c"]);
+	expect(ops.list(client, { allProjects: true, snoozed: false }).threads.map((thread) => thread.threadId).sort()).toEqual(["a", "b"]);
+	const read = await ops.read(client, { threadId: tid("c") });
+	encodes(OrchestratorMcpThreadReadResult, read);
+	expect(read.thread).toMatchObject({ snoozed: true, snoozedUntil: until, pinned: false, blockedOnThreadWait: false, pendingBackgroundTasks: [], lastTitleRegeneration: null });
+	expect((await ops.read(client, { threadId: tid("a") })).thread).toMatchObject({ pinned: true, snoozed: false });
+});
+
+it("answers a thread link passed as a thread id with the id to pass (T3 0.1.11)", async () => {
+	const { ops } = await setup();
+	const link = ops.list(client, { projectId: "p" as never }).threads.find((thread) => thread.threadId === "a")!.link!;
+	await expect(ops.read(client, { threadId: tid(link) })).rejects.toThrow(`\`${link}\` is a thread link, not a thread id. Pass \`a\` instead.`);
+	// The web app's link this host gives a client that signed in from a browser, too.
+	await expect(ops.organize({ ...client, webOrigin: "https://claw.example" }, { threadId: "https://claw.example/env-1/b", action: "pin" })).rejects.toThrow("Pass `b` instead.");
+	// A link to a thread that is not here, or to another environment, is not found.
+	await expect(ops.read(client, { threadId: tid("t3-thread://v2/env-2/a") })).rejects.toThrow("Thread t3-thread://v2/env-2/a was not found.");
+	await expect(ops.read(client, { threadId: tid("nope") })).rejects.toThrow("Thread nope was not found.");
 });

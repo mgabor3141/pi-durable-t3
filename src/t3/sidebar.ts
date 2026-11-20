@@ -79,12 +79,14 @@ export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, no
 	return quietSince < now - days * DAY_MS ? quietSince : null;
 }
 
-/** T3's `isSnoozed`, as clients show it: snoozed until a time still ahead, unless a run failed after it was snoozed. */
-function isSnoozed(shell: OrchestrationV2ThreadShell, now: number): boolean {
+/** T3's `isSnoozed` (ThreadSettlementService, which clients match): snoozed until a time still ahead, unless something
+ * woke it meanwhile: an approval waiting, a question asked since the snooze, or a run that failed after it. */
+export function isSnoozed(shell: OrchestrationV2ThreadShell, now: number): boolean {
 	const until = ms(shell.snoozedUntil);
 	if (until === null || until <= now) return false;
-	if (shell.pendingRuntimeRequest !== null) return false;
 	const snoozedAt = ms(shell.snoozedAt);
+	const request = shell.pendingRuntimeRequest;
+	if (request !== null && (request.kind !== "user_input" || snoozedAt === null || DateTime.toEpochMillis(request.createdAt) > snoozedAt)) return false;
 	const completedAt = ms(shell.latestRunCompletedAt);
 	const wokeOnError = shell.status === "failed" && (snoozedAt === null || (completedAt !== null && completedAt > snoozedAt));
 	return !wokeOnError;

@@ -36,6 +36,7 @@ import { contextEdits as messageContextEdits } from "./message-contexts.ts";
 import { type SectionChange, systemPromptUpdates, updateDetails, updateTitle } from "./prompt-updates.ts";
 import { sentTokens, sizeAfterCompaction } from "./context-size.ts";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 
 /** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
 const CODEMODE_TOOL = "codemode";
@@ -1525,6 +1526,26 @@ function projectRows(b: Build) {
 	return { projection, visibleTurnItems, updatedAt, author, sidebar, thread };
 }
 
+/** Execution rows (T3's `EXECUTION_TURN_ITEM_TYPES`): what a turn is doing, as against what it says. */
+const EXECUTION_ITEM_TYPES: ReadonlySet<string> = new Set(["command_execution", "dynamic_tool", "subagent", "file_change", "file_search", "web_search", "compaction"]);
+
+/** T3's `deriveBlockedOnThreadWait`, with this host's waits for T3's `t3_thread_wait` and `delegate_task` in `wait`
+ * mode: every row the running turn still works on is `thread_wait`, or a `thread_prompt` that waits (its default). A
+ * child's card follows the child, not the wait, so it does not count. */
+function blockedOnThreadWait(activeRun: OrchestrationV2Run | undefined, turnItems: readonly OrchestrationV2TurnItem[]): boolean {
+	if (activeRun?.status !== "running") return false;
+	let waits = false;
+	for (const item of turnItems) {
+		if (item.runId !== activeRun.id || !EXECUTION_ITEM_TYPES.has(item.type) || (item.status !== "running" && item.status !== "waiting")) continue;
+		if (item.type === "subagent" && item.origin === "app_owned") continue;
+		if (item.type !== "dynamic_tool") return false;
+		const input = item.input as { wait?: unknown } | null | undefined;
+		if (item.toolName !== "thread_wait" && !(item.toolName === "thread_prompt" && input?.wait !== false)) return false;
+		waits = true;
+	}
+	return waits;
+}
+
 /** The thread's shell: its sidebar row, with the latest run and message as T3's shell reads them. */
 function projectShell(b: Build, rows: ReturnType<typeof projectRows>): OrchestrationV2ThreadShell {
 	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, messages, turnItems, shownIds } = b;
@@ -1614,7 +1635,12 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 			return at == null ? null : time(at);
 		})(),
 		hasActionableProposedPlan: false,
-		pendingBackgroundTasks: [],
+		// T3's `deriveBlockedOnThreadWait`: the running turn does nothing but wait for other threads (T3's sidebar shows
+		// it waiting, not working). Here that is `thread_wait`, or `thread_prompt` waiting for its answer.
+		blockedOnThreadWait: blockedOnThreadWait(activeRun, turnItems),
+		// T3's `derivePendingBackgroundWork`: work the latest run left going, here the children it started without waiting
+		// (`thread_prompt` with `wait: false`) that still work, each a subagent task.
+		pendingBackgroundTasks: derivePendingBackgroundWork({ latestRun: latestRun ?? null, providerThreads: [], turnItems, runs, activeProviderThreadId: null }),
 		providerInstanceHistory: [id(PROVIDER_INSTANCE_ID)],
 		itemCount: meta.summary === undefined || view !== undefined ? turnItems.length : meta.summary.itemCount,
 		visibleItemCount: meta.summary === undefined || view !== undefined ? visibleTurnItems.length : meta.summary.visibleItemCount,

@@ -32,7 +32,9 @@ import {
 	type ThreadMetadataMcpUpdateResult,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import { formatThreadLink, hasThreadLinks, parseThreadLinkHref, threadLinkCandidates, threadLinkRefs } from "@t3tools/shared/threadLinks";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 import { type AuthMcpClientAccess, ProjectId, type RuntimeMode, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
@@ -52,6 +54,7 @@ import type {
 	ScheduledTaskUpsertInput,
 } from "@t3tools/contracts";
 import type { Logger } from "./logging.ts";
+import { isSnoozed } from "./sidebar.ts";
 
 /** Who is calling: the thread the call comes from, or the MCP client that signed in over OAuth (`./mcp-oauth.ts`) with
  * the access the user approved; and the web origin its links should open in. */
@@ -117,6 +120,32 @@ const isTerminal = (run: OrchestrationV2Run) => ["completed", "failed", "cancell
 const byOrdinalDesc = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, right) => right.ordinal - left.ordinal);
 const latestRun = (projection: Pick<OrchestrationV2ThreadProjection, "runs">) => byOrdinalDesc(projection.runs)[0];
 const latestActiveRun = (projection: Pick<OrchestrationV2ThreadProjection, "runs">) => byOrdinalDesc(projection.runs.filter(isActive))[0];
+
+/** T3's `threadStatus`: a running turn's status, else the latest run's, but a thread whose children still work for it
+ * (pending background work that holds it) is `waiting` unless its run failed. */
+function threadStatus(activeStatus: string | null | undefined, settledStatus: string, shell: Pick<OrchestrationV2ThreadShell, "pendingBackgroundTasks">): string {
+	if (activeStatus != null) return activeStatus;
+	if (settledStatus === "failed") return settledStatus;
+	return backgroundWorkHoldsCompletion(shell.pendingBackgroundTasks ?? []) ? "waiting" : settledStatus;
+}
+
+/** T3's `threadSnooze`, `pinned` and `threadBackgroundWork` fields of a list item and a read's thread, from the shell. */
+function shellState(shell: OrchestrationV2ThreadShell, now: number) {
+	const snoozed = isSnoozed(shell, now);
+	return {
+		snoozed,
+		snoozedUntil: snoozed && shell.snoozedUntil != null ? iso(shell.snoozedUntil) : null,
+		pinned: shell.pinnedAt != null,
+		blockedOnThreadWait: shell.blockedOnThreadWait === true,
+		pendingBackgroundTasks: (shell.pendingBackgroundTasks ?? []).map((task) => ({
+			taskId: task.taskId,
+			kind: task.kind,
+			...(task.description === undefined ? {} : { description: task.description }),
+			...(task.awaited === undefined ? {} : { awaited: task.awaited }),
+			...(task.kind === "subagent" && task.childThreadId !== undefined ? { childThreadId: task.childThreadId } : {}),
+		})),
+	};
+}
 
 /** A run a subagent's report started, not a person or another agent's message (`orchestration.ts` mints the ids). T3
  * calls these automatic: its notification and delegated-completion messages. */
@@ -239,8 +268,38 @@ export class ThreadOps {
 		return this.#bridge.hasThread(threadId) ? this.#bridge.threadShell(threadId) : undefined;
 	}
 
+	/**
+	 * T3's `threadNotFound`: agents paste the `link` of a result where its id goes, so a link that names a thread here is
+	 * answered with the id to pass. A link is T3's (`t3-thread://`, hosted) or the web app link this host gives a client
+	 * (`<origin>/<environment>/<thread>`). T3's other hints do not apply: no thread id here has a `mcp:` or
+	 * delegated-task prefix to suggest, and no environment is linked.
+	 */
+	#notFound(threadId: string, message: string): never {
+		const environmentId = EnvironmentId.make(this.#environmentId);
+		const candidates: string[] = [];
+		if (hasThreadLinks(threadId)) {
+			const link = parseThreadLinkHref(threadId);
+			const refs = link === null ? threadLinkRefs(threadId, environmentId) : threadLinkCandidates(link, environmentId);
+			candidates.push(...refs.filter((ref) => ref.environmentId === environmentId).map((ref) => ref.threadId as string));
+		} else if (URL.canParse(threadId)) {
+			const segments = new URL(threadId).pathname.split("/");
+			const decode = (segment: string | undefined) => {
+				try {
+					return segment === undefined ? undefined : decodeURIComponent(segment);
+				} catch {
+					return undefined;
+				}
+			};
+			const thread = decode(segments.at(-1));
+			if (decode(segments.at(-2)) === this.#environmentId && thread !== undefined) candidates.push(thread);
+		}
+		const suggested = candidates.find((candidate) => this.#bridge.hasThread(candidate));
+		if (suggested !== undefined) fail("thread_not_found", `\`${threadId}\` is a thread link, not a thread id. Pass \`${suggested}\` instead.`);
+		return fail("thread_not_found", message);
+	}
+
 	async #projection(threadId: string): Promise<OrchestrationV2ThreadProjection> {
-		if (!this.#bridge.hasThread(threadId)) fail("thread_not_found", `Thread ${threadId} was not found.`);
+		if (!this.#bridge.hasThread(threadId)) this.#notFound(threadId, `Thread ${threadId} was not found.`);
 		try {
 			return (await this.#bridge.projection(threadId)).projection;
 		} catch (error) {
@@ -257,7 +316,7 @@ export class ThreadOps {
 			link: this.#link(caller, shell.id),
 			createdBy: shell.createdBy,
 			creationSource: shell.creationSource,
-			status: shell.activityRunStatus ?? shell.status,
+			status: threadStatus(shell.activityRunStatus, shell.status, shell),
 			latestRunId: shell.latestRunId,
 			providerInstanceId: shell.modelSelection.instanceId,
 			model: shell.modelSelection.model,
@@ -267,9 +326,7 @@ export class ThreadOps {
 			pullRequests: [],
 			settled,
 			settledAt: settled && shell.settledAt !== null ? iso(shell.settledAt) : null,
-			// Snoozing is not supported on this host: nothing is ever snoozed.
-			snoozed: false,
-			snoozedUntil: null,
+			...shellState(shell, Date.now()),
 			parentThreadId: shell.lineage.parentThreadId,
 			relationshipToParent: shell.lineage.relationshipToParent,
 			itemCount: shell.visibleItemCount,
@@ -286,15 +343,16 @@ export class ThreadOps {
 		if (projectId !== null) this.#project(projectId);
 		const statuses = input.statuses === undefined || input.statuses.length === 0 ? null : new Set<string>(input.statuses);
 		const titleContains = input.titleContains?.toLocaleLowerCase();
+		const now = Date.now();
 		const threads = this.#bridge
 			.shellSnapshot()
 			.threads.filter((shell) => projectId === null || shell.projectId === projectId)
 			// T3's ThreadManagementService: side chats are never listed.
 			.filter((shell) => shell.lineage.sideChat !== true)
 			.filter((shell) => input.includeSubagents !== false || shell.lineage.relationshipToParent !== "subagent")
-			.filter((shell) => statuses === null || statuses.has(shell.activityRunStatus ?? shell.status))
+			.filter((shell) => statuses === null || statuses.has(threadStatus(shell.activityRunStatus, shell.status, shell)))
 			.filter((shell) => input.settled === undefined || (shell.settledOverride === "settled") === input.settled)
-			.filter((shell) => input.snoozed === undefined || input.snoozed === false)
+			.filter((shell) => input.snoozed === undefined || isSnoozed(shell, now) === input.snoozed)
 			.filter((shell) => titleContains === undefined || shell.title.toLocaleLowerCase().includes(titleContains))
 			.toSorted((left, right) => DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt));
 		const cursor = input.cursor ?? 0;
@@ -383,7 +441,7 @@ export class ThreadOps {
 			link: this.#link(caller, projection.thread.id),
 			createdBy: projection.thread.createdBy,
 			creationSource: projection.thread.creationSource,
-			status: active?.status ?? latest?.status ?? "idle",
+			status: threadStatus(active?.status, latest?.status ?? "idle", shell),
 			latestRunId: latest?.id ?? null,
 			activeRunId: active?.id ?? null,
 			providerInstanceId: projection.thread.modelSelection.instanceId,
@@ -406,12 +464,10 @@ export class ThreadOps {
 			archived: projection.thread.archivedAt !== null,
 			settled,
 			settledAt: settled && projection.thread.settledAt !== null ? iso(projection.thread.settledAt) : null,
-			snoozed: false,
-			snoozedUntil: null,
+			...shellState(shell, Date.now()),
 			createdAt: iso(projection.thread.createdAt),
 			updatedAt: iso(projection.thread.updatedAt),
 		} as OrchestratorMcpThreadDetail;
-		void shell;
 		const recentRuns = byOrdinalDesc(projection.runs)
 				.slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
 				.map(
@@ -472,7 +528,9 @@ export class ThreadOps {
 		// A retry of a send that reached the thread (its message is there) is answered with what that send did, as T3
 		// replays a command's receipt: a steer or restart whose turn has ended since is not refused, and nothing is sent.
 		const sent = before.messages.some((message) => message.id === messageId);
-		if ((mode === "steer" || mode === "restart") && running === undefined && !sent) fail("thread_not_sendable", `Thread ${input.threadId} has no running turn to ${mode}.`);
+		if ((mode === "steer" || mode === "restart") && running === undefined && !sent) {
+			fail("thread_not_sendable", `Thread ${input.threadId} has no running turn that can be ${mode === "steer" ? "steered" : "restarted"}. Send with mode: "auto" or "queue" to start a new turn there.`);
+		}
 		// T3 0.1.11: an agent's `auto` send does not overtake an agent message still queued (behind a `/compact`, say), so
 		// the agent gets them in the order they were sent: it queues too.
 		const agentQueued = before.runs.some((run) => run.status === "queued" && run.queueHeld !== true && before.messages.find((message) => message.id === run.userMessageId)?.createdBy === "agent");
@@ -705,11 +763,12 @@ export class ThreadOps {
 		const bind = input.bindToCurrentThread ?? (parent !== undefined && parent.projectId === projectId);
 		if (bind && (parent === undefined || parent.projectId !== projectId)) fail("invalid_request", parent === undefined ? notInThread : otherProject);
 		const modelSelection = parent?.modelSelection ?? this.#projectDefaultModel(projectId).settings.defaultModelSelection ?? fail("invalid_request", `Project ${projectId} has no default model, so this caller cannot pick one for it.`);
-		const derivedTitle = input.prompt!.split("\n")[0]?.trim() ?? "";
+		// T3: never end on a lone high surrogate, which renders as a broken character.
+		const derivedTitle = (input.prompt!.split("\n")[0]?.trim() ?? "").slice(0, 80).replace(/[\uD800-\uDBFF]$/, "");
 		const key = input.clientRequestId;
 		const task = await this.#upsert(
 			{
-				title: input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task"),
+				title: input.title ?? (derivedTitle.length > 0 ? derivedTitle : "Scheduled task"),
 				prompt: input.prompt!,
 				enabled: input.enabled ?? true,
 				schedule: input.schedule!,
@@ -850,7 +909,7 @@ export class ThreadOps {
 	/** The thread a tool acts on (T3's `readThread`): the one named, else the caller's own. */
 	#target(caller: Caller, threadId: string | undefined): string {
 		const id = threadId ?? caller.threadId ?? fail("target_required", "Name a threadId outside a thread.");
-		if (!this.#bridge.hasThread(id)) fail("thread_not_found", `Thread ${id} was not found.`);
+		if (!this.#bridge.hasThread(id)) this.#notFound(id, `Thread ${id} was not found.`);
 		return id;
 	}
 
@@ -883,6 +942,12 @@ export class ThreadOps {
 				return this.#command({ type: "thread.snooze", threadId, snoozedUntil: input.snoozedUntil });
 			case "mark_unread":
 				return this.#command({ type: "thread.mark-unread", threadId });
+			case "pin": {
+				// T3 0.1.11: an agent's pin lands at the top of Pinned, as a client's pin does (keyless, it would sort below every
+				// keyed pin). The key is sent even for a thread already pinned: the pin ignores it then.
+				const orderKey = topOfPinnedRunOrderKey(this.#bridge.threadRecords().flatMap((thread) => (thread.pinnedAt === undefined || thread.archivedAt !== undefined || thread.deletedAt !== null ? [] : [thread.pinOrderKey])));
+				return this.#command({ type: "thread.pin", threadId, ...(orderKey === null ? {} : { orderKey }) });
+			}
 			default:
 				return this.#command({ type: `thread.${input.action}`, threadId });
 		}

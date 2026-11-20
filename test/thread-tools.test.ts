@@ -102,7 +102,7 @@ async function setup(options: { readonly webhookOrigin?: () => string } = {}) {
 		const projection = await settled("a", (candidate) => candidate.messages.filter((message) => message.text.startsWith("Parent saw:")).length >= count);
 		return projection!.messages.filter((message) => message.text.startsWith("Parent saw:")).map((message) => JSON.parse(message.text.slice("Parent saw: ".length)));
 	};
-	return { bridge, orchestration, f, ask, settled, sawAll, tasks: () => tasks! };
+	return { bridge, orchestration, f, ask, settled, sawAll, ops, tasks: () => tasks! };
 }
 
 it("a parent starts a child, waits for its report, and follows up on it", { timeout: 60_000 }, async () => {
@@ -614,6 +614,44 @@ it("an agent schedules, lists, changes and deletes a task with T3's tools", { ti
 	const [unbound, fresh] = (await sawAll(8)).slice(-2);
 	expect(tasks().list().tasks.find((task) => task.id === unbound.scheduledTaskId)).toMatchObject({ threadId: null, threadMode: "new_thread" });
 	expect(fresh.error).toMatch(/^invalid_request: freshSession: A fresh session each run is not supported/);
+});
+
+it("a task title derived from a prompt never ends on half a character (T3 0.1.11)", { timeout: 60_000 }, async () => {
+	const { ask, sawAll } = await setup();
+	await ask("a", { name: "schedule_task", args: { prompt: `${"x".repeat(79)}😀 and report`, schedule: { type: "interval", everyMs: 3_600_000 } } });
+	const [created] = await sawAll(1);
+	expect(created.title).toBe("x".repeat(79));
+});
+
+it("a child still working holds its parent: waiting on it, its work in the background, and no archive meanwhile (T3 0.1.11)", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled, ops } = await setup();
+	const refusal = "Thread a has running delegated tasks. Wait for them or cancel them before archiving.";
+
+	// A parent that waits for its child is blocked on it (T3's sidebar: "Waiting", not "Working").
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Waited for" }, message: "Hold on: fg" } });
+	const blocked = await bridge.waitFor("a", (projection) => (bridge.threadShell("a").blockedOnThreadWait === true && projection.subagents.some((task) => task.status === "running") ? true : undefined), 10_000);
+	expect(blocked).toBe(true);
+	expect(ops.list({}, { allProjects: true }).threads.find((thread) => thread.threadId === "a")).toMatchObject({ status: "running", blockedOnThreadWait: true });
+	await expect(bridge.sidebar.archive("a")).rejects.toThrow(refusal);
+	gate("fg").release();
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	expect(bridge.threadShell("a").blockedOnThreadWait).toBe(false);
+
+	// A child started without waiting goes on after the parent's turn: background work that holds the parent.
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Background" }, message: "Hold on: bg", wait: false } });
+	const parent = await settled("a", (projection) => projection.messages.filter((message) => message.text.startsWith("Parent saw:")).length === 2);
+	const childId = (JSON.parse(parent!.messages.filter((message) => message.text.startsWith("Parent saw:")).at(-1)!.text.slice("Parent saw: ".length)) as { threadId: string }).threadId;
+	expect(bridge.threadShell("a").pendingBackgroundTasks).toEqual([expect.objectContaining({ kind: "subagent", childThreadId: childId, description: "Background" })]);
+	const listed = ops.list({}, { allProjects: true }).threads.find((thread) => thread.threadId === "a")!;
+	expect(listed).toMatchObject({ status: "waiting", blockedOnThreadWait: false, pendingBackgroundTasks: [{ kind: "subagent", childThreadId: childId, description: "Background" }] });
+	await expect(bridge.sidebar.archive("a")).rejects.toThrow(refusal);
+	expect(bridge.threadRecord("a")!.archivedAt).toBeUndefined();
+
+	gate("bg").release();
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
+	expect(bridge.threadShell("a").pendingBackgroundTasks).toEqual([]);
+	await bridge.sidebar.archive("a");
+	expect(bridge.threadRecord("a")!.archivedAt).toEqual(expect.any(Number));
 });
 
 it("a webhook task's URL is returned by its creation only, and a task is listed by its id (T3 0.1.11)", { timeout: 60_000 }, async () => {
