@@ -23,4 +23,5 @@ export { applyOrchestrationV2ProjectionEvent } from "@t3tools/t3-server/orchestr
 export { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
 export * as RpcAuthorization from "@t3tools/t3-server/RpcAuthorization";
 export { advertisedJsonSchema } from "@t3tools/t3-server/advertisedJsonSchema";
+export { type IgnoreFile, parseIgnoreFile } from "@t3tools/t3-server/IgnorePatterns";
 export { renderErrorPage as renderMcpOAuthErrorPage } from "@t3tools/t3-server/mcpOAuthHtml";

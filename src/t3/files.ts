@@ -29,7 +29,7 @@ import type {
 	ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { messageOf } from "../host-errors.ts";
-import { type IgnoreFile, parseIgnoreFile } from "./ignore-patterns.ts";
+import { type IgnoreFile, parseIgnoreFile } from "./t3-server.ts";
 
 /** `WorkspaceFileSystem.PROJECT_READ_FILE_MAX_BYTES`: a read returns at most this many bytes; `truncated` says more existed. */
 export const READ_FILE_MAX_BYTES = 1024 * 1024;

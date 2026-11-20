@@ -20,7 +20,7 @@ mkdir -p "$here/node_modules/@t3tools"
 ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
 ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
 ln -sfn ../../vendor/t3-server "$here/node_modules/@t3tools/t3-server"
-if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/vendor/t3-server/webhookFilter.ts" ] && [ -f "$here/vendor/t3-server/CommandPolicy.ts" ] && [ -f "$here/web/index.html" ]; then
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/vendor/t3-server/webhookFilter.ts" ] && [ -f "$here/vendor/t3-server/CommandPolicy.ts" ] && [ -f "$here/vendor/t3-server/IgnorePatterns.ts" ] && [ -f "$here/web/index.html" ]; then
   echo "setup:t3: already at $T3_TAG"
   exit 0
 fi
@@ -109,6 +109,10 @@ grep -q '^import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPo
   || { echo "setup:t3: RpcAuthorization's imports changed; update dev/setup-t3.sh"; exit 1; }
 sed 's#^import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";$#import { isProviderSignOutPrompt } from "./CommandPolicy.ts";#' "$authz" > "$here/vendor/t3-server/RpcAuthorization.ts"
 cp "$CACHE/apps/server/src/orchestration-v2/CommandPolicy.ts" "$here/vendor/t3-server/CommandPolicy.ts"
+# T3's `.ignore` matcher for file search, as-is (it imports nothing): the nearest `.ignore` includes or excludes a path
+# ahead of git's rules, which git cannot evaluate (files.ts).
+[ -f "$CACHE/apps/server/src/workspace/IgnorePatterns.ts" ] || { echo "setup:t3: apps/server/src/workspace/IgnorePatterns.ts missing"; exit 1; }
+cp "$CACHE/apps/server/src/workspace/IgnorePatterns.ts" "$here/vendor/t3-server/IgnorePatterns.ts"
 # The input schema T3 advertises for an MCP tool (compacted JSON Schema), as-is.
 [ -f "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" ] || { echo "setup:t3: apps/server/src/mcp/advertisedJsonSchema.ts missing"; exit 1; }
 cp "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" "$here/vendor/t3-server/advertisedJsonSchema.ts"
