@@ -65,6 +65,8 @@ interface McpDeps {
 	readonly resolveClient: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
 	/** The request's origin (where its links open, and where the challenge points). */
 	readonly originOf: (request: HttpServerRequest.HttpServerRequest) => string;
+	/** Whether Settings → Labs → Linked environments is on: a peer link is served only then. */
+	readonly linksEnabled: () => boolean;
 }
 
 /** T3's `decodeAsAdvertised`: calls are decoded with the JSON codec of each tool's parameters. */
@@ -149,6 +151,13 @@ export function makeMcpLayer(deps: McpDeps) {
 				return HttpServerResponse.jsonUnsafe(
 					{ error: "invalid_mcp_credential", message: "A valid T3 Code MCP credential is required." },
 					{ status: 401, headers: { "cache-control": "no-store", "www-authenticate": challenge } },
+				);
+			}
+			// A peer link whose setting was turned off since it signed in is refused, after its session was renewed, in T3's order.
+			if (session.peerLink === true && !deps.linksEnabled()) {
+				return HttpServerResponse.jsonUnsafe(
+					{ error: "linked_environments_off", message: "Linked environments is off on this machine. Turn it on in its Settings → Labs." },
+					{ status: 403, headers: { "cache-control": "no-store" } },
 				);
 			}
 			const access: AuthMcpClientAccess = session.access ?? (session.scopes.includes(AuthOrchestrationOperateScope) ? "approval-required" : "read-only");

@@ -297,7 +297,9 @@ export function makeServerLayer(deps: {
 		return resolveSession(request);
 	};
 
-	const mcpOAuth = new McpOAuth(auth, { linksEnabled: () => bridge.config.settings.current().linkedEnvironmentsEnabled === true });
+	// Settings → Labs → Linked environments: peer links register, and are served, only while it is on.
+	const linksEnabled = () => bridge.config.settings.current().linkedEnvironmentsEnabled === true;
+	const mcpOAuth = new McpOAuth(auth, { linksEnabled });
 
 	const apiLayer = makeHttpApiLayer({
 		scheduledTasks: deps.scheduledTasks,
@@ -314,7 +316,7 @@ export function makeServerLayer(deps: {
 	});
 
 	// T3's orchestrator MCP server over this host's threads (`mcp.ts`).
-	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log, deps.scheduledTasks), log, version: SERVER_VERSION, resolveClient: (request) => auth.verifyMcpClient(request.headers.authorization), originOf: requestOrigin });
+	const mcpLayer = makeMcpLayer({ bridge, ops: new ThreadOps(bridge, auth.environmentId, log, deps.scheduledTasks), log, version: SERVER_VERSION, resolveClient: (request) => auth.verifyMcpClient(request.headers.authorization), originOf: requestOrigin, linksEnabled });
 
 	const routes = Layer.mergeAll(
 		// The web app sends its traces here (T3's `layerOtlpTracesProxyRoute`). This host exports no traces, which is T3's

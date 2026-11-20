@@ -158,7 +158,7 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	});
 }, 60_000);
 
-it("tells a peer link how long its session now lasts, on every answer (T3 0.1.11's t3-link-expires-at)", async () => {
+it("tells a peer link how long its session now lasts on every answer, and refuses it once links are off (T3 0.1.11)", async () => {
 	const port = 4944;
 	const root = join(scratch, "peer-link-host");
 	await mkdir(t3Dir(root), { recursive: true });
@@ -179,4 +179,12 @@ it("tells a peer link how long its session now lasts, on every answer (T3 0.1.11
 	expect(expiresAt - before, "a full thirty days").toBeGreaterThanOrEqual(30 * 86_400_000 - 60_000);
 	expect(expiresAt - before).toBeLessThanOrEqual(30 * 86_400_000 + 60_000);
 	expect((await rpc(agent.token, undefined, initialize, port)).headers.get("t3-link-expires-at"), "not a link: no header").toBeNull();
+	// Linked environments turned off: the link is refused with T3's answer; any other client is served as before.
+	const ws = await connectWs(port, await pair(port, pairCode(root)));
+	exitValue(await ws.call("server.updateSettings", { patch: { linkedEnvironmentsEnabled: false } }), "settings");
+	ws.close();
+	const refused = await fetch(`${origin}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${link.token}` }, body: JSON.stringify(initialize) });
+	expect(refused.status).toBe(403);
+	expect(await refused.json()).toEqual({ error: "linked_environments_off", message: "Linked environments is off on this machine. Turn it on in its Settings → Labs." });
+	expect((await rpc(agent.token, undefined, initialize, port)).status).toBe(200);
 }, 60_000);
