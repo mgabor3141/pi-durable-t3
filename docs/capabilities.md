@@ -60,7 +60,7 @@ ends with that message rather than hanging open.
 | Workflow scripts | `orchestration.getWorkflowScript` | 🕐 | |
 | File access | `projects.listEntries`, `projects.readFile`, `projects.writeFile` | ✅ | T3's file panel: browse the tree, open a file, edit and save (the panel autosaves). More: [File access](#file-access) |
 | New project, ignored files | `projects.createNew`, `projects.listIgnoredFiles` (new in 0.1.1), `projects.createFromThread` (new in 0.1.5) | ❌ | `projects.createNew` makes a Git repository, which this host has none of. `projects.listIgnoredFiles` (git-ignored files to copy into a new worktree) is not advertised (`ignoredFileListing`), and `projects.createFromThread` is hidden because `threadProjectFromScratch` is not advertised, so T3 never asks |
-| Issues (new in 0.1.11) | `issues.*`, `issueTrackers.*`, `thread.issue.link`, `thread.issue.unlink`; `issues`, `issueLinkedThreads` | ❌ | not advertised, so T3 shows no Issues page or issue links for this environment; a call is refused by name |
+| Issues (new in 0.1.11) | `issues.*`, `issueTrackers.*`, `thread.issue.link`, `thread.issue.unlink`; `issues`, `issueLinkedThreads` | ❌ | not advertised, so T3 shows no Issues page or issue links for this environment. Settings → Source control & issues asks `issueTrackers.list` all the same (no capability gates it) and shows the refusal ("Could not load issue trackers"); any call is refused by name |
 | Git, PRs, diffs, worktrees | `git.*`, `pullRequests.*` (incl. `pullRequests.changeBreakdown`, new in 0.1.1), `vcs.*`, `sourceControl.*`, `review.*`, `projectClone.*`, `worktreeSetup.*`, `subscribeVcsStatus`, `subscribeWorktreeSetup`, `subscribeProjectClones`, `orchestration.getTurnDiff`, `orchestration.getFullThreadDiff`, `thread.pull-request*` (incl. `thread.pull-request-watch.checks-reopen`, new in 0.1.11), `pullRequests.subscribeLinkedThreadRefreshes` (0.1.11; `linkedThreadRefreshes` is not advertised), `server.discoverSourceControl`, `sourceControl.star` (new in 0.1.7), `thread.metadata.update`'s `continuation` (0.1.10: a message queued with a worktree move) | ❌ | the agent uses `git` itself |
 | File restore on undo | `checkpoint.rollback` with `restoreFiles: true` | ❌ | files belong to the agent |
 | Terminal | `terminal.*`, `subscribeTerminalEvents`, `subscribeTerminalMetadata`, `orchestration.subscribeCommandOutput` | ❌ | tools run in the Harness. Command output streaming is not advertised, so T3 never asks |
@@ -222,6 +222,16 @@ difference from T3 today, not a refusal: each is answered as T3 0.1.9 answered i
   the queue (Queued messages row), which loses nothing.
 - **`settleAfterRun`:** T3 passes over a queued run "Send now" moved into the awaited turn, and a wake cancelled before
   it started; here either leaves the thread active.
+- **Archive:** T3 refuses to archive a thread while its delegated tasks run; here a thread whose `thread_prompt` children
+  still work is archived.
+- **The MCP tools:** an agent's pin (`t3_thread_organize`) lands at the top of Pinned with an order key T3 computes
+  (`pinOrderKey`); here it has none and sorts below keyed pins. A steer or restart with no running turn adds `Send with
+  mode: "auto" or "queue" to start a new turn there.` to its refusal. List and read results carry `pinned`,
+  `blockedOnThreadWait` and `pendingBackgroundTasks` (left out here; the contract allows their absence). A task title
+  derived from a prompt does not end on a lone high surrogate. An unknown `threadId` that is a thread link is answered
+  with the id to pass instead.
+- **File search:** the nearest `.ignore` file includes or excludes ahead of git's rules, and path search lists symlinks
+  that point inside the project (not followed into); here git's rules alone count, and links are left out.
 - **Scheduled tasks:** T3 follows a run to its end for up to a day (a failed run fails the task; a one-time task's
   completed run deletes it), and stores a worktree request on a folder that is not a Git repository as the root. Here a
   run is the dispatch (a one-time task stays listed after it ran, and a run that failed reads as succeeded), and a
@@ -230,6 +240,9 @@ difference from T3 today, not a refusal: each is answered as T3 0.1.9 answered i
   parent); here only approvals and questions are.
 - **File access:** T3 keeps whitespace at the ends of a path, reads text as strict UTF-8 (invalid bytes mean binary),
   keeps a file's byte-order mark on save, and answers a missing project folder with `allowMissing` as missing.
+- **Auth:** behind a proxy on loopback T3 takes the client's address from the last `X-Forwarded-For` entry; a peer
+  link's session is extended on use (`t3-link-expires-at`); malformed registration JSON is answered with RFC 7591's
+  `invalid_client_metadata`.
 - **Smaller:** `unpricedTokens` in the usage buckets; accents folded in Scratch folder names; audio and video files an
   HTML preview may load, checked by where a link points; `Secure` on the browser cookie over HTTPS; the access stream
   subscribes before its snapshot; the project tools report a default model from the settings' per-project override;
