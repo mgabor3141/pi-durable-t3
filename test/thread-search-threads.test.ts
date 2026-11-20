@@ -91,6 +91,24 @@ describe("Threads.search", () => {
 		expect((await threads.search("walrus", 50, true)).map((hit) => hit.threadId)).toEqual(agentOrder);
 	});
 
+	it("T3's search keeps what the agent's search read of a thread it passes over", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		for (const threadId of ["shown", "archived"]) {
+			const thread = await create({ threadId, projectId: "p" });
+			model.respond(fauxAssistantMessage("ok"));
+			await threads.submit({ threadId, conversationId: thread.head, requestId: `r-${threadId}`, message: "kept words" }, undefined);
+			await idle(harness, thread.head);
+		}
+		await threads.updateRecord("archived", (record) => {
+			record.archivedAt = Date.now();
+		});
+		await threads.search("kept words", 50, true);
+		const read = threads.searchChars();
+		await threads.search("kept words", 50);
+		expect(threads.searchChars()).toBe(read);
+	});
+
 	it("prefers the user message over the assistant answer within one thread", async () => {
 		const { threads, harness, model } = await makeThreads();
 		const create = createNamed(threads, harness, model);

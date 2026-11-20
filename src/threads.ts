@@ -406,8 +406,9 @@ export class Threads {
 		const candidates: SearchCandidate[] = [];
 		const heads = new Set<number>();
 		for (const thread of threads) {
-			if (!forAgent && (thread.archivedAt !== undefined || thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)) continue;
+			// A live thread's read is kept even when this search passes it over: the agent's search reads it next.
 			heads.add(thread.head);
+			if (!forAgent && (thread.archivedAt !== undefined || thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)) continue;
 			const read = await this.#searchable(thread);
 			if (read === undefined) continue;
 			if (forAgent) {
