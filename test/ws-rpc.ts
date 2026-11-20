@@ -16,8 +16,8 @@ export type Frame = {
 	defect?: unknown;
 };
 
-
-async function get(port: number, path: string): Promise<number> {
+/** The status `path` answers with, or 0 when nothing answers. */
+export async function get(port: number, path: string): Promise<number> {
 	try {
 		const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(1500) });
 		return response.status;

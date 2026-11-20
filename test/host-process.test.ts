@@ -7,12 +7,12 @@
 // clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
 // never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
 import { sleep } from "./wait.ts";
-import { seedProjects } from "./host-process-harness.ts";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { launch, seedProjects, type Launched } from "./host-process-harness.ts";
+import { get, waitListening } from "./ws-rpc.ts";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import { afterAll, expect, it } from "vitest";
 
 const main = new URL("../examples/coding-agent/src/host.ts", import.meta.url).pathname;
@@ -24,23 +24,6 @@ afterAll(async () => {
 	await rm(scratch, { recursive: true, force: true });
 });
 
-type Launched = { child: ChildProcessByStdio<null, Readable, Readable>; out: () => string; exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }> };
-
-/** Start the host on `port` with one project under a fresh root; returns the child and a live output getter. */
-function launch(root: string, port: number, extraEnv: NodeJS.ProcessEnv = {}): Launched {
-	const child = spawn(process.execPath, ["--experimental-strip-types", main, "--root", root], {
-		env: { ...process.env, PI_DURABLE_T3_FAKE: "1", PI_CODING_AGENT_DIR: agentDir, ...extraEnv },
-		stdio: ["ignore", "pipe", "pipe"],
-	});
-	let buffer = "";
-	child.stdout.on("data", (c: Buffer) => (buffer += c.toString()));
-	child.stderr.on("data", (c: Buffer) => (buffer += c.toString()));
-	const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-		child.on("exit", (code, signal) => resolve({ code, signal }));
-	});
-	return { child, out: () => buffer, exited };
-}
-
 async function writeRoot(name: string, port: number): Promise<string> {
 	const root = join(scratch, name);
 	await mkdir(join(root, "projects/alpha"), { recursive: true });
@@ -50,25 +33,6 @@ async function writeRoot(name: string, port: number): Promise<string> {
 	await mkdir(join(root, "t3"), { recursive: true });
 	await seedProjects(root, [{ path: join(root, "projects/alpha"), title: "alpha" }]);
 	return root;
-}
-
-const get = async (port: number, path: string): Promise<number> => {
-	try {
-		const response = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(1500) });
-		return response.status;
-	} catch {
-		return 0;
-	}
-};
-
-/** Poll the well-known endpoint until the server answers 200 (ready and listening), or give up. */
-async function waitListening(port: number, timeoutMs = 15_000): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if ((await get(port, "/.well-known/t3/environment")) === 200) return true;
-		await sleep(150);
-	}
-	return false;
 }
 
 /** Poll until nothing answers on `port` again (the listener is released), or give up. */
@@ -121,7 +85,7 @@ it("`pair` mints one code and exits, for both the documented and pnpm's `-- pair
 it("Ctrl-C (SIGINT) stops the host: the process exits 0 within a few seconds and releases the port", async () => {
 	const port = 4901;
 	const root = await writeRoot("b1", port);
-	const host = launch(root, port);
+	const host = launch(root, port, {}, agentDir);
 	try {
 		expect(await waitListening(port)).toBe(true);
 		host.child.kill("SIGINT");
@@ -143,11 +107,11 @@ it("a second instance on a taken port exits 1 with the address and EADDRINUSE, a
 	const port = 4902;
 	const rootA = await writeRoot("b2-a", port);
 	const rootB = await writeRoot("b2-b", port);
-	const a = launch(rootA, port);
+	const a = launch(rootA, port, {}, agentDir);
 	let b: Launched | undefined;
 	try {
 		expect(await waitListening(port)).toBe(true);
-		b = launch(rootB, port);
+		b = launch(rootB, port, {}, agentDir);
 		// The second host must fail on its own (not hang, not idle) within a few seconds.
 		const exited = await Promise.race([b.exited, sleep(8000).then(() => "timeout" as const)]);
 		if (exited === "timeout") throw new Error(`second instance never exited:\n${b.out()}`);
