@@ -128,3 +128,60 @@ it("refuses create_threads: it acts as the calling thread, and a client has none
 	const { ops } = await setup();
 	expect(await failureOf(() => ops.create(client, { threads: [{ prompt: "x" }] }))).toBe("thread_credential_required");
 });
+
+it("pages a thread as T3 0.1.11 reads it: forward for a client, back with beforePosition, cut to fit the result", { timeout: 60_000 }, async () => {
+	const { f, ops } = await setup();
+	for (const n of [1, 2, 3]) {
+		f.model.respond(fauxAssistantMessage(`reply ${n}`));
+		await ops.send(client, { threadId: tid("b"), message: `message ${n}` });
+		await ops.wait(client, { threadId: tid("b") });
+	}
+	const texts = (read: { items: readonly { text: string | null }[] }) => read.items.map((item) => item.text);
+	// A client's cursorless read goes forward from the start; `earlierPosition` is null at the start.
+	const first = await ops.read(client, { threadId: tid("b"), limit: 2 });
+	encodes(OrchestratorMcpThreadReadResult, first);
+	expect(texts(first)).toEqual(["message 1", "reply 1"]);
+	expect(first).toMatchObject({ hasMore: true, earlierPosition: null });
+	// Back from the end: the newest page before the position, in order, and where to page back from.
+	const end = await ops.read(client, { threadId: tid("b"), beforePosition: 100, limit: 2 });
+	expect(texts(end)).toEqual(["message 3", "reply 3"]);
+	expect(end.earlierPosition).toBe(end.items[0]!.position);
+	const older = await ops.read(client, { threadId: tid("b"), beforePosition: end.earlierPosition!, limit: 2 });
+	expect(texts(older)).toEqual(["message 2", "reply 2"]);
+	const oldest = await ops.read(client, { threadId: tid("b"), beforePosition: older.earlierPosition!, limit: 2 });
+	expect(texts(oldest)).toEqual(["message 1", "reply 1"]);
+	expect(oldest.earlierPosition).toBeNull();
+	// From the start with `afterPosition: -1`, then on from `nextPosition`.
+	const next = await ops.read(client, { threadId: tid("b"), afterPosition: first.nextPosition!, limit: 2 });
+	expect(texts(next)).toEqual(["message 2", "reply 2"]);
+	expect(next.earlierPosition).toBe(next.items[0]!.position);
+	// T3's defaults: ten items, 500 characters each.
+	f.model.respond(fauxAssistantMessage("x".repeat(2_000)));
+	await ops.send(client, { threadId: tid("b"), message: "long" });
+	await ops.wait(client, { threadId: tid("b") });
+	const long = (await ops.read(client, { threadId: tid("b"), beforePosition: 100, limit: 1 })).items[0]!;
+	expect(long).toMatchObject({ textTruncated: true, nextTextOffset: 500 });
+	expect(long.text).toHaveLength(500);
+	f.model.respond(fauxAssistantMessage("y".repeat(40_000)));
+	await ops.send(client, { threadId: tid("b"), message: "longer" });
+	await ops.wait(client, { threadId: tid("b") });
+	f.model.respond(fauxAssistantMessage("z".repeat(40_000)));
+	await ops.send(client, { threadId: tid("b"), message: "longest" });
+	await ops.wait(client, { threadId: tid("b") });
+	// Two items of 20,000 characters do not fit in 30,000 bytes: the newest is kept, the older waits for the next page.
+	const cut = await ops.read(client, { threadId: tid("b"), beforePosition: 100, limit: 3, maxCharsPerItem: 20_000 });
+	expect(Buffer.byteLength(JSON.stringify(cut))).toBeLessThanOrEqual(30_000);
+	expect(texts(cut).map((text) => text?.slice(0, 7))).toEqual(["longest", "z".repeat(7)]);
+	expect(cut.items.at(-1)).toMatchObject({ textTruncated: true, nextTextOffset: 20_000 });
+	expect(cut.earlierPosition).toBe(cut.items[0]!.position);
+	// One item over the budget on its own is cut to fit.
+	const alone = await ops.read(client, { threadId: tid("b"), beforePosition: 100, limit: 1, maxCharsPerItem: 50_000 });
+	expect(Buffer.byteLength(JSON.stringify(alone))).toBeLessThanOrEqual(30_000);
+	expect(alone.items[0]).toMatchObject({ textTruncated: true });
+	expect(alone.items[0]!.text!.length).toBeGreaterThan(10_000);
+});
+
+it("names a project that does not exist", async () => {
+	const { ops } = await setup();
+	await expect(Promise.resolve().then(() => ops.list(client, { projectId: "nope" as never }))).rejects.toThrow("Project nope was not found.");
+});

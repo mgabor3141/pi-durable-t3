@@ -76,12 +76,39 @@ const fail = (code: Failure, message: string): never => {
 };
 
 // T3's defaults and bounds (`OrchestratorMcpService`).
-const DEFAULT_THREAD_LIST_LIMIT = 50;
-const DEFAULT_THREAD_READ_LIMIT = 50;
+const DEFAULT_THREAD_LIST_LIMIT = 10;
+const DEFAULT_THREAD_READ_LIMIT = 10;
 const DEFAULT_THREAD_RUN_LIMIT = 10;
-const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
-const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
-const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
+const DEFAULT_THREAD_ITEM_MAX_CHARS = 500;
+// T3 0.1.11: a wait answers before common MCP client timeouts, and a read fits what Claude Code shows inline (bytes, not
+// characters: CJK text runs near one token per character).
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const MAX_WAIT_TIMEOUT_MS = 45_000;
+const THREAD_READ_RESULT_MAX_BYTES = 30_000;
+
+const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/** T3's `textPageEnd`: where a page of `maxChars` from `offset` ends, never between the halves of a surrogate pair. */
+function textPageEnd(text: string | null, offset: number, maxChars: number): number {
+	const end = offset + maxChars;
+	if (text === null || end >= text.length) return end;
+	const last = text.charCodeAt(end - 1);
+	if (last < 0xd800 || last > 0xdbff) return end;
+	return end - 1 > offset ? end - 1 : end + 1;
+}
+
+/** The longest length in [low, high] that `fits`, or `low - 1` (T3's binary search). */
+function longestFitting(low: number, high: number, fits: (length: number) => boolean): number {
+	let best = low - 1;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		if (fits(mid)) {
+			best = mid;
+			low = mid + 1;
+		} else high = mid - 1;
+	}
+	return best;
+}
 
 const iso = (value: DateTime.DateTime) => DateTime.formatIso(value);
 const isActive = (run: OrchestrationV2Run) => run.status === "preparing" || run.status === "starting" || run.status === "running" || run.status === "waiting";
@@ -195,7 +222,12 @@ export class ThreadOps {
 		if (target === undefined) return;
 		const ceiling = clientCeiling(client.access);
 		if (RUNTIME_MODE_RANK[target.runtimeMode] > RUNTIME_MODE_RANK[ceiling]) {
-			fail("runtime_mode_escalation_denied", `Child runtime mode ${target.runtimeMode} is broader than parent mode ${ceiling}.`);
+			// T3 0.1.11's words for a thread above the caller's limit (`assertTargetWithinLimits`); a client's interaction
+			// limit is `default`.
+			fail(
+				"runtime_mode_escalation_denied",
+				`Thread "${target.id}" runs in ${target.runtimeMode}/${target.interactionMode}, above this caller's ${ceiling}/default limit. For linked calls, this limit is also capped by the link's approved access. This call does not create an approval request. Have the user act directly in the target thread through an authorized client.`,
+			);
 		}
 	}
 
@@ -244,7 +276,10 @@ export class ThreadOps {
 
 	/** `t3_thread_list`: threads newest first, in the project named (or all). */
 	list(caller: Caller, input: OrchestratorMcpThreadListInput): OrchestratorMcpThreadListResult {
-		const projectId = input.allProjects === true ? null : (input.projectId ?? fail("target_required", "Name a projectId, or pass allProjects: true, outside a thread."));
+		const projectId =
+			input.allProjects === true ? null : (input.projectId ?? fail("target_required", "Pass projectId, or allProjects: true for every project. This MCP client is not running inside a T3 thread."));
+		// T3 0.1.11: a project that does not exist is named, rather than answered with no threads.
+		if (projectId !== null) this.#project(projectId);
 		const statuses = input.statuses === undefined || input.statuses.length === 0 ? null : new Set<string>(input.statuses);
 		const titleContains = input.titleContains?.toLocaleLowerCase();
 		const threads = this.#bridge
@@ -274,19 +309,33 @@ export class ThreadOps {
 		const projection = await this.#projection(input.threadId);
 		const shell = this.#shell(input.threadId)!;
 		const view = input.view ?? "messages";
+		const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
 		const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
 		const visible = projection.visibleTurnItems;
+		// T3 0.1.11's paging (`readThread` over `ProjectionStore.getTimelinePage`): a thread's own agent reads newest first
+		// from a cursorless read, a client forward; `beforePosition` pages back, `afterPosition: -1` reads from the start.
+		const newestFirst = input.itemId === undefined && (input.beforePosition !== undefined || (input.afterPosition === undefined && caller.threadId !== undefined));
+		const after = input.afterPosition ?? -1;
 		const matching = visible.filter((row) =>
-			input.itemId === undefined
-				? row.position > (input.afterPosition ?? -1) && (view === "activity" || ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type))
-				: row.sourceItemId === input.itemId,
+			input.itemId === undefined ? view === "activity" || ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type) : row.sourceItemId === input.itemId,
 		);
-		const page = matching.slice(0, input.limit ?? DEFAULT_THREAD_READ_LIMIT);
+		const timeline = (() => {
+			if (input.itemId !== undefined) return { rows: matching.slice(0, limit), hasMore: matching.length > limit, hasEarlier: false };
+			const earlier = matching.some((row) => row.position <= after);
+			if (!newestFirst) {
+				const following = matching.filter((row) => row.position > after);
+				return { rows: following.slice(0, limit), hasMore: following.length > limit, hasEarlier: earlier };
+			}
+			const before = input.beforePosition ?? Number.POSITIVE_INFINITY;
+			const between = matching.filter((row) => row.position > after && row.position < before);
+			const rows = between.slice(Math.max(0, between.length - limit));
+			return { rows, hasMore: matching.some((row) => row.position >= before), hasEarlier: earlier || between.length > rows.length };
+		})();
 		const messages = new Map(projection.messages.map((message) => [message.id as string, message]));
-		const items = page.map((row): OrchestratorMcpThreadTimelineItem => {
+		const item = (row: (typeof visible)[number], chars: number, title = row.item.title): OrchestratorMcpThreadTimelineItem => {
 			const text = turnItemText(row.item);
 			const offset = input.itemId === undefined ? 0 : (input.textOffset ?? 0);
-			const end = offset + maxChars;
+			const end = textPageEnd(text, offset, chars);
 			const truncated = text !== null && text.length > end;
 			const messageId = row.item.type === "user_message" || row.item.type === "assistant_message" ? row.item.messageId : null;
 			const message = messageId === null ? undefined : messages.get(messageId as string);
@@ -303,13 +352,23 @@ export class ThreadOps {
 				...(message?.senderThreadId === undefined ? {} : { senderThreadId: message.senderThreadId }),
 				type: row.item.type,
 				status: row.item.status,
-				title: row.item.title,
+				title,
 				text: text === null ? null : text.slice(offset, end),
 				textTruncated: truncated,
 				nextTextOffset: truncated ? end : null,
 				updatedAt: iso(row.item.updatedAt),
 			} as OrchestratorMcpThreadTimelineItem;
-		});
+		};
+		/** T3's `timelineItemWithin`: the item with its text cut, and an oversized title too, until its JSON fits. */
+		const itemWithin = (row: (typeof visible)[number], maxBytes: number): OrchestratorMcpThreadTimelineItem => {
+			const longestText = (title: string | null) => item(row, Math.max(longestFitting(2, maxChars - 1, (n) => jsonBytes(item(row, n, title)) <= maxBytes), 1), title);
+			const cut = longestText(row.item.title);
+			const title = cut.title;
+			if (title === null || jsonBytes(cut) <= maxBytes) return cut;
+			// Half the budget for the title keeps `textOffset` pages of the text useful.
+			const cutTitle = (chars: number) => title.slice(0, chars === 0 ? 0 : textPageEnd(title, 0, chars));
+			return longestText(cutTitle(Math.max(longestFitting(1, title.length - 1, (n) => jsonBytes({ ...cut, title: cutTitle(n) }) <= maxBytes / 2), 0)));
+		};
 		const latest = latestRun(projection);
 		const active = latestActiveRun(projection);
 		const settled = projection.thread.settledOverride === "settled";
@@ -347,9 +406,7 @@ export class ThreadOps {
 			updatedAt: iso(projection.thread.updatedAt),
 		} as OrchestratorMcpThreadDetail;
 		void shell;
-		return {
-			thread,
-			recentRuns: byOrdinalDesc(projection.runs)
+		const recentRuns = byOrdinalDesc(projection.runs)
 				.slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
 				.map(
 					(run): OrchestratorMcpThreadRun =>
@@ -363,10 +420,31 @@ export class ThreadOps {
 							startedAt: run.startedAt === null ? null : iso(run.startedAt),
 							completedAt: run.completedAt === null ? null : iso(run.completedAt),
 						}) as OrchestratorMcpThreadRun,
-				),
+				);
+		// T3's `timelineItemsWithinBudget`: items from the end the caller pages toward while the result fits
+		// `THREAD_READ_RESULT_MAX_BYTES`; never empty for a non-empty page.
+		const budget = Math.max(THREAD_READ_RESULT_MAX_BYTES - jsonBytes({ thread, recentRuns, nextPosition: null, hasMore: false, earlierPosition: null, items: [] }), THREAD_READ_RESULT_MAX_BYTES / 2);
+		const kept: OrchestratorMcpThreadTimelineItem[] = [];
+		let bytes = 0;
+		for (const row of newestFirst ? timeline.rows.toReversed() : timeline.rows) {
+			const next = item(row, maxChars);
+			bytes += jsonBytes(next) + (kept.length === 0 ? 0 : 1);
+			if (bytes <= budget) {
+				kept.push(next);
+				continue;
+			}
+			if (kept.length === 0) kept.push(itemWithin(row, budget));
+			break;
+		}
+		const items = newestFirst ? kept.toReversed() : kept;
+		const start = newestFirst ? timeline.rows.length - items.length : 0;
+		return {
+			thread,
+			recentRuns,
 			items,
-			nextPosition: page.at(-1)?.position ?? null,
-			hasMore: matching.length > page.length,
+			nextPosition: items.at(-1)?.position ?? null,
+			hasMore: timeline.hasMore || (!newestFirst && items.length < timeline.rows.length),
+			earlierPosition: timeline.hasEarlier || start > 0 ? (items[0]?.position ?? null) : null,
 		} as OrchestratorMcpThreadReadResult;
 	}
 
@@ -531,8 +609,10 @@ export class ThreadOps {
 		return task;
 	}
 
-	/** T3's `scheduledTaskSummary`: a webhook task with its URL, when this host knows where it is reached. */
-	#summary(task: ScheduledTask): OrchestratorMcpScheduledTask {
+	/** T3's `scheduledTaskSummary`: a webhook task with its URL, when this host knows where it is reached and `mayRun`. Since
+	 * 0.1.11 the URL (a bearer credential) is returned only by the creation, to a caller allowed to start the task's
+	 * runs; a list or an update leaves it out, and the user copies it from Settings. */
+	#summary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
 		return {
 			scheduledTaskId: task.id,
 			title: task.title,
@@ -545,7 +625,7 @@ export class ThreadOps {
 			schedule: task.schedule,
 			nextRunAt: task.nextRunAt,
 			lastRunStatus: task.lastRunStatus,
-			...(task.webhook?.url == null ? {} : { webhookUrl: task.webhook.url }),
+			...(task.webhook?.url == null || !mayRun ? {} : { webhookUrl: task.webhook.url }),
 			...(task.webhook === undefined ? {} : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
 		} as OrchestratorMcpScheduledTask;
 	}
@@ -600,7 +680,7 @@ export class ThreadOps {
 				} as ScheduledTaskUpsertInput,
 				"update scheduled",
 			);
-			return this.#summary(task);
+			return this.#summary(task, false);
 		}
 		if (input.prompt === undefined || input.schedule === undefined) fail("invalid_request", "A new scheduled task needs `prompt` and `schedule`.");
 		const projectId = input.projectId ?? parent?.projectId ?? fail("target_required", "Pass projectId: this MCP client is not running inside a T3 thread.");
@@ -630,14 +710,19 @@ export class ThreadOps {
 			"schedule",
 		);
 		this.#log.info("scheduled task saved by an agent", { scheduledTaskId: task.id, threadId: caller.threadId });
-		return this.#summary(task);
+		// The creator may run it: a write needed a live caller (or a client that is not read-only), and the task runs at
+		// the caller's own modes.
+		return this.#summary(task, true);
 	}
 
-	/** `list_scheduled_tasks`: the given project's, else the calling thread's project's, else all of them. */
+	/** `list_scheduled_tasks`: the given project's, else the calling thread's project's, else all of them; one task with
+	 * `scheduledTaskId` (0.1.11). */
 	listScheduledTasks(caller: Caller, input: OrchestratorMcpListScheduledTasksInput): OrchestratorMcpListScheduledTasksResult {
 		const projectId = input.projectId ?? this.#caller(caller)?.projectId;
-		const tasks = this.#tasks().list().tasks.filter((task) => projectId === undefined || task.projectId === projectId);
-		return { tasks: tasks.map((task) => this.#summary(task)) } as OrchestratorMcpListScheduledTasksResult;
+		const tasks = this.#tasks()
+			.list()
+			.tasks.filter((task) => (projectId === undefined || task.projectId === projectId) && (input.scheduledTaskId === undefined || task.id === input.scheduledTaskId));
+		return { tasks: tasks.map((task) => this.#summary(task, false)) } as OrchestratorMcpListScheduledTasksResult;
 	}
 
 	/** `delete_scheduled_task`: it stops at once. */
@@ -837,7 +922,7 @@ export class ThreadOps {
 	}
 
 	/** `run_scheduled_task_now`: start a task's run; success means started, not finished. */
-	async runScheduledTaskNow(caller: Caller, input: { readonly taskId: string }): Promise<{ taskId: string; threadId: string | null; link?: string; lastRunStatus: ScheduledTask["lastRunStatus"]; runCount: number; nextRunAt: ScheduledTask["nextRunAt"] }> {
+	async runScheduledTaskNow(caller: Caller, input: { readonly taskId: string }): Promise<{ taskId: string; threadId: string | null; link?: string; lastRunStatus: ScheduledTask["lastRunStatus"]; lastRunError: ScheduledTask["lastRunError"]; runCount: number; nextRunAt: ScheduledTask["nextRunAt"] }> {
 		this.#mayWrite(caller, undefined);
 		if (!this.#tasks().list().tasks.some((task) => task.id === input.taskId)) fail("invalid_request", "The scheduled task was not found.");
 		let ran: { task: ScheduledTask; threadId: string | null };
@@ -847,7 +932,7 @@ export class ThreadOps {
 			return fail("orchestration_error", (error as Error).message);
 		}
 		const { task, threadId } = ran;
-		return { taskId: task.id, threadId, ...(threadId === null ? {} : { link: this.#link(caller, threadId) }), lastRunStatus: task.lastRunStatus, runCount: task.runCount, nextRunAt: task.nextRunAt };
+		return { taskId: task.id, threadId, ...(threadId === null ? {} : { link: this.#link(caller, threadId) }), lastRunStatus: task.lastRunStatus, lastRunError: task.lastRunError, runCount: task.runCount, nextRunAt: task.nextRunAt };
 	}
 }
 

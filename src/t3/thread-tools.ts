@@ -11,6 +11,9 @@ import { OrchestratorToolkit, ProjectToolkit, ThreadToolkit } from "./mcp-toolki
 /** What T3's descriptions leave unsaid about this host, added to the agent's tools. */
 const PROJECT_CREATE_NOTE = "Here a project needs `workspaceRoot` (no git repositories are made), and has only a title and a folder.";
 const QUEUE_NOTE = "Here `reorder` is refused: the queue keeps the order messages were sent in.";
+/** T3 0.1.11 returns a task's `webhookUrl` from its creation only; its own description says so in words that would change
+ * the first sentence (`mcp-toolkit.ts`). */
+const SCHEDULE_NOTE = "Only the creation returns `webhookUrl`; a list or an update leaves it out, and the user can copy it from Settings.";
 const PROJECT_UPDATE_NOTE =
 	"Here a project has only a title and a folder. A new `workspaceRoot` points the project at another folder: no files move, and the project's existing threads keep running in the folder they started in.";
 import { advertisedJsonSchema } from "./t3-server.ts";
@@ -103,7 +106,7 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 	const ops = options.ops;
 	if (ops !== undefined) {
 		const t3Tools: Record<string, { readonly writes: boolean; readonly run: (caller: { threadId?: string }, input: never) => unknown; readonly note?: string }> = {
-			schedule_task: { writes: true, run: (caller, input) => ops.scheduleTask(caller, input) },
+			schedule_task: { writes: true, run: (caller, input) => ops.scheduleTask(caller, input), note: SCHEDULE_NOTE },
 			list_scheduled_tasks: { writes: false, run: (caller, input) => ops.listScheduledTasks(caller, input) },
 			delete_scheduled_task: { writes: false, run: (caller, input) => ops.deleteScheduledTask(caller, input) },
 			t3_project_list: { writes: false, run: (caller, input) => ops.projectList(caller, input) },

@@ -66,7 +66,7 @@ const brain: FauxResponseStep = (context, options) => {
 	return fauxAssistantMessage("ok");
 };
 
-async function setup() {
+async function setup(options: { readonly webhookOrigin?: () => string } = {}) {
 	let bridge: Bridge | undefined;
 	const late = new Proxy({} as Bridge, { get: (_target, key) => (bridge as unknown as Record<string | symbol, unknown>)[key] instanceof Function ? (bridge as never as Record<string | symbol, (...args: unknown[]) => unknown>)[key]!.bind(bridge) : (bridge as unknown as Record<string | symbol, unknown>)[key] });
 	const orchestration = new Orchestration(late, log);
@@ -82,7 +82,7 @@ async function setup() {
 	bridge.start();
 	await bridge.loaded();
 	orchestration.start();
-	tasks = new ScheduledTasks({ harness: f.harness, dispatch: scheduledTaskDispatch(bridge), log });
+	tasks = new ScheduledTasks({ harness: f.harness, dispatch: scheduledTaskDispatch(bridge), log, ...(options.webhookOrigin === undefined ? {} : { webhookOrigin: options.webhookOrigin }) });
 	await tasks.load();
 	onTestFinished(async () => {
 		for (const entry of gates.values()) entry.release();
@@ -600,4 +600,20 @@ it("an agent schedules, lists, changes and deletes a task with T3's tools", { ti
 	const [unbound, fresh] = (await sawAll(8)).slice(-2);
 	expect(tasks().list().tasks.find((task) => task.id === unbound.scheduledTaskId)).toMatchObject({ threadId: null, threadMode: "new_thread" });
 	expect(fresh.error).toMatch(/^invalid_request: freshSession: A fresh session each run is not supported/);
+});
+
+it("a webhook task's URL is returned by its creation only, and a task is listed by its id (T3 0.1.11)", { timeout: 60_000 }, async () => {
+	const { ask, sawAll } = await setup({ webhookOrigin: () => "https://claw.example" });
+	await ask("a", { name: "schedule_task", args: { prompt: "Hook", schedule: { type: "webhook" } } });
+	await ask("a", { name: "schedule_task", args: { prompt: "Other", schedule: { type: "interval", everyMs: 3_600_000 } } });
+	const [webhook, other] = await sawAll(2);
+	expect(webhook.webhookUrl).toMatch(new RegExp(`^https://claw\\.example/api/hooks/${encodeURIComponent(webhook.scheduledTaskId)}/`));
+	await ask("a", { name: "list_scheduled_tasks", args: { scheduledTaskId: webhook.scheduledTaskId } });
+	await ask("a", { name: "schedule_task", args: { scheduledTaskId: webhook.scheduledTaskId, title: "Hook renamed" } });
+	const [, , listed, updated] = await sawAll(4);
+	expect(listed.tasks.map((task: { scheduledTaskId: string }) => task.scheduledTaskId)).toEqual([webhook.scheduledTaskId]);
+	expect(listed.tasks[0]).not.toHaveProperty("webhookUrl");
+	expect(updated).toMatchObject({ title: "Hook renamed", webhookSignature: "none" });
+	expect(updated).not.toHaveProperty("webhookUrl");
+	expect(other).not.toHaveProperty("webhookUrl");
 });

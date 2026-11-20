@@ -23,7 +23,11 @@ import type { AuthStore, ClientMetadata, McpApprovalCodeRefusal, StoredToken } f
 
 const AUTHORIZATION_CODE_TTL_MS = 60_000;
 const MAX_CLIENT_NAME_LENGTH = 100;
-const MAX_REDIRECT_URIS = 5;
+const MAX_REDIRECT_URIS = 10;
+// The client id rides in the authorize URL (T3 0.1.11). Past the original five redirect URIs it is capped, to leave room
+// under Node's 16 KB header limit for an encoded redirect_uri and state.
+const MAX_UNBOUNDED_CLIENT_ID_REDIRECT_URIS = 5;
+const MAX_CLIENT_ID_LENGTH = 10_240;
 const MAX_REDIRECT_URI_LENGTH = 512;
 const DEFAULT_CLIENT_NAME = "MCP client";
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -83,9 +87,11 @@ const redirectMatches = (registered: string, presented: string): boolean => {
 
 const sameResource = (urls: McpOAuthUrls, presented: string | undefined): boolean => {
 	if (presented === undefined) return true;
+	// URL.hash misses empty fragments, which RFC 8707 §2 also forbids.
+	if (presented.includes("#")) return false;
 	try {
 		const url = new URL(presented);
-		return url.hash === "" && `${url.origin}${url.pathname.replace(/\/+$/u, "")}` === urls.resource;
+		return `${url.origin}${url.pathname.replace(/\/+$/u, "")}` === urls.resource;
 	} catch {
 		return false;
 	}
@@ -240,7 +246,11 @@ export class McpOAuth {
 			throw new McpRegistrationRefusal("invalid_client_metadata", "Linked environments is off on that machine. Turn it on in its Settings → Labs.");
 		}
 		const body = base64Url(JSON.stringify({ v: 1, n: name, r: redirectUris, ...(peerLink ? { p: 1 } : {}) }));
-		return { clientId: `${body}.${this.#sign("mcp-client-id", body)}`, name, redirectUris: [...redirectUris], peerLink };
+		const clientId = `${body}.${this.#sign("mcp-client-id", body)}`;
+		if (redirectUris.length > MAX_UNBOUNDED_CLIENT_ID_REDIRECT_URIS && clientId.length > MAX_CLIENT_ID_LENGTH) {
+			throw new McpRegistrationRefusal("invalid_redirect_uri", "Redirect URIs are too long to fit in an authorization request.");
+		}
+		return { clientId, name, redirectUris: [...redirectUris], peerLink };
 	}
 
 	/** Throws `McpOAuthPageError` (show it; never redirect) or `McpOAuthRedirectError` (send it back to the client). */

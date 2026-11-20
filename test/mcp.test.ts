@@ -87,8 +87,10 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 
 	const listed = await rpc(token, session, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 	const names = ((listed.message?.result as { tools: { name: string }[] }).tools ?? []).map((tool) => tool.name).sort();
+	// T3 0.1.11 hides the tools for an agent inside a thread (delegation, secrets, create_threads, background waits) from a
+	// client outside one.
 	expect(names).toEqual(
-		["create_threads", "delegate_task", "delete_scheduled_task", "list_scheduled_tasks", "request_secret", "schedule_task", "t3_background_wait", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "task_cancel", "task_status", "t3_project_list", "t3_project_read", "t3_project_create", "t3_project_update", "t3_project_delete", "t3_thread_organize", "t3_queue", "run_scheduled_task_now"].sort(),
+		["delete_scheduled_task", "list_scheduled_tasks", "schedule_task", "t3_thread_interrupt", "t3_thread_list", "t3_thread_read", "t3_thread_send", "t3_thread_update", "t3_thread_wait", "t3_workflow_stop", "t3_project_list", "t3_project_read", "t3_project_create", "t3_project_update", "t3_project_delete", "t3_thread_organize", "t3_queue", "run_scheduled_task_now"].sort(),
 	);
 
 	const call = async (id: number, name: string, args: unknown, meta?: unknown) =>
@@ -110,13 +112,11 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	expect(noProject.isError).toBe(true);
 	expect(JSON.parse(noProject.content![0]!.text)).toMatchObject({ _tag: "OrchestratorMcpFailure", code: "target_required" });
 
-	const delegated = await call(6, "delegate_task", { task: "x" });
-	expect(delegated.isError).toBe(true);
-	expect(host.out()).toContain("unsupported MCP tool");
+	// A hidden tool is not called either.
+	const delegated = await rpc(token, session, { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "delegate_task", arguments: { task: "x" } } });
+	expect(delegated.message?.error).toMatchObject({ message: "Tool 'delegate_task' not found" });
 
-	// A client outside a thread cannot act as one; a full-access client may write to any thread.
-	const created = await call(7, "create_threads", { threads: [{ prompt: "hi" }] });
-	expect(JSON.parse(created.content![0]!.text)).toMatchObject({ code: "thread_credential_required" });
+	// A full-access client may write to any thread.
 	const renamed = await call(8, "t3_thread_update", { threadId: "mcp-b", action: "rename", title: "Renamed by a client" });
 	expect(renamed.isError).toBe(false);
 	expect(renamed.structuredContent).toMatchObject({ threadId: "mcp-b", title: "Renamed by a client" });
@@ -153,6 +153,6 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 	});
 	expect(await failureOf(approver.token, "t3_thread_update", { threadId: "mcp-a", action: "rename", title: "x" })).toMatchObject({
 		code: "runtime_mode_escalation_denied",
-		message: "Child runtime mode full-access is broader than parent mode approval-required.",
+		message: expect.stringContaining('Thread "mcp-a" runs in full-access/default, above this caller\'s approval-required/default limit.'),
 	});
 }, 60_000);

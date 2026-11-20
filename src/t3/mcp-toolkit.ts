@@ -1,5 +1,8 @@
-// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.9), copied as it is so the
-// tool names, descriptions, schemas and annotations an agent sees are T3's. Removed: the server services each tool
+// T3's orchestrator MCP toolkit (apps/server/src/mcp/toolkits/orchestrator/tools.ts at v0.1.11), copied as it is so the
+// tool names, descriptions, schemas and annotations an agent sees are T3's. One exception: `schedule_task` keeps
+// v0.1.9's description. Its first sentence is how an integrator's tool catalog names the tool in the system prompt
+// (claw's codemode section), and 0.1.11 reworded it without a change of meaning; the one change that matters, that only
+// the creation returns `webhookUrl`, is said in the host's note on the agent's tool (`thread-tools.ts`). Removed: the server services each tool
 // depends on in T3 (`mcp.ts` supplies the handlers), the three linked-environment tools, which T3 hides while links
 // are off and this host has none, and `orchestrator_capabilities` (the provider and model menu for `delegate_task`,
 // which this host does not serve).
@@ -36,6 +39,7 @@ import {
   ThreadMetadataMcpUpdateResult,
   TrimmedNonEmptyString,
   NonNegativeInt,
+  clampedPositiveInt,
   Project,
   ProjectCreatePayload,
   ProjectId,
@@ -47,11 +51,14 @@ import {
   ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
 
+/** T3's `hiddenFromOutsideClients` (0.1.11): tools for an agent inside a T3 thread are not listed to a client from outside
+ * one, which every `/mcp` client here is (this host's own agents use the thread tools instead). */
+const hiddenFromOutsideClients = () => false;
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
@@ -63,7 +70,8 @@ const DelegateTaskTool = Tool.make("delegate_task", {
 })
   .annotate(Tool.Title, "Delegate a child task")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const TaskStatusTool = Tool.make("task_status", {
   description:
@@ -76,7 +84,8 @@ const TaskStatusTool = Tool.make("task_status", {
   .annotate(Tool.Title, "Get delegated task status")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const TaskCancelTool = Tool.make("task_cancel", {
   description:
@@ -87,7 +96,8 @@ const TaskCancelTool = Tool.make("task_cancel", {
   failureMode: "return",
 })
   .annotate(Tool.Title, "Cancel delegated task")
-  .annotate(Tool.Destructive, true);
+  .annotate(Tool.Destructive, true)
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const WorkflowStopTool = Tool.make("t3_workflow_stop", {
   description:
@@ -105,7 +115,7 @@ const WorkflowStopTool = Tool.make("t3_workflow_stop", {
 
 const BackgroundWaitTool = Tool.make("t3_background_wait", {
   description:
-    "Keep this thread in Working while background work runs. Pass its task ID after starting it. Not for work left running (dev server, watcher). `waiting=false` clears. Does not stop the task. Claude only.",
+    "Keep this thread in Working while background work runs. Pass its task ID once started. Not for work left running (dev server, watcher). `waiting=false` clears. Doesn't stop tasks. Claude/OpenCode only.",
   parameters: Schema.Struct({
     taskIds: Schema.Array(TrimmedNonEmptyString).check(
       Schema.isMinLength(1),
@@ -119,7 +129,11 @@ const BackgroundWaitTool = Tool.make("t3_background_wait", {
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-}).annotate(Tool.Title, "Wait on background work");
+})
+  .annotate(Tool.Title, "Wait on background work")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const ScheduleTaskTool = Tool.make("schedule_task", {
   description:
@@ -168,7 +182,8 @@ const RequestSecretTool = Tool.make("request_secret", {
   .annotate(Tool.Title, "Request a secret from the user")
   .annotate(Tool.Destructive, false)
   // Claude Code defers MCP tools behind ToolSearch; agents that never load this one ask in chat.
-  .annotate(Tool.Meta, { "anthropic/alwaysLoad": true });
+  .annotate(Tool.Meta, { "anthropic/alwaysLoad": true })
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
@@ -180,7 +195,8 @@ const CreateThreadsTool = Tool.make("create_threads", {
 })
   .annotate(Tool.Title, "Create T3 threads")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, hiddenFromOutsideClients);
 
 const ThreadListTool = Tool.make("t3_thread_list", {
   description:
@@ -197,7 +213,7 @@ const ThreadListTool = Tool.make("t3_thread_list", {
 
 const ThreadReadTool = Tool.make("t3_thread_read", {
   description:
-    "Read any thread by id. `messages` (default): user and assistant messages and plans. `activity`: all timeline items. Keep reads small: low `limit` and `maxCharsPerItem`. Page with `afterPosition=nextPosition`. Cut-off text: `itemId` with `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. In your reply, name it as its `link` verbatim.",
+    "Read any thread by id. View `messages` (default) or `activity` (all items). Newest first; older: `beforePosition=earlierPosition`; from the start: `afterPosition=-1`, then `nextPosition`. Cut-off text: `itemId`, `textOffset=nextTextOffset`. Reading a child's final result marks it delivered. In your reply, name it as its `link` verbatim.",
   parameters: OrchestratorMcpThreadReadInput,
   success: OrchestratorMcpThreadReadResult,
   failure: OrchestratorMcpFailure,
@@ -283,7 +299,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadInterruptTool,
 );
 
-// T3's project toolkit (apps/server/src/mcp/toolkits/project/tools.ts at v0.1.9), the same way: T3's names,
+// T3's project toolkit (apps/server/src/mcp/toolkits/project/tools.ts at v0.1.11), the same way: T3's names,
 // descriptions, schemas and annotations, its server dependencies removed. Left out: `t3_project_clone` (a git clone;
 // this host has no git) and `t3_thread_launch` (`create_threads` starts threads here).
 const projectShared = {
@@ -297,7 +313,7 @@ const ProjectListTool = Tool.make("t3_project_list", {
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     cursor: Schema.optional(NonNegativeInt),
-    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+    limit: Schema.optional(clampedPositiveInt(100)),
   }),
   success: Schema.Struct({
     projects: Schema.Array(Project),
@@ -348,7 +364,7 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 
 export const ProjectToolkit = Toolkit.make(ProjectListTool, ProjectReadTool, ProjectCreateTool, ProjectUpdateTool, ProjectDeleteTool);
 
-// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.9), the same way: the three tools this
+// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.11), the same way: the three tools this
 // host does, `t3_thread_organize`, `t3_queue` and `run_scheduled_task_now`. Left out: `t3_thread_search` (an agent
 // here has `thread_search`), `t3_thread_configure` (its values come from `orchestrator_capabilities`, not served),
 // `t3_thread_transfer` (fork and merge-back) and `t3_pending_request` (no user questions here).
@@ -393,7 +409,7 @@ const QueueTool = Tool.make("t3_queue", {
     beforeRunId: Schema.optional(Schema.NullOr(RunId)),
     targetRunId: Schema.optional(RunId),
     cursor: Schema.optional(NonNegativeInt),
-    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+    limit: Schema.optional(clampedPositiveInt(100)),
   }),
   success: Schema.Union([
     Schema.Struct({ items: Schema.Array(queueEntry), nextCursor: Schema.NullOr(NonNegativeInt) }),
@@ -415,6 +431,7 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
     threadId: ScheduledTask.fields.threadId,
     link: Schema.optional(Schema.String),
     lastRunStatus: ScheduledTask.fields.lastRunStatus,
+    lastRunError: ScheduledTask.fields.lastRunError,
     runCount: NonNegativeInt,
     nextRunAt: ScheduledTask.fields.nextRunAt,
   }),
