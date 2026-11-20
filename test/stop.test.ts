@@ -96,6 +96,27 @@ it("Stop shows at once and answers at once; a run held by a deaf tool shows not 
 	expect((ended!.turnItems as unknown as Item[]).some((item) => item.type === "run_interrupt_request")).toBe(false);
 });
 
+// T3's shell says the user stopped the latest run (`latestRunStopRequested`, from its `run_interrupt_request`), so its
+// web app does not announce "Thread completed" for it, while it stops and after it ended; the next run is not stopped.
+it("the shell says the latest run was stopped, while it stops and after it ended, until another run is the latest", { timeout: 60_000 }, async () => {
+	const { f, bridge } = await setup([defineExtension({ name: "deaf", tools: [deaf("slow", 1_500)] })]);
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("after"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });
+	await toolRunning("slow");
+	expect(bridge.threadShell("t").latestRunStopRequested).toBe(false);
+	await bridge.interrupt("t");
+	const stopped = (await lastRun(bridge)).id;
+	expect(bridge.threadShell("t")).toMatchObject({ status: "running", latestRunId: stopped, latestRunStopRequested: true });
+	await runEnded(bridge, 10_000);
+	expect(bridge.threadShell("t")).toMatchObject({ latestRunId: stopped, latestRunStopRequested: true });
+
+	f.model.respond(fauxAssistantMessage("next"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "again", mode: "start" });
+	await bridge.waitFor("t", (projection) => (projection.runs.length === 2 && projection.runs.every((run) => run.status !== "running") ? true : undefined), 10_000);
+	expect(bridge.threadShell("t")).toMatchObject({ status: "completed", latestRunStopRequested: false });
+	expect(bridge.threadShell("t").latestRunId).not.toBe(stopped);
+});
+
 it("an abortable tool returns the moment it is stopped, though its work goes on", { timeout: 60_000 }, async () => {
 	const { f, bridge } = await setup([defineExtension({ name: "deaf", tools: [abortable(deaf("slow", 30_000))] })]);
 	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("after"));

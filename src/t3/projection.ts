@@ -221,6 +221,8 @@ export interface ThreadMeta {
 	/** A Stop of the running run: when it was asked for, and when the run was found not ending (T3's
 	 * `run_interrupt_request`, which its clients show as "Stopping", then "Agent not responding to Stop"). */
 	readonly stop?: { readonly requestedAt: number; readonly unresponsiveAt?: number };
+	/** The run the thread's latest Stop was for, also once it has ended (`Stops.stoppedRun`). */
+	readonly stoppedRunId?: string;
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
 	/** T3's limit recovery, from the thread record: the run a provider's limit ended, when the limit resets, and whether
@@ -1599,6 +1601,12 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 		latestRunRequestedAt: latestRun?.requestedAt ?? (keptRun === null ? null : time(keptRun.requestedAt)),
 		latestRunStartedAt: latestRun?.startedAt ?? (keptRun?.startedAt == null ? null : time(keptRun.startedAt)),
 		latestRunCompletedAt: latestRun?.completedAt ?? (keptRun?.completedAt == null ? null : time(keptRun.completedAt)),
+		// T3's `latestRunStopRequested`: the user stopped the latest run (its `run_interrupt_request`), so T3's clients do
+		// not announce it completed. That row goes with the run's end here, so the run the Stop was for is kept (`Stops`).
+		latestRunStopRequested: (() => {
+			const shownRunId = latestRun?.id ?? keptRun?.id;
+			return shownRunId !== undefined && (shownRunId === meta.stoppedRunId || turnItems.some((item) => item.runId === shownRunId && item.type === "run_interrupt_request"));
+		})(),
 		activeRunId: activeRun?.id ?? null,
 		activityRunStartedAt: activeRun?.startedAt ?? null,
 		activityRunStatus: activeRun === undefined ? null : "running",

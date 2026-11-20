@@ -545,6 +545,7 @@ export class Bridge {
 		const model: ModelRef | null = state?.configuration?.model ?? state?.view?.docs["pi.agent"]?.model ?? null;
 		const thinkingLevel = state?.configuration?.thinkingLevel ?? state?.view?.docs["pi.agent"]?.thinkingLevel;
 		const stop = this.#stops.of(threadId, state);
+		const stoppedRunId = this.#stops.stoppedRun(threadId);
 		const shown = this.#commands.shown(threadId);
 		const approvals = this.approvals.shown(threadId);
 		const listed = model === null ? undefined : state?.catalog.find((entry) => entry.provider === model.provider && entry.modelId === model.modelId);
@@ -591,6 +592,7 @@ export class Bridge {
 			children: this.#children(threadId),
 			running: state?.view?.docs["pi.live"]?.run !== undefined,
 			...(stop === undefined ? {} : { stop }),
+			...(stoppedRunId === undefined ? {} : { stoppedRunId }),
 			...(shown === undefined ? {} : { shown }),
 			...(approvals === undefined ? {} : { approvals }),
 			titleRegeneration: this.#titles.pending(threadId),
@@ -789,6 +791,7 @@ export class Bridge {
 
 	/** A thread that no longer exists: its view ends its subscriptions. */
 	#forget(threadId: string, error: Error): void {
+		this.#stops.clear(threadId);
 		this.#runHolds.get(threadId)?.();
 		this.#runHolds.delete(threadId);
 		const view = this.#views.get(threadId);
