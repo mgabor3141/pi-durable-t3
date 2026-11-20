@@ -66,6 +66,10 @@ export class SecretRequests {
 		// T3 0.1.9's answer from a secret provider (1Password and the like). This host configures none and does not
 		// advertise `secretRequestReferences`, so its clients do not offer it; one that sends it anyway is told.
 		if (input.answer.type === "reference") throw new SecretRequestError({ reason: "reference_unreadable", provider: input.answer.reference.provider });
+		// Answered already: an answer woke the call, which may not have ended yet. T3 refuses before it stores, so a late
+		// answer saves nothing. (Not "is it asleep": an answer may come before the call parked, and pi keeps it.)
+		const state = (await this.#deps.harness().getTask(call.taskId, BACKGROUND_CONTEXT))?.state as { readonly checkpoint?: { readonly wake?: unknown } } | undefined;
+		if (state?.checkpoint?.wake !== undefined) throw new SecretRequestError({ reason: "already_answered" });
 		if (input.answer.type === "save") {
 			try {
 				await sink.save(name, input.answer.secret);

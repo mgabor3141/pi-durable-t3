@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
+import { type ConversationId, type Extension, LiveDoc } from "@earendil-works/pi-durable";
 import { SecretRequestError, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -134,4 +134,36 @@ it("a card that waits through a restart is answered after it: saved, and the cal
 	const { entries } = await (await up.harness.conversation(head, BACKGROUND_CONTEXT))!.context(BACKGROUND_CONTEXT);
 	expect(JSON.stringify(entries)).toContain('"name\\":\\"API_KEY\\"');
 	expect(JSON.stringify(entries)).not.toContain(SECRET);
+});
+
+/** A thread "t" whose agent can ask for secrets (saved into `saves`), on a bridge, with `extra` tools of its own. */
+async function secretThread(extra: Extension[] = []) {
+	let bridge: Bridge | undefined;
+	const saves: [string, string][] = [];
+	let f: Awaited<ReturnType<typeof makeThreads>> | undefined;
+	const requests = new SecretRequests({ harness: () => f!.harness, liveCall: (threadId, callId) => bridge!.liveCall(threadId, callId), hasThread: (threadId) => bridge!.hasThread(threadId) });
+	const extension = requests.extension({ save: async (name, value) => void saves.push([name, value]) });
+	f = await makeThreads({ projects: [{ id: "p" }], extensions: [extension, ...extra] });
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p", title: "Secrets" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-secret-"));
+	bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	bridge.start();
+	onTestFinished(async () => {
+		await bridge!.close();
+		await rm(scratch, { recursive: true, force: true });
+	});
+	await bridge.loaded();
+	return { f, bridge, requests, saves };
+}
+
+it("refuses an answer that comes after the card was answered before it stores anything, as T3 does", { timeout: 60_000 }, async () => {
+	const { f, bridge, requests, saves } = await secretThread();
+	f.model.respond(fauxAssistantMessage([fauxToolCall("request_secret", { name: "TOKEN", label: "Token", reason: "To call the API." }, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("Fine."));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "Go.", mode: "start" });
+	expect(await parked(f, "call-1")).toBe(true);
+	const card = { threadId: ThreadId.make("t"), turnItemId: TurnItemId.make("ti-tcall-1") };
+	await requests.answer({ ...card, answer: { type: "decline" } });
+	// A second answer right after (a double click, a retry): refused, and the declined secret is not saved.
+	await expect(requests.answer({ ...card, answer: { type: "save", secret: "SECOND" } })).rejects.toMatchObject({ reason: expect.stringMatching(/^(already_answered|agent_stopped)$/) });
+	expect(saves).toEqual([]);
 });
