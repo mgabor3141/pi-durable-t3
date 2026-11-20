@@ -261,8 +261,8 @@ it("revoking a client cuts its live WebSocket", async () => {
 }, 30000);
 
 it("behind a proxy on loopback, a device is listed at the address the proxy appended to X-Forwarded-For (T3 0.1.11)", async () => {
-	const { host, token } = await start("conn-forwarded", 5600);
-	const port = 5600;
+	const port = 4943;
+	const { host, token } = await start("conn-forwarded", port);
 	try {
 		const exchange = async (label: string, forwardedFor: string) =>
 			formPost(port, "/oauth/token", { subject_token: (await mint(port, token, { label })).body["credential"] as string }, { "x-forwarded-for": forwardedFor });
@@ -280,8 +280,8 @@ it("behind a proxy on loopback, a device is listed at the address the proxy appe
 }, 30000);
 
 it("subscribeAuthAccess: a change made while the snapshot is on its way is not lost (T3 0.1.11)", async () => {
-	const { host, token } = await start("conn-snapshot-gap", 5602);
-	const port = 5602;
+	const port = 4948;
+	const { host, token } = await start("conn-snapshot-gap", port);
 	// A socket that holds back its acknowledgements: the server sends one chunk, the snapshot, and waits for the ack
 	// before the next. A change made in that window must still arrive after it.
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(await wsTicket(port, token))}`, { perMessageDeflate: true });

@@ -159,7 +159,7 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 }, 60_000);
 
 it("tells a peer link how long its session now lasts, on every answer (T3 0.1.11's t3-link-expires-at)", async () => {
-	const port = 5601;
+	const port = 4944;
 	const root = join(scratch, "peer-link-host");
 	await mkdir(t3Dir(root), { recursive: true });
 	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
