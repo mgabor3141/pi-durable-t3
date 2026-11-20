@@ -14,7 +14,7 @@ import { Bridge } from "../src/t3/bridge.ts";
 import { ProviderLimits } from "../src/t3/provider-limits.ts";
 import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { isBusy, report } from "../src/t3/reports.ts";
-import { createNamed, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
+import { createNamed, gated, idle, makeThreads, bridgeConfig, quietLog } from "./threads-harness.ts";
 
 type Item = { id: string; type: string; runId: string | null; text?: string; status: string; failure?: { class: string; resetAt?: string }; retry?: unknown };
 type Run = { id: string; status: string; userMessageId: string; queueHeld?: boolean };
@@ -147,4 +147,26 @@ it("a thread waiting at a limit can be snoozed with its queue held; settling it 
 	await f.threads.settle("t");
 	expect(bridge.threadRecord("t")?.limitRecovery).toMatchObject({ autoResume: false, snooze: false });
 	await expect(update({ runId, resetAt, autoResume: true })).rejects.toThrow("The thread is settled. Un-settle it to resume at the reset.");
+});
+
+it("once the limited run is no longer the last that ran, a message someone queued blocks a snooze again", { timeout: 60_000 }, async () => {
+	const { f, bridge, send, shown } = await setup();
+	f.model.respond(limit(6 * 3600), fauxAssistantMessage("answered at once"));
+	await send("go");
+	const stopped = await shown(["failed"]);
+	expect(stopped.recovery).toMatchObject({ autoResume: false });
+	// Not waited for: the next message runs at once, and the limit no longer stands (its record stays on the thread).
+	await send("try again");
+	expect((await shown(["failed", "completed"])).recovery).toBeNull();
+	expect(bridge.threadRecord("t")?.limitRecovery, "the record keeps it").toBeDefined();
+	// A turn that works, a message queued behind it, then Stop: the queue holds someone's message, not the limit's.
+	const held = gated("work");
+	f.model.respond(held.step);
+	await send("work");
+	await bridge.waitFor("t", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	await bridge.sendMessage({ threadId: "t", commandId: "cq", messageId: "mq", text: "queued", mode: "queue" });
+	await bridge.interrupt("t");
+	held.release();
+	await bridge.waitFor("t", (projection) => (projection.runs.some((run) => run.status === "queued") && !projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	await expect(bridge.sidebar.snooze("t", new Date(Date.now() + 3_600_000).toISOString())).rejects.toThrow("Thread t has a queued run and cannot be snoozed.");
 });

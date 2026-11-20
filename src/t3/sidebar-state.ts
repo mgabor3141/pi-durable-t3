@@ -134,7 +134,9 @@ export class SidebarState {
 		try {
 			const { projection } = await this.#bridge.view(threadId).projection(15_000);
 			if (projection.runtimeRequests.some((request) => request.status === "pending" && request.kind !== "user_input")) throw new CommandError(`Thread ${threadId} has a pending approval and cannot be snoozed.`);
-			const heldBehindLimit = this.#bridge.thread(threadId)?.limitRecovery !== undefined;
+			// T3's `usageLimitHoldsQueue`: the limit holds the queue while it stands, i.e. while the limited run is still the last that
+			// ran (the projection's `limitRecovery`); the record keeps its recovery after a later run, which no longer holds it.
+			const heldBehindLimit = projection.thread.limitRecovery != null;
 			if (!heldBehindLimit && projection.runs.some((run) => run.status === "queued")) throw new CommandError(`Thread ${threadId} has a queued run and cannot be snoozed.`);
 		} finally {
 			release();
