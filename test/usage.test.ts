@@ -133,6 +133,15 @@ describe("getUsageSummary (buckets, cost source, dedupe, window)", () => {
 		expect(summary.buckets[0]!.totals).toMatchObject({ uncachedInputTokens: 100, outputTokens: 50 });
 	});
 
+	it("counts the tokens of the unpriced records in a bucket (T3 0.1.11's unpricedTokens)", async () => {
+		const free = usage({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+		const summary = await summarizeUsage(window(), [{ conversationId: 1, entries: [assistant(1, { timestamp: D1, usage: free }), assistant(2, { timestamp: D1 })] }], stateDir);
+		// Input, cached input, cache writes and output of the free turn only: the priced one is costed.
+		expect(summary.buckets[0]).toMatchObject({ records: 2, unpricedRecords: 1, unpricedTokens: 100 + 20 + 10 + 50 });
+		const priced = await summarizeUsage(window(), [{ conversationId: 1, entries: [assistant(1, { timestamp: D1 })] }], stateDir);
+		expect(priced.buckets[0]).toMatchObject({ costSource: "providerReported", unpricedTokens: 0 });
+	});
+
 	it("counts a forked entry once across two conversations that share it", async () => {
 		// Both threads' head views contain entry 5 (a fork shares its ancestor entries); dedupe keys on the entry id.
 		const summary = await summarizeUsage(

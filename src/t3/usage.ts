@@ -115,6 +115,7 @@ interface MutableBucket {
 	categoryCostUsd: UsageCategoryCost | null;
 	records: number;
 	unpricedRecords: number;
+	unpricedTokens: number;
 	providerReportedRecords: number;
 	sessions: Set<string>;
 }
@@ -212,6 +213,7 @@ function aggregate(records: readonly UsageRecord[], input: UsageSummaryInput): r
 				categoryCostUsd: null,
 				records: 0,
 				unpricedRecords: 0,
+				unpricedTokens: 0,
 				providerReportedRecords: 0,
 				sessions: new Set<string>(),
 			};
@@ -237,8 +239,11 @@ function aggregate(records: readonly UsageRecord[], input: UsageSummaryInput): r
 					};
 		}
 		bucket.records += 1;
-		if (record.reportedCostUsd === null) bucket.unpricedRecords += 1;
-		else bucket.providerReportedRecords += 1;
+		if (record.reportedCostUsd === null) {
+			bucket.unpricedRecords += 1;
+			// T3's count of what no price covers: input, cached input, cache writes and output (reasoning is not added).
+			bucket.unpricedTokens += record.totals.uncachedInputTokens + record.totals.cachedInputTokens + record.totals.cacheCreationTokens + record.totals.outputTokens;
+		} else bucket.providerReportedRecords += 1;
 		if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
 	}
 
@@ -268,6 +273,7 @@ function aggregate(records: readonly UsageRecord[], input: UsageSummaryInput): r
 			costSource: resolveCostSource(bucket),
 			records: bucket.records,
 			unpricedRecords: bucket.unpricedRecords,
+			unpricedTokens: bucket.unpricedTokens,
 			sessions: bucket.sessions.size,
 		});
 	}
