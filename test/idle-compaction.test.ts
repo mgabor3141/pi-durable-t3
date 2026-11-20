@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -128,4 +129,29 @@ it("turning the setting on covers a thread that is idle already, as a start of t
 	// The same look the bridge takes when it starts: the threads whose latest run completed within the cache's lifetime.
 	store.update({ idleCompaction: "beforeCacheExpires" });
 	await expect.poll(compactions, { timeout: 20_000 }).toBe(1);
+});
+
+it("an idle compaction stays out of the thread's shell: the user's last turn stays its latest run, also in the summary (T3's isSilentRunForShell)", { timeout: 60_000 }, async () => {
+	IdleCompaction.limits = { minTokens: 1000, leadMs: 299_000 };
+	const { f, bridge, thread, turn, compactions } = await setup({ idleCompaction: "beforeCacheExpires" });
+	await turn("one", "first" + long);
+	await turn("two", "second" + long, summary);
+	const before = bridge.threadShell("t");
+	expect(before.status).toBe("completed");
+	// Every shell T3's clients are sent meanwhile: none shows the compaction running or as the latest run, so T3 does
+	// not announce "Thread completed" for it.
+	const shells: OrchestrationV2ThreadShell[] = [];
+	const stop = bridge.onShell((item) => {
+		if (item.kind === "thread.updated" && item.thread.id === "t") shells.push(item.thread);
+	});
+	onTestFinished(stop);
+	await expect.poll(compactions, { timeout: 20_000 }).toBe(1);
+	await idle(f.harness, thread.head);
+	const compaction = await bridge.waitFor("t", (projection) => projection.runs.find((run) => projection.messages.some((message) => message.id === run.userMessageId && message.text === "/compact" && run.status === "completed")), 10_000);
+	expect(compaction).toBeDefined();
+	const shown = (shell: OrchestrationV2ThreadShell) => JSON.parse(JSON.stringify({ latestRunId: shell.latestRunId, latestRunRequestedAt: shell.latestRunRequestedAt, latestRunCompletedAt: shell.latestRunCompletedAt, status: shell.status, activeRunId: shell.activeRunId, activityRunStatus: shell.activityRunStatus, latestUserMessageAt: shell.latestUserMessageAt, latestVisibleMessage: shell.latestVisibleMessage }));
+	expect(shown(bridge.threadShell("t"))).toEqual(shown(before));
+	for (const shell of shells) expect(shown(shell)).toEqual(shown(before));
+	// The summary keeps that run too, for the thread once it is not open.
+	await expect.poll(() => bridge.threadRecord("t")?.summary?.latestRun?.id).toBe(before.latestRunId);
 });

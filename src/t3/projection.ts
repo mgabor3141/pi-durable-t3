@@ -18,6 +18,7 @@ import type {
 	OrchestrationV2ThreadShell,
 	OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { idleCompactionOf } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
@@ -1546,17 +1547,33 @@ function blockedOnThreadWait(activeRun: OrchestrationV2Run | undefined, turnItem
 	return waits;
 }
 
+/** T3's `isSilentRunForShell`: a run of T3's own idle compaction (`idle-compaction.ts`) that did not fail. */
+function isSilentRun(run: OrchestrationV2Run, messages: readonly OrchestrationV2ConversationMessage[], turnItems: readonly OrchestrationV2TurnItem[]): boolean {
+	return (
+		run.status !== "failed" &&
+		messages.some((message) => message.id === run.userMessageId && idleCompactionOf(message) !== undefined) &&
+		!turnItems.some((item) => item.runId === run.id && item.type === "compaction" && item.status === "failed")
+	);
+}
+
 /** The thread's shell: its sidebar row, with the latest run and message as T3's shell reads them. */
 function projectShell(b: Build, rows: ReturnType<typeof projectRows>): OrchestrationV2ThreadShell {
-	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs, messages, turnItems, shownIds } = b;
+	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs: allRuns, messages, turnItems, shownIds } = b;
 	const { visibleTurnItems, updatedAt, author, sidebar, thread } = rows;
+	// T3's own idle compactions stay out of the shell unless they fail, so thread lists, notifications and the relay keep
+	// presenting the user's last turn (T3's `isSilentRunForShell`): a compaction is neither the latest run nor work.
+	const silent = new Set(allRuns.filter((run) => isSilentRun(run, messages, turnItems)).map((run) => run.id as string));
+	const runs = silent.size === 0 ? allRuns : allRuns.filter((run) => !silent.has(run.id as string));
+	// Nor does the shell show the thread working while only such a compaction runs.
+	const working = busy && !(b.live?.run === undefined && b.manualCompactionRunId !== null && silent.has(b.manualCompactionRunId));
 	const liveRuns = runs.filter((run) => run.status !== "rolled_back");
 	// T3's `latestUnheldRun`: the newest run that is not waiting in a held queue, so a thread whose run stopped or
 	// reached a limit shows that, and not "queued", while messages wait behind it.
 	const latestRun = liveRuns.findLast((run) => !(run.status === "queued" && (run as { queueHeld?: boolean }).queueHeld === true));
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
-	// The thread's own messages: a command the host answered on the spot is not the thread's latest message.
-	const durable = shownIds.size === 0 ? messages : messages.filter((message) => !shownIds.has(message.id as string));
+	// The thread's own messages: a command the host answered on the spot is not the thread's latest message, nor is
+	// T3's idle `/compact` (T3's shell leaves it out of the user's messages).
+	const durable = messages.filter((message) => !shownIds.has(message.id as string) && idleCompactionOf(message) === undefined);
 	const lastVisibleMessage = durable.at(-1);
 	const lastUser = durable.findLast((message) => message.role === "user");
 	const lastUserAuthored = durable.findLast((message) => message.role === "user" && ((message as Any).createdBy ?? "user") === "user");
@@ -1586,10 +1603,10 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 		activityRunStartedAt: activeRun?.startedAt ?? null,
 		activityRunStatus: activeRun === undefined ? null : "running",
 		// T3's shell status is the latest run's status, and "idle" only for a thread that never ran (ProjectionStore.ts).
-		status: busy ? "running" : (latestRun?.status ?? keptRun?.status ?? "idle"),
+		status: working ? "running" : (latestRun?.status ?? keptRun?.status ?? "idle"),
 		// T3's `threadErrorSummary`: what the latest run failed with, for the sidebar ("limited" for a provider's limit).
 		...(() => {
-			const failed = busy || latestRun?.status !== "failed" ? undefined : (turnItems.findLast((item) => item.type === "error" && item.status === "failed" && item.runId === latestRun.id) as { failure?: { class: string; message: string; resetAt?: string } } | undefined)?.failure;
+			const failed = working || latestRun?.status !== "failed" ? undefined : (turnItems.findLast((item) => item.type === "error" && item.status === "failed" && item.runId === latestRun.id) as { failure?: { class: string; message: string; resetAt?: string } } | undefined)?.failure;
 			if (failed !== undefined) return { lastError: failed.message, lastErrorClass: failed.class, lastErrorCode: null, usageLimitResetAt: failed.class === "usage_limit" ? (failed.resetAt ?? null) : null };
 			if (latestRun === undefined && keptRun?.status === "failed" && keptRun.errorClass !== undefined) return { lastErrorClass: keptRun.errorClass, usageLimitResetAt: keptRun.resetAt ?? null };
 			return {};
