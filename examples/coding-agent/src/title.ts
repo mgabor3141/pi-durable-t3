@@ -1,6 +1,6 @@
 // The example's `titleThread` hook: one tool-less completion on the thread's own model. It reads the conversation's
-// context at the entry the bridge names (not a fork: the title model gets no tools and runs nothing) and sends its
-// user/assistant TEXT only, trimmed to a budget the way T3's `formatThreadTitleContext` does: no tool calls or results
+// context at the entry the bridge names (not a fork: the title model gets no tools and runs nothing), a side chat's from
+// the entry after the one it was opened at, and sends its user/assistant TEXT only, trimmed to a budget the way T3's `formatThreadTitleContext` does: no tool calls or results
 // (no tools are declared), no thinking, at most 2000 characters per message and 8000 in all, keeping the first user
 // message and then the most recent ones.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -36,14 +36,16 @@ export function titleContext(messages: readonly { role: string; content: unknown
 }
 
 export function titleThread(harness: Harness, models: Models): TitleThread {
-	return async ({ conversationId, at, reason, previousTitle, signal }) => {
+	return async ({ conversationId, at, after, reason, previousTitle, projectTitle, signal }) => {
 		const ctx = BACKGROUND_CONTEXT;
 		const conversation = await harness.conversation(conversationId, ctx);
 		if (conversation === undefined) return undefined;
 		const { model: ref } = await conversation.agent(ctx);
 		const model = ref === undefined ? undefined : models.getModel(ref.provider, ref.modelId);
 		if (model === undefined) return undefined;
-		const { messages } = await conversation.context(ctx, { at });
+		const view = await conversation.context(ctx, { at });
+		// A side chat's history before `after` is its main thread's, not its subject.
+		const messages = after === undefined ? view.messages : view.entries.flatMap((entry, index) => (entry.id > after ? (view.contributions[index] ?? []) : []));
 		const ask =
 			reason === "regenerate"
 				? `Write a better title for this conversation than "${previousTitle ?? ""}".`
@@ -51,7 +53,8 @@ export function titleThread(harness: Harness, models: Models): TitleThread {
 		const reply = await models.completeSimple(
 			model,
 			{
-				systemPrompt: "You name chat threads. Reply with the title only: at most 6 words, no quotes, no trailing period.",
+				// T3 names the project so the model leaves it out: the UI shows it beside the title.
+				systemPrompt: `You name chat threads. Reply with the title only: at most 6 words, no quotes, no trailing period. Never include the project name (${JSON.stringify(projectTitle)}); the UI already shows it next to the title.`,
 				messages: [{ role: "user", content: `${titleContext(messages)}\n\n${ask}`, timestamp: Date.now() }],
 			},
 			{ signal },

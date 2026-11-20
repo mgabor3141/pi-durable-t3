@@ -96,9 +96,10 @@ await t3.close();
   finds.
 - Thread titles follow T3: the first message seeds the title, then the bridge asks your `titleThread` hook for a
   better one (once that message is committed, not after the reply) and again on "Regenerate title". You get the
-  thread's head, the entry to title from, and a signal that aborts when a rename or newer request supersedes you (or the host closes); a
-  late answer is ignored. Return `undefined` (or "New thread") to keep the title. The hook owns its timeout: until it
-  settles, the thread shows "Regenerating…". The example's hook is
+  thread's head, the entry to title from, the project's title (for the model to leave out), a side chat's starting
+  entry (`after`: title from what follows it), and a signal that aborts when a rename or newer request supersedes you (or the host closes); a
+  late answer is ignored. Return `undefined` (or "New thread") to keep the title; a throw is a failure, and T3 shows its
+  last line. The hook owns its timeout: until it settles, the thread shows "Regenerating…". The example's hook is
   [`examples/coding-agent/src/title.ts`](examples/coding-agent/src/title.ts): one tool-less completion on the
   thread's model, over the conversation's text trimmed to T3's budget.
 

@@ -11,6 +11,11 @@ export type TitleThreadRequest = {
 	readonly reason: "first-message" | "regenerate";
 	/** The title being replaced; "regenerate" only. */
 	readonly previousTitle?: string;
+	/** The title of the thread's project, which T3 shows beside the thread's: T3 tells its generator to leave it out. */
+	readonly projectTitle: string;
+	/** A side chat: the entry it was opened at. The history up to it is the main thread's, which T3 leaves out of a side
+	 * chat's title; title from the entries after it. Absent: the whole context counts. */
+	readonly after?: EntryId;
 	/** Aborted when a rename or a newer request supersedes this one. */
 	readonly signal: AbortSignal;
 	/** T3's text-generation model (Settings), when it names one of this host's models: generate with it. Absent: the

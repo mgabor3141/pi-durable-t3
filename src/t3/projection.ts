@@ -233,6 +233,8 @@ export interface ThreadMeta {
 	readonly approvals?: readonly ShownApproval[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
+	/** T3's `lastTitleRegeneration`: how the last "regenerate" ended (in memory, as the request is). */
+	readonly lastTitleRegeneration?: { readonly status: "renamed" | "unchanged" | "failed"; readonly message?: string; readonly requestId: string; readonly completedAt: number } | null;
 }
 
 /** Bridge-side memory needed for a faithful projection. */
@@ -1474,6 +1476,7 @@ function projectRows(b: Build) {
 		projectId: id(meta.projectId),
 		title: meta.title,
 		titleRegeneration: meta.titleRegeneration == null ? null : { requestId: id(meta.titleRegeneration.requestId), startedAt: time(meta.titleRegeneration.startedAt) },
+		lastTitleRegeneration: meta.lastTitleRegeneration == null ? null : { ...meta.lastTitleRegeneration, requestId: id(meta.lastTitleRegeneration.requestId), completedAt: time(meta.lastTitleRegeneration.completedAt) },
 		providerInstanceId: id(PROVIDER_INSTANCE_ID),
 		modelSelection,
 		runtimeMode: "full-access",
@@ -1544,6 +1547,7 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 		projectId: id(meta.projectId),
 		title: meta.title,
 		titleRegeneration: meta.titleRegeneration == null ? null : { requestId: id(meta.titleRegeneration.requestId), startedAt: time(meta.titleRegeneration.startedAt) },
+		lastTitleRegeneration: meta.lastTitleRegeneration == null ? null : { ...meta.lastTitleRegeneration, requestId: id(meta.lastTitleRegeneration.requestId), completedAt: time(meta.lastTitleRegeneration.completedAt) },
 		providerInstanceId: id(PROVIDER_INSTANCE_ID),
 		modelSelection,
 		runtimeMode: "full-access",

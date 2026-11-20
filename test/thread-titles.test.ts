@@ -57,7 +57,8 @@ async function start(fixture: ThreadsFixture, threads: Threads, titleThread?: Ti
 }
 
 const MODEL = { model: "faux/faux-1" };
-const shell = (bridge: Bridge, threadId: string) => bridge.shellSnapshot().threads.find((t) => (t.id as string) === threadId) as unknown as { title: string; titleRegeneration: unknown };
+const shell = (bridge: Bridge, threadId: string) =>
+	bridge.shellSnapshot().threads.find((t) => (t.id as string) === threadId) as unknown as { title: string; titleRegeneration: unknown; lastTitleRegeneration: { status: string; message?: string; requestId: string } | null };
 const send = (bridge: Bridge, threadId: string, n: number, titleSeed?: string) =>
 	bridge.sendMessage({ threadId, commandId: `c${n}`, messageId: `m${n}`, text: `hello ${n}`, mode: "queue", ...(titleSeed === undefined ? {} : { titleSeed }) });
 
@@ -80,8 +81,9 @@ it("seeds the title on the first message only, asks the hook at the first user e
 	expect(shell(bridge, threadId).titleRegeneration).toMatchObject({ requestId: "c1" });
 	await until("the hook call", () => calls.length === 1);
 	const request = calls[0]!.request;
-	expect(request).toMatchObject({ threadId, reason: "first-message" });
+	expect(request).toMatchObject({ threadId, reason: "first-message", projectTitle: "p" });
 	expect(request.previousTitle).toBeUndefined();
+	expect(request.after, "not a side chat: the whole context counts").toBeUndefined();
 	const head = (await fixture.threads.thread(threadId))!.head;
 	expect(request.conversationId).toBe(head);
 	const entries = (await (await conversation(fixture.harness, head)).context(ctx)).entries;
@@ -91,6 +93,7 @@ it("seeds the title on the first message only, asks the hook at the first user e
 	calls[0]!.resolve("  Generated title ");
 	await until("the generated title", () => shell(bridge, threadId).title === "Generated title");
 	expect(shell(bridge, threadId).titleRegeneration).toBeNull();
+	expect(shell(bridge, threadId).lastTitleRegeneration, "a first title reports no outcome, as in T3").toBeNull();
 	expect((await fixture.threads.thread(threadId))!.title).toBe("Generated title");
 
 	// A later message's seed changes nothing and asks nothing.
@@ -146,13 +149,21 @@ it("regenerate asks with the latest entry and the previous title; 'New thread', 
 	calls[1]!.resolve("Seed");
 	await until("the same title completes", () => shell(bridge, threadId).titleRegeneration === null);
 	expect(shell(bridge, threadId).title).toBe("Seed");
+	// T3 0.1.11's `lastTitleRegeneration`, which the web app reports as "Title kept".
+	expect(shell(bridge, threadId).lastTitleRegeneration).toMatchObject({ status: "unchanged", requestId: "g1" });
+	expect(shell(bridge, threadId).lastTitleRegeneration?.message).toBeUndefined();
 
 	await bridge.updateThreadMetadata({ commandId: "g2", threadId, regenerateTitle: true });
 	await until("the second regenerate call", () => calls.length === 3);
-	calls[2]!.reject(new Error("model down"));
+	calls[2]!.reject(new Error(`Request failed\n\n  ${"overloaded ".repeat(40)}  \n`));
 	await until("the failure completes", () => shell(bridge, threadId).titleRegeneration === null);
 	expect(shell(bridge, threadId).title).toBe("Seed");
 	expect(warnings).toContain("Thread title generation failed");
+	// The web app's "Failed to regenerate thread title" names why: the error's last line, at most 300 characters.
+	const failed = shell(bridge, threadId).lastTitleRegeneration!;
+	expect(failed).toMatchObject({ status: "failed", requestId: "g2" });
+	expect(failed.message).toBe(`${"overloaded ".repeat(40).trim().slice(0, 299)}…`);
+	expect((await bridge.projection(threadId)).projection.thread.lastTitleRegeneration).toMatchObject({ status: "failed", requestId: "g2" });
 
 	// A newer request supersedes an older one; `regenerateTitle: false` clears it.
 	await bridge.updateThreadMetadata({ commandId: "g3", threadId, regenerateTitle: true });
@@ -163,6 +174,7 @@ it("regenerate asks with the latest entry and the previous title; 'New thread', 
 	calls[3]!.resolve("Stale");
 	calls[4]!.resolve("Fresh title");
 	await until("the fresh title", () => shell(bridge, threadId).title === "Fresh title");
+	expect(shell(bridge, threadId).lastTitleRegeneration).toMatchObject({ status: "renamed", requestId: "g4" });
 	await bridge.updateThreadMetadata({ commandId: "g5", threadId, regenerateTitle: true });
 	await until("the call", () => calls.length === 6);
 	await bridge.updateThreadMetadata({ commandId: "g6", threadId, regenerateTitle: false });
@@ -279,4 +291,58 @@ it("hands the title hook T3's text-generation model (when it names one of this h
 	expect(calls[0]!.request.model).toEqual({ provider: "faux", modelId: "faux-1", thinkingLevel: "low" });
 	expect(calls[0]!.request.guidance, "T3's title guidance, trimmed").toBe("Use sentence case.");
 	calls[0]!.resolve(undefined);
+}, 30_000);
+
+it("a title chosen before the first message is kept; a placeholder, a side chat's and a fork's are not (T3 0.1.11)", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	fixture.model.respond(...Array.from({ length: 8 }, () => fauxAssistantMessage("pong")));
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+
+	// Named on create (an agent's launch that tracks an issue): the first message's seed does not replace it.
+	await bridge.createThread({ threadId: "named", projectId: "p", title: "Issue 42: login" });
+	await bridge.applySelection("named", MODEL);
+	await send(bridge, "named", 1, "work on this");
+	expect(shell(bridge, "named")).toMatchObject({ title: "Issue 42: login", titleRegeneration: null });
+	// An agent's placeholder is replaced.
+	await bridge.createThread({ threadId: "placeholder", projectId: "p", title: "Main thread 2" });
+	await bridge.applySelection("placeholder", MODEL);
+	await send(bridge, "placeholder", 2, "Fix the docs");
+	expect(shell(bridge, "placeholder").title).toBe("Fix the docs");
+	await until("the placeholder's hook call", () => calls.length === 1);
+	calls[0]!.resolve(undefined);
+
+	// A side chat's title is replaced by its first message, unless it was renamed first.
+	await until("the placeholder's reply", async () => (await bridge.projection("placeholder")).projection.messages.length >= 2);
+	await bridge.forkThread({ sourceThreadId: "placeholder", targetThreadId: "side", title: "Side chat", sideChat: true });
+	await bridge.forkThread({ sourceThreadId: "placeholder", targetThreadId: "side-renamed", title: "Side chat", sideChat: true });
+	await bridge.renameThread("side-renamed", "My side question");
+	expect(bridge.threadRecord("side-renamed")!.titleRenamed).toBe(true);
+	await send(bridge, "side-renamed", 3, "what about the tests");
+	expect(shell(bridge, "side-renamed")).toMatchObject({ title: "My side question", titleRegeneration: null });
+	await send(bridge, "side", 4, "what about the build");
+	expect(shell(bridge, "side").title).toBe("what about the build");
+	await until("the side chat's hook call", () => calls.length === 2);
+	// A side chat is titled from its own messages: the hook is told where the main thread's history ends.
+	expect(calls[1]!.request).toMatchObject({ threadId: "side", after: bridge.threadRecord("side")!.forkEntryId, projectTitle: "p" });
+	calls[1]!.resolve(undefined);
+
+	// A generated title clears the rename.
+	await until("the side chat's reply", async () => (await bridge.projection("side-renamed")).projection.messages.length >= 2);
+	await bridge.updateThreadMetadata({ commandId: "g1", threadId: "side-renamed", regenerateTitle: true });
+	await until("the regenerate call", () => calls.length === 3);
+	calls[2]!.resolve("Testing questions");
+	await until("the generated title", () => shell(bridge, "side-renamed").title === "Testing questions");
+	expect(bridge.threadRecord("side-renamed")!.titleRenamed).toBeUndefined();
+}, 30_000);
+
+it("regenerating a thread with no messages of its own fails, saying so", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+	const threadId = await newThread(bridge);
+	await bridge.updateThreadMetadata({ commandId: "g1", threadId, regenerateTitle: true });
+	await until("the outcome", () => shell(bridge, threadId).lastTitleRegeneration !== null);
+	expect(shell(bridge, threadId)).toMatchObject({ title: "New thread", titleRegeneration: null, lastTitleRegeneration: { status: "failed", message: "This thread has no messages to title yet.", requestId: "g1" } });
+	expect(calls).toHaveLength(0);
 }, 30_000);

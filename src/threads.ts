@@ -582,11 +582,14 @@ export class Threads {
 		});
 	}
 
-	/** Set a thread's title: one commit on its record, so a rename survives a restart. */
-	async rename(threadId: string, title: string): Promise<void> {
+	/** Set a thread's title: one commit on its record, so a rename survives a restart. `renamed` sets or clears
+	 * `titleRenamed` (a rename, a generated title); absent, it stays as it is (a first message's seed). */
+	async rename(threadId: string, title: string, renamed?: boolean): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
 			const record = await writes.live(threadId);
 			record.title = title;
+			if (renamed === true) record.titleRenamed = true;
+			else if (renamed === false) delete record.titleRenamed;
 			await writes.putRecord(record);
 		});
 	}

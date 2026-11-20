@@ -394,6 +394,8 @@ export class ThreadOps {
 			pullRequests: [],
 			titleRegeneration:
 				projection.thread.titleRegeneration == null ? null : { requestId: projection.thread.titleRegeneration.requestId, startedAt: iso(projection.thread.titleRegeneration.startedAt) },
+			lastTitleRegeneration:
+				projection.thread.lastTitleRegeneration == null ? null : { ...projection.thread.lastTitleRegeneration, completedAt: iso(projection.thread.lastTitleRegeneration.completedAt) },
 			branch: projection.thread.branch,
 			worktreePath: projection.thread.worktreePath,
 			parentThreadId: projection.thread.lineage.parentThreadId,

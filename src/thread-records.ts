@@ -107,6 +107,9 @@ export type ThreadRecord = {
 	projectId: string;
 	head: number;
 	title: string;
+	/** T3's `titleRenamed`: the title was renamed (by a person, an agent or the integrator), so a first message does not
+	 * replace it, not even on a fork or a side chat. A generated title clears it. */
+	titleRenamed?: true;
 	createdAt: number;
 	createdBy: Actor;
 	creationSource: CreationSource;

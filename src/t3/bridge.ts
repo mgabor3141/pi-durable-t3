@@ -109,6 +109,18 @@ type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
+/**
+ * T3's `hasTitleSetBeforeFirstMessage` (0.1.11): a title someone chose before the first message, which that message's
+ * `titleSeed` does not replace. A rename always counts. Otherwise a thread starts as "New thread", or with an agent's
+ * placeholder (`<parent> thread 2`), or with the seed itself (the web app's launch), and any other title was chosen on
+ * purpose; a fork or a side chat starts with a title its first message replaces.
+ */
+function titleSetBeforeFirstMessage(record: Pick<ThreadRecord, "title" | "titleRenamed" | "forkedFrom" | "lineage">, seed: string): boolean {
+	if (record.titleRenamed === true) return true;
+	const title = record.title.trim();
+	return record.forkedFrom === null && record.lineage.sideChat !== true && title !== "" && title !== "New thread" && !/ thread \d+$/u.test(title) && title !== seed;
+}
+
 /** One `projects.mutate` payload, as the facet decoded it. */
 export type ProjectMutation = {
 	readonly type: "project.create" | "project.update" | "project.delete";
@@ -565,6 +577,7 @@ export class Bridge {
 			...(shown === undefined ? {} : { shown }),
 			...(approvals === undefined ? {} : { approvals }),
 			titleRegeneration: this.#titles.pending(threadId),
+			lastTitleRegeneration: this.#titles.lastOutcome(threadId),
 		};
 	}
 
@@ -1223,13 +1236,17 @@ export class Bridge {
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();
 			// A side chat's own rows start empty (its inherited history is not shown), so its first message seeds its title, as
-			// T3's side chat has no messages before it.
-			const seeded = seed !== undefined && seed !== "" && (!this.#hasMessages(state) || record?.pendingContext?.type === "side_chat");
+			// T3's side chat has no messages before it. Since 0.1.11 a title chosen before the first message is kept.
+			const seeded =
+				seed !== undefined &&
+				seed !== "" &&
+				(!this.#hasMessages(state) || record?.pendingContext?.type === "side_chat") &&
+				(record === undefined || !titleSetBeforeFirstMessage(record, seed));
 			const previousTitle = this.#thread(input.threadId)?.title ?? "";
 			if (seeded) {
 				this.#titles.cancel(input.threadId);
 				await this.#titles.store(input.threadId, seed);
-				this.#titles.begin(input.threadId, input.commandId);
+				this.#titles.begin(input.threadId, input.commandId, "first-message");
 			}
 			// The client's message id rides in the entry (`app.user`, placed by `Threads.submit`); `requestId` stays the
 			// commandId for durable dedup (design.md, Invariants). Attachments are kept in the environment before the message
@@ -1282,7 +1299,7 @@ export class Bridge {
 				else await this.#store.submit(request, undefined);
 			})().catch((error: unknown) => {
 				if (seeded) {
-					void this.#titles.complete(input.threadId, input.commandId, undefined);
+					void this.#titles.complete(input.threadId, input.commandId);
 					// T3 stores the seed and the message in one command: a message that did not land leaves no seed title.
 					if (this.#thread(input.threadId)?.title === seed) void this.#titles.store(input.threadId, previousTitle).catch(() => {});
 				}
@@ -1361,7 +1378,7 @@ export class Bridge {
 		if (trimmed === "") throw new CommandError("Thread title cannot be empty.");
 		if (!this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		this.#titles.cancel(threadId);
-		await this.#titles.store(threadId, trimmed);
+		await this.#titles.store(threadId, trimmed, true);
 	}
 
 	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
@@ -1383,7 +1400,7 @@ export class Bridge {
 		if (command.limitRecovery !== undefined) await this.#limits.configure(command.threadId, command.limitRecovery as RecoveryUpdate | null);
 		if (command.title !== undefined) await this.renameThread(command.threadId, command.title);
 		if (command.regenerateTitle === true) {
-			this.#titles.begin(command.threadId, command.commandId);
+			this.#titles.begin(command.threadId, command.commandId, "regenerate");
 			this.#titles.generate(command.threadId, command.commandId, { reason: "regenerate" });
 		} else if (command.regenerateTitle === false) {
 			this.#titles.cancel(command.threadId);

@@ -2,6 +2,7 @@
 // the model's reply (trimmed, unquoted) as the title. Faux model; temp roots only.
 import { expect, it } from "vitest";
 import { fauxAssistantMessage, type Context } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId, EntryId } from "@earendil-works/pi-durable";
 import { titleContext, titleThread } from "../src/title.ts";
 import { createNamed, firstUserEntry, idle, makeThreads } from "../../../test/threads-harness.ts";
@@ -19,10 +20,12 @@ it("titles from the context at the first user entry, on the thread's model, with
 	const at = (await firstUserEntry(f.harness, thread.head)) as EntryId;
 
 	const title = await titleThread(f.harness, f.model.models)({
-		threadId: "t", conversationId: thread.head as ConversationId, at, reason: "first-message", signal: new AbortController().signal,
+		threadId: "t", conversationId: thread.head as ConversationId, at, reason: "first-message", projectTitle: "Shop", signal: new AbortController().signal,
 	});
 	expect(title).toBe("Fixing the login bug");
 	expect(seen).toHaveLength(1);
+	// T3 tells the generator the project's name, which the UI already shows beside the title.
+	expect(JSON.stringify(seen[0]!.messages.filter((m) => (m.role as string) === "system"))).toContain('Never include the project name (\\"Shop\\")');
 	// No tools: pi-ai declares them as `toolsAdded` on system messages, and the title request is one user message of
 	// plain text — no tool calls or results to replay either.
 	expect(seen[0]!.messages.some((m) => ((m as { toolsAdded?: unknown[] }).toolsAdded?.length ?? 0) > 0)).toBe(false);
@@ -32,6 +35,29 @@ it("titles from the context at the first user entry, on the thread's model, with
 	// The context ends at `at`: the first message, then the title instruction — not the reply.
 	expect(users[0]!.content).toContain("the login is broken");
 	expect(users[0]!.content).not.toContain("pong");
+}, 30_000);
+
+it("titles a side chat from the entries after the one it was opened at", async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }], coding: true });
+	const seen: Context[] = [];
+	f.model.respond(fauxAssistantMessage("pong"), fauxAssistantMessage("pong again"), async (context) => {
+		seen.push(context);
+		return fauxAssistantMessage("Docs question");
+	});
+	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
+	await f.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "the login is broken" }, undefined);
+	await idle(f.harness, thread.head);
+	const opened = (await (await f.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))!.context(BACKGROUND_CONTEXT)).entries.at(-1)!.id;
+	await f.threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r2", message: "what do the docs say" }, undefined);
+	await idle(f.harness, thread.head);
+	const at = (await (await f.harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT))!.context(BACKGROUND_CONTEXT)).entries.at(-1)!.id;
+
+	await titleThread(f.harness, f.model.models)({
+		threadId: "t", conversationId: thread.head as ConversationId, at, after: opened, reason: "regenerate", previousTitle: "x", projectTitle: "Shop", signal: new AbortController().signal,
+	});
+	const prompt = seen[0]!.messages.find((m) => m.role === "user")!.content as string;
+	expect(prompt).toContain("what do the docs say");
+	expect(prompt).not.toContain("the login is broken");
 }, 30_000);
 
 it("the title context keeps text only, within T3's budget: the first user message, then the newest", () => {
