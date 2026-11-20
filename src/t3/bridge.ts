@@ -26,7 +26,7 @@ import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
 import type { WsItem, WsSuccess } from "./ws-types.ts";
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { ProjectId, ThreadId, withMessageSenderNote } from "@t3tools/contracts";
 import type { BridgeCore } from "./bridge-core.ts";
 import { IdleCompaction } from "./idle-compaction.ts";
 import { ProviderLimits, type RecoveryUpdate } from "./provider-limits.ts";
@@ -41,6 +41,7 @@ import type { TextGenerationModel } from "./title-thread.ts";
 import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { USER_ENTRY_KINDS } from "./runs.ts";
+import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { messageOf } from "../host-errors.ts";
 import { undoTarget } from "./undo.ts";
 
@@ -101,6 +102,18 @@ export function selectImageBlocks(
 	return blocks.length === 0 ? undefined : blocks;
 }
 
+/**
+ * T3's `withMessageSenderNote`: who sent a message no person typed in the chat (a scheduled task, another thread's
+ * agent, an agent through T3's tools), in a line the model reads with it. A hidden block after the text, so T3 shows
+ * the message as it was sent. A scheduled task's message names the task in its id (`SCHEDULED_MESSAGE_ID`). None for
+ * a message that starts with a slash command or a skill mention, which T3 sends as it is.
+ */
+function senderNote(provenance: Provenance, messageId: string, text: string): ContentBlock | undefined {
+	const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
+	const message = { ...provenance, ...(scheduledTaskId === undefined ? {} : { scheduledTaskId }) } as Parameters<typeof withMessageSenderNote>[0];
+	if (withMessageSenderNote(message, text) === text) return undefined;
+	return { type: "text", text: withMessageSenderNote(message, ""), hidden: true };
+}
 
 const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -1281,7 +1294,9 @@ export class Bridge {
 							this.#log.warn("pending context could not be built; it waits for the next message", { threadId: input.threadId, error: String(error) });
 							return undefined;
 						});
-			const contextBlocks: ContentBlock[] = transfer?.block === undefined ? [] : [transfer.block];
+			// Who sent it, when no person did; a child's report names its thread in its own header, so it gets none.
+			const note = input.automatic === true ? undefined : senderNote(input.provenance ?? USER_WEB, input.messageId, input.text);
+			const contextBlocks: ContentBlock[] = [...(note === undefined ? [] : [note]), ...(transfer?.block === undefined ? [] : [transfer.block])];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
 			const request = {
 				threadId: input.threadId,

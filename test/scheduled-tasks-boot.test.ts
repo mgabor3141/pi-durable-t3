@@ -210,3 +210,40 @@ it("a Stop on an idle thread whose queue holds a task's message leaves it waitin
 		await close();
 	}
 });
+
+it("a scheduled task's prompt tells the model which task sent it, and T3 shows the prompt as written (T3's withMessageSenderNote)", { timeout: 30_000 }, async () => {
+	const { createNamed } = await import("./threads-harness.ts");
+	const { fauxAssistantMessage } = await import("@earendil-works/pi-ai");
+	// What the model reads of each prompt: the last message of its request.
+	const read: unknown[] = [];
+	const step = async (context: { messages: readonly { content: unknown }[] }) => {
+		read.push(context.messages.at(-1)!.content);
+		return fauxAssistantMessage("done");
+	};
+	const f = await makeThreads({ projects: [{ id: "p" }], responses: [step, step] });
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "bound", projectId: "p" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-note-"));
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	bridge.start();
+	await bridge.loaded();
+	try {
+		const dispatch = scheduledTaskDispatch(bridge);
+		const ran = (messageId: string) => bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.userMessageId === messageId && run.status === "completed") ? true : undefined), 10_000);
+		await dispatch.queue({ threadId: "bound", projectId: "p", commandId: "scheduled-task:task-1:1:scheduled", messageId: "scheduled-task-message:task-1:1:scheduled", text: "hourly report", provenance: { createdBy: "user", creationSource: "web" } });
+		await ran("scheduled-task-message:task-1:1:scheduled");
+		expect(read[0]).toEqual([
+			{ type: "text", text: "hourly report" },
+			{ type: "text", text: '[T3 Code: scheduled task "task-1" sent this prompt, not the user typing in this chat.]', hidden: true },
+		]);
+		const { projection } = await bridge.projection("bound");
+		expect(projection.messages.find((message) => message.id === "scheduled-task-message:task-1:1:scheduled")).toMatchObject({ text: "hourly report", scheduledTaskId: "task-1" });
+
+		// A prompt that starts with a skill mention (or a slash command) goes as it is, as T3 sends it.
+		await dispatch.queue({ threadId: "bound", projectId: "p", commandId: "scheduled-task:task-1:2:scheduled", messageId: "scheduled-task-message:task-1:2:scheduled", text: "$deploy now", provenance: { createdBy: "user", creationSource: "web" } });
+		await ran("scheduled-task-message:task-1:2:scheduled");
+		expect(read[1]).toBe("$deploy now");
+	} finally {
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	}
+});

@@ -109,6 +109,34 @@ it("lists a named project, refuses without one, and reads a thread a client wrot
 	expect(await failureOf(() => ops.update(caller, { action: "rename", title: "Me" }))).toBe("target_required");
 });
 
+// T3's `sendToThread` names the calling thread as the sender, and `withMessageSenderNote` tells the model who sent a
+// message (the thread's agent, or T3's tools for a client outside a thread); T3 shows the message as it was sent.
+it("tells the model who sent a message: the calling thread's agent, or T3's tools for a client", { timeout: 60_000 }, async () => {
+	const { f, ops } = await setup();
+	const read: unknown[] = [];
+	const step = async (context: { messages: readonly { content: unknown }[] }) => {
+		read.push(context.messages.at(-1)!.content);
+		return fauxAssistantMessage("ok");
+	};
+	f.model.respond(step);
+	const fromThread = await ops.send({ threadId: "a" }, { threadId: tid("b"), message: "hi from a" });
+	await ops.wait(client, { threadId: tid("b"), timeoutMs: 10_000 });
+	expect(read[0]).toEqual([
+		{ type: "text", text: "hi from a" },
+		{ type: "text", text: '[T3 Code: the agent in T3 thread "a" sent this message, not the user.]', hidden: true },
+	]);
+	const item = (await ops.read(client, { threadId: tid("b") })).items.find((candidate) => candidate.messageId === fromThread.messageId);
+	expect(item).toMatchObject({ text: "hi from a", createdBy: "agent", creationSource: "mcp", senderThreadId: "a" });
+
+	f.model.respond(step);
+	await ops.send(client, { threadId: tid("b"), message: "hi from outside" });
+	await ops.wait(client, { threadId: tid("b"), timeoutMs: 10_000 });
+	expect(read[1]).toEqual([
+		{ type: "text", text: "hi from outside" },
+		{ type: "text", text: "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]", hidden: true },
+	]);
+});
+
 it("waits with a timeout, interrupts a running turn, and refuses to steer an idle one", { timeout: 60_000 }, async () => {
 	const { f, ops } = await setup({ tokensPerSecond: 20 });
 	const caller = client;

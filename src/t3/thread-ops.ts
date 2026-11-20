@@ -542,7 +542,8 @@ export class ThreadOps {
 					messageId,
 					text: input.message,
 					mode: mode === "auto" ? (running === undefined ? "start" : agentQueued ? "queue" : "steer") : mode === "queue" ? (running === undefined ? "start" : "queue") : mode,
-					provenance: { createdBy: "agent", creationSource: "mcp" },
+					// T3 names the calling thread as the sender (`senderThreadId`), which the message shows and the model is told.
+					provenance: { createdBy: "agent", creationSource: "mcp", ...(caller.threadId === undefined ? {} : { senderThreadId: caller.threadId }) },
 				});
 			} catch (error) {
 				fail(error instanceof CommandError ? "thread_not_sendable" : "orchestration_error", `Unable to send to thread ${input.threadId}: ${(error as Error).message}`);

@@ -23,8 +23,9 @@ const log: Logger = { info: () => {}, warn: () => {} };
 
 afterEach(() => vi.restoreAllMocks());
 type Msg = { role: string; content: unknown };
+/** A message's own text: the hidden blocks the host adds for the model (who sent it) are not part of what it says. */
 const textOf = (message: Msg | undefined): string =>
-	message === undefined ? "" : typeof message.content === "string" ? message.content : (message.content as { type: string; text?: string }[]).map((block) => block.text ?? "").join("");
+	message === undefined ? "" : typeof message.content === "string" ? message.content : (message.content as { type: string; text?: string; hidden?: boolean }[]).map((block) => (block.hidden === true ? "" : (block.text ?? ""))).join("");
 
 /** Named holds: a "Hold on: <name>" message is answered once the test releases <name>. */
 const gates = new Map<string, { promise: Promise<void>; release: () => void }>();
