@@ -296,10 +296,13 @@ export class SidebarState {
 				const subagent = thread.lineage.relationshipToParent === "subagent";
 				const days = subagent ? (this.#parentDone(thread.lineage.parentThreadId) ? 0 : null) : autoSettleDays(settings, thread.projectId);
 				if (days === null || !this.#bridge.hasThread(thread.threadId)) continue;
-				const shell = this.#bridge.shell(thread.threadId);
-				const settledAt = autoSettleAt(shell, days, now, thread.lastSnoozeWakeAt);
-				if (settledAt === null) continue;
+				if (autoSettleAt(this.#bridge.shell(thread.threadId), days, now, thread.lastSnoozeWakeAt) === null) continue;
 				try {
+					// A thread that is not open is its summary, which knows nothing of a run going on now (one that waits for a
+					// card through a restart, however long ago it started): it settles only if its transcript, loaded, agrees.
+					const shell = (await this.#bridge.projection(thread.threadId)).shell;
+					const settledAt = autoSettleAt(shell, days, now, thread.lastSnoozeWakeAt);
+					if (settledAt === null) continue;
 					await this.autoSettle(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), subagent ? undefined : settledAt);
 				} catch (error) {
 					this.#bridge.log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: messageOf(error) });

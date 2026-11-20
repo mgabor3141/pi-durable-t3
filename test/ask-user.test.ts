@@ -163,6 +163,9 @@ it("a card that waits through a restart is the same request, runs no tool code m
 
 	const up = await restart({ ...f, extensions: [extension!] });
 	const again = await open({ ...up, model: f.model }, scratch);
+	// However long the card has waited, the settlement sweep at startup leaves the thread alone: its run goes on.
+	await again.sidebar.sweep(Date.now() + 30 * 24 * 60 * 60 * 1000);
+	expect(again.threadShell("t").settledOverride).toBeNull();
 	// The thread opens with its run, and shows the card the call is: the same request, asked at the same time.
 	const after = await again.waitFor("t", (projection) => (projection.runtimeRequests as unknown as (Request & { createdAt: unknown })[]).find((request) => request.status === "pending"), 10_000);
 	expect(after).toMatchObject({ id: "uq-call-1", createdAt: (before!.request as Request & { createdAt: unknown }).createdAt });
