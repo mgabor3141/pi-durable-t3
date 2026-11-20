@@ -1,9 +1,7 @@
 // The documents the threads layer keeps in the Harness, and the shapes in them: one record per thread (a named
 // pointer to its head conversation, shaped after T3's `OrchestrationV2AppThread`), one sidebar summary per thread,
-// the directory of thread ids and heads, the command receipts, and the queue held aside. `threads.ts` is their
-// only writer.
+// the directory of thread ids and heads, and the command receipts. `threads.ts` is their only writer.
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
-import type { JsonValue } from "@earendil-works/chord/json";
 
 /** Who created a thread or a message (T3's `OrchestrationV2Actor`). */
 type Actor = "user" | "agent" | "system";
@@ -200,19 +198,6 @@ export const ReceiptsDoc = defineDoc<{ receipts: Receipt[] }>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ receipts: [] }),
-	checkpointWhen: () => true,
-});
-
-/**
- * Queued inputs taken out of a conversation's inbox for the length of a Stop's abort (`ThreadQueue.abort`), by conversation
- * id: written in the commit that takes them out and cleared in the one that puts them back, so a host that dies in
- * between finds them here when it starts again (`load`).
- */
-export const HeldQueueDoc = defineDoc<{ held: Record<string, JsonValue[]> }>({
-	kind: "pi-durable-t3.held-queue",
-	version: 1,
-	scope: "session",
-	initial: () => ({ held: {} }),
 	checkpointWhen: () => true,
 });
 

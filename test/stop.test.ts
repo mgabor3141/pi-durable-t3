@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type ConversationId, defineExtension, defineTool, type Extension, LiveDoc } from "@earendil-works/pi-durable";
+import { type ConversationId, defineExtension, defineTool, type Extension, type Harness, InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { abortable } from "../src/t3/abortable.ts";
 import { Stops } from "../src/t3/stops.ts";
@@ -17,7 +17,7 @@ import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { object } from "../src/t3/schema.ts";
 import type { Threads } from "../src/threads.ts";
-import { conversation, createNamed, idle, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
+import { conversation, createNamed, gated, idle, makeThreads, restart, bridgeConfig } from "./threads-harness.ts";
 
 const warnings: string[] = [];
 const log: Logger = { info: () => {}, warn: (message: string) => void warnings.push(message) };
@@ -195,4 +195,36 @@ it("a restart keeps the queue: its message runs now and the queued one follows",
 	await idle(f.harness, thread.head);
 	const ended = await bridge.waitFor("t", (projection) => (projection.runs.length === 3 && projection.runs.every((run) => run.status !== "queued" && run.status !== "running") ? (projection.runs as unknown as QueueRun[]) : undefined), 5_000);
 	expect(ended!.map((run) => [run.userMessageId, run.status])).toEqual([["m1", "interrupted"], ["m3", "completed"], ["m2", "completed"]]);
+});
+
+// Every message is submitted with pi-durable's `onAbort: "keep"`: whatever aborts the conversation (Stop, a restart, a
+// limit, an abort the integrator asks for itself), the queue stays in the inbox, each message with its queued
+// submission, and a host that dies at any point of it finds the queue where it was.
+it("a conversation's abort leaves every queued message queued, across a restart too", { timeout: 60_000 }, async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const thread = await createNamed(f.threads, f.harness, f.model)({ threadId: "t", projectId: "p" });
+	const head = thread.head as ConversationId;
+	const held = gated("never finished");
+	f.model.respond(held.step);
+	const message = (id: string, text: string) => ({ threadId: "t", conversationId: head, requestId: `c-${id}`, message: text, messageId: id });
+	await f.threads.submit(message("m1", "go"), undefined);
+	await f.threads.submit(message("m2", "then this"), "followUp");
+	await f.threads.submit(message("m3", "a steer"), "steer");
+	expect(await f.threads.queueBehindRun({ conversationId: head, requestId: "c-m4", message: "/compact", messageId: "m4" })).toBe(true);
+	const queue = async (harness: Harness) => {
+		const items = (await harness.snapshot(InboxDoc, head, BACKGROUND_CONTEXT))!.items.filter((item) => item.mode !== "write");
+		const statuses = await harness.commit(async (tx) => Promise.all(items.map(async (item) => (await tx.submission(item.id))?.status)), BACKGROUND_CONTEXT);
+		return items.map((item, index) => [item.mode, statuses[index]]);
+	};
+	const before = await queue(f.harness);
+	expect(before).toEqual([["followUp", "queued"], ["steer", "queued"], ["followUp", "queued"]]);
+
+	const aborted = (await conversation(f.harness, head)).abort(BACKGROUND_CONTEXT);
+	held.release();
+	await aborted;
+	expect(await queue(f.harness), "nothing withdrawn").toEqual(before);
+	const up = await restart(f);
+	await up.threads.load();
+	expect(await queue(up.harness), "and nothing lost to a restart").toEqual(before);
+	await up.harness.close(BACKGROUND_CONTEXT);
 });

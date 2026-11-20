@@ -49,7 +49,7 @@ const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_
 import { takeQueued, ThreadQueue } from "./thread-queue.ts";
 import { type Provenance, USER_WEB, type ThreadLineage, type Spawn, type ThreadSummary, type ThreadRecord, type Thread, ThreadsDoc, type StoredSummary, NO_SUMMARY, MAX_UNDOS, MAX_RECEIPTS, ThreadRecordDoc, ThreadSummaryDoc, type Directory, ReceiptsDoc } from "./thread-records.ts";
 export type { Provenance, ThreadLineage, PendingContext, NotifyRequest, Spawn, SummaryRun, ThreadSummary, AppliedUndo, LimitRecovery, ThreadRecord, ThreadOpens, Thread, ThreadOrigin } from "./thread-records.ts";
-export { USER_WEB, HeldQueueDoc, ThreadsDoc } from "./thread-records.ts";
+export { USER_WEB, ThreadsDoc } from "./thread-records.ts";
 
 type ThreadsDeps = {
 	readonly harness: Harness;
@@ -257,7 +257,6 @@ export class Threads {
 	/** Load the documents into memory, once. Every read and write awaits it. */
 	load(): Promise<void> {
 		this.#loading ??= (async () => {
-			await this.queue.restoreHeld();
 			const receipts = await this.#harness.snapshot(ReceiptsDoc, BACKGROUND_CONTEXT);
 			for (const receipt of receipts?.receipts ?? []) this.#receipts.set(receipt.commandId, receipt.sequence);
 			const directory = await this.#harness.snapshot(ThreadsDoc, BACKGROUND_CONTEXT);
@@ -617,7 +616,7 @@ export class Threads {
 			return queued;
 		}
 		const submission = await conversation.submit(
-			whenBusy === undefined ? this.draft(input) : { type: "input", requestId: input.requestId, content, whenBusy, entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } },
+			whenBusy === undefined ? this.draft(input) : { type: "input", requestId: input.requestId, content, whenBusy, onAbort: "keep", entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } },
 			BACKGROUND_CONTEXT,
 		);
 		await this.submitted(input);
@@ -648,10 +647,12 @@ export class Threads {
 	}
 
 	/** The submission of a message sent with no `whenBusy`: it starts a run when the conversation is idle. For a caller
-	 * that admits it in a commit of its own (`ThreadQueue`), with `watermark` before that commit and `submitted` after. */
+	 * that admits it in a commit of its own (`ThreadQueue`), with `watermark` before that commit and `submitted` after.
+	 * Every message is submitted with `onAbort: "keep"`: one that waits in the queue stays there through a Stop
+	 * (`ThreadQueue.abort`), as T3's queue does. */
 	draft(input: MessageInput): SubmissionDraft {
 		const { content, data } = this.#prompt(input);
-		return { type: "input", requestId: input.requestId, content, ...(Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }) };
+		return { type: "input", requestId: input.requestId, content, onAbort: "keep", ...(Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }) };
 	}
 
 	/** What follows the admission of a message that runs: its conversation promoted, and the sidebar's preview. */
@@ -708,6 +709,7 @@ export class Threads {
 				id: created.id,
 				mode,
 				content: structuredClone(content) as never,
+				onAbort: "keep",
 				...(entry === undefined ? {} : { entry: { kind: entry.kind, data: structuredClone(entry.data) } }),
 			});
 			return { id: created.id, status: "queued" } as unknown as Submission;
@@ -726,7 +728,7 @@ export class Threads {
 			const live = await tx.doc(LiveDoc, conversationId);
 			if (live.run === undefined || live.run.afterRun !== undefined) return false;
 			const created = await tx.createSubmission({ conversationId, requestId: input.requestId, type: "input", status: "queued" });
-			(await tx.doc(InboxDoc, conversationId)).items.push({ id: created.id, mode: "followUp", content: input.message, entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } });
+			(await tx.doc(InboxDoc, conversationId)).items.push({ id: created.id, mode: "followUp", content: input.message, onAbort: "keep", entry: { kind: APP_USER_ENTRY, data: { messageId: input.messageId } } });
 			return true;
 		}, BACKGROUND_CONTEXT);
 	}

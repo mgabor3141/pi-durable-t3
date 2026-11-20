@@ -1,13 +1,11 @@
 // A thread's queue: the messages waiting in its head conversation's inbox (T3's queued runs), and the commands on
-// them (remove, edit, send now, promote to a steer), Stop, and "send now" ahead of the queue. pi-durable's abort
-// withdraws whatever is queued, so Stop holds the queue aside for the length of that commit, in a document, so a host
-// that dies in between does not lose it.
+// them (remove, edit, send now, promote to a steer), Stop, and "send now" ahead of the queue. Every message is
+// submitted with `onAbort: "keep"` (`Threads.draft`), so Stop's abort leaves the queue where it is.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type SubmissionDraft, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
-import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
-import { HeldQueueDoc, type Thread } from "./thread-records.ts";
+import type { Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
 import { queuedCommand, takeCommands, type TakenCommand } from "./t3/queued-commands.ts";
@@ -49,20 +47,6 @@ export class ThreadQueue {
 
 	constructor(threads: QueueHost) {
 		this.#threads = threads;
-	}
-
-	/** A host that died while it held a conversation's queue aside (`abort`) puts it back when it starts. */
-	async restoreHeld(): Promise<void> {
-		const aside = await this.#threads.harness.snapshot(HeldQueueDoc, BACKGROUND_CONTEXT);
-		if (aside !== undefined && Object.keys(aside.held).length > 0) {
-			await this.#threads.harness.commit(async (tx) => {
-				const doc = await tx.doc(HeldQueueDoc);
-				for (const [conversationId, held] of Object.entries(doc.held)) {
-					(await tx.doc(InboxDoc, Number(conversationId) as ConversationId)).items.unshift(...(copy(held) as never[]));
-					delete doc.held[conversationId];
-				}
-			}, BACKGROUND_CONTEXT);
-		}
 	}
 
 	/** The head conversation a queued-message command edits, and the thread it belongs to. */
@@ -241,32 +225,13 @@ export class ThreadQueue {
 
 	/**
 	 * Aborts the named conversation; never promotes. The messages queued behind the run stay queued, as T3's Stop and
-	 * restart keep them: pi-durable's abort withdraws every queued input in the commit that admits it, so they are out
-	 * of the inbox for that commit, kept where a restart finds them (`restoreHeld`). They are back before the run has
-	 * ended (the abort resolves only then), each with its queued submission, so it is the same queued message.
+	 * restart keep them: each was submitted with `onAbort: "keep"`, so pi-durable's abort leaves it in the inbox, with
+	 * its queued submission, and nothing starts it until the next message or Resume (T3's held queue).
 	 */
 	async abort(input: { threadId: string; conversationId: number }): Promise<void> {
-		const conversationId = input.conversationId as ConversationId;
-		const conversation = await this.#threads.harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		const conversation = await this.#threads.harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		const held = await this.#threads.harness.commit(async (tx) => {
-			const queued = takeQueued((await tx.doc(InboxDoc, conversationId)).items);
-			if (queued.length > 0) (await tx.doc(HeldQueueDoc)).held[String(conversationId)] = queued as unknown as JsonValue[];
-			return queued;
-		}, BACKGROUND_CONTEXT);
-		// Asked for, not awaited: the abort's commit is in line (the Session admits commits in the order they are asked
-		// for), so the commit that returns the messages follows it, and the abort's end is awaited once they are back.
-		const ended = conversation.abort(BACKGROUND_CONTEXT);
-		// Its failure is thrown where it is awaited, below; until then it must not count as unhandled.
-		ended.catch(() => {});
-		if (held.length > 0) {
-			await this.#threads.harness.commit(async (tx) => {
-				// Ahead of anything queued since: they were queued first.
-				(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
-				delete (await tx.doc(HeldQueueDoc)).held[String(conversationId)];
-			}, BACKGROUND_CONTEXT);
-		}
-		await ended;
+		await conversation.abort(BACKGROUND_CONTEXT);
 	}
 
 	/**
