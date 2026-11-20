@@ -38,6 +38,9 @@ it("asks with T3's card, saves the answer by name, and keeps the value out of th
 	const card = await bridge.waitFor("t", (projection) => projection.turnItems.find((item) => item.type === "secret_request" && item.secretStatus === "pending"), 10_000);
 	// The card's button (T3 0.1.9) opens the page the agent named.
 	expect(card).toMatchObject({ id: "ti-tcall-1", label: "GitHub token", reason: "To read your repos.", url: "https://github.com/settings/tokens", placeholder: "ghp_…", delivery: "file" });
+	// The waiting card is the thread's pending request, as T3's shell has it: "Needs your input" in the sidebar, and one
+	// only the user answers (`userOnly`), so a parent shows it for its child.
+	expect(bridge.threadShell("t").pendingRuntimeRequest).toMatchObject({ id: "ti-tcall-1", kind: "user_input", blocking: true, userOnly: true });
 	// An answer through a secret provider (T3 0.1.9) is refused: this host has none, and does not say it has.
 	await expect(requests.answer({ threadId: ThreadId.make("t"), turnItemId: TurnItemId.make("ti-tcall-1"), answer: { type: "reference", reference: { provider: "op", reference: "op://vault/item" } } } as never)).rejects.toMatchObject({ reason: "reference_unreadable" });
 	// The thread was snoozed while its agent waited: the saved secret wakes it (T3 0.1.9), and only that.
@@ -56,6 +59,7 @@ it("asks with T3's card, saves the answer by name, and keeps the value out of th
 
 	const done = await bridge.waitFor("t", (projection) => (projection.turnItems.some((item) => item.type === "secret_request" && item.secretStatus === "saved") ? projection : undefined), 10_000);
 	expect(JSON.stringify(done)).not.toContain(SECRET);
+	expect(bridge.threadShell("t").pendingRuntimeRequest, "answered, it no longer waits").toBeNull();
 
 	// A second ask, declined.
 	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "Another.", mode: "start" });

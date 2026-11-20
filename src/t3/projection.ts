@@ -1579,7 +1579,16 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 			const pending = b.runtimeRequests
 				.filter((request) => request.status === "pending")
 				.toSorted((left, right) => Number(left.kind === "user_input") - Number(right.kind === "user_input") || DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt))[0];
-			return pending === undefined ? null : { id: pending.id, kind: pending.kind, createdAt: pending.createdAt, blocking: pending.responseCapability.type !== "message" };
+			const request = pending === undefined ? null : { id: pending.id, kind: pending.kind, createdAt: pending.createdAt, blocking: pending.responseCapability.type !== "message" };
+			if (request !== null && request.kind !== "user_input") return request;
+			// T3's `secretRequestAsPendingInput`: a secret card its call still waits on is the thread's request too, one only
+			// the user can answer (`userOnly`: a parent shows it for its child), unless a newer question waits.
+			const card = turnItems
+				.filter((item) => item.type === "secret_request" && (item as { secretStatus?: string }).secretStatus === "pending")
+				.toSorted((left, right) => DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt))[0];
+			const asked = card === undefined ? undefined : (card.startedAt ?? card.updatedAt);
+			if (card === undefined || asked === undefined || (request !== null && DateTime.toEpochMillis(asked) < DateTime.toEpochMillis(request.createdAt))) return request;
+			return { id: id(card.id), kind: "user_input", createdAt: asked, blocking: true, userOnly: true };
 		})(),
 		latestVisibleMessage:
 			lastVisibleMessage === undefined
