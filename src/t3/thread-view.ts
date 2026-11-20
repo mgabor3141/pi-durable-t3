@@ -263,6 +263,8 @@ export class ThreadView {
 		this.#result = undefined;
 		this.#history = undefined;
 		this.#stream = undefined;
+		this.#streamed = undefined;
+		this.#placed = [];
 		this.#log = [];
 		if (this.#flushTimer !== undefined) clearTimeout(this.#flushTimer);
 		this.#flushTimer = undefined;
