@@ -12,9 +12,8 @@ export class Stops {
 		this.#bridge = bridge;
 	}
 
-	/** Each thread's latest Stop: the run's task and the run, when Stop was pressed, and when it was found not ending. Kept
-	 * once the run has ended (no timer then), for `stoppedRun`. */
-	readonly #stops = new Map<string, { readonly taskId: number; readonly runId: string | undefined; readonly requestedAt: number; unresponsiveAt?: number; timer: ReturnType<typeof setTimeout> | undefined }>();
+	/** Stops of running runs, by thread: the run's task, when Stop was pressed, and when it was found not ending. */
+	readonly #stops = new Map<string, { readonly taskId: number; readonly requestedAt: number; unresponsiveAt?: number; readonly timer: ReturnType<typeof setTimeout> }>();
 
 	/** How long a stopped run may take to end before the thread shows it not responding (T3's Claude adapter waits as
 	 * long for a Stop to be confirmed). */
@@ -32,7 +31,7 @@ export class Stops {
 			this.#bridge.republish(threadId);
 		}, Stops.confirmMs);
 		timer.unref();
-		this.#stops.set(threadId, { taskId, runId: state.result?.shell.activeRunId ?? undefined, requestedAt: Date.now(), timer });
+		this.#stops.set(threadId, { taskId, requestedAt: Date.now(), timer });
 		this.#bridge.republish(threadId);
 	}
 
@@ -50,17 +49,10 @@ export class Stops {
 		return { requestedAt: stop.requestedAt, ...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: stop.unresponsiveAt }) };
 	}
 
-	/** The run the thread's latest Stop was for, running or ended: T3 keeps a Stop on its run (`latestRunStopRequested`). */
-	stoppedRun(threadId: string): string | undefined {
-		return this.#stops.get(threadId)?.runId;
-	}
-
-	/** After a projection: a stop whose run is no longer the thread's is over; the run it was for is kept. */
+	/** After a projection: a stop whose run is no longer the thread's is over. */
 	settle(view: ThreadView): void {
 		const stop = this.#stops.get(view.threadId);
-		if (stop?.timer === undefined || view.view?.docs["pi.live"]?.run?.taskId === stop.taskId) return;
-		clearTimeout(stop.timer);
-		stop.timer = undefined;
+		if (stop !== undefined && view.view?.docs["pi.live"]?.run?.taskId !== stop.taskId) this.clear(view.threadId);
 	}
 
 	close(): void {
