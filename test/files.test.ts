@@ -441,6 +441,18 @@ describe("search", () => {
 		expect(resolved.filter((path) => path.includes("app-link.ts"))).toHaveLength(1);
 	});
 
+	it("a project inside a repository gets the repository's ignore rules", async () => {
+		const { base, root, files } = await fixture();
+		const { execFileSync } = await import("node:child_process");
+		execFileSync("git", ["init", "-q"], { cwd: base });
+		await writeFile(join(base, ".gitignore"), "*.log\n");
+		await writeFile(join(root, "debug.log"), "x");
+		await writeFile(join(root, "notes.txt"), "x");
+		const found = (await files.searchEntries({ cwd: root, query: "", limit: 50, kind: "file" })).entries.map((entry) => entry.path);
+		expect(found).toContain("notes.txt");
+		expect(found).not.toContain("debug.log");
+	});
+
 	it("searches contents: ranges, whole word, case, regex, and the limit with its truncated flag", async () => {
 		const { root, files } = await fixture();
 		await writeFile(join(root, "notes.txt"), "Alpha beta\nalphabet soup\nALPHA again\n");

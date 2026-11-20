@@ -193,23 +193,31 @@ async function ignoredPaths(env: ExecutionEnv, root: string, walked: Walked, con
 
 const parentOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
 
-/** `git ls-files --others --ignored --exclude-standard --directory` (T3's `listGitIgnoredPaths`): the untracked paths
- * git ignores, a folder named once without what is in it; none where the root is not a repository or git is missing. */
+/** T3's bounds on `listGitIgnoredPaths`: an answer cut at the cap, or one that took too long, is not used. */
+const GIT_IGNORED_TIMEOUT_SECONDS = 10;
+const GIT_IGNORED_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+
+/** `git ls-files --others --ignored --exclude-standard --directory` (T3's `listGitIgnoredPaths`), run in the root, so a
+ * folder inside a repository gets the repository's rules: the untracked paths git ignores, relative to the root, a
+ * folder named once without what is in it. None where git is missing, the root is in no repository, or the answer was
+ * cut. */
 async function gitIgnoredPaths(env: ExecutionEnv, root: string, context: Context): Promise<ReadonlySet<string>> {
-	const hasGit = await env.exists(`${root}/.git`, context);
-	if (!hasGit.ok || !hasGit.value) return new Set();
 	let output = "";
+	let bytes = 0;
 	const run = await env.exec(
 		["git", "-c", "core.fsmonitor=false", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
 		{
 			cwd: root,
+			timeout: GIT_IGNORED_TIMEOUT_SECONDS,
 			onOutput: (text, _context, info) => {
-				if (info.stream === "stdout") output += text;
+				if (info.stream !== "stdout" || bytes > GIT_IGNORED_MAX_OUTPUT_BYTES) return;
+				bytes += Buffer.byteLength(text);
+				output += text;
 			},
 		},
 		context,
 	);
-	if (!run.ok || run.value.exitCode !== 0) return new Set();
+	if (!run.ok || run.value.exitCode !== 0 || bytes > GIT_IGNORED_MAX_OUTPUT_BYTES) return new Set();
 	return new Set(output.split("\0").flatMap((path) => (path === "" ? [] : [toPosix(path).replace(/\/$/, "")])));
 }
 
