@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, MISSED_RUN, HELD_OCCURRENCE, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, MISSED_RUN, HELD_OCCURRENCE, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledRunOutcome, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -80,6 +80,7 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 		// Every thread a test names exists in project "p", unarchived, unless the test says otherwise.
 		thread: options.dispatch?.thread ?? (async () => ({ projectId: "p", archived: false })),
 		queuedOccurrence: options.dispatch?.queuedOccurrence ?? (async () => null),
+		runOutcome: options.dispatch?.runOutcome ?? (async () => null),
 	};
 	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 	harnesses.push(harness);
@@ -232,6 +233,110 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		await expect(tasks.setEnabled({ id: task.id, enabled: true })).rejects.toThrow("The run time has passed.");
 		expect(nextScheduledRunAt({ type: "once", runAt: "2026-07-01T13:00:00Z" }, new Date("2026-07-01T12:00:00Z"))?.toISOString()).toBe("2026-07-01T13:00:00.000Z");
 		expect(isSameSchedule({ type: "once", runAt: "2026-07-01T15:00:00+02:00" }, { type: "once", runAt: "2026-07-01T13:00:00Z" })).toBe(true);
+	});
+
+	/** A dispatch whose runs end when the test says: `end(messageId, outcome)`. */
+	function followedRuns() {
+		const waiting = new Map<string, (outcome: ScheduledRunOutcome | null) => void>();
+		const runOutcome: ScheduledTaskDispatch["runOutcome"] = (_threadId, messageId, timeoutMs, signal) =>
+			new Promise((resolve) => {
+				expect(timeoutMs, "T3 follows a run for up to a day").toBe(24 * 60 * 60_000);
+				waiting.set(messageId, resolve);
+				signal.addEventListener("abort", () => resolve(null), { once: true });
+			});
+		const end = async (messageId: string, outcome: ScheduledRunOutcome | null) => {
+			for (let i = 0; i < 200 && !waiting.has(messageId); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+			waiting.get(messageId)!(outcome);
+			waiting.delete(messageId);
+			// The outcome is written after the follow wakes.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		};
+		return { runOutcome, end, waiting };
+	}
+
+	it("a one-time task is removed once its scheduled run completes; one run by hand before its time is kept (T3 0.1.11)", async () => {
+		const runs = followedRuns();
+		const { tasks, calls, advance } = await fixture({
+			dispatch: {
+				runOutcome: runs.runOutcome,
+				launch: async (launch) => {
+					calls.push({ kind: "launch", ...launch });
+					return "t-once";
+				},
+			},
+		});
+		const task = (await tasks.upsert(input({ schedule: { type: "once", runAt: "2026-07-01T12:30:00Z" } }))).task;
+		// By hand at 12:10: its run completes, and the 12:30 run is still to come.
+		advance(10 * 60_000);
+		await tasks.runNow({ id: task.id });
+		await runs.end(calls[0]!.messageId, { status: "completed", error: null });
+		expect(tasks.list().tasks[0]).toMatchObject({ id: task.id, nextRunAt: "2026-07-01T12:30:00.000Z" });
+		// At 12:30: the dispatch alone keeps it (the turn can still fail); its completed run removes it.
+		advance(20 * 60_000);
+		await tasks.tick();
+		expect(tasks.list().tasks[0]).toMatchObject({ id: task.id, lastRunStatus: "succeeded", nextRunAt: null });
+		await runs.end(calls[1]!.messageId, { status: "completed", error: null });
+		expect(tasks.list().tasks).toEqual([]);
+
+		// Paused, run by hand before its time: its `nextRunAt` is null, but the run was early, so it is kept.
+		const paused = (await tasks.upsert(input({ schedule: { type: "once", runAt: "2026-07-01T14:00:00Z" } }))).task;
+		await tasks.setEnabled({ id: paused.id, enabled: false });
+		await tasks.runNow({ id: paused.id });
+		await runs.end(calls[2]!.messageId, { status: "completed", error: null });
+		expect(tasks.list().tasks.map((kept) => kept.id)).toEqual([paused.id]);
+
+		// A host that stops stops following: the wait ends with nothing recorded.
+		advance(1_000);
+		await tasks.runNow({ id: paused.id });
+		expect(runs.waiting.size).toBe(1);
+		await tasks.stop();
+		expect(tasks.list().tasks[0]).toMatchObject({ id: paused.id, lastRunStatus: "succeeded", runCount: 2 });
+	});
+
+	it("a run that does not complete after its message was accepted fails the task, with its provider's error or T3's words (T3 0.1.11)", async () => {
+		const runs = followedRuns();
+		let occurrence: "queued" | "held" | null = null;
+		const { tasks, calls, advance } = await fixture({ dispatch: { runOutcome: runs.runOutcome, queuedOccurrence: async () => occurrence } });
+		const task = (await tasks.upsert(input({ threadId: "t1" as never }))).task;
+		const cases: [ScheduledRunOutcome, string][] = [
+			[{ status: "failed", error: "Weekly usage limit reached" }, "Weekly usage limit reached"],
+			[{ status: "failed", error: null }, "The run failed."],
+			[{ status: "interrupted", error: null }, "The run was stopped."],
+			[{ status: "cancelled", error: null }, "The run was cancelled."],
+			[{ status: "rolled_back", error: null }, "The run was rolled back."],
+		];
+		for (const [outcome, error] of cases) {
+			advance(1_000);
+			await tasks.runNow({ id: task.id });
+			const before = tasks.list().tasks[0]!;
+			expect(before).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null });
+			await runs.end(calls.at(-1)!.messageId, outcome);
+			// Only the run's status and error: not its count, its time, or the task's place in the list.
+			expect(tasks.list().tasks[0]).toEqual({ ...before, lastRunStatus: "failed", lastRunError: error });
+		}
+		// A held occurrence (#38906) is recorded over the run without changing its time: the run's end still replaces it.
+		occurrence = null;
+		advance(60_000);
+		await tasks.tick();
+		const scheduled = calls.at(-1)!.messageId;
+		occurrence = "held";
+		advance(60_000);
+		await tasks.tick();
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "failed", lastRunError: HELD_OCCURRENCE });
+		await runs.end(scheduled, { status: "failed", error: "Provider overloaded" });
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "failed", lastRunError: "Provider overloaded" });
+		occurrence = null;
+		// A later run since: the earlier run's end is not this one's.
+		advance(1_000);
+		await tasks.runNow({ id: task.id });
+		const earlier = calls.at(-1)!.messageId;
+		advance(1_000);
+		await tasks.runNow({ id: task.id });
+		await runs.end(earlier, { status: "failed", error: "too late" });
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null });
+		// Nothing to record (a message sent as a steer, a thread gone, a day passed): the dispatch's record stands.
+		await runs.end(calls.at(-1)!.messageId, null);
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null });
 	});
 
 	it("a task bound to a thread queues the prompt there; a failed dispatch is a failed run", async () => {

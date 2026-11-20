@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
-import { scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
+import { scheduledRunOutcome, scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
 import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -61,6 +61,64 @@ it("a bound task's message waiting in its thread's queue is a queued occurrence,
 		held.release();
 		await bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.status === "queued" && run.queueHeld === true) ? true : undefined), 10_000);
 		expect(await dispatch.queuedOccurrence("t", "bound")).toBe("held");
+	} finally {
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	}
+});
+
+it("a scheduled run is followed to its end by its message: completed, failed with the provider's error, stopped, removed from the queue, or sent as a steer (T3 0.1.11's recordRunOutcome)", { timeout: 60_000 }, async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const { createNamed, gated, errored } = await import("./threads-harness.ts");
+	const { fauxAssistantMessage } = await import("@earendil-works/pi-ai");
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "bound", projectId: "p" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-outcome-"));
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	bridge.start();
+	await bridge.loaded();
+	const signal = new AbortController().signal;
+	const dispatch = scheduledTaskDispatch(bridge);
+	let fire = 0;
+	// What the service does: queue, then follow the run that carries the message.
+	const send = async () => {
+		const messageId = `scheduled-task-message:t:${++fire}:manual`;
+		await dispatch.queue({ threadId: "bound", projectId: "p", commandId: `scheduled-task:t:${fire}:manual`, messageId, text: `run ${fire}`, provenance: { createdBy: "user", creationSource: "web" } });
+		return { messageId, outcome: dispatch.runOutcome("bound", messageId, 20_000, signal) };
+	};
+	const running = () => bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	const queued = () => bridge.waitFor("bound", (projection) => projection.runs.find((run) => run.status === "queued")?.id, 10_000);
+	try {
+		f.model.respond(fauxAssistantMessage("done"));
+		expect(await (await send()).outcome).toEqual({ status: "completed", error: null });
+
+		f.model.respond(errored("Weekly usage limit reached"));
+		expect(await (await send()).outcome).toEqual({ status: "failed", error: "Weekly usage limit reached" });
+
+		const stopped = gated("never seen");
+		f.model.respond(stopped.step);
+		const interrupted = await send();
+		await running();
+		await bridge.interrupt("bound");
+		stopped.release();
+		expect(await interrupted.outcome).toEqual({ status: "interrupted", error: null });
+
+		// Behind a working run: removed from the queue is T3's cancelled run; sent as a steer, it is in another run.
+		const busy = gated("working");
+		f.model.respond(busy.step, fauxAssistantMessage("steered"));
+		await bridge.sendMessage({ threadId: "bound", commandId: "c-work", messageId: "m-work", text: "work", mode: "start" });
+		await running();
+		const removed = await send();
+		await bridge.cancelQueued("bound", (await queued())!);
+		expect(await removed.outcome).toEqual({ status: "cancelled", error: null });
+		const promoted = await send();
+		await bridge.promoteQueued("bound", (await queued())!);
+		expect(await promoted.outcome, "a steer's run is the one it steers: nothing to record").toBeNull();
+		expect(scheduledRunOutcome((await bridge.projection("bound")).projection, promoted.messageId), "the steer is in the working run").toBeNull();
+		busy.release();
+
+		// A message no run carries (a command the host answers itself) is not followed; nor is a thread that is gone.
+		expect(await dispatch.runOutcome("bound", "scheduled-task-message:t:0:manual", 20_000, signal)).toBeNull();
+		expect(await dispatch.runOutcome("gone", "scheduled-task-message:t:0:manual", 20_000, signal)).toBeNull();
 	} finally {
 		await bridge.close();
 		await rm(scratch, { recursive: true, force: true });

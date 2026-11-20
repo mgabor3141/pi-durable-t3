@@ -1,13 +1,14 @@
 // T3's scheduled tasks (apps/server/src/scheduledTasks/ScheduledTaskService.ts + scheduling/Scheduler.ts), replicated
 // for the interval, fixed-time, one-time and webhook triggers (a webhook's own state is `task-webhooks.ts`). The tasks live in one
 // document in the Harness's storage (`pi-durable-t3.scheduled-tasks`), beside the threads they bind to, as T3 keeps them
-// in its database; a run is a dispatch — a new thread with the prompt as its first message, or the prompt queued on
-// the task's thread — never the turn's completion.
+// in its database. A run is recorded when it is dispatched — a new thread with the prompt as its first message, or the
+// prompt queued on the task's thread — and then followed to its end, which can fail the task or use up a one-time one.
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
-import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskThreadMode, type ScheduledTaskUpsertInput, scheduledTaskThreadMode } from "@t3tools/contracts";
+import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
+import { type OrchestrationV2ThreadProjection, ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskThreadMode, type ScheduledTaskUpsertInput, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
@@ -26,8 +27,20 @@ export const FRESH_SESSION_UNSUPPORTED = "A fresh session each run is not suppor
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 export const MISSED_RUN = "Missed a scheduled run because the server was not running at that time.";
 export const HELD_OCCURRENCE = "A previous occurrence is held in the thread queue. Resume or remove it to run this task again.";
+/** T3's words for a run that did not complete and left no provider failure to quote (`UNSUCCESSFUL_RUN_ERRORS`). */
+export const UNSUCCESSFUL_RUN_ERRORS = {
+	failed: "The run failed.",
+	interrupted: "The run was stopped.",
+	cancelled: "The run was cancelled.",
+	rolled_back: "The run was rolled back.",
+} as const;
 /** T3's Scheduler cadence. */
 const POLL_INTERVAL_MS = 5_000;
+/** T3's `RUN_OUTCOME_WAIT_MS`: how long a dispatched run is followed to its end. */
+const RUN_OUTCOME_WAIT_MS = 24 * 60 * 60 * 1_000;
+
+/** How a dispatched run ended, and the message of its provider's failure when it left one. */
+export type ScheduledRunOutcome = { readonly status: "completed" | keyof typeof UNSUCCESSFUL_RUN_ERRORS; readonly error: string | null };
 
 /** The two dispatch paths a run takes (T3's `threadLaunch.launch` and `threadManagement.sendToThread(mode: "queue")`). */
 export interface ScheduledTaskDispatch {
@@ -42,6 +55,10 @@ export interface ScheduledTaskDispatch {
 	/** T3's `queuedOccurrence`: whether a message of this task still waits in the thread's queue (`"queued"`), in a queue
 	 * that is held (`"held"`), or not at all (`null`). */
 	queuedOccurrence(taskId: string, threadId: string): Promise<"queued" | "held" | null>;
+	/** T3's `waitForThread` on the run that carries `messageId`: how it ended, or `null` when there is nothing to record
+	 * (the thread is gone, no run carries the message, it did not end within `timeoutMs`, `signal` aborted, or the message
+	 * moved into another run). */
+	runOutcome(threadId: string, messageId: string, timeoutMs: number, signal: AbortSignal): Promise<ScheduledRunOutcome | null>;
 }
 
 /**
@@ -104,6 +121,10 @@ export class ScheduledTasks {
 	readonly #tasks = new Map<string, Task>();
 	readonly #listeners = new Set<() => void>();
 	readonly #activeRuns = new Set<string>();
+	/** The runs being followed to their end (T3's `recordRunOutcome` fibers), and what stops them. In memory, as T3's
+	 * are: a restart forgets them, and the task keeps what its dispatch recorded. */
+	readonly #following = new Set<Promise<void>>();
+	readonly #stopFollowing = new AbortController();
 	readonly #dispatch: ScheduledTaskDispatch;
 	readonly #now: () => Date;
 	readonly #log: Logger | undefined;
@@ -160,11 +181,13 @@ export class ScheduledTasks {
 		void this.tick();
 	}
 
-	/** Stops the loop and waits for a tick in flight. */
+	/** Stops the loop and the runs being followed, and waits for a tick in flight. */
 	async stop(): Promise<void> {
 		if (this.#timer !== undefined) clearInterval(this.#timer);
 		this.#timer = undefined;
+		this.#stopFollowing.abort();
 		await this.#tick;
+		await Promise.all(this.#following);
 	}
 
 	/** One poll; a poll still running makes this a no-op (T3's one-permit scheduler). */
@@ -324,7 +347,9 @@ export class ScheduledTasks {
 				runCount: source.runCount + 1,
 			};
 			// Only the row this run marked: a task deleted (and recreated) mid-run is not stamped.
-			if (current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso) await this.#write(completed);
+			const written = current !== undefined && current.lastRunStatus === "running" && current.lastRunAt === startedAtIso;
+			if (written) await this.#write(completed);
+			if (written && lastRunError === null && threadId !== null) this.#followRun(active.id, startedAtIso, threadId, messageId);
 			return { task: completed, threadId: lastRunError === null ? threadId : null };
 		} catch (error) {
 			// Anything failing after the mark leaves the task `running`, which the poll skips forever: record the attempt.
@@ -341,6 +366,31 @@ export class ScheduledTasks {
 		} finally {
 			this.#activeRuns.delete(task.id);
 		}
+	}
+
+	/**
+	 * T3's `recordRunOutcome`, started once a run's dispatch is recorded: the provider can still fail the turn after its
+	 * message was accepted, so the run is followed to its end, for up to a day. A one-time task whose run completed at or
+	 * after its time is spent and removed (its thread stays); a paused one's `nextRunAt` is null too, so the time is what
+	 * tells a manual run before it. A run that did not complete fails the task with its provider's error or T3's words for
+	 * how it ended. Either applies only while the task still shows this run, as succeeded or held behind a Stop.
+	 */
+	#followRun(taskId: string, startedAtIso: string, threadId: string, messageId: string): void {
+		const following = (async () => {
+			const outcome = await this.#dispatch.runOutcome(threadId, messageId, RUN_OUTCOME_WAIT_MS, this.#stopFollowing.signal);
+			const current = this.#tasks.get(taskId);
+			if (outcome === null || current === undefined || current.lastRunAt !== startedAtIso) return;
+			if (outcome.status === "completed") {
+				if (current.lastRunStatus === "succeeded" && current.nextRunAt === null && current.schedule.type === "once" && Date.parse(startedAtIso) >= Date.parse(current.schedule.runAt)) {
+					await this.#remove([taskId], "Could not delete schedule task.");
+				}
+				return;
+			}
+			if (current.lastRunStatus !== "succeeded" && !(current.lastRunStatus === "failed" && current.lastRunError === HELD_OCCURRENCE)) return;
+			await this.#write({ ...current, lastRunStatus: "failed", lastRunError: outcome.error ?? UNSUCCESSFUL_RUN_ERRORS[outcome.status] });
+		})().catch((error: unknown) => this.#log?.warn("could not record scheduled run outcome", { taskId, error: errorMessage(error) }));
+		this.#following.add(following);
+		void following.finally(() => this.#following.delete(following));
 	}
 
 	/**
@@ -601,5 +651,33 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			const occurrences = projection.runs.filter((run) => run.status === "queued" && ofTask.has(run.userMessageId));
 			return occurrences.some((run) => run.queueHeld === true) ? "held" : occurrences.length > 0 ? "queued" : null;
 		},
+		runOutcome: async (threadId, messageId, timeoutMs, signal) => {
+			if (!bridge.hasThread(threadId)) return null;
+			// T3 follows a run its first read finds; a slash command this host answers on the spot starts none.
+			if (!(await bridge.projection(threadId)).projection.runs.some((run) => run.userMessageId === messageId)) return null;
+			try {
+				return (await bridge.waitFor(threadId, (projection) => scheduledRunOutcome(projection, messageId), timeoutMs, signal)) ?? null;
+			} catch (error) {
+				// A Stop of the host, or the thread deleted meanwhile (T3's wait ends on `thread.deleted` with nothing recorded).
+				if (signal.aborted || !bridge.hasThread(threadId)) return null;
+				throw error;
+			}
+		},
 	};
 }
+
+/**
+ * How the run that carries `messageId` ended, read from its thread's projection for T3's `recordRunOutcome`: `undefined`
+ * while it has not, `null` when there is nothing to record. A run is found by its message, not its id: a queued
+ * message's run is renamed when pi places it. A queued message gone with no run of its own was removed from the queue
+ * (T3 cancels its run) or sent as a steer, into the run it steers (T3 passes over the cancel that leaves).
+ */
+export function scheduledRunOutcome(projection: OrchestrationV2ThreadProjection, messageId: string): ScheduledRunOutcome | null | undefined {
+	const runs = projection.runs.filter((run) => run.userMessageId === messageId);
+	const run = runs.find((candidate) => candidate.status !== "rolled_back") ?? runs[0];
+	if (run === undefined) return projection.messages.some((message) => message.id === messageId) ? null : { status: "cancelled", error: null };
+	if (run.status === "completed") return { status: "completed", error: null };
+	if (run.status !== "failed" && run.status !== "interrupted" && run.status !== "cancelled" && run.status !== "rolled_back") return undefined;
+	return { status: run.status, error: latestRootProviderFailure(run, projection.turnItems)?.message ?? null };
+}
+
