@@ -924,10 +924,10 @@ export class Bridge {
 
 	/**
 	 * Every conversation on this host, as the usage view reads it: the head view of each thread in the directory, with
-	 * its entries and the conversation id that names them. Used by `server.getUsageSummary` (see `usage.ts`). A thread
+	 * its whole transcript and the conversation id that names them. Used by `server.getUsageSummary` (see `usage.ts`). A thread
 	 * the host cannot open is skipped rather than guessed at; a thread with no usage contributes no records.
 	 */
-	async usageConversations(timeoutMs = 30_000): Promise<{ readonly conversationId: number; readonly entries: EntryRecord[] }[]> {
+	async usageConversations(timeoutMs = 30_000): Promise<{ readonly conversationId: number; readonly entries: readonly EntryRecord[] }[]> {
 		const threadIds = this.#directory.map((thread) => thread.threadId);
 		const loaded = await Promise.all(
 			threadIds.map(async (threadId) => {
@@ -937,13 +937,14 @@ export class Bridge {
 					return undefined;
 				}
 				const view = this.#views.get(threadId);
-				const entries = view?.view?.entries;
+				// The whole transcript: the view's entries are the active context only, after the last compaction's cut.
+				const entries = view?.transcript;
 				const conversationId = view?.conversationId;
 				if (entries === undefined || conversationId === undefined) return undefined;
 				return { conversationId, entries };
 			}),
 		);
-		return loaded.filter((entry): entry is { conversationId: number; entries: EntryRecord[] } => entry !== undefined);
+		return loaded.filter((entry): entry is { conversationId: number; entries: readonly EntryRecord[] } => entry !== undefined);
 	}
 
 	/** The thread a conversation is shown as: the live thread whose head it is. */

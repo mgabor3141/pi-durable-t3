@@ -5,6 +5,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
+import { usageRecordsOf } from "../src/t3/usage.ts";
 import { createNamed, idle, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -53,6 +54,9 @@ it("a compacted thread shows its turns in order and the card where the summary l
 		["user_message", "question 5"],
 		["assistant_message", "answer 5"],
 	]);
+	// The usage page counts the turns above the cut too: one record per answer.
+	const usage = (await bridge.usageConversations()).flatMap((conversation) => usageRecordsOf(conversation.conversationId, conversation.entries));
+	expect(usage).toHaveLength(5);
 	const fresh = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
 	fresh.start(); await fresh.loaded();
 	const again = (await fresh.projection("t")).projection.turnItems as unknown as { type: string; text?: string; runId: string }[];
