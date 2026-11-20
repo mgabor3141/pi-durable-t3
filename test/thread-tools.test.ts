@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { expect, it, onTestFinished } from "vitest";
+import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { Orchestration } from "../src/t3/orchestration.ts";
@@ -17,6 +17,8 @@ import { threadToolsExtension } from "../src/t3/thread-tools.ts";
 import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
+
+afterEach(() => vi.restoreAllMocks());
 type Msg = { role: string; content: unknown };
 const textOf = (message: Msg | undefined): string =>
 	message === undefined ? "" : typeof message.content === "string" ? message.content : (message.content as { type: string; text?: string }[]).map((block) => block.text ?? "").join("");
@@ -337,6 +339,28 @@ it("a report message splits into its reports by their headers", async () => {
 	const blocks = reportBlocks(`${one}\n\n${two}`);
 	expect(blocks).toEqual([one, two]);
 	expect(blocks.map(reportChild)).toEqual(["t-a1", "t-b2"]);
+});
+
+it("a report whose delivery fails once is delivered when it is tried again", { timeout: 60_000 }, async () => {
+	// The pause before a failed delivery is tried again, shortened.
+	const realSetTimeout = globalThis.setTimeout;
+	vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => realSetTimeout(fn, ms === 10_000 ? 20 : ms)) as typeof setTimeout);
+	const { bridge, ask, settled } = await setup();
+	const send = bridge.sendMessage.bind(bridge);
+	let failed = 0;
+	(bridge as unknown as { sendMessage: typeof send }).sendMessage = async (input) => {
+		if (input.commandId.startsWith("notify-") && failed === 0) {
+			failed++;
+			throw new Error("transient: storage busy");
+		}
+		return send(input);
+	};
+	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 5+5?", wait: false } });
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
+	expect(failed).toBe(1);
+	expect(parent!.messages.filter((message) => message.role === "user" && message.text.startsWith("[Report from thread"))).toHaveLength(1);
+	const child = bridge.threadRecords().find((thread) => thread.threadId !== "a")!;
+	expect(child.notify ?? []).toEqual([]);
 });
 
 it("a batch the last process wrote before it stopped is sent once, as one message", { timeout: 60_000 }, async () => {

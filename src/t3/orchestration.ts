@@ -36,6 +36,8 @@ export const MAX_ACTIVE_CHILDREN = 10;
 const waitMs = (timeoutMs: number | undefined) => (timeoutMs === undefined ? Number.POSITIVE_INFINITY : Math.max(1, timeoutMs));
 /** A follower re-arms its wait this often; it holds the thread open meanwhile. */
 const FOLLOW_CHUNK_MS = 60 * 60_000;
+/** A delivery that failed is tried again after this pause, so that a lasting failure does not spin. */
+const REDELIVER_MS = 10_000;
 
 const hash = (...parts: readonly (string | undefined)[]) => createHash("sha256").update(parts.map((part) => part ?? "").join("\0")).digest("base64url").slice(0, 20);
 
@@ -511,7 +513,14 @@ export class Orchestration {
 					}
 				}
 			} catch (error) {
-				if (!this.#closed) this.#log.warn("thread report delivery stopped", { caller, error: messageOf(error) });
+				if (!this.#closed) {
+					this.#log.warn("thread report delivery stopped", { caller, error: messageOf(error) });
+					// The requests are still on the children's records, but their followers counted them as handed over and
+					// ended: follow those children again, which hands the requests over once more.
+					setTimeout(() => {
+						for (const thread of this.#bridge.threadRecords()) if ((thread.notify ?? []).some((request) => request.threadId === caller)) this.#follow(thread.threadId);
+					}, REDELIVER_MS).unref();
+				}
 			} finally {
 				this.#delivering.delete(caller);
 				if ((this.#outbox.get(caller)?.size ?? 0) === 0) this.#outbox.delete(caller);
