@@ -9,7 +9,7 @@ import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
-import { autoSettleAt } from "../src/t3/sidebar.ts";
+import { autoSettleAt, isSnoozed } from "../src/t3/sidebar.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { createNamed, makeThreads, bridgeConfig, gated } from "./threads-harness.ts";
 
@@ -243,6 +243,29 @@ it("a thread made from old turns counts as active from when it was made", () => 
 	expect(autoSettleAt(fork(now - 8 * day), 7, now)).toBe(now - 8 * day);
 	// A thread older than its messages is as before: quiet since the newest of them.
 	expect(autoSettleAt(fork(now - 60 * day), 7, now)).toBe(now - 30 * day);
+});
+
+it("a thread waiting for work it started does not settle by itself (T3's isAutoSettlementCandidate)", () => {
+	const day = 24 * 60 * 60 * 1000;
+	const now = Date.UTC(2026, 10, 17);
+	const old = DateTime.makeUnsafe(now - 30 * day);
+	const quiet = (pendingBackgroundTasks: readonly unknown[]) =>
+		({ archivedAt: null, settledOverride: null, pendingRuntimeRequest: null, status: "completed", createdAt: old, latestUserMessageAt: old, latestRunRequestedAt: old, latestRunStartedAt: old, latestRunCompletedAt: old, pendingBackgroundTasks }) as unknown as Parameters<typeof autoSettleAt>[0];
+	expect(autoSettleAt(quiet([{ taskId: "ti-cchild", kind: "subagent", childThreadId: "child" }]), 7, now), "a child still working holds it").toBeNull();
+	// A command left running (a dev server) holds nothing unless the agent waits for it, as in T3.
+	expect(autoSettleAt(quiet([{ taskId: "x", kind: "command" }]), 7, now)).toBe(now - 30 * day);
+	expect(autoSettleAt(quiet([]), 7, now)).toBe(now - 30 * day);
+});
+
+it("a snooze ends for an approval or a question asked since, not for a question that was waiting already (T3's isSnoozed)", () => {
+	const now = Date.UTC(2026, 10, 17);
+	const at = (ms: number) => DateTime.makeUnsafe(ms);
+	const snoozed = (pendingRuntimeRequest: unknown) =>
+		({ snoozedUntil: at(now + 3_600_000), snoozedAt: at(now - 60_000), pendingRuntimeRequest, status: "completed", latestRunCompletedAt: at(now - 120_000) }) as unknown as Parameters<typeof isSnoozed>[0];
+	expect(isSnoozed(snoozed(null), now)).toBe(true);
+	expect(isSnoozed(snoozed({ kind: "user_input", createdAt: at(now - 120_000) }), now), "asked before the snooze").toBe(true);
+	expect(isSnoozed(snoozed({ kind: "user_input", createdAt: at(now - 30_000) }), now), "asked since").toBe(false);
+	expect(isSnoozed(snoozed({ kind: "approval", createdAt: at(now - 120_000) }), now), "an approval").toBe(false);
 });
 
 it("undoing a settle puts back the stamp it cleared, so the thread returns to its place (T3 0.1.10's restoreUnsettledAt)", { timeout: 30_000 }, async () => {

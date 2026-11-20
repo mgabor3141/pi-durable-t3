@@ -4,6 +4,7 @@
 // requests and snoozes, which settle or hold threads in T3, do not exist here.
 import { DateTime } from "effect";
 import type { OrchestrationV2ThreadShell, ServerSettings } from "@t3tools/contracts";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import type { ThreadOpens } from "../threads.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -69,6 +70,8 @@ export function autoSettleAt(shell: OrchestrationV2ThreadShell, days: number, no
 	if (shell.archivedAt !== null || shell.settledOverride !== null) return null;
 	if (shell.pinnedAt != null || shell.autoSettleDisabledAt != null) return null;
 	if (shell.pendingRuntimeRequest !== null || shell.activityRunStatus != null || shell.status === "running") return null;
+	// T3's `isAutoSettlementCandidate`: not while work it waits for goes on (children it started still working).
+	if (backgroundWorkHoldsCompletion(shell.pendingBackgroundTasks ?? [])) return null;
 	if (isSnoozed(shell, now)) return null;
 	const times = [shell.latestUserMessageAt, shell.latestRunRequestedAt, shell.latestRunStartedAt, shell.latestRunCompletedAt].map(ms).filter((value) => value !== null);
 	const activityAt = Math.max(DateTime.toEpochMillis(shell.createdAt), ...times);
