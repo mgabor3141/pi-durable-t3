@@ -298,6 +298,23 @@ describe("listEntries", () => {
 		expect(((await failure(files.list({ cwd: root, directoryPath: ".git" }))) as EntriesError).failure).toBe("directory_list_failed");
 	});
 
+	it("lists a symlink that stays inside the root under its target's kind, but not one to a folder it is inside", async () => {
+		const { root, outside, files } = await fixture();
+		await symlink(join(root, "README.md"), join(root, "readme-link"));
+		await symlink(join(root, "src"), join(root, "src-link"));
+		await symlink(outside, join(root, "outside-link"));
+		await symlink(root, join(root, "src", "root-link"));
+		await symlink(join(root, "src"), join(root, "src", "self-link"));
+		const top = (await files.list({ cwd: root, directoryPath: "" })).entries.toSorted((a, b) => (a.path < b.path ? -1 : 1));
+		expect(top).toEqual([
+			{ path: "README.md", kind: "file" },
+			{ path: "readme-link", kind: "file" },
+			{ path: "src", kind: "directory" },
+			{ path: "src-link", kind: "directory" },
+		]);
+		expect((await files.list({ cwd: root, directoryPath: "src" })).entries).toEqual([{ path: "src/app.ts", kind: "file" }]);
+	});
+
 	it("refuses a directory outside the root or through a symlink out of it", async () => {
 		const { root, outside, files } = await fixture();
 		await symlink(outside, join(root, "leakdir"));
@@ -344,6 +361,57 @@ describe("search", () => {
 		const found = (await files.searchEntries({ cwd: root, query: "file.txt", limit: 10, kind: "file" })).entries.map((entry) => entry.path);
 		expect(found).toContain("kept-file.txt");
 		expect(found).not.toContain("ignored-file.txt");
+	});
+
+	it("the nearest .ignore includes or excludes a path ahead of git's rules, in path and content search", async () => {
+		const { root, files } = await fixture();
+		const { execFileSync } = await import("node:child_process");
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		await writeFile(join(root, ".gitignore"), "*.log\nbuild/\n");
+		await writeFile(join(root, ".ignore"), "!keep.log\n!build/\nsecret/\n*.tmp\n");
+		await mkdir(join(root, "build"), { recursive: true });
+		await mkdir(join(root, "secret"), { recursive: true });
+		await mkdir(join(root, "sub"), { recursive: true });
+		for (const name of ["keep.log", "drop.log", "build/out.txt", "secret/plan.txt", "sub/keep.tmp", "sub/drop.tmp", "top.tmp"]) await writeFile(join(root, name), "needle\n");
+		await writeFile(join(root, "sub", ".ignore"), "!keep.tmp\n");
+		const found = async (kind?: "file" | "directory") => (await files.searchEntries({ cwd: root, query: "", limit: 100, ...(kind === undefined ? {} : { kind }) })).entries.map((entry) => entry.path).toSorted();
+		const visible = ["build/out.txt", "keep.log", "sub/keep.tmp"];
+		expect(await found("file")).toEqual([".gitignore", ".ignore", "README.md", "src/app.ts", "sub/.ignore", ...visible].toSorted());
+		expect(await found("directory")).toEqual(["build", "src", "sub"]);
+		const contents = await files.searchContents({ cwd: root, query: "needle", limit: 50, caseSensitive: false, wholeWord: false, useRegex: false });
+		expect(contents.matches.map((match) => match.path).toSorted()).toEqual(visible);
+		// The whole-tree listing marks the same paths ignored.
+		const listed = (await files.list({ cwd: root })).entries;
+		expect(listed.filter((entry) => entry.ignored === true).map((entry) => entry.path).toSorted()).toEqual(["drop.log", "secret", "secret/plan.txt", "sub/drop.tmp", "top.tmp"]);
+	});
+
+	it("a .ignore counts without git too", async () => {
+		const { root, files } = await fixture();
+		await writeFile(join(root, ".ignore"), "src/\n");
+		expect((await files.searchEntries({ cwd: root, query: "app", limit: 10 })).entries).toEqual([]);
+		expect((await files.searchContents({ cwd: root, query: "answer", limit: 10, caseSensitive: false, wholeWord: false, useRegex: false })).matches).toEqual([]);
+	});
+
+	it("lists a symlink that points inside the project under its target's kind, without following it", async () => {
+		const { root, outside, files } = await fixture();
+		await mkdir(join(root, ".git"), { recursive: true });
+		await writeFile(join(root, ".git", "config"), "[core]\n");
+		await symlink(join(root, "src", "app.ts"), join(root, "app-link.ts"));
+		await symlink(join(root, "src"), join(root, "src-link"));
+		await symlink(outside, join(root, "outside-link"));
+		await symlink(join(outside, "secret.txt"), join(root, "secret-link.txt"));
+		await symlink(join(root, ".git", "config"), join(root, "git-link"));
+		await symlink(join(root, "nowhere"), join(root, "dangling-link"));
+		const all = (await files.searchEntries({ cwd: root, query: "link", limit: 20 })).entries.toSorted((a, b) => a.path.localeCompare(b.path));
+		expect(all).toEqual([
+			{ path: "app-link.ts", kind: "file" },
+			{ path: "src-link", kind: "directory" },
+		]);
+		expect((await files.searchEntries({ cwd: root, query: "link", limit: 20, kind: "directory" })).entries).toEqual([{ path: "src-link", kind: "directory" }]);
+		expect((await files.list({ cwd: root })).entries.map((entry) => entry.path)).not.toContain("src-link/app.ts");
+		// Content search reads the target once, where it is, not again through a link.
+		const contents = await files.searchContents({ cwd: root, query: "answer", limit: 10, caseSensitive: false, wholeWord: false, useRegex: false });
+		expect(contents.matches.map((match) => match.path)).toEqual(["src/app.ts"]);
 	});
 
 	it("searches contents: ranges, whole word, case, regex, and the limit with its truncated flag", async () => {

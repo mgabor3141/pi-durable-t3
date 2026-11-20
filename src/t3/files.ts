@@ -29,6 +29,7 @@ import type {
 	ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { messageOf } from "../host-errors.ts";
+import { type IgnoreFile, parseIgnoreFile } from "./ignore-patterns.ts";
 
 /** `WorkspaceFileSystem.PROJECT_READ_FILE_MAX_BYTES`: a read returns at most this many bytes; `truncated` says more existed. */
 export const READ_FILE_MAX_BYTES = 1024 * 1024;
@@ -99,18 +100,25 @@ const isGitMetadataName = (segment: string) => {
 const inGitFolder = (path: string) => path.split(sep).some(isGitMetadataName);
 
 type WalkOptions = { readonly maxEntries?: number; readonly skipGit?: boolean };
+type Walked = { entries: ProjectEntry[]; truncated: boolean; links: ReadonlySet<string> };
 
-/** One recursive walk over the environment, bounded like T3's index. Symbolic links are returned but never followed. */
-async function walk(env: ExecutionEnv, root: string, context: Context, options: WalkOptions = {}): Promise<{ entries: ProjectEntry[]; truncated: boolean }> {
+/**
+ * One recursive walk over the environment, bounded like T3's index, parents before their entries. A symbolic link that
+ * resolves inside the root, outside `.git`, to a file or a folder is listed with its target's kind and never followed
+ * (T3's `scanDirectory`); `links` names them. Any other link is left out.
+ */
+async function walk(env: ExecutionEnv, root: string, context: Context, options: WalkOptions = {}): Promise<Walked> {
 	const limit = options.maxEntries ?? INDEX_MAX_ENTRIES;
 	const entries: ProjectEntry[] = [];
+	const links = new Set<string>();
 	const queue: string[] = [root];
+	const realRoot = await env.canonicalPath(root, context);
 	while (queue.length > 0 && entries.length < limit) {
 		const directory = queue.shift()!;
 		const listed = await env.listDir(directory, context);
 		if (!listed.ok) continue;
 		for (const info of listed.value) {
-			if (entries.length >= limit) return { entries, truncated: true };
+			if (entries.length >= limit) return { entries, truncated: true, links };
 			if (info.name === ".git" && options.skipGit !== false) continue;
 			const rel = toPosix(relative(root, info.path));
 			if (rel === "" || rel.startsWith("../") || rel === "..") continue;
@@ -119,12 +127,72 @@ async function walk(env: ExecutionEnv, root: string, context: Context, options: 
 				queue.push(info.path);
 			} else if (info.kind === "file") {
 				entries.push({ path: rel, kind: "file" });
+			} else if (info.kind === "symlink" && realRoot.ok) {
+				const target = await env.canonicalPath(info.path, context);
+				const targetInfo = target.ok ? await env.fileInfo(target.value, context) : undefined;
+				if (!target.ok || !targetInfo?.ok) continue;
+				const inRoot = relative(realRoot.value, target.value);
+				if (!isInsideRealRoot(realRoot.value, target.value) || inRoot.split(sep).includes(".git")) continue;
+				if (targetInfo.value.kind !== "file" && targetInfo.value.kind !== "directory") continue;
+				entries.push({ path: rel, kind: targetInfo.value.kind });
+				links.add(rel);
 			}
-			// Symbolic links are listed neither as files nor as directories: following one is the caller's risk, and T3's
-			// index treats a link as a link. A link to a directory is not descended into.
 		}
 	}
-	return { entries, truncated: false };
+	return { entries, truncated: false, links };
+}
+
+/**
+ * The walked paths T3's file search leaves out, as ripgrep and T3's index (fff) decide them: below a folder that is left
+ * out; else as the nearest `.ignore` with a pattern for the path says (T3's `decideByIgnoreFile`, which re-includes what
+ * git ignores, too); else as git ignores it. Git's verdict is T3's `listGitIgnoredPaths` (every git source, tracked
+ * files never), which names an ignored folder rather than what is in it, so a folder a `.ignore` takes back is searched.
+ * Like T3, a link is never a folder to a folder-only rule. Everything is read through the environment.
+ */
+async function ignoredPaths(env: ExecutionEnv, root: string, walked: Walked, context: Context): Promise<ReadonlySet<string>> {
+	const gitIgnored = await gitIgnoredPaths(env, root, context);
+	const ignoreFiles = new Map<string, IgnoreFile>();
+	for (const entry of walked.entries) {
+		if (entry.kind !== "file" || walked.links.has(entry.path) || !(entry.path === ".ignore" || entry.path.endsWith("/.ignore"))) continue;
+		const text = await env.readTextFile(`${root}/${entry.path}`, context);
+		if (text.ok) ignoreFiles.set(parentOf(entry.path), parseIgnoreFile(text.value));
+	}
+	const decide = (path: string, isFolder: boolean) => {
+		for (let directory = parentOf(path); ; directory = parentOf(directory)) {
+			const decision = ignoreFiles.get(directory)?.decide(directory === "" ? path : path.slice(directory.length + 1), isFolder);
+			if (decision !== undefined || directory === "") return decision;
+		}
+	};
+	const ignored = new Set<string>();
+	// Parents come before their entries, so a folder's verdict is known when its entries are judged.
+	for (const entry of walked.entries) {
+		const parent = parentOf(entry.path);
+		const decision = parent !== "" && ignored.has(parent) ? "ignored" : decide(entry.path, entry.kind === "directory" && !walked.links.has(entry.path));
+		if (decision === "ignored" || (decision === undefined && gitIgnored.has(entry.path))) ignored.add(entry.path);
+	}
+	return ignored;
+}
+
+const parentOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+
+/** `git ls-files --others --ignored --exclude-standard --directory` (T3's `listGitIgnoredPaths`): the untracked paths
+ * git ignores, a folder named once without what is in it; none where the root is not a repository or git is missing. */
+async function gitIgnoredPaths(env: ExecutionEnv, root: string, context: Context): Promise<ReadonlySet<string>> {
+	const hasGit = await env.exists(`${root}/.git`, context);
+	if (!hasGit.ok || !hasGit.value) return new Set();
+	let output = "";
+	const run = await env.exec(
+		["git", "-c", "core.fsmonitor=false", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+		{
+			cwd: root,
+			onOutput: (text, _context, info) => {
+				if (info.stream === "stdout") output += text;
+			},
+		},
+		context,
+	);
+	if (!run.ok || run.value.exitCode !== 0) return new Set();
+	return new Set(output.split("\0").flatMap((path) => (path === "" ? [] : [toPosix(path).replace(/\/$/, "")])));
 }
 
 /** `git check-ignore` over a bounded argv list, through the same environment: the set of ignored relative paths. */
@@ -336,7 +404,7 @@ export class WorkspaceFiles {
 		const cwd = await this.#entriesRoot(input.cwd);
 		if (input.directoryPath === undefined) {
 			const walked = await walk(this.#env, cwd, this.#context);
-			const ignored = await gitIgnored(this.#env, cwd, walked.entries.map((entry) => entry.path), this.#context);
+			const ignored = await ignoredPaths(this.#env, cwd, walked, this.#context);
 			const withIgnored = walked.entries.map((entry) => (ignored.has(entry.path) ? { ...entry, ignored: true } : entry));
 			const sorted = withDirectoryAncestors(withIgnored).toSorted((left, right) => left.path.localeCompare(right.path));
 			const entries = sorted.slice(0, INDEX_MAX_ENTRIES);
@@ -357,11 +425,35 @@ export class WorkspaceFiles {
 		if (!listed.ok) {
 			throw new EntriesError("directory_list_failed", `Failed to read workspace directory '${target.absolutePath}' while browsing '${directoryPath}' from '${cwd}'.`, { normalizedCwd: cwd, detail: `Failed to read workspace directory '${target.absolutePath}' while browsing '${directoryPath}' from '${cwd}'.` }, listed.error);
 		}
-		const entries = listed.value.flatMap((info): ProjectEntry[] => {
-			if (info.name === ".git" || (info.kind !== "directory" && info.kind !== "file")) return [];
-			const path = target.relativePath ? `${target.relativePath}/${info.name}` : info.name;
-			return [{ path, kind: info.kind }];
-		});
+		// A link is listed under its target's kind when it stays inside the root and outside `.git` (T3's
+		// `resolveSymlinkKind`), except a link to a folder this listing is inside, so "Expand all folders" cannot loop.
+		const rootPath = realRoot.value;
+		let visited: string[] | undefined;
+		const visitedFolders = async () => {
+			if (visited !== undefined) return visited;
+			visited = [rootPath];
+			let current = cwd;
+			for (const segment of target.relativePath.split("/").filter(Boolean)) {
+				current = join(current, segment);
+				const real = await this.#canonical(current);
+				if (real.ok) visited.push(real.value);
+			}
+			return visited;
+		};
+		const linkKind = async (path: string): Promise<ProjectEntryKind | undefined> => {
+			const resolved = await this.#canonical(path);
+			if (!resolved.ok || !isInsideRealRoot(rootPath, resolved.value) || relative(rootPath, resolved.value).split(sep).includes(".git")) return undefined;
+			const info = await this.#env.fileInfo(resolved.value, this.#context);
+			if (!info.ok || (info.value.kind !== "file" && info.value.kind !== "directory")) return undefined;
+			if (info.value.kind === "file") return "file";
+			return (await visitedFolders()).some((folder) => isInsideRealRoot(resolved.value, folder)) ? undefined : "directory";
+		};
+		const entries: ProjectEntry[] = [];
+		for (const info of listed.value) {
+			if (info.name === ".git") continue;
+			const kind = info.kind === "directory" || info.kind === "file" ? info.kind : info.kind === "symlink" ? await linkKind(info.path) : undefined;
+			if (kind !== undefined) entries.push({ path: target.relativePath ? `${target.relativePath}/${info.name}` : info.name, kind });
+		}
 		const ignored = await gitIgnored(this.#env, cwd, entries.map((entry) => entry.path), this.#context);
 		return { entries: entries.map((entry) => (ignored.has(entry.path) ? { ...entry, ignored: true } : entry)), truncated: false };
 	}
@@ -371,7 +463,7 @@ export class WorkspaceFiles {
 	async searchEntries(input: { readonly cwd: string; readonly query: string; readonly limit: number; readonly kind?: ProjectEntryKind; readonly imageOnly?: boolean }): Promise<ProjectSearchEntriesResult> {
 		const cwd = await this.#entriesRoot(input.cwd);
 		const walked = await walk(this.#env, cwd, this.#context);
-		const ignored = await gitIgnored(this.#env, cwd, walked.entries.map((entry) => entry.path), this.#context);
+		const ignored = await ignoredPaths(this.#env, cwd, walked, this.#context);
 		const query = normalizeSearchQuery(input.query);
 		const entries: ProjectEntry[] = [];
 		for (const entry of walked.entries) {
@@ -388,13 +480,14 @@ export class WorkspaceFiles {
 	async searchContents(input: { readonly cwd: string } & ContentQuery): Promise<ProjectSearchContentsResult> {
 		const cwd = await this.#entriesRoot(input.cwd);
 		const walked = await walk(this.#env, cwd, this.#context);
-		const ignored = await gitIgnored(this.#env, cwd, walked.entries.filter((entry) => entry.kind === "file").map((entry) => entry.path), this.#context);
+		const ignored = await ignoredPaths(this.#env, cwd, walked, this.#context);
 		const matcher = lineMatches(input);
 		const matches: ProjectSearchContentsResult["matches"][number][] = [];
 		const deadline = performance.now() + CONTENT_SEARCH_TIME_BUDGET_MS;
 		let truncated = false;
 		for (const entry of walked.entries) {
-			if (entry.kind !== "file" || ignored.has(entry.path)) continue;
+			// A link is listed, not searched: T3's index and git grep do not read through one.
+			if (entry.kind !== "file" || ignored.has(entry.path) || walked.links.has(entry.path)) continue;
 			if (performance.now() > deadline || matches.length >= input.limit) {
 				truncated = true;
 				break;
