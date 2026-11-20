@@ -449,8 +449,9 @@ export class ThreadOps {
 	}
 
 	/**
-	 * `t3_thread_send`: a message from the caller (an agent, over MCP) to any thread. `auto` steers a running turn or
-	 * starts one; `queue` waits for the running turn; `steer` and `restart` need a running turn.
+	 * `t3_thread_send`: a message from the caller (an agent, over MCP) to any thread. `auto` steers a running turn (or
+	 * queues behind an agent's queued message) or starts one; `queue` waits for the running turn; `steer` and `restart`
+	 * need a running turn.
 	 */
 	async send(caller: Caller, input: OrchestratorMcpThreadSendInput): Promise<OrchestratorMcpThreadSendResult> {
 		this.#mayWrite(caller, input.threadId);
@@ -459,21 +460,29 @@ export class ThreadOps {
 		const before = await this.#projection(input.threadId);
 		const mode = input.mode ?? "auto";
 		const running = before.runs.find((run) => run.status === "running");
-		if ((mode === "steer" || mode === "restart") && running === undefined) fail("thread_not_sendable", `Thread ${input.threadId} has no running turn to ${mode}.`);
 		const key = input.clientRequestId ?? randomUUID();
 		const messageId = `mcp-${stableId(namespaceOf(caller), key, "thread-send", "message")}`;
 		const commandId = `mcp-${stableId(namespaceOf(caller), key, "thread-send")}`;
-		try {
-			await this.#bridge.sendMessage({
-				threadId: input.threadId,
-				commandId,
-				messageId,
-				text: input.message,
-				mode: mode === "auto" ? (running === undefined ? "start" : "steer") : mode === "queue" ? (running === undefined ? "start" : "queue") : mode,
-				provenance: { createdBy: "agent", creationSource: "mcp" },
-			});
-		} catch (error) {
-			fail(error instanceof CommandError ? "thread_not_sendable" : "orchestration_error", `Unable to send to thread ${input.threadId}: ${(error as Error).message}`);
+		// A retry of a send that reached the thread (its message is there) is answered with what that send did, as T3
+		// replays a command's receipt: a steer or restart whose turn has ended since is not refused, and nothing is sent.
+		const sent = before.messages.some((message) => message.id === messageId);
+		if ((mode === "steer" || mode === "restart") && running === undefined && !sent) fail("thread_not_sendable", `Thread ${input.threadId} has no running turn to ${mode}.`);
+		// T3 0.1.11: an agent's `auto` send does not overtake an agent message still queued (behind a `/compact`, say), so
+		// the agent gets them in the order they were sent: it queues too.
+		const agentQueued = before.runs.some((run) => run.status === "queued" && run.queueHeld !== true && before.messages.find((message) => message.id === run.userMessageId)?.createdBy === "agent");
+		if (!sent) {
+			try {
+				await this.#bridge.sendMessage({
+					threadId: input.threadId,
+					commandId,
+					messageId,
+					text: input.message,
+					mode: mode === "auto" ? (running === undefined ? "start" : agentQueued ? "queue" : "steer") : mode === "queue" ? (running === undefined ? "start" : "queue") : mode,
+					provenance: { createdBy: "agent", creationSource: "mcp" },
+				});
+			} catch (error) {
+				fail(error instanceof CommandError ? "thread_not_sendable" : "orchestration_error", `Unable to send to thread ${input.threadId}: ${(error as Error).message}`);
+			}
 		}
 		// The message's run, once the thread shows it: the run it started, the one it steered, or its queued run.
 		const found = await this.#bridge.waitFor(

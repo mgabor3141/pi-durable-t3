@@ -20,7 +20,7 @@ import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { ThreadOps } from "../src/t3/thread-ops.ts";
-import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
+import { createNamed, gated, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 // biome-ignore lint/suspicious/noExplicitAny: a schema of any shape
@@ -122,6 +122,34 @@ it("waits with a timeout, interrupts a running turn, and refuses to steer an idl
 	const ended = await ops.wait(caller, { threadId: tid("b"), timeoutMs: 10_000 });
 	expect(ended).toMatchObject({ timedOut: false, status: "interrupted" });
 	expect(await ops.interrupt(caller, { threadId: tid("b") })).toMatchObject({ status: "no_active_run", runId: null });
+});
+
+// T3 0.1.11: a retried send is answered from its receipt, so a steer whose turn has ended since is not refused; and an
+// agent's `auto` send queues instead of steering while another agent message waits in the queue.
+it("answers a retried steer whose turn has ended, and queues an auto send behind an agent's queued message", { timeout: 60_000 }, async () => {
+	const { f, ops, bridge } = await setup();
+	const caller = client;
+	const first = gated("first answer");
+	f.model.respond(first.step, fauxAssistantMessage("to the steers"), fauxAssistantMessage("to the person"), fauxAssistantMessage("to the queued one"), fauxAssistantMessage("to the auto one"));
+	const started = await ops.send(caller, { threadId: tid("b"), message: "long task" });
+	const steered = await ops.send(caller, { threadId: tid("b"), message: "and this", mode: "steer", clientRequestId: "k1" });
+	expect(steered).toMatchObject({ runId: started.runId, delivery: "steered" });
+	// A person's queued message lets an agent's auto send steer; an agent's makes it queue.
+	await bridge.sendMessage({ threadId: "b", commandId: "person-1", messageId: "person-1", text: "a person's", mode: "queue" });
+	expect(await ops.send(caller, { threadId: tid("b"), message: "steer on", clientRequestId: "k2" })).toMatchObject({ runId: started.runId, delivery: "steered" });
+	const queued = await ops.send(caller, { threadId: tid("b"), message: "after this", mode: "queue", clientRequestId: "k3" });
+	expect(queued).toMatchObject({ delivery: "queued" });
+	const auto = await ops.send(caller, { threadId: tid("b"), message: "then this", clientRequestId: "k4" });
+	expect(auto, "behind the agent's queued message, not into the turn").toMatchObject({ delivery: "queued" });
+	expect(auto.runId).not.toBe(started.runId);
+	first.release();
+	const ended = await bridge.waitFor("b", (projection) => (projection.runs.length === 4 && projection.runs.every((run) => run.status === "completed") ? projection : undefined), 10_000);
+	expect(ended?.runs.map((run) => String(run.userMessageId))).toEqual([started.messageId, "person-1", queued.messageId, auto.messageId]);
+
+	expect(await ops.send(caller, { threadId: tid("b"), message: "and this", mode: "steer", clientRequestId: "k1" }), "the retry, after its turn ended").toMatchObject({ messageId: steered.messageId, runId: started.runId });
+	expect(await failureOf(() => ops.send(caller, { threadId: tid("b"), message: "and this", mode: "steer", clientRequestId: "k5" })), "a new steer").toBe("thread_not_sendable");
+	const messages = (await bridge.projection("b")).projection.messages.filter((message) => message.text === "and this");
+	expect(messages, "sent once").toHaveLength(1);
 });
 
 it("refuses create_threads: it acts as the calling thread, and a client has none", async () => {
