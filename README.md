@@ -206,9 +206,9 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   `previewBrowser.open(conversationId, url)`.
 - `AgentPreviewSession` (returned by `previewBrowser.open`): `id`, `page`, `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
-- `abortable(tool)` and `abortableExtension(extension)`: a tool (or every tool of an extension) whose call returns the
-  moment Stop aborts it, for a tool that does not listen for `context.abortSignal` itself. pi-durable ends a run only
-  when its tool calls have returned, so one such tool holds the user's Stop until its work ends.
+- `abortable(tool)`: a tool whose call returns the moment Stop aborts it, for a tool that does not listen for
+  `context.abortSignal` itself. pi-durable ends a run only when its tool calls have returned, so one such tool holds
+  the user's Stop until its work ends.
 - `t3.queuedCommands()` (an extension to install on the Harness's registry): a `/compact` or a `/reload` sent as a
   queued message while the agent works waits its turn. It is a queued message like any other until it is the next one;
   then the run that ends does what it says before the messages behind it go on: the context is compacted, or the next

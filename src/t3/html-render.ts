@@ -25,6 +25,7 @@ import {
 import { T3_CODE_DARK_THEME_COLORS, T3_CODE_LIGHT_THEME_COLORS } from "@t3tools/shared/themePalettes";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import type { Context } from "@earendil-works/chord/context";
+import { withTimeout } from "./preview.ts";
 
 export { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
 export type { HtmlRenderReference };
@@ -236,16 +237,6 @@ const CONSOLE_LEVELS: Readonly<Record<string, ConsoleMessage["level"]>> = {
 	assert: "error",
 };
 const MEASURE_FRAGMENT = htmlRenderThemeFragment(htmlRenderTheme(T3_CODE_DARK_THEME_COLORS, "dark", HTML_RENDER_MEASURE_FONTS));
-
-function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-	let timer: NodeJS.Timeout | undefined;
-	return Promise.race([
-		promise,
-		new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000} seconds`)), ms);
-		}),
-	]).finally(() => clearTimeout(timer));
-}
 
 /**
  * One page of T3's headless browser, in a context of its own (none of the preview tabs' cookies): the main frame stays

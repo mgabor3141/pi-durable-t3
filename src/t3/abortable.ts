@@ -4,7 +4,7 @@
 // aborted. The work it started is not cancelled by this (a tool that can cancel it should pass the signal on as well);
 // its result is dropped, and a failure it ends with later is ignored.
 import type { Context } from "@earendil-works/chord/context";
-import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
+import type { ToolRegistration } from "@earendil-works/pi-durable";
 
 type Execute = (args: never, api: never, context: Context) => Promise<unknown>;
 
@@ -26,10 +26,4 @@ export function abortable<T extends ToolRegistration>(tool: T): T {
 		});
 	};
 	return { ...tool, execute: wrapped } as unknown as T;
-}
-
-/** `extension` with every tool `abortable`. */
-export function abortableExtension(extension: Extension): Extension {
-	const tools = (extension as { tools?: readonly ToolRegistration[] }).tools;
-	return tools === undefined ? extension : ({ ...extension, tools: tools.map(abortable) } as Extension);
 }

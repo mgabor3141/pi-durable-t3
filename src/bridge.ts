@@ -47,7 +47,7 @@ export type { MessageContext, MessageContextAnswer, MessageContextRequest } from
 export { DISPLAY_ONLY_RULE, messageContextData } from "./t3/message-context.ts";
 export type { HostUpdates } from "./t3/updates-config.ts";
 export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
-export { abortable, abortableExtension } from "./t3/abortable.ts";
+export { abortable } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
