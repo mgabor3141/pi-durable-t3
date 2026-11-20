@@ -1,5 +1,6 @@
 // The file calls (`src/t3/files.ts`), replicated from T3's workspace services: containment, the roots a call may name,
-// read limits (1 MiB, NUL = binary), atomic writes that keep the file's mode, and the search limits.
+// paths taken as written, read limits (1 MiB; a NUL byte or invalid UTF-8 = binary), atomic writes that keep the
+// file's mode and byte-order mark, and the search limits.
 import { chmod, link, mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -167,6 +168,40 @@ describe("readFile", () => {
 		expect(await files.readFile({ cwd: root, relativePath: "nope.txt", allowMissing: true })).toEqual({ relativePath: "nope.txt", contents: "", byteLength: 0, truncated: false, exists: false });
 		expect(await files.readFile({ cwd: root, relativePath: "no/such/dir/x.txt", allowMissing: true })).toMatchObject({ exists: false });
 	});
+
+	it("answers a missing project folder as a missing file when allowMissing, as T3 does", async () => {
+		const { base, files } = await fixture();
+		const gone = join(base, "gone");
+		expect(await files.readFile({ cwd: gone, relativePath: "a.txt", allowMissing: true })).toEqual({ relativePath: "a.txt", contents: "", byteLength: 0, truncated: false, exists: false });
+		// Without allowMissing it is still the root's failure; and a path out of the folder is refused before either.
+		expect((await failure(files.readFile({ cwd: gone, relativePath: "a.txt" }))) as FileError).toMatchObject({ failure: "operation_failed", context: { operation: "realpath-workspace-root" } });
+		expect(((await failure(files.readFile({ cwd: gone, relativePath: "../x.txt", allowMissing: true }))) as FileError).failure).toBe("workspace_path_outside_root");
+	});
+
+	it("reads text as strict UTF-8: invalid bytes are binary, a character the 1 MiB cut splits is not", async () => {
+		const { root, files } = await fixture();
+		await writeFile(join(root, "latin1.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+		expect(((await failure(files.readFile({ cwd: root, relativePath: "latin1.txt" }))) as FileError).failure).toBe("binary_file");
+		// "é" is two bytes; the read stops between them.
+		await writeFile(join(root, "split.txt"), Buffer.concat([Buffer.alloc(READ_FILE_MAX_BYTES - 1, "a"), Buffer.from("é tail", "utf8")]));
+		const split = await files.readFile({ cwd: root, relativePath: "split.txt" });
+		expect(split.truncated).toBe(true);
+		expect(split.contents).toBe("a".repeat(READ_FILE_MAX_BYTES - 1));
+	});
+});
+
+describe("paths as written", () => {
+	it("keeps whitespace at the ends of a path: ' a.txt' is not 'a.txt'", async () => {
+		const { root, files } = await fixture();
+		await writeFile(join(root, "a.txt"), "plain\n");
+		await writeFile(join(root, " a.txt "), "spaced\n");
+		expect((await files.readFile({ cwd: root, relativePath: " a.txt " })).contents).toBe("spaced\n");
+		expect(await files.writeFile({ cwd: root, relativePath: " b.txt", contents: "new\n" })).toEqual({ relativePath: " b.txt" });
+		expect(await readFile(join(root, " b.txt"), "utf8")).toBe("new\n");
+		await expect(stat(join(root, "b.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		await files.writeFile({ cwd: root, relativePath: " a.txt ", contents: "changed\n" });
+		expect(await readFile(join(root, "a.txt"), "utf8")).toBe("plain\n");
+	});
 });
 
 describe("writeFile", () => {
@@ -213,6 +248,21 @@ describe("writeFile", () => {
 		expect(error.context.operation).toBe("write-file");
 		expect(await readdir(root)).not.toContainEqual(expect.stringMatching(/\.tmp$/));
 		expect(await readFile(join(root, "dir", "keep.txt"), "utf8")).toBe("keep");
+	});
+
+	it("keeps a file's byte-order mark on save, which a read decodes away", async () => {
+		const { root, files } = await fixture();
+		const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+		await writeFile(join(root, "bom.txt"), Buffer.concat([bom, Buffer.from("first\n")]));
+		expect((await files.readFile({ cwd: root, relativePath: "bom.txt" })).contents).toBe("first\n");
+		await files.writeFile({ cwd: root, relativePath: "bom.txt", contents: "second\n" });
+		expect(await readFile(join(root, "bom.txt"))).toEqual(Buffer.concat([bom, Buffer.from("second\n")]));
+		// Contents that bring their own mark are not given a second, and a file without one, or a new file, gets none.
+		await files.writeFile({ cwd: root, relativePath: "bom.txt", contents: "\uFEFFthird\n" });
+		expect(await readFile(join(root, "bom.txt"))).toEqual(Buffer.concat([bom, Buffer.from("third\n")]));
+		await files.writeFile({ cwd: root, relativePath: "README.md", contents: "plain\n" });
+		await files.writeFile({ cwd: root, relativePath: "new.txt", contents: "plain\n" });
+		for (const name of ["README.md", "new.txt"]) expect(await readFile(join(root, name), "utf8")).toBe("plain\n");
 	});
 
 	it("writes through a hard link, as the environment writes", async () => {

@@ -32,6 +32,7 @@ import { messageOf } from "../host-errors.ts";
 
 /** `WorkspaceFileSystem.PROJECT_READ_FILE_MAX_BYTES`: a read returns at most this many bytes; `truncated` says more existed. */
 export const READ_FILE_MAX_BYTES = 1024 * 1024;
+const UTF8_BOM = "\uFEFF";
 /** The listing cap T3's index applies to a whole-tree listing. */
 const INDEX_MAX_ENTRIES = 25_000;
 /** The content-search budget and per-file match cap T3's index applies. */
@@ -72,11 +73,11 @@ const toPosix = (input: string) => input.replaceAll("\\", "/");
 /** Absolute, normalized T3 path. T3 sends absolute paths; a relative one is refused by the caller. */
 const normalizeCwd = (cwd: string) => resolve(cwd.trim());
 
-/** `WorkspacePaths.resolveRelativePathWithinRoot`: lexical containment — absolute, `.`/empty and `..` escapes refuse. */
+/** `WorkspacePaths.resolveRelativePathWithinRoot`: lexical containment — absolute, `.`/empty and `..` escapes refuse.
+ * The path is taken as written: whitespace at its ends is part of a file's name (T3 stopped trimming it after 0.1.9). */
 function resolveWithinRoot(workspaceRoot: string, requested: string): { absolutePath: string; relativePath: string } | null {
-	const normalized = requested.trim();
-	if (isAbsolute(normalized)) return null;
-	const absolutePath = resolve(workspaceRoot, normalized);
+	if (isAbsolute(requested)) return null;
+	const absolutePath = resolve(workspaceRoot, requested);
 	const relativeToRoot = toPosix(relative(workspaceRoot, absolutePath));
 	if (relativeToRoot.length === 0 || relativeToRoot === "." || relativeToRoot.startsWith("../") || relativeToRoot === ".." || isAbsolute(relativeToRoot)) return null;
 	return { absolutePath, relativePath: relativeToRoot };
@@ -317,6 +318,18 @@ export class WorkspaceFiles {
 		}
 	}
 
+	/** Whether a file starts with a UTF-8 byte-order mark; a file that cannot be read (or is missing) does not. */
+	async #startsWithUtf8Bom(path: string): Promise<boolean> {
+		const opened = await this.#env.openBinaryReader(path, { noFollow: true }, this.#context);
+		if (!opened.ok) return false;
+		try {
+			const read = await opened.value.read(0, 3, this.#context);
+			return read.ok && read.value.length === 3 && read.value[0] === 0xef && read.value[1] === 0xbb && read.value[2] === 0xbf;
+		} finally {
+			await opened.value.close(this.#context).catch(() => {});
+		}
+	}
+
 	// --- projects.listEntries -----------------------------------------------------------------------------------------
 
 	async list(input: { readonly cwd: string; readonly directoryPath?: string }): Promise<ProjectListEntriesResult> {
@@ -416,7 +429,7 @@ export class WorkspaceFiles {
 
 	async readFile(input: { readonly cwd: string; readonly relativePath: string; readonly allowMissing?: boolean }): Promise<ProjectReadFileResult> {
 		const cwd = normalizeCwd(input.cwd);
-		const requested = input.relativePath.trim();
+		const requested = input.relativePath;
 		const absolute = isAbsolute(requested);
 		const target = absolute
 			? { absolutePath: resolve(requested), relativePath: toPosix(requested) }
@@ -427,7 +440,12 @@ export class WorkspaceFiles {
 			const realWorkspaceRoot = await this.#canonical(cwd).catch((cause: unknown) => {
 				throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, cause);
 			});
-			if (!realWorkspaceRoot.ok) throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, realWorkspaceRoot.error);
+			if (!realWorkspaceRoot.ok) {
+				// A project folder that is gone (T3: storage cleanup removed an idle worktree) holds no file, so a read that
+				// allows a missing file answers missing, as T3 does.
+				if (input.allowMissing === true && realWorkspaceRoot.error.code === "not_found") return { relativePath: target.relativePath, contents: "", byteLength: 0, truncated: false, exists: false };
+				throw new FileError("operation_failed", `Workspace file operation 'realpath-workspace-root' failed at '${cwd}'.`, { resolvedPath: target.absolutePath, operation: "realpath-workspace-root", operationPath: cwd }, realWorkspaceRoot.error);
+			}
 			realWorkspaceRootPath = realWorkspaceRoot.value;
 		}
 		let resolved: { path: string; exists: boolean };
@@ -460,9 +478,19 @@ export class WorkspaceFiles {
 			const read = await opened.value.read(0, bytesToRead, this.#context);
 			if (!read.ok) throw failed("read", read.error);
 			const fileBytes = read.value;
-			// T3's binary test: a NUL byte in what was read.
-			if (fileBytes.includes(0)) throw new FileError("binary_file", `Workspace file '${input.relativePath}' in '${cwd}' is binary and cannot be previewed as text.`, { resolvedPath: realTargetPath });
-			return { relativePath: target.relativePath, contents: new TextDecoder("utf-8").decode(fileBytes), byteLength: info.value.size, truncated: info.value.size > READ_FILE_MAX_BYTES };
+			const truncated = info.value.size > READ_FILE_MAX_BYTES;
+			const binary = () => new FileError("binary_file", `Workspace file '${input.relativePath}' in '${cwd}' is binary and cannot be previewed as text.`, { resolvedPath: realTargetPath });
+			// T3's binary test: a NUL byte in what was read, or bytes that are not UTF-8. Text with U+FFFD in place of
+			// them would corrupt the file on save. A character the 1 MiB cut split is dropped (a streaming decode), not
+			// taken for binary. The decoder drops a byte-order mark; a save puts it back.
+			if (fileBytes.includes(0)) throw binary();
+			let contents: string;
+			try {
+				contents = new TextDecoder("utf-8", { fatal: true }).decode(fileBytes, { stream: truncated });
+			} catch {
+				throw binary();
+			}
+			return { relativePath: target.relativePath, contents, byteLength: info.value.size, truncated };
 		} finally {
 			await opened.value.close(this.#context).catch(() => {});
 		}
@@ -496,12 +524,14 @@ export class WorkspaceFiles {
 		if (inGitFolder(realTargetPath)) {
 			throw new FileError("resolved_path_outside_root", `Workspace file '${input.relativePath}' resolves outside workspace root '${cwd}': ${realTargetPath}`, { resolvedPath: realTargetPath, resolvedWorkspaceRoot: realWorkspaceRoot.value });
 		}
+		// A read decodes a byte-order mark away, so a save from the editor would drop it: keep the one the file has.
+		const contents = !input.contents.startsWith(UTF8_BOM) && (await this.#startsWithUtf8Bom(realTargetPath)) ? UTF8_BOM + input.contents : input.contents;
 		const directory = dirname(realTargetPath);
 		const made = await this.#env.createDir(directory, { recursive: true }, this.#context);
 		if (!made.ok) {
 			throw new FileError("operation_failed", `Workspace file operation 'make-directory' failed at '${directory}'.`, { resolvedPath: realTargetPath, operation: "make-directory", operationPath: directory }, made.error);
 		}
-		const written = await this.#env.writeFile(realTargetPath, input.contents, this.#context);
+		const written = await this.#env.writeFile(realTargetPath, contents, this.#context);
 		if (!written.ok) {
 			throw new FileError("operation_failed", `Workspace file operation 'write-file' failed at '${realTargetPath}'.`, { resolvedPath: realTargetPath, operation: "write-file", operationPath: realTargetPath }, written.error);
 		}
