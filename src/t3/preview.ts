@@ -30,6 +30,29 @@ import type { PreviewBrowserConfig } from "./preview-config.ts";
 const CONNECT_TIMEOUT_MS = 30_000;
 const NAVIGATION_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 } as const;
+
+/**
+ * Client hints to match a Chrome user agent: without them a Chromium build keeps advertising itself in
+ * `navigator.userAgentData` even when the user agent string has been overridden.
+ */
+function clientHints(userAgent: string): { brands: { brand: string; version: string }[]; fullVersionList: { brand: string; version: string }[]; platform: string; platformVersion: string; architecture: string; model: string; mobile: boolean; bitness: string; wow64: boolean } | undefined {
+	const match = /(?:Chrome|Chromium)\/(\d+)/u.exec(userAgent);
+	if (match === null) return undefined;
+	const major = match[1] ?? "0";
+	const windows = userAgent.includes("Windows");
+	const mac = userAgent.includes("Mac OS X");
+	return {
+		brands: [{ brand: "Chromium", version: major }, { brand: "Google Chrome", version: major }, { brand: "Not:A-Brand", version: "24" }],
+		fullVersionList: [{ brand: "Chromium", version: `${major}.0.0.0` }, { brand: "Google Chrome", version: `${major}.0.0.0` }, { brand: "Not:A-Brand", version: "24.0.0.0" }],
+		platform: windows ? "Windows" : mac ? "macOS" : "Linux",
+		platformVersion: windows ? "19.0.0" : mac ? "15.0.0" : "6.8.0",
+		architecture: "x86",
+		model: "",
+		mobile: false,
+		bitness: "64",
+		wow64: false,
+	};
+}
 const MAX_TABS_PER_THREAD = 8;
 const MAX_TABS_TOTAL = 32;
 const AGENT_TAB_IDLE_MS = 30 * 60_000;
@@ -216,6 +239,8 @@ class PreviewTab {
 		this.page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
 		this.page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 		this.cdp = await withTimeout(this.context.newCDPSession(this.page), PAGE_OPEN_TIMEOUT_MS, "preview CDP session");
+		// Before the first navigation: a page must not see an automation user agent or a live webdriver flag.
+		await this.#applyIdentity();
 		// Browserless opens pages at its own window size; a CDP override is what makes the screencast match the tab.
 		await this.#setViewport(size.width, size.height);
 		this.cdp.on("Page.screencastFrame", (event) => this.#onScreencastFrame(event));
@@ -284,6 +309,34 @@ class PreviewTab {
 		} catch (error) {
 			const title = await withTimeout(page.title(), CDP_TIMEOUT_MS, "preview title").catch(() => "");
 			this.#owner.fail(this, url, title, (error as Error).message || String(error));
+		}
+	}
+
+	/**
+	 * Present the configured identity in this tab: the user agent (with client hints to match) and a document-start
+	 * script. Both are per target through CDP, so they apply to the browser's own profile context too, where Playwright
+	 * has no context-level user agent to set.
+	 */
+	async #applyIdentity(): Promise<void> {
+		const cdp = this.cdp;
+		if (cdp === undefined) return;
+		const { userAgent, initScript } = this.#owner.identity;
+		if (userAgent !== undefined) {
+			await withTimeout(
+				cdp.send("Emulation.setUserAgentOverride", {
+					userAgent,
+					acceptLanguage: "en-US,en;q=0.9",
+					platform: userAgent.includes("Windows") ? "Win32" : userAgent.includes("Mac OS X") ? "MacIntel" : "Linux x86_64",
+					...(clientHints(userAgent) === undefined ? {} : { userAgentMetadata: clientHints(userAgent) }),
+				}),
+				CDP_TIMEOUT_MS,
+				"preview user agent",
+			).catch((error: unknown) => this.#owner.logWarning("could not set the preview user agent", error));
+		}
+		if (initScript !== undefined) {
+			await withTimeout(cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: initScript }), CDP_TIMEOUT_MS, "preview init script").catch(
+				(error: unknown) => this.#owner.logWarning("could not install the preview init script", error),
+			);
 		}
 	}
 
@@ -637,6 +690,20 @@ export class PreviewSessions {
 		this.#sweepTimer.unref();
 	}
 
+	/** The browser identity every tab presents: a user agent and a document-start script, when configured. */
+	get identity(): { readonly userAgent?: string; readonly initScript?: string } {
+		const { userAgent, initScript } = this.#config;
+		return {
+			...(userAgent === undefined ? {} : { userAgent }),
+			...(initScript === undefined ? {} : { initScript }),
+		};
+	}
+
+	/** A tab that could not apply the configured identity keeps loading, without it. */
+	logWarning(message: string, error: unknown): void {
+		this.#log.warn(message, { error: String(error) });
+	}
+
 	async browser(): Promise<Browser> {
 		if (this.#browser !== undefined && this.#browser.isConnected()) return this.#browser;
 		this.#browserOpening ??= chromium.connectOverCDP(endpoint(this.#config), { timeout: CONNECT_TIMEOUT_MS }).then((browser) => {
@@ -666,10 +733,20 @@ export class PreviewSessions {
 	async #createContext(): Promise<BrowserContext> {
 		const browser = await this.browser();
 		const storageState = await this.#readState();
-		const context = await withTimeout(browser.newContext({
+		// The browser's own profile context, when the deployment gave it one (Browserless with a mounted profile
+		// directory): adopting it is what lets the cache, history and cookies outlive a browser process, where a
+		// context we create ourselves lives only as long as this one. Cookies from the storageState are added to it;
+		// an existing context cannot take a localStorage export, so origins keep what the profile holds.
+		const [shared] = browser.contexts();
+		const context = shared ?? await withTimeout(browser.newContext({
 			viewport: DEFAULT_VIEWPORT,
 			...(storageState === undefined ? {} : { storageState }),
 		}), PAGE_OPEN_TIMEOUT_MS, "preview context create");
+		if (shared !== undefined && storageState !== undefined && storageState.cookies.length > 0) {
+			await withTimeout(shared.addCookies(storageState.cookies), PAGE_OPEN_TIMEOUT_MS, "preview profile cookies").catch((error: unknown) =>
+				this.#log.warn("could not load the browser profile's cookies", { error: String(error) }),
+			);
+		}
 		this.#context = context;
 		context.on("close", () => {
 			if (this.#context === context) this.#context = undefined;
