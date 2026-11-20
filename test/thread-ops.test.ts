@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
+import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
 import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { createNamed, gated, makeThreads, bridgeConfig } from "./threads-harness.ts";
 
@@ -236,4 +237,30 @@ it("refuses to delete the built-in scratch project, as T3 0.1.11 does over MCP",
 	await expect(ops.projectDelete(client, { projectId, force: true })).rejects.toThrow('"No project" is the built-in scratch project and cannot be deleted through MCP. The user can remove it in Settings.');
 	expect(bridge.isScratchProject(projectId), "still there").toBe(true);
 	expect(await failureOf(() => ops.projectDelete(client, { projectId }))).toBe("invalid_request");
+});
+
+it("reports a project's default model from the settings' override for it, and schedules a client's task on it (T3 0.1.11)", async () => {
+	const { f, bridge } = await setup();
+	const tasks = new ScheduledTasks({ harness: f.harness, dispatch: scheduledTaskDispatch(bridge), log });
+	await tasks.load();
+	const ops = new ThreadOps(bridge, "env-1", log, tasks);
+	const schedule = { type: "interval", everyMs: 3_600_000 } as never;
+	const selection = { instanceId: "pi", model: "faux/override" };
+	// Nothing saved: no project reports a default, and a client outside a thread cannot pick a model for a task.
+	expect(ops.projectRead(client, { projectId: "p" }).defaultModelSelection).toBeNull();
+	await expect(ops.scheduleTask(client, { projectId: "p", prompt: "x", schedule } as never)).rejects.toThrow("Project p has no default model, so this caller cannot pick one for it.");
+	// The environment's default model is new threads' everywhere, so a task is scheduled on it; no project reports it as its own.
+	bridge.config.settings.update({ defaultModelSelection: { instanceId: "pi", model: "faux/everywhere" } } as never);
+	expect(ops.projectRead(client, { projectId: "p" }).defaultModelSelection).toBeNull();
+	await ops.scheduleTask(client, { projectId: "q", prompt: "on the environment's", schedule } as never);
+	// A project's own override is what the project tools report, and what its tasks run on.
+	bridge.config.settings.update({ projectSettingsOverrides: { p: { defaultModelSelection: selection } } } as never);
+	expect(ops.projectRead(client, { projectId: "p" }).defaultModelSelection).toMatchObject(selection);
+	expect(ops.projectList(client, {}).projects.map((project) => project.defaultModelSelection?.model ?? null)).toEqual(["faux/override", null]);
+	expect((await ops.projectUpdate(client, { projectId: "p", title: "Renamed" })).defaultModelSelection).toMatchObject(selection);
+	await ops.scheduleTask(client, { projectId: "p", prompt: "on the project's", schedule } as never);
+	expect(tasks.list().tasks.map((task) => [task.prompt, task.modelSelection.model]).sort()).toEqual([
+		["on the environment's", "faux/everywhere"],
+		["on the project's", "faux/override"],
+	]);
 });

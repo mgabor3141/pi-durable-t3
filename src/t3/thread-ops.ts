@@ -31,8 +31,9 @@ import {
 	type ThreadMetadataMcpUpdateInput,
 	type ThreadMetadataMcpUpdateResult,
 } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
-import { type AuthMcpClientAccess, type RuntimeMode, scheduledTaskThreadMode } from "@t3tools/contracts";
+import { type AuthMcpClientAccess, ProjectId, type RuntimeMode, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
@@ -701,7 +702,7 @@ export class ThreadOps {
 		this.#project(projectId);
 		const bind = input.bindToCurrentThread ?? (parent !== undefined && parent.projectId === projectId);
 		if (bind && (parent === undefined || parent.projectId !== projectId)) fail("invalid_request", parent === undefined ? notInThread : otherProject);
-		const modelSelection = parent?.modelSelection ?? fail("invalid_request", `Project ${projectId} has no default model, so this caller cannot pick one for it.`);
+		const modelSelection = parent?.modelSelection ?? this.#projectDefaultModel(projectId).settings.defaultModelSelection ?? fail("invalid_request", `Project ${projectId} has no default model, so this caller cannot pick one for it.`);
 		const derivedTitle = input.prompt!.split("\n")[0]?.trim() ?? "";
 		const key = input.clientRequestId;
 		const task = await this.#upsert(
@@ -754,17 +755,30 @@ export class ThreadOps {
 
 	// ---- projects (T3's project toolkit) ------------------------------------------------------------------------
 
+	/** The model new threads in a project start on (T3's `resolveProjectSettings`): the project's override in the settings,
+	 * else the environment's default model; a project record here holds none. */
+	#projectDefaultModel(projectId: string) {
+		return resolveProjectSettings(this.#bridge.config.settings.current(), ProjectId.make(projectId), null);
+	}
+
+	/** T3's `withSavedDefaultModel`: a project as the project tools report it, with the default model the settings save
+	 * for it, and null when it has only the environment's. */
+	#withSavedDefaultModel(project: ProjectRecord): ProjectRecord {
+		const resolved = this.#projectDefaultModel(project.id);
+		return { ...project, defaultModelSelection: resolved.sources.defaultModelSelection === "project" ? resolved.settings.defaultModelSelection : null };
+	}
+
 	/** `t3_project_list`: a page of every project, in the registry's order (T3's `listPage`: offset cursor, 20 a page). */
 	projectList(_caller: Caller, input: { readonly cursor?: number; readonly limit?: number }): { projects: ProjectRecord[]; nextCursor: number | null } {
 		const all = this.#bridge.projectRecords();
 		const cursor = input.cursor ?? 0;
 		const limit = input.limit ?? 20;
-		return { projects: all.slice(cursor, cursor + limit), nextCursor: cursor + limit < all.length ? cursor + limit : null };
+		return { projects: all.slice(cursor, cursor + limit).map((project) => this.#withSavedDefaultModel(project)), nextCursor: cursor + limit < all.length ? cursor + limit : null };
 	}
 
 	/** `t3_project_read`: one project. */
 	projectRead(_caller: Caller, input: { readonly projectId: string }): ProjectRecord {
-		return this.#bridge.projectRecords().find((project) => project.id === input.projectId) ?? fail("invalid_request", "The project was not found.");
+		return this.#withSavedDefaultModel(this.#bridge.projectRecords().find((project) => project.id === input.projectId) ?? fail("invalid_request", "The project was not found."));
 	}
 
 	/** `t3_project_create`: register a folder (made first with `createWorkspaceRootIfMissing`). The id derives from the
@@ -789,13 +803,15 @@ export class ThreadOps {
 	async projectUpdate(caller: Caller, input: Record<string, unknown> & { readonly projectId: string; readonly title?: string; readonly workspaceRoot?: string }): Promise<ProjectRecord> {
 		this.#mayWrite(caller, undefined);
 		this.#onlyStoredFields("t3_project_update", input, ["projectId", "title", "workspaceRoot"]);
-		return this.#mutateProject(caller, {
-			type: "project.update",
-			projectId: input.projectId,
-			commandId: randomUUID(),
-			...(input.title === undefined ? {} : { title: input.title }),
-			...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
-		});
+		return this.#withSavedDefaultModel(
+			await this.#mutateProject(caller, {
+				type: "project.update",
+				projectId: input.projectId,
+				commandId: randomUUID(),
+				...(input.title === undefined ? {} : { title: input.title }),
+				...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+			}),
+		);
 	}
 
 	/** `t3_project_delete`: the project, and with `force` its threads; the folder stays. */
