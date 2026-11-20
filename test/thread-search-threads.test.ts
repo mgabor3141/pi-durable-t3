@@ -1,7 +1,7 @@
 // The threads layer's `search` over real pi-durable conversations: a prompt committed to a thread's head is searchable
-// by its text (the user message and the assistant's answer), a thread with no match is absent, a deleted thread is
-// never named, and the result is T3's shape (best match per thread, user message first). This is the layer the RPC
-// answers from; the pure ranking rules are proven in `thread-search.test.ts`.
+// by its text (the user message and the assistant's answer), word by word, a thread with no match is absent, a deleted
+// or archived thread is never named, and the result is T3's shape (best match per thread, user message first). This is
+// the layer the RPC answers from; the pure ranking rules are proven in `thread-search.test.ts`.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -29,6 +29,22 @@ describe("Threads.search", () => {
 		const byAssistant = await threads.search("mentions", 50);
 		expect(byAssistant[0]!.source).toBe("assistant");
 		expect(byAssistant[0]!.snippet).toContain("mentions");
+	});
+
+	it("matches the query word by word, as T3 does, and leaves an archived thread out", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		const thread = await create({ threadId: "t", projectId: "p" });
+		model.respond(fauxAssistantMessage("done"));
+		await threads.submit({ threadId: "t", conversationId: thread.head, requestId: "r1", message: "The sidebar needs a fix" }, undefined);
+		await idle(harness, thread.head);
+
+		expect((await threads.search("fix sidebar", 50)).map((hit) => [hit.threadId, hit.snippet])).toEqual([["t", "The sidebar needs a fix"]]);
+		expect(await threads.search("fix navbar", 50)).toEqual([]);
+		await threads.updateRecord("t", (record) => {
+			record.archivedAt = Date.now();
+		});
+		expect(await threads.search("fix sidebar", 50)).toEqual([]);
 	});
 
 	it("prefers the user message over the assistant answer within one thread", async () => {

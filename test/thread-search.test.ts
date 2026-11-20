@@ -1,112 +1,138 @@
-// The pure replication of T3's thread-search semantics (`src/t3/thread-search.ts`, from
-// `apps/server/src/orchestration-v2/ThreadSearch.ts`): the ASCII-case-insensitive substring match, the per-thread
-// best-message ranking (user first, then newest, then lowest id), the global order (a thread whose best is a user
-// message first, then most-recently-updated, then thread id), the snippet, and the limit. A test over candidates drives
-// the rules directly, without a Harness.
+// The pure replication of T3 0.1.11's thread search (`src/t3/thread-search.ts`, from
+// `apps/server/src/orchestration-v2/ThreadSearch.ts` and `@t3tools/shared/paletteSearch`): which messages are searched,
+// the word-by-word match with its grades, the per-thread best message and hit count, the clients' ranking, the snippet,
+// and the limit. A test over candidates drives the rules directly, without a Harness.
 import { describe, expect, it } from "vitest";
-import { buildSearchSnippet, searchThreads, type SearchCandidate } from "../src/t3/thread-search.ts";
+import type { EntryRecord } from "../src/t3/model-types.ts";
+import { buildSearchSnippet, searchCandidate, searchThreads, type SearchCandidate, type SearchSubject } from "../src/t3/thread-search.ts";
 
+const NOW = Date.parse("2026-11-20T12:00:00Z");
+const DAY = 24 * 60 * 60 * 1000;
 let seq = 0;
 const c = (over: Partial<SearchCandidate> & Pick<SearchCandidate, "threadId" | "text">): SearchCandidate => ({
 	projectId: "p",
 	source: "user",
-	messageCreatedAt: 1000,
-	messageId: ++seq,
+	messageCreatedAt: NOW - DAY,
+	entryId: ++seq,
 	...over,
 });
+const none = new Map<string, SearchSubject>();
+const search = (candidates: readonly SearchCandidate[], query: string, subjects: ReadonlyMap<string, SearchSubject> = none, limit = 50) => searchThreads(candidates, subjects, query, limit, NOW);
+const ids = (candidates: readonly SearchCandidate[], query: string) => search(candidates, query).map((match) => match.threadId);
 
-const map = (entries: readonly (readonly [string, number])[]): ReadonlyMap<string, number> => new Map(entries);
+describe("matching, word by word as T3 matches", () => {
+	it("finds every word of the query anywhere in the message, in any order and case", () => {
+		const candidates = [c({ threadId: "a", text: "The Sidebar needs a fix" }), c({ threadId: "b", text: "fix the navbar" })];
+		expect(ids(candidates, "fix sidebar")).toEqual(["a"]);
+		expect(ids(candidates, "SIDEBAR   fix")).toEqual(["a"]);
+		expect(ids(candidates, "fix")).toEqual(expect.arrayContaining(["a", "b"]));
+	});
 
-describe("matching (ASCII-case-insensitive substring, SQLite LIKE)", () => {
-	it("matches across case, and treats the query as a literal substring", () => {
-		const hits = searchThreads([c({ threadId: "a", text: "Hello WORLD" })], map([]), "world", 50);
-		expect(hits).toHaveLength(1);
-		expect(hits[0]!.threadId).toBe("a");
+	it("ignores accents either way", () => {
+		const candidates = [c({ threadId: "a", text: "Le café est fermé" })];
+		expect(ids(candidates, "cafe ferme")).toEqual(["a"]);
+		expect(ids([c({ threadId: "b", text: "meet at the cafe" })], "Café")).toEqual(["b"]);
 	});
-	it("does not match a non-substring; the match is an exact substring (LIKE), no whitespace folding", () => {
-		const candidates = [c({ threadId: "a", text: "one  two" }), c({ threadId: "b", text: "abc" })];
-		// SQLite LIKE matches the (escaped) query as a literal substring; the query's own spacing is not collapsed, so a
-		// single-space query does NOT match the double-space text. Only an exact substring matches.
-		expect(searchThreads(candidates, map([]), "one two", 50)).toEqual([]);
-		expect(searchThreads(candidates, map([]), "one  two", 50).map((m) => m.threadId)).toEqual(["a"]);
-		expect(searchThreads(candidates, map([]), "xyz", 50)).toEqual([]);
+
+	it("a word shorter than four characters must start a word, and a query of only short words matches nothing", () => {
+		expect(ids([c({ threadId: "a", text: "the drafts folder" })], "fts")).toEqual([]);
+		expect(ids([c({ threadId: "a", text: "the fts index" })], "fts")).toEqual(["a"]);
+		expect(ids([c({ threadId: "a", text: "it is a test" })], "is a")).toEqual([]);
 	});
-	it("folds ASCII letters only: a non-ASCII letter is a literal", () => {
-		// "É" is not folded to "é" (foldAsciiCase leaves it); so an accented query matches only the accented text.
-		const candidates = [c({ threadId: "a", text: "café" }), c({ threadId: "b", text: "cafe" })];
-		expect(searchThreads(candidates, map([]), "café", 50).map((m) => m.threadId)).toEqual(["a"]);
+
+	it("reads a link as its text, and a file mention's label as typed", () => {
+		const link = searchCandidate(entry({ text: "see [the docs](https://example.com/zebra)" }), "a", "p")!;
+		expect(ids([link], "zebra")).toEqual([]);
+		expect(ids([link], "docs")).toEqual(["a"]);
+		const mention = searchCandidate(entry({ text: "open [\\_\\_init\\_\\_.py](/repo/pkg/__init__.py)" }), "a", "p")!;
+		expect(mention.text).toBe("open __init__.py");
+		expect(ids([mention], "__init__.py")).toEqual(["a"]);
 	});
 });
 
-describe("per-thread best match (user first, then newest, then lowest id)", () => {
-	it("prefers a user message over a later assistant message in the same thread", () => {
-		const candidates = [
-			c({ threadId: "a", source: "assistant", text: "needle", messageCreatedAt: 5000, messageId: 10 }),
-			c({ threadId: "a", source: "user", text: "needle", messageCreatedAt: 1000, messageId: 11 }),
-		];
-		const [hit] = searchThreads(candidates, map([["a", 5000]]), "needle", 50);
-		expect(hit?.source).toBe("user");
-		expect(hit?.messageCreatedAt).toBe(1000);
-	});
-	it("among same-source messages, takes the newest, then the lowest id", () => {
-		const candidates = [
-			c({ threadId: "a", source: "user", text: "needle", messageCreatedAt: 2000, messageId: 5 }),
-			c({ threadId: "a", source: "user", text: "needle", messageCreatedAt: 9000, messageId: 9 }),
-		];
-		const [hit] = searchThreads(candidates, map([["a", 9000]]), "needle", 50);
-		expect(hit?.messageCreatedAt).toBe(9000);
-	});
-	it("one match per thread, never two rows for the same thread", () => {
-		const candidates = [c({ threadId: "a", text: "x" }), c({ threadId: "a", source: "assistant", text: "x" })];
-		expect(searchThreads(candidates, map([]), "x", 50)).toHaveLength(1);
+let entryId = 100;
+function entry(input: { text: string; role?: "user" | "assistant"; data?: unknown }): EntryRecord {
+	const role = input.role ?? "user";
+	const message = role === "user" ? { role, content: [{ type: "text", text: input.text }], timestamp: NOW } : { role, content: [{ type: "text", text: input.text }], timestamp: NOW, stopReason: "stop" };
+	return { id: ++entryId, kind: role === "user" ? "app.user" : "pi.assistant", data: input.data, model: [message] } as unknown as EntryRecord;
+}
+
+describe("which messages are searched", () => {
+	it("a person's messages and the agent's answers, not a user-role message an agent wrote, nor the attachment-only placeholder", () => {
+		expect(searchCandidate(entry({ text: "hello", data: { messageId: "msg-1" } }), "t", "p")).toMatchObject({ source: "user", messageId: "msg-1" });
+		expect(searchCandidate(entry({ text: "hello", role: "assistant" }), "t", "p")).toMatchObject({ source: "assistant" });
+		expect(searchCandidate(entry({ text: "hello", role: "assistant" }), "t", "p")?.messageId).toBeUndefined();
+		expect(searchCandidate(entry({ text: "a report", data: { createdBy: "agent", creationSource: "mcp" } }), "t", "p")).toBeUndefined();
+		expect(searchCandidate(entry({ text: "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]" }), "t", "p")).toBeUndefined();
 	});
 });
 
-describe("global order (user-first thread, then recency, then thread id) and limit", () => {
-	it("threads whose best is a user message come before threads whose best is an assistant message", () => {
+describe("the best message per thread, and its hits", () => {
+	it("a whole word beats a word start beats a match inside a word, before user-first and recency", () => {
 		const candidates = [
-			c({ threadId: "assistant-thread", source: "assistant", text: "needle", messageCreatedAt: 99999 }),
-			c({ threadId: "user-thread", source: "user", text: "needle", messageCreatedAt: 1 }),
+			c({ threadId: "a", text: "trusty crate", messageCreatedAt: NOW - 1000 }),
+			c({ threadId: "a", text: "rusty nail", source: "assistant", messageCreatedAt: NOW - 2000 }),
+			c({ threadId: "a", text: "rust is great", source: "assistant", messageCreatedAt: NOW - 3 * DAY }),
 		];
-		const order = searchThreads(candidates, map([["assistant-thread", 99999], ["user-thread", 1]]), "needle", 50);
-		expect(order.map((m) => m.threadId)).toEqual(["user-thread", "assistant-thread"]);
+		const [hit] = search(candidates, "rust");
+		expect(hit).toMatchObject({ snippet: "rust is great", source: "assistant", quality: 1, hits: 1 });
 	});
-	it("within the same source rank, most-recently-updated thread first, then thread id", () => {
+
+	it("at one grade, a user's message, then the newest; hits counts the thread's matches at that grade", () => {
 		const candidates = [
-			c({ threadId: "a", text: "needle", messageCreatedAt: 10 }),
-			c({ threadId: "b", text: "needle", messageCreatedAt: 10 }),
-			c({ threadId: "c", text: "needle", messageCreatedAt: 10 }),
+			c({ threadId: "a", text: "needle one", source: "assistant", messageCreatedAt: NOW - 1000 }),
+			c({ threadId: "a", text: "needle two", messageCreatedAt: NOW - 3000, messageId: "u-old" }),
+			c({ threadId: "a", text: "needle three", messageCreatedAt: NOW - 2000, messageId: "u-new" }),
+			c({ threadId: "a", text: "needles", messageCreatedAt: NOW - 500 }),
 		];
-		const order = searchThreads(candidates, map([["a", 100], ["b", 300], ["c", 200]]), "needle", 50);
-		expect(order.map((m) => m.threadId)).toEqual(["b", "c", "a"]);
+		expect(search(candidates, "needle")).toEqual([
+			{ threadId: "a", projectId: "p", source: "user", snippet: "needle three", messageCreatedAt: NOW - 2000, quality: 1, hits: 3, messageId: "u-new" },
+		]);
 	});
-	it("ties on recency break by thread id ascending", () => {
-		const candidates = [c({ threadId: "z", text: "needle" }), c({ threadId: "y", text: "needle" })];
-		expect(searchThreads(candidates, map([["z", 5], ["y", 5]]), "needle", 50).map((m) => m.threadId)).toEqual(["y", "z"]);
+
+	it("words written together as typed grade above the same words apart", () => {
+		const together = search([c({ threadId: "a", text: "run vp dev now" })], "vp dev")[0]!;
+		const apart = search([c({ threadId: "b", text: `dev ${"x ".repeat(60)} vp` })], "vp dev")[0]!;
+		expect(together.quality).toBeGreaterThan(apart.quality);
 	});
-	it("caps results at the limit, in order", () => {
+});
+
+describe("ranking across threads, as T3's clients rank message matches", () => {
+	it("a word match before a match inside a word, however recent", () => {
+		const candidates = [c({ threadId: "inside", text: "a trustworthy plan", messageCreatedAt: NOW }), c({ threadId: "word", text: "the trust fall", messageCreatedAt: NOW - 30 * DAY })];
+		expect(ids(candidates, "trust")).toEqual(["word", "inside"]);
+	});
+
+	it("a thread the palette picked for this query first, then more hits and recent use", () => {
+		const candidates = [
+			c({ threadId: "busy", text: "deploy notes" }),
+			c({ threadId: "busy", text: "deploy again" }),
+			c({ threadId: "quiet", text: "deploy once" }),
+			c({ threadId: "picked", text: "deploy here" }),
+		];
+		expect(ids(candidates, "deploy")[0]).toBe("busy");
+		const subjects = new Map<string, SearchSubject>([["picked", { activityAt: null, opens: { openedAt: NOW - DAY, score: 1, picks: [{ query: "deploy", at: NOW - DAY }] } }]]);
+		expect(search(candidates, "deploy", subjects).map((match) => match.threadId)[0]).toBe("picked");
+		const recent = new Map<string, SearchSubject>([["quiet", { activityAt: NOW - 1000, opens: null }]]);
+		expect(search(candidates.filter((x) => x.threadId !== "busy"), "deploy", recent).map((match) => match.threadId)).toEqual(["quiet", "picked"]);
+	});
+
+	it("caps results at the limit", () => {
 		const candidates = Array.from({ length: 60 }, (_, i) => c({ threadId: `t${String(i).padStart(2, "0")}`, text: "needle" }));
-		const hits = searchThreads(candidates, map(candidates.map((x) => [x.threadId, 0])), "needle", 50);
-		expect(hits).toHaveLength(50);
+		expect(search(candidates, "needle", none, 50)).toHaveLength(50);
 	});
 });
 
 describe("snippet (T3's buildSearchSnippet)", () => {
-	it("collapses whitespace and returns the whole text when short", () => {
-		expect(buildSearchSnippet("  hello\n  world\t", "world")).toBe("hello world");
+	it("the whole text when short, whitespace collapsed and emphasis and code marks dropped", () => {
+		expect(buildSearchSnippet("  hello\n  **world** `x`\t", 10)).toBe("hello world x");
 	});
-	it("windows a long text around the match, under the 240-char cap, with ellipses", () => {
-		const text = `${"a".repeat(200)} NEEDLE ${"b".repeat(200)}`;
-		const snippet = buildSearchSnippet(text, "needle");
+
+	it("starts a few words before the match, cut at 240 characters with ellipses", () => {
+		const text = `${"word ".repeat(60)}NEEDLE ${"tail ".repeat(60)}`;
+		const snippet = search([c({ threadId: "a", text })], "needle")[0]!.snippet;
+		expect(snippet.startsWith("…word word word word NEEDLE")).toBe(true);
+		expect(snippet.endsWith("…")).toBe(true);
 		expect(snippet.length).toBeLessThanOrEqual(240);
-		expect(snippet).toContain("NEEDLE");
-		expect(snippet.startsWith("…")).toBe(true);
-		expect(snippet.endsWith("…")).toBe(true);
-	});
-	it("no leading ellipsis when the match sits at the start of a long text", () => {
-		const text = `NEEDLE ${"c".repeat(400)}`;
-		const snippet = buildSearchSnippet(text, "needle");
-		expect(snippet.startsWith("NEEDLE")).toBe(true);
-		expect(snippet.endsWith("…")).toBe(true);
 	});
 });

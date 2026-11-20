@@ -35,7 +35,7 @@ import { APP_COMPACT_ENTRY, APP_CONTINUE_ENTRY, APP_NOTE_ENTRY, APP_RELOAD_ENTRY
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
 import { shownPromptSections } from "./t3/queued-commands.ts";
 import type { Message } from "@earendil-works/pi-ai";
-import { searchThreads, searchCandidate, type SearchCandidate, type ThreadSearchMatch } from "./t3/thread-search.ts";
+import { searchThreads, searchCandidate, type SearchCandidate, type SearchSubject, type ThreadSearchMatch } from "./t3/thread-search.ts";
 
 import { type ProjectRegistry, projectsInCommit } from "./registry.ts";
 
@@ -392,29 +392,30 @@ export class Threads {
 	}
 
 	/**
-	 * T3's `orchestration.searchThreads`, answered from the conversations this host already has (design.md). It mirrors
-	 * T3's `ThreadSearch.search` semantics (in `t3/thread-search.ts`): every thread's committed user/assistant messages are
-	 * read, matched by an ASCII-case-insensitive substring, ranked per thread (a user message first, then newest, then
-	 * lowest entry id), and ordered globally (user-first thread, then most-recently-updated, then thread id), capped at
-	 * `limit`. A thread is searched by its HEAD conversation — the sidebar's live thread — and by its whole transcript. Deleted threads are absent from
-	 * the document, so a search never names one (design.md, Invariants).
+	 * T3's `orchestration.searchThreads`, answered from the conversations this host already has (design.md), by T3's rules
+	 * (`t3/thread-search.ts`): every listed thread's committed user/assistant messages are matched word by word, the best
+	 * match per thread is ranked as T3's clients rank them, capped at `limit`. A thread is searched by its HEAD
+	 * conversation — the sidebar's live thread — and by its whole transcript. Deleted threads are absent from the
+	 * document, so a search never names one (design.md, Invariants); archived ones, subagents and side chats are not
+	 * searched, as in T3.
 	 */
 	async search(query: string, limit: number): Promise<ThreadSearchMatch[]> {
 		const threads = await this.list();
-		const threadUpdatedAt = new Map<string, number>();
+		const subjects = new Map<string, SearchSubject>();
 		const candidates: SearchCandidate[] = [];
 		const heads = new Set<number>();
 		for (const thread of threads) {
+			if (thread.archivedAt !== undefined || thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true) continue;
 			heads.add(thread.head);
 			const read = await this.#searchable(thread);
 			if (read === undefined) continue;
-			// T3's `threads.updated_at`: the most-recent activity on the head. A message's timestamp is the activity this
-			// host records, so the newest message time (falling back to creation) is the thread's recency.
-			threadUpdatedAt.set(thread.threadId, Math.max(thread.createdAt, read.updatedAt));
+			// T3 ranks by when a person last wrote in the thread, and by how often and for what it was opened.
+			const summary = thread.summary;
+			subjects.set(thread.threadId, { activityAt: (summary?.latestUserAuthoredMessageAt === undefined ? summary?.latestUserMessageAt : summary.latestUserAuthoredMessageAt) ?? null, opens: thread.opens ?? null });
 			candidates.push(...read.candidates);
 		}
 		for (const head of this.#searched.keys()) if (!heads.has(head)) this.#searched.delete(head);
-		return searchThreads(candidates, threadUpdatedAt, query, limit);
+		return searchThreads(candidates, subjects, query, limit, Date.now());
 	}
 
 	/** The characters search keeps of the threads it has read (the memory log). */
@@ -429,12 +430,12 @@ export class Threads {
 	 * the ones written since the last. The whole transcript, not the model's context: T3 searches every message, and a
 	 * compaction takes none of them out of what the thread shows.
 	 */
-	readonly #searched = new Map<number, { last: EntryId | undefined; updatedAt: number; candidates: SearchCandidate[] }>();
+	readonly #searched = new Map<number, { last: EntryId | undefined; candidates: SearchCandidate[] }>();
 
-	async #searchable(thread: Thread): Promise<{ updatedAt: number; candidates: readonly SearchCandidate[] } | undefined> {
+	async #searchable(thread: Thread): Promise<{ candidates: readonly SearchCandidate[] } | undefined> {
 		const conversation = await this.#harness.conversation(thread.head as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) return undefined;
-		const read = this.#searched.get(thread.head) ?? { last: undefined, updatedAt: 0, candidates: [] };
+		const read = this.#searched.get(thread.head) ?? { last: undefined, candidates: [] };
 		this.#searched.set(thread.head, read);
 		let cursor: Parameters<typeof conversation.entries>[2];
 		const from = read.last === undefined ? {} : { minEntryId: ((read.last as number) + 1) as EntryId };
@@ -445,9 +446,7 @@ export class Threads {
 				if (read.last !== undefined && entry.id <= (read.last as number)) continue;
 				read.last = entry.id as EntryId;
 				const candidate = searchCandidate(entry, thread.threadId, thread.projectId);
-				if (candidate === undefined) continue;
-				if (candidate.messageCreatedAt !== null && candidate.messageCreatedAt > read.updatedAt) read.updatedAt = candidate.messageCreatedAt;
-				read.candidates.push(candidate);
+				if (candidate !== undefined) read.candidates.push(candidate);
 			}
 			cursor = page.next;
 		} while (cursor !== undefined);
