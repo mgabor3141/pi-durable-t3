@@ -163,7 +163,7 @@ A step is a response the model was given back (a failed or cut-off request is no
 
 ### Scheduled tasks
 
-A run is the dispatch — a new thread with the prompt as its first message (shown as "Sent by automation"), or the prompt queued on the task's thread — not the turn's end. Deleting a thread deletes the tasks bound to it (T3's `scheduled-tasks.cleanup` effect, `deleteForThread`); a thread deleted outside T3 leaves its tasks failing on every run. A task left running by a crash is recorded failed and rescheduled. A fixed-time run missed while the host was down is skipped and, since 0.1.10, recorded as the task's last run, failed ("Missed a scheduled run because the server was not running at that time."). The list names the host's time zone (`timeZone`, 0.1.11), which T3 shows in a fixed time's label.
+A run is the dispatch — a new thread with the prompt as its first message (shown as "Sent by automation"), or the prompt queued on the task's thread — not the turn's end. Deleting a thread deletes the tasks bound to it (T3's `scheduled-tasks.cleanup` effect, `deleteForThread`); a thread deleted outside T3 leaves its tasks failing on every run. A task left running by a crash is recorded failed and rescheduled. A fixed-time run missed while the host was down is skipped and, since 0.1.10, recorded as the task's last run, failed ("Missed a scheduled run because the server was not running at that time."). The list names the host's time zone (`timeZone`, 0.1.11), which T3 shows in a fixed time's label. As T3 0.1.11, a recurring task does not queue its prompt on its thread again while the last copy still waits there: that run is skipped, and when the queue is held (after a Stop) the task records it as failed ("A previous occurrence is held in the thread queue. Resume or remove it to run this task again.").
 
 Stored in the Harness's storage beside the threads. Every run is at the project root: a task asking for a worktree is refused (T3's form defaults to one; pick "Use the project checkout"), except on the Scratch project, where T3 itself stores a worktree request as the root. A run queued on the task's thread follows the thread's current model, as in T3; the task's model seeds new threads only. A task asking for approvals or plan mode is refused, as the thread commands are (T3's form never asks).
 
@@ -222,11 +222,10 @@ difference from T3 today, not a refusal: each is answered as T3 0.1.9 answered i
   the queue (Queued messages row), which loses nothing.
 - **`settleAfterRun`:** T3 passes over a queued run "Send now" moved into the awaited turn, and a wake cancelled before
   it started; here either leaves the thread active.
-- **Scheduled tasks:** T3 no longer queues a recurring task's prompt again while the last one still waits in the
-  thread's queue (and fails the task when that queue is held), follows a run to its end for up to a day (a failed run
-  fails the task; a one-time task's completed run deletes it), and stores a worktree request on a folder that is not a
-  Git repository as the root. Here a run is the dispatch, every interval queues one, and a worktree request is refused
-  except on Scratch.
+- **Scheduled tasks:** T3 follows a run to its end for up to a day (a failed run fails the task; a one-time task's
+  completed run deletes it), and stores a worktree request on a folder that is not a Git repository as the root. Here a
+  run is the dispatch (a one-time task stays listed after it ran, and a run that failed reads as succeeded), and a
+  worktree request is refused except on Scratch.
 - **The shell:** a waiting secret card is the thread's pending request (`userOnly`, "Needs your input", passed up to a
   parent); here only approvals and questions are.
 - **File access:** T3 keeps whitespace at the ends of a path, reads text as strict UTF-8 (invalid bytes mean binary),

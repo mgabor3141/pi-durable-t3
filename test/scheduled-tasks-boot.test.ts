@@ -37,3 +37,32 @@ it("a bound task dispatched right at boot finds its thread", async () => {
 		await rm(scratch, { recursive: true, force: true });
 	}
 }, 30_000);
+
+it("a bound task's message waiting in its thread's queue is a queued occurrence, held after a Stop (T3 0.1.11's queuedOccurrence)", { timeout: 30_000 }, async () => {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const { createNamed, gated } = await import("./threads-harness.ts");
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "bound", projectId: "p" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-occurrence-"));
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), { info: () => {}, warn: () => {} }, f.threads, f.model.models);
+	bridge.start();
+	await bridge.loaded();
+	try {
+		const dispatch = scheduledTaskDispatch(bridge);
+		expect(await dispatch.queuedOccurrence("t", "bound")).toBeNull();
+		const held = gated("work");
+		f.model.respond(held.step);
+		await bridge.sendMessage({ threadId: "bound", commandId: "c1", messageId: "m1", text: "work", mode: "start" });
+		await bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+		await dispatch.queue({ threadId: "bound", projectId: "p", commandId: "scheduled-task:t:1:scheduled", messageId: "scheduled-task-message:t:1:scheduled", text: "hourly", provenance: { createdBy: "user", creationSource: "web" } });
+		await bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.status === "queued") ? true : undefined), 10_000);
+		expect(await dispatch.queuedOccurrence("t", "bound")).toBe("queued");
+		expect(await dispatch.queuedOccurrence("other-task", "bound"), "another task's message is not this task's").toBeNull();
+		await bridge.interrupt("bound");
+		held.release();
+		await bridge.waitFor("bound", (projection) => (projection.runs.some((run) => run.status === "queued" && run.queueHeld === true) ? true : undefined), 10_000);
+		expect(await dispatch.queuedOccurrence("t", "bound")).toBe("held");
+	} finally {
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	}
+});

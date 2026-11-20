@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, MISSED_RUN, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, MISSED_RUN, HELD_OCCURRENCE, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -79,6 +79,7 @@ async function fixture(options: { dir?: string; dispatch?: Partial<ScheduledTask
 		isScratchProject: options.dispatch?.isScratchProject ?? ((projectId) => projectId === "scratch"),
 		// Every thread a test names exists in project "p", unarchived, unless the test says otherwise.
 		thread: options.dispatch?.thread ?? (async () => ({ projectId: "p", archived: false })),
+		queuedOccurrence: options.dispatch?.queuedOccurrence ?? (async () => null),
 	};
 	const harness = await Harness.open(await openNodeSqliteStorage(join(dir, "durable.db")), { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
 	harnesses.push(harness);
@@ -290,6 +291,35 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(tasks.list().tasks[0]).toMatchObject({ nextRunAt: new Date(2026, 6, 3, 9, 0).toISOString(), lastRunStatus: "failed", lastRunError: MISSED_RUN, runCount: 1 });
 		// The list names the zone fixed times are in (T3 0.1.11): the host's.
 		expect(tasks.list().timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+	});
+
+	it("a recurring task bound to a thread does not queue another copy while one still waits; a held one fails the task (T3 #38906)", async () => {
+		let occurrence: "queued" | "held" | null = null;
+		const { tasks, calls, advance } = await fixture({ dispatch: { queuedOccurrence: async () => occurrence } });
+		const task = (await tasks.upsert(input({ threadId: "t1" as never }))).task;
+		advance(60 * 60_000);
+		await tasks.tick();
+		expect(calls.map((call) => call.kind)).toEqual(["queue"]);
+		// The last copy still waits: this hour is skipped, the next one kept, and the task's last run is unchanged.
+		occurrence = "queued";
+		advance(60 * 60_000);
+		await tasks.tick();
+		expect(calls).toHaveLength(1);
+		const skipped = tasks.list().tasks[0]!;
+		expect(skipped).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null, runCount: 1 });
+		expect(Date.parse(skipped.nextRunAt!)).toBeGreaterThan(Date.parse(task.nextRunAt!) + 60 * 60_000);
+		// Held behind a Stop: the task says so.
+		occurrence = "held";
+		advance(60 * 60_000);
+		await tasks.tick();
+		expect(calls).toHaveLength(1);
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "failed", lastRunError: HELD_OCCURRENCE, runCount: 1 });
+		// A manual run is not held back; and once the queue is empty the schedule queues again.
+		await tasks.runNow({ id: task.id });
+		occurrence = null;
+		advance(60 * 60_000);
+		await tasks.tick();
+		expect(calls.map((call) => call.kind)).toEqual(["queue", "queue", "queue"]);
 	});
 
 	it("restart: a task left running is recorded failed and rescheduled; the document round-trips", async () => {

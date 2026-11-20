@@ -25,6 +25,7 @@ export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-
 export const FRESH_SESSION_UNSUPPORTED = "A fresh session each run is not supported by pi-durable-t3: a thread keeps its context. Choose a new thread each run, or one thread that continues.";
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
 export const MISSED_RUN = "Missed a scheduled run because the server was not running at that time.";
+export const HELD_OCCURRENCE = "A previous occurrence is held in the thread queue. Resume or remove it to run this task again.";
 /** T3's Scheduler cadence. */
 const POLL_INTERVAL_MS = 5_000;
 
@@ -38,6 +39,9 @@ export interface ScheduledTaskDispatch {
 	isScratchProject(projectId: string): boolean;
 	/** A live thread's project and whether it is archived (T3's `threadManagement.getThreadShell`); none when it is gone. */
 	thread(threadId: string): Promise<{ projectId: string; archived: boolean } | undefined>;
+	/** T3's `queuedOccurrence`: whether a message of this task still waits in the thread's queue (`"queued"`), in a queue
+	 * that is held (`"held"`), or not at all (`null`). */
+	queuedOccurrence(taskId: string, threadId: string): Promise<"queued" | "held" | null>;
 }
 
 /**
@@ -182,7 +186,7 @@ export class ScheduledTasks {
 			.sort((a, b) => Date.parse(a.nextRunAt!) - Date.parse(b.nextRunAt!) || a.id.localeCompare(b.id));
 		for (const task of due) {
 			try {
-				if (isMissedFixedTimeRun(task.schedule, new Date(task.nextRunAt!), now)) await this.#rescheduleMissedRun(task, now);
+				if (isMissedFixedTimeRun(task.schedule, new Date(task.nextRunAt!), now)) await this.#reschedule(task, now, "missed", MISSED_RUN);
 				else await this.#runTask(task, "scheduled");
 			} catch (error) {
 				this.#log?.warn("scheduled task run failed", { taskId: task.id, error: errorMessage(error) });
@@ -239,11 +243,12 @@ export class ScheduledTasks {
 		return webhook === undefined ? task : { ...task, webhook };
 	}
 
-	async #rescheduleMissedRun(task: Task, now: Date): Promise<void> {
+	/** T3's `rescheduleMissedRun`: skip this run and move to the next. With `runError` (0.1.10) the skipped run is the task's
+	 * last run, failed, so the task says why it did not run. */
+	async #reschedule(task: Task, now: Date, reason: string, runError?: string): Promise<void> {
 		const next = nextRunAt(task, now);
-		this.#log?.info("skipping missed scheduled task run", { taskId: task.id, missedRunAt: task.nextRunAt, rescheduledTo: next });
-		// Since 0.1.10 the skipped run is the task's last run, failed, so the task says why it did not run.
-		await this.#write({ ...task, nextRunAt: next, lastRunStatus: "failed", lastRunError: MISSED_RUN, updatedAt: now.toISOString() });
+		this.#log?.info("skipping scheduled task run", { taskId: task.id, reason, missedRunAt: task.nextRunAt, rescheduledTo: next });
+		await this.#write({ ...task, nextRunAt: next, ...(runError === undefined ? {} : { lastRunStatus: "failed" as const, lastRunError: runError }), updatedAt: now.toISOString() });
 	}
 
 	/** Run `task`: the task as the run left it, and the thread the run went to (null when none started). */
@@ -264,6 +269,16 @@ export class ScheduledTasks {
 				return { task, threadId: null };
 			}
 			if (trigger === "scheduled" && (!active.enabled || active.nextRunAt === null || Date.parse(active.nextRunAt) > startedAt.getTime())) return { task: active, threadId: null };
+			// T3 0.1.11 (#38906): a thread that stays busy would otherwise collect one copy of a recurring task's prompt per
+			// interval. While one still waits in its queue this run is skipped; in a held queue (after a Stop) the task also
+			// says so. A failed read falls through to the normal send.
+			if (trigger === "scheduled" && active.schedule.type !== "once" && active.threadId !== null) {
+				const occurrence = await this.#dispatch.queuedOccurrence(active.id, active.threadId).catch(() => null);
+				if (occurrence !== null) {
+					await this.#reschedule(active, startedAt, "previous occurrence still queued", occurrence === "held" ? HELD_OCCURRENCE : undefined);
+					return { task: this.#tasks.get(task.id) ?? active, threadId: null };
+				}
+			}
 
 			await this.#write({ ...active, updatedAt: startedAtIso, lastRunAt: startedAtIso, lastRunStatus: "running", lastRunError: null });
 
@@ -572,6 +587,14 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			await bridge.loaded();
 			const thread = bridge.threadRecord(threadId);
 			return thread === undefined ? undefined : { projectId: thread.projectId, archived: thread.archivedAt !== undefined };
+		},
+		// The queued runs' messages name their task (`SCHEDULED_MESSAGE_ID`, read by the projection).
+		queuedOccurrence: async (taskId, threadId) => {
+			if (!bridge.hasThread(threadId)) return null;
+			const { projection } = await bridge.projection(threadId);
+			const ofTask = new Set(projection.messages.filter((message) => message.scheduledTaskId === taskId).map((message) => message.id));
+			const occurrences = projection.runs.filter((run) => run.status === "queued" && ofTask.has(run.userMessageId));
+			return occurrences.some((run) => run.queueHeld === true) ? "held" : occurrences.length > 0 ? "queued" : null;
 		},
 	};
 }
