@@ -414,6 +414,33 @@ describe("search", () => {
 		expect(contents.matches.map((match) => match.path)).toEqual(["src/app.ts"]);
 	});
 
+	it("resolves only the links search keeps: none inside an ignored folder (each is a round trip on a remote environment)", async () => {
+		const { root } = await fixture();
+		const { execFileSync } = await import("node:child_process");
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		await writeFile(join(root, ".gitignore"), "node_modules/\n");
+		await mkdir(join(root, "node_modules", ".pnpm"), { recursive: true });
+		for (let i = 0; i < 20; i++) await symlink(join(root, "src"), join(root, "node_modules", `pkg-${i}`));
+		await symlink(join(root, "src", "app.ts"), join(root, "app-link.ts"));
+		const resolved: string[] = [];
+		const env = new NodeExecutionEnv({ cwd: "/" });
+		const counting = new Proxy(env, {
+			get: (target, key) => {
+				const value = Reflect.get(target, key, target) as unknown;
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]) => {
+					if (key === "canonicalPath" || key === "fileInfo") resolved.push(String(args[0]));
+					return (value as (...rest: unknown[]) => unknown).apply(target, args);
+				};
+			},
+		});
+		const files = new WorkspaceFiles({ env: counting, roots: () => [root] });
+		opened.push(files);
+		expect((await files.searchEntries({ cwd: root, query: "link", limit: 10 })).entries).toEqual([{ path: "app-link.ts", kind: "file" }]);
+		expect(resolved.filter((path) => path.includes("node_modules"))).toEqual([]);
+		expect(resolved.filter((path) => path.includes("app-link.ts"))).toHaveLength(1);
+	});
+
 	it("searches contents: ranges, whole word, case, regex, and the limit with its truncated flag", async () => {
 		const { root, files } = await fixture();
 		await writeFile(join(root, "notes.txt"), "Alpha beta\nalphabet soup\nALPHA again\n");
