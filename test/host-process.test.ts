@@ -4,8 +4,8 @@
 // T3 reads it (the thread-detail routes' auth and unknown-thread contracts).
 //
 // Each test spawns `node --experimental-strip-types examples/coding-agent/src/host.ts` with the offline reply model on a loopback port chosen
-// clear of the defaults (3774) and the smoke's (4911/4920). `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is
-// never read. Ports here are their own (4901-4904) and distinct, so the tests can run in parallel.
+// clear of the defaults (3774) and the smoke's and pack-proof's (4911 and 5070; 5070 and 5072 on CI).
+// `PI_CODING_AGENT_DIR` points at a temp dir so `~/.pi` is never read. No other test listens on this file's ports (4901-4904).
 import { sleep } from "./wait.ts";
 import { launch, seedProjects, type Launched } from "./host-process-harness.ts";
 import { get, waitListening } from "./ws-rpc.ts";

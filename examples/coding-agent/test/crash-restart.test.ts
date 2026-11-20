@@ -20,7 +20,7 @@ import { openCodingHarness } from "../src/host-runtime.ts";
 import { createScriptedModel } from "../../../test/fake-model.ts";
 
 const childScript = new URL("../../../test/crash-child.ts", import.meta.url).pathname;
-const PORT = 4951; // its own port, clear of the host-process tests (4901-4905) and the smoke (4911/4920).
+const PORT = 4951; // its own port, clear of the host-process tests (4901-4904) and the smoke and pack-proof (4911 and 5070; 5070 and 5072 on CI).
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const textOf = (entry: EntryRecord): string => {
 	const content = (entry.model?.[0] as { content?: unknown } | undefined)?.content;

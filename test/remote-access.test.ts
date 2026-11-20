@@ -11,7 +11,7 @@ import { attachT3, mintPairingCode, type RemoteAccessState } from "../src/bridge
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { makeThreads } from "./threads-harness.ts";
 
-const PORT = 4971;
+const PORT = 4974;
 
 it("advertises the integrator's URL and SSH host, and pushes a snapshot when they change", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }] });

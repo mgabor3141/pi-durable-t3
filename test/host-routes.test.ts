@@ -7,7 +7,7 @@ import { attachT3 } from "../src/bridge.ts";
 import { waitListening } from "./ws-rpc.ts";
 import { makeThreads } from "./threads-harness.ts";
 
-const PORT = 4971;
+const PORT = 4972;
 
 it("serves the integrator's routes beside T3's", async () => {
 	const f = await makeThreads({ projects: [{ id: "p" }] });
