@@ -813,14 +813,15 @@ export class Threads {
 
 	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. `restore` (T3 0.1.10's
 	 * undo of a settle) is the stamp the settle cleared, put back instead of now so the thread returns to its place in
-	 * the active section rather than to the top; `null`: it had none. */
+	 * the active section rather than to the top; `null`: it had none. A thread already kept active keeps what it has,
+	 * none included, as T3's does: an un-settle of an active thread does not move it. */
 	async unsettle(threadId: string, restore?: number | null): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
 			const thread = await writes.live(threadId);
 			const already = thread.settledOverride === "active";
 			thread.settledOverride = "active";
 			delete thread.settledAt;
-			const at = already ? (thread.unsettledAt ?? Date.now()) : restore === undefined ? Date.now() : restore;
+			const at = already ? (thread.unsettledAt ?? null) : restore === undefined ? Date.now() : restore;
 			if (at === null) delete thread.unsettledAt;
 			else thread.unsettledAt = at;
 			await writes.putRecord(thread);

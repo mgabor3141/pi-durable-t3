@@ -261,6 +261,11 @@ it("undoing a settle puts back the stamp it cleared, so the thread returns to it
 	await dispatch(bridge, { type: "thread.unsettle", threadId: "u", restoreUnsettledAt: null });
 	expect(bridge.threadShell("u").settledOverride).toBe("active");
 	expect(bridge.threadShell("u").unsettledAt ?? null).toBeNull();
+	// Already kept active, a thread keeps what it has, none included (T3's `?? null`): it does not move to the top.
+	await dispatch(bridge, { type: "thread.unsettle", threadId: "u" });
+	expect(bridge.threadShell("u").unsettledAt ?? null).toBeNull();
+	await dispatch(bridge, { type: "thread.unsettle", threadId: "t" });
+	expect(iso(bridge.threadShell("t").unsettledAt)).toBe(anchor);
 	// Without one, as before: stamped now.
 	await dispatch(bridge, { type: "thread.settle", threadId: "u" });
 	const before = Date.now();
