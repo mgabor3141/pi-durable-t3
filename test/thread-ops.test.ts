@@ -27,14 +27,14 @@ const log: Logger = { info: () => {}, warn: () => {} };
 const encodes = (schema: any, value: unknown) => Schema.encodeUnknownSync(schema)(value);
 const tid = (value: string) => ThreadId.make(value);
 
-async function setup(options: { tokensPerSecond?: number } = {}) {
+async function setup(options: { tokensPerSecond?: number; scratchDir?: string } = {}) {
 	const f = await makeThreads({ projects: [{ id: "p" }, { id: "q" }], ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }) });
 	const create = createNamed(f.threads, f.harness, f.model);
 	await create({ threadId: "a", projectId: "p", title: "Caller" });
 	await create({ threadId: "b", projectId: "p", title: "Worker" });
 	await create({ threadId: "c", projectId: "q", title: "Elsewhere" });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-ops-"));
-	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, ...(options.scratchDir === undefined ? {} : { scratchDir: options.scratchDir }) }), log, f.threads, f.model.models);
 	bridge.start();
 	await bridge.loaded();
 	onTestFinished(async () => {
@@ -184,4 +184,14 @@ it("pages a thread as T3 0.1.11 reads it: forward for a client, back with before
 it("names a project that does not exist", async () => {
 	const { ops } = await setup();
 	await expect(Promise.resolve().then(() => ops.list(client, { projectId: "nope" as never }))).rejects.toThrow("Project nope was not found.");
+});
+
+it("refuses to delete the built-in scratch project, as T3 0.1.11 does over MCP", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-durable-t3-ops-scratch-"));
+	onTestFinished(() => rm(home, { recursive: true, force: true }));
+	const { bridge, ops } = await setup({ scratchDir: join(home, "scratch") });
+	const { projectId } = await bridge.ensureScratch();
+	await expect(ops.projectDelete(client, { projectId, force: true })).rejects.toThrow('"No project" is the built-in scratch project and cannot be deleted through MCP. The user can remove it in Settings.');
+	expect(bridge.isScratchProject(projectId), "still there").toBe(true);
+	expect(await failureOf(() => ops.projectDelete(client, { projectId }))).toBe("invalid_request");
 });

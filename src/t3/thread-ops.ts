@@ -787,6 +787,8 @@ export class ThreadOps {
 	/** `t3_project_delete`: the project, and with `force` its threads; the folder stays. */
 	async projectDelete(caller: Caller, input: { readonly projectId: string; readonly force?: boolean }): Promise<ProjectRecord> {
 		this.#mayWrite(caller, undefined);
+		// T3 0.1.11: an agent may not delete "No project" (with `force`, every Scratch thread would go with it).
+		if (this.#bridge.isScratchProject(input.projectId)) fail("invalid_request", '"No project" is the built-in scratch project and cannot be deleted through MCP. The user can remove it in Settings.');
 		return this.#mutateProject(caller, { type: "project.delete", projectId: input.projectId, commandId: randomUUID(), ...(input.force === undefined ? {} : { force: input.force }) });
 	}
 
