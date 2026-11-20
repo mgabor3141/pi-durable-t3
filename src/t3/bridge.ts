@@ -1639,10 +1639,11 @@ export class Bridge {
 	/**
 	 * T3's `orchestration.searchThreads`, answered from the host's threads (`Threads.search`, whose scan lives in the
 	 * threads layer). The result is T3's shape: message timestamps cross the wire as ISO, the same conversion the projection
-	 * makes; the matching, ranking and snippets are T3's (`t3/thread-search.ts`).
+	 * makes; the matching, ranking and snippets are T3's (`t3/thread-search.ts`). `forAgent`: an agent's `thread_search`,
+	 * which searches every thread and message (`Threads.search`).
 	 */
-	async searchThreads(query: string, limit: number): Promise<OrchestrationSearchThreadsResult> {
-		const matches = await this.#store.search(query, limit);
+	async searchThreads(query: string, limit: number, forAgent = false): Promise<OrchestrationSearchThreadsResult> {
+		const matches = await this.#store.search(query, limit, forAgent);
 		return {
 			matches: matches.map((match) => ({
 				threadId: match.threadId,

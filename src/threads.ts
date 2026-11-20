@@ -396,23 +396,28 @@ export class Threads {
 	 * (`t3/thread-search.ts`): every listed thread's committed user/assistant messages are matched word by word, the best
 	 * match per thread is ranked as T3's clients rank them, capped at `limit`. A thread is searched by its HEAD
 	 * conversation — the sidebar's live thread — and by its whole transcript. Deleted threads are absent from the
-	 * document, so a search never names one (design.md, Invariants); archived ones, subagents and side chats are not
-	 * searched, as in T3.
+	 * document, so a search never names one (design.md, Invariants); archived ones, subagents, side chats and messages an
+	 * agent wrote are not searched, as in T3. `forAgent` (an agent's `thread_search`, this host's tool) searches them all,
+	 * and ranks without the user's palette picks and recent use, which say nothing about what an agent looks for.
 	 */
-	async search(query: string, limit: number): Promise<ThreadSearchMatch[]> {
+	async search(query: string, limit: number, forAgent = false): Promise<ThreadSearchMatch[]> {
 		const threads = await this.list();
 		const subjects = new Map<string, SearchSubject>();
 		const candidates: SearchCandidate[] = [];
 		const heads = new Set<number>();
 		for (const thread of threads) {
-			if (thread.archivedAt !== undefined || thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true) continue;
+			if (!forAgent && (thread.archivedAt !== undefined || thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)) continue;
 			heads.add(thread.head);
 			const read = await this.#searchable(thread);
 			if (read === undefined) continue;
+			if (forAgent) {
+				candidates.push(...read.candidates);
+				continue;
+			}
 			// T3 ranks by when a person last wrote in the thread, and by how often and for what it was opened.
 			const summary = thread.summary;
 			subjects.set(thread.threadId, { activityAt: (summary?.latestUserAuthoredMessageAt === undefined ? summary?.latestUserMessageAt : summary.latestUserAuthoredMessageAt) ?? null, opens: thread.opens ?? null });
-			candidates.push(...read.candidates);
+			candidates.push(...read.candidates.filter((candidate) => candidate.byAgent !== true));
 		}
 		for (const head of this.#searched.keys()) if (!heads.has(head)) this.#searched.delete(head);
 		return searchThreads(candidates, subjects, query, limit, Date.now());

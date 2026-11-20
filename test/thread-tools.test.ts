@@ -139,6 +139,20 @@ it("a parent starts a child, waits for its report, and follows up on it", { time
 	expect((await bridge.projection(result.threadId)).projection.runs).toHaveLength(2);
 });
 
+it("an agent's thread_search finds an archived subagent child by the prompt an agent sent it", { timeout: 60_000 }, async () => {
+	const { ask, sawAll, f } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Adder" }, message: "What is 7+8? Count the zebrafish." } });
+	const [started] = (await sawAll(1)) as { threadId: string }[];
+	await f.threads.updateRecord(started!.threadId, (record) => {
+		record.archivedAt = Date.now();
+	});
+	// T3's own search (the web app's) leaves an archived subagent and an agent's prompt out; the agent's tool does not.
+	expect((await f.threads.search("zebrafish", 50)).map((match) => match.threadId)).not.toContain(started!.threadId);
+	await ask("a", { name: "thread_search", args: { query: "zebrafish count" } });
+	const [, found] = (await sawAll(2)) as [unknown, { matches: { threadId: string; snippet: string }[] }];
+	expect(found.matches.find((match) => match.threadId === started!.threadId)).toMatchObject({ snippet: "What is 7+8? Count the zebrafish." });
+});
+
 it("a child started without waiting reports back into its parent, which wakes for it", { timeout: 60_000 }, async () => {
 	const { bridge, ask, settled } = await setup();
 	await ask("a", { name: "thread_prompt", args: { new: {}, message: "What is 5+5?", wait: false } });

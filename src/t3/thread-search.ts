@@ -7,7 +7,8 @@
 // What T3 does:
 //   searched  — every committed user/assistant message of a thread the sidebar lists (not archived, not a subagent, not
 //               a side chat), but not a user-role message an agent wrote (a `thread_prompt`, a child's report) and not
-//               the web app's attachment-only placeholder. The text as it reads: an assistant quote as its words, a file
+//               the web app's attachment-only placeholder. (An agent's `thread_search` searches every thread and every
+//               message but the placeholder: `Threads.search`.) The text as it reads: an assistant quote as its words, a file
 //               mention's escaped label unescaped, a link as its label.
 //   matched   — word by word (`messageMatcher`): every word of the query must be in the message, ignoring case and
 //               accents, and one shorter than four characters must start a word ("fts" is not in "drafts"). A query
@@ -44,6 +45,9 @@ export interface SearchCandidate {
 	/** The id the thread's projection gives the message, where it is the entry's own: a user's message. An answer's
 	 * id depends on its run (`m<user entry>.<n>`), which a candidate does not know, and the contract lets it be absent. */
 	readonly messageId?: string;
+	/** A user-role message an agent wrote (a `thread_prompt`, a child's report): T3 does not index it, an agent's
+	 * `thread_search` searches it. */
+	readonly byAgent?: true;
 }
 
 /** What T3's ranking knows of a thread besides its matches: when a person last wrote in it, and how it was opened. */
@@ -83,20 +87,18 @@ const searchText = (text: string): string =>
 		.replace(LINK_LABEL, (_link, open: string, label: string, close: string) => open + label.replace(/\\([*_])/g, "$1") + close)
 		.replace(MARKDOWN_LINK, "$1");
 
-/** A searchable candidate from an entry, or `undefined` when T3 would not index it: not a user/assistant message, a
- * user-role message an agent wrote, or the attachment-only placeholder. The committed entries a scan reads carry no
- * streaming partial. */
+/** A searchable candidate from an entry, or `undefined` when it is not a user/assistant message or is the
+ * attachment-only placeholder. A user-role message an agent wrote is marked `byAgent`. The committed entries a scan
+ * reads carry no streaming partial. */
 export function searchCandidate(entry: EntryRecord, threadId: string, projectId: string): SearchCandidate | undefined {
 	const message = firstMessage(entry);
 	if (message === undefined) return undefined;
-	const candidate = (source: ThreadSearchSource, content: string | ContentBlock[] | undefined, messageId?: string): SearchCandidate | undefined => {
+	const candidate = (source: ThreadSearchSource, content: string | ContentBlock[] | undefined, messageId?: string, byAgent = false): SearchCandidate | undefined => {
 		const text = textOf(content);
 		if (isAttachmentOnlyBootstrapPrompt(text)) return undefined;
-		return { threadId, projectId, source, text: searchText(text), messageCreatedAt: message.timestamp ?? null, entryId: entry.id, ...(messageId === undefined ? {} : { messageId }) };
+		return { threadId, projectId, source, text: searchText(text), messageCreatedAt: message.timestamp ?? null, entryId: entry.id, ...(messageId === undefined ? {} : { messageId }), ...(byAgent ? { byAgent: true as const } : {}) };
 	};
-	if (isUserEntry(entry) && message.role === "user") {
-		return authorOf(entry.data).createdBy === "user" ? candidate("user", message.content, messageIdOf(entry) ?? `m${entry.id}`) : undefined;
-	}
+	if (isUserEntry(entry) && message.role === "user") return candidate("user", message.content, messageIdOf(entry) ?? `m${entry.id}`, authorOf(entry.data).createdBy !== "user");
 	if (isAssistantEntry(entry) && message.role === "assistant") return candidate("assistant", message.content);
 	return undefined;
 }
@@ -135,7 +137,8 @@ const iso = (at: number | null) => (at === null ? null : new Date(at).toISOStrin
 
 /**
  * Search `candidates` for `query` and return at most `limit` matches in T3's order. `subjects` holds each thread's
- * recent use for the ranking (a thread missing from it ranks as one never used); `now` is the clock T3 ranks by.
+ * recent use for the ranking (a thread missing from it ranks as one never used, with no palette picks); `now` is the
+ * clock T3 ranks by.
  */
 export function searchThreads(candidates: readonly SearchCandidate[], subjects: ReadonlyMap<string, SearchSubject>, query: string, limit: number, now: number): ThreadSearchMatch[] {
 	if (messageSearchTokens(query).long.length === 0) return [];

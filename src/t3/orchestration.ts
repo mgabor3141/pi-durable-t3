@@ -355,7 +355,7 @@ export class Orchestration {
 	}
 
 	async search(query: string, limit = 20) {
-		const found = await this.#bridge.searchThreads(query, Math.min(100, Math.max(1, limit)));
+		const found = await this.#bridge.searchThreads(query, Math.min(100, Math.max(1, limit)), true);
 		return found.matches.map((match) => ({ threadId: match.threadId as string, title: this.#bridge.threadRecord(match.threadId as string)?.title ?? "", snippet: match.snippet, at: match.messageCreatedAt }));
 	}
 

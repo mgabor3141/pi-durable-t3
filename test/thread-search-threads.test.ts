@@ -47,6 +47,50 @@ describe("Threads.search", () => {
 		expect(await threads.search("fix sidebar", 50)).toEqual([]);
 	});
 
+	it("an agent's thread_search (forAgent) searches archived threads, subagents, side chats and agents' prompts; T3's search does not", async () => {
+		const { threads, harness, model } = await makeThreads();
+		const create = createNamed(threads, harness, model);
+		const send = async (threadId: string, message: string, provenance?: { createdBy: "agent"; creationSource: "mcp" }) => {
+			const thread = await create({ threadId, projectId: "p" });
+			model.respond(fauxAssistantMessage("ok"));
+			await threads.submit({ threadId, conversationId: thread.head, requestId: `r-${threadId}`, message, ...(provenance === undefined ? {} : { provenance }) }, undefined);
+			await idle(harness, thread.head);
+		};
+		await send("archived", "the archived walrus");
+		await send("child", "the child walrus");
+		await send("side", "the side walrus");
+		await send("prompted", "the prompted walrus", { createdBy: "agent", creationSource: "mcp" });
+		await send("plain", "the plain walrus");
+		await threads.updateRecord("archived", (record) => {
+			record.archivedAt = Date.now();
+		});
+		await threads.updateRecord("child", (record) => {
+			record.lineage = { parentThreadId: "plain", relationshipToParent: "subagent", rootThreadId: "plain" };
+		});
+		await threads.updateRecord("side", (record) => {
+			record.lineage = { parentThreadId: "plain", relationshipToParent: "fork", rootThreadId: "plain", sideChat: true };
+		});
+		const found = async (forAgent: boolean) => (await threads.search("walrus", 50, forAgent)).map((hit) => hit.threadId).toSorted();
+		expect(await found(true)).toEqual(["archived", "child", "plain", "prompted", "side"]);
+		expect(await found(false)).toEqual(["plain"]);
+		// The agent's ranking has no palette part: a thread the user picked for the query does not come first.
+		await threads.updateRecord("archived", (record) => {
+			record.opens = { openedAt: Date.now(), score: 5, picks: [{ query: "walrus", at: Date.now() }] };
+		});
+		await threads.updateRecord("plain", (record) => {
+			record.opens = { openedAt: Date.now(), score: 5, picks: [{ query: "walrus", at: Date.now() }] };
+		});
+		expect((await threads.search("walrus", 50, false))[0]?.threadId).toBe("plain");
+		const agentOrder = (await threads.search("walrus", 50, true)).map((hit) => hit.threadId);
+		await threads.updateRecord("archived", (record) => {
+			delete record.opens;
+		});
+		await threads.updateRecord("plain", (record) => {
+			delete record.opens;
+		});
+		expect((await threads.search("walrus", 50, true)).map((hit) => hit.threadId)).toEqual(agentOrder);
+	});
+
 	it("prefers the user message over the assistant answer within one thread", async () => {
 		const { threads, harness, model } = await makeThreads();
 		const create = createNamed(threads, harness, model);

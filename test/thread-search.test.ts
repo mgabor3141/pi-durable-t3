@@ -58,11 +58,12 @@ function entry(input: { text: string; role?: "user" | "assistant"; data?: unknow
 }
 
 describe("which messages are searched", () => {
-	it("a person's messages and the agent's answers, not a user-role message an agent wrote, nor the attachment-only placeholder", () => {
+	it("a person's messages and the agent's answers, a user-role message an agent wrote marked as such, not the attachment-only placeholder", () => {
 		expect(searchCandidate(entry({ text: "hello", data: { messageId: "msg-1" } }), "t", "p")).toMatchObject({ source: "user", messageId: "msg-1" });
 		expect(searchCandidate(entry({ text: "hello", role: "assistant" }), "t", "p")).toMatchObject({ source: "assistant" });
 		expect(searchCandidate(entry({ text: "hello", role: "assistant" }), "t", "p")?.messageId).toBeUndefined();
-		expect(searchCandidate(entry({ text: "a report", data: { createdBy: "agent", creationSource: "mcp" } }), "t", "p")).toBeUndefined();
+		expect(searchCandidate(entry({ text: "a report", data: { createdBy: "agent", creationSource: "mcp" } }), "t", "p")).toMatchObject({ source: "user", byAgent: true });
+		expect(searchCandidate(entry({ text: "hello" }), "t", "p")?.byAgent).toBeUndefined();
 		expect(searchCandidate(entry({ text: "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]" }), "t", "p")).toBeUndefined();
 	});
 });
