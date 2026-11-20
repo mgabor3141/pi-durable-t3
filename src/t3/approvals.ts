@@ -69,6 +69,8 @@ const Decision = defineSignal({ name: "t3.approval", version: 1, schema: obj({ d
 const MEMO = "t3.approval:";
 /** What the memo keeps: the card as first asked, and when. */
 type Memo = { readonly prompt: string; readonly reason?: string; readonly appName?: string; readonly options: readonly ApprovalOption[]; readonly at: number };
+/** A task's state, as far as a card reads it. */
+type TaskState = { readonly status: string; readonly signals?: readonly { readonly signal: string; readonly key: string }[]; readonly checkpoint?: { readonly phase?: string } };
 /** How many cards that ended a thread keeps showing. */
 const MAX_ENDED = 20;
 const PREFIX = "ap-";
@@ -145,7 +147,7 @@ export class ApprovalRequests {
 				if (signal.signal !== Decision.name) continue;
 				const requestId = `${PREFIX}${node.id}:${signal.key}`;
 				asleep.add(requestId);
-				if (!this.#asleep.has(requestId) && !this.#reading.has(requestId)) void this.#read(requestId, node.id, Number(node.conversationId), signal.key).catch((error: unknown) => this.#deps.log.warn("an approval card could not be read from its call", { requestId, error: messageOf(error) }));
+				if (!this.#asleep.has(requestId) && !this.#reading.has(requestId)) void this.#read(requestId, node.id, signal.key).catch((error: unknown) => this.#deps.log.warn("an approval card could not be read from its call", { requestId, error: messageOf(error) }));
 			}
 		}
 		const ended = [...this.#asleep].filter(([requestId, card]) => {
@@ -160,44 +162,82 @@ export class ApprovalRequests {
 	}
 
 	/** A new card: what it says from its call's task, and where it stands, the entry of the model's call it belongs to. */
-	async #read(requestId: string, taskId: TaskId, conversationId: number, key: string): Promise<void> {
+	async #read(requestId: string, taskId: TaskId, key: string): Promise<void> {
 		this.#reading.add(requestId);
 		try {
-			const harness = this.#deps.harness();
-			const record = await harness.getTask(taskId, BACKGROUND_CONTEXT);
-			const memo = record?.memos?.[`${MEMO}${key}`] as Memo | undefined;
-			const threadId = this.#deps.threadOf(conversationId);
-			if (memo === undefined || threadId === undefined) return;
-			let input = record?.input as ToolTaskInput | undefined;
-			while (input?.kind === "nested") input = (await harness.getTask(input.parent, BACKGROUND_CONTEXT))?.input as ToolTaskInput | undefined;
-			// Still asleep on it now that it is read.
+			const read = await this.#cardOf(requestId, taskId, key);
+			// Still asleep on it now that it is read, and not answered meanwhile (`#named`).
 			const node = this.#graph.tasks[String(taskId)];
-			if (input === undefined || node?.state.status !== "sleeping" || !(node.state.signals ?? []).some((signal) => signal.signal === Decision.name && signal.key === key)) return;
-			this.#asleep.set(requestId, { threadId, taskId, key });
-			this.#set(threadId, { requestId, prompt: memo.prompt, ...(memo.reason === undefined ? {} : { reason: memo.reason }), ...(memo.appName === undefined ? {} : { appName: memo.appName }), options: memo.options, at: memo.at, after: Number(input.assistant), status: "pending" });
-			this.#deps.recompute(threadId);
+			if (read === undefined || node?.state.status !== "sleeping" || !(node.state.signals ?? []).some((signal) => signal.signal === Decision.name && signal.key === key)) return;
+			if (this.#byThread.get(read.asleep.threadId)?.some((card) => card.requestId === requestId)) return;
+			this.#asleep.set(requestId, read.asleep);
+			this.#set(read.asleep.threadId, read.card);
+			this.#deps.recompute(read.asleep.threadId);
 		} finally {
 			this.#reading.delete(requestId);
 		}
 	}
 
+	/** The card a call's task asks with `key`, from the task (its memo, and the model's call it belongs to), with the
+	 * task's state. */
+	async #cardOf(requestId: string, taskId: TaskId, key: string): Promise<{ readonly asleep: Asleep; readonly card: ShownApproval; readonly state: TaskState } | undefined> {
+		const harness = this.#deps.harness();
+		const record = await harness.getTask(taskId, BACKGROUND_CONTEXT);
+		const memo = record?.memos?.[`${MEMO}${key}`] as Memo | undefined;
+		const threadId = record === undefined ? undefined : this.#deps.threadOf(Number(record.conversationId));
+		if (record === undefined || memo === undefined || threadId === undefined) return undefined;
+		let input = record.input as ToolTaskInput | undefined;
+		while (input?.kind === "nested") input = (await harness.getTask(input.parent, BACKGROUND_CONTEXT))?.input as ToolTaskInput | undefined;
+		if (input === undefined) return undefined;
+		return {
+			asleep: { threadId, taskId, key },
+			card: { requestId, prompt: memo.prompt, ...(memo.reason === undefined ? {} : { reason: memo.reason }), ...(memo.appName === undefined ? {} : { appName: memo.appName }), options: memo.options, at: memo.at, after: Number(input.assistant), status: "pending" },
+			state: record.state as TaskState,
+		};
+	}
+
+	/**
+	 * The card a request id names (`ap-<task>:<key>`), when this process has not read it yet: just after a restart a
+	 * client still shows it before the woken gate sleeps again. Its task keeps an answer that comes early, which the gate
+	 * reads when it asks again, so the card counts while the task asks: asleep on the key, or its gate running again.
+	 */
+	async #named(requestId: string): Promise<{ readonly asleep: Asleep; readonly card: ShownApproval } | undefined> {
+		const named = /^ap-(\d+):(.+)$/s.exec(requestId);
+		if (named === null) return undefined;
+		const read = await this.#cardOf(requestId, Number(named[1]) as TaskId, named[2]!);
+		const state = read?.state;
+		const asking =
+			(state?.status === "sleeping" && (state.signals ?? []).some((signal) => signal.signal === Decision.name && signal.key === named[2])) ||
+			((state?.status === "pending" || state?.status === "running") && state.checkpoint?.phase === "call");
+		return asking ? read : undefined;
+	}
+
 	/** T3's `runtime-request.respond` with a `decision`: refused in T3's words when the card no longer waits, or when
 	 * the decision is not one the card offered. Delivered to every call of the thread waiting on the same question. */
 	async respond(input: { readonly threadId: string; readonly requestId: string; readonly decision: ApprovalDecision; readonly feedback?: string }): Promise<void> {
-		const waiting = this.#asleep.get(input.requestId);
-		const card = this.#byThread.get(input.threadId)?.find((each) => each.requestId === input.requestId);
-		if (waiting === undefined || waiting.threadId !== input.threadId || card === undefined || this.#hidden(input.requestId)) throw new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
+		const gone = () => new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
+		const shown = this.#byThread.get(input.threadId)?.find((each) => each.requestId === input.requestId);
+		const named = this.#asleep.has(input.requestId) || shown !== undefined ? undefined : await this.#named(input.requestId);
+		const waiting = this.#asleep.get(input.requestId) ?? named?.asleep;
+		const card = shown ?? named?.card;
+		if (waiting === undefined || waiting.threadId !== input.threadId || card === undefined || this.#hidden(input.requestId)) throw gone();
 		// A typed message declines with feedback, which T3 sends whatever the buttons were.
 		const offered = input.decision === "decline" || card.options.some((option) => option.decision === input.decision);
 		if (!offered) throw new CommandError(`The decision ${input.decision} is not one this request offers.`);
 		const feedback = input.feedback?.trim();
 		const value = { decision: input.decision, ...(feedback === undefined || feedback === "" ? {} : { feedback }) };
 		const group = [...this.#asleep].filter(([, each]) => each.threadId === waiting.threadId && each.key === waiting.key);
+		if (named !== undefined) group.push([input.requestId, named.asleep]);
 		let delivered = false;
 		for (const [, each] of group) if ((await this.#deps.harness().signal(each.taskId, Decision, each.key, value, BACKGROUND_CONTEXT)) === "delivered") delivered = true;
-		// The card shown ends with the decision; those that waited behind it were never shown.
+		// The card shown ends with the decision; those that waited behind it were never shown. One answered before this
+		// process read it is shown as answered.
 		for (const [requestId] of group) this.#end(requestId, requestId !== input.requestId ? undefined : delivered ? { status: "resolved", ...value } : { status: "cancelled" });
-		if (!delivered) throw new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
+		if (named !== undefined && delivered) {
+			this.#set(waiting.threadId, { ...card, status: "resolved", ...value, resolvedAt: Date.now() });
+			this.#deps.recompute(waiting.threadId);
+		}
+		if (!delivered) throw gone();
 	}
 
 	/** Does the card wait behind an older one of its thread with the same question, which is shown and answers both? */

@@ -219,6 +219,31 @@ it("keeps a card waiting through a restart: the same request, answered after it"
 	expect(await result("call-1", up.harness)).toBe("ran");
 });
 
+it("takes an answer from a client that still shows the card right after a restart, before the card is shown again", { timeout: 60_000 }, async () => {
+	const { f, bridge, thread, card, result, decided, current, extension, scratch, command } = await setup();
+	f.model.respond(call("call-1"), fauxAssistantMessage("Done."));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "Go.", mode: "start" });
+	const before = await card("pending");
+	expect(await parked(f.harness, thread.head, "call-1")).toBe(true);
+	await bridge.close();
+
+	const up = await restart({ ...f, extensions: [extension] });
+	const again = new Bridge(bridgeConfig({ stateDir: scratch, registry: up.registry }), quietLog, up.threads, f.model.models);
+	current.current = again;
+	again.start();
+	onTestFinished(() => again.close());
+	await again.loaded();
+	// The click lands before the new process has read the card from its call (its task graph is not even watched yet).
+	expect(again.approvals.shown("t")).toBeUndefined();
+	await command({ type: "runtime-request.respond", requestId: before!.request.id, decision: "accept" }, again);
+	await idle(up.harness, thread.head);
+	expect(decided).toEqual([{ decision: "accept" }]);
+	expect(await result("call-1", up.harness)).toBe("ran");
+	expect((await card("resolved", again))!.request).toMatchObject({ id: before!.request.id, decision: "accept" });
+	// Answered once.
+	await expect(command({ type: "runtime-request.respond", requestId: before!.request.id, decision: "decline" }, again)).rejects.toThrow("is no longer pending");
+});
+
 it("forgets a card still waiting when its thread is deleted, and does not open the deleted thread again", { timeout: 60_000 }, async () => {
 	const { f, bridge } = await setup();
 	f.model.respond(call("call-1"), fauxAssistantMessage("Never."));
