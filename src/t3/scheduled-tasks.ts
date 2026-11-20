@@ -244,11 +244,16 @@ export class ScheduledTasks {
 	}
 
 	/** T3's `rescheduleMissedRun`: skip this run and move to the next. With `runError` (0.1.10) the skipped run is the task's
-	 * last run, failed, so the task says why it did not run. */
+	 * last run, failed, so the task says why it did not run. `task` can be a stale copy (the queue read before a skip
+	 * waits on a projection): as T3's conditional UPDATE, a task deleted, run or rescheduled since is left alone, the write
+	 * starts from the task as it is now, and the failure is recorded only over the status `task` saw. */
 	async #reschedule(task: Task, now: Date, reason: string, runError?: string): Promise<void> {
-		const next = nextRunAt(task, now);
+		const current = this.#tasks.get(task.id);
+		if (current === undefined || current.nextRunAt !== task.nextRunAt || current.lastRunAt !== task.lastRunAt) return;
+		const next = nextRunAt(current, now);
 		this.#log?.info("skipping scheduled task run", { taskId: task.id, reason, missedRunAt: task.nextRunAt, rescheduledTo: next });
-		await this.#write({ ...task, nextRunAt: next, ...(runError === undefined ? {} : { lastRunStatus: "failed" as const, lastRunError: runError }), updatedAt: now.toISOString() });
+		const unchanged = current.lastRunStatus === task.lastRunStatus && current.lastRunError === task.lastRunError;
+		await this.#write({ ...current, nextRunAt: next, ...(runError === undefined || !unchanged ? {} : { lastRunStatus: "failed" as const, lastRunError: runError }), updatedAt: now.toISOString() });
 	}
 
 	/** Run `task`: the task as the run left it, and the thread the run went to (null when none started). */

@@ -322,6 +322,43 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(calls.map((call) => call.kind)).toEqual(["queue", "queue", "queue"]);
 	});
 
+	it("a skip waits on the queue read without undoing what happened meanwhile: a deleted task stays deleted, an edit stays", async () => {
+		let release!: () => void;
+		let gate = new Promise<void>((resolve) => (release = resolve));
+		let reading = false;
+		const { tasks, advance } = await fixture({
+			dispatch: {
+				queuedOccurrence: async () => {
+					reading = true;
+					await gate;
+					return "held";
+				},
+			},
+		});
+		const waitReading = async () => {
+			while (!reading) await new Promise((resolve) => setTimeout(resolve, 5));
+			reading = false;
+		};
+		const deleted = (await tasks.upsert(input({ threadId: "t1" as never }))).task;
+		advance(60 * 60_000);
+		let tick = tasks.tick();
+		await waitReading();
+		await tasks.delete({ id: deleted.id });
+		release();
+		await tick;
+		expect(tasks.list().tasks.map((task) => task.id), "the deleted task stays deleted").not.toContain(deleted.id);
+
+		gate = new Promise<void>((resolve) => (release = resolve));
+		const edited = (await tasks.upsert(input({ threadId: "t1" as never, title: "Other" }))).task;
+		advance(60 * 60_000);
+		tick = tasks.tick();
+		await waitReading();
+		await tasks.upsert(input({ id: edited.id, threadId: "t1" as never, title: "Renamed meanwhile" }));
+		release();
+		await tick;
+		expect(tasks.list().tasks.find((task) => task.id === edited.id)).toMatchObject({ title: "Renamed meanwhile", lastRunStatus: "failed", lastRunError: HELD_OCCURRENCE });
+	});
+
 	it("restart: a task left running is recorded failed and rescheduled; the document round-trips", async () => {
 		const { dir, tasks, harness } = await fixture({ dispatch: { launch: () => new Promise<void>(() => {}) } });
 		const task = (await tasks.upsert(input())).task;
