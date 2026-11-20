@@ -111,7 +111,7 @@ export function authorOf(data: unknown): { createdBy: "user" | "agent" | "system
 	return { createdBy, creationSource, ...(typeof value.senderThreadId === "string" ? { senderThreadId: value.senderThreadId } : {}) };
 }
 
-export const attachmentsOf = (entry: EntryRecord): UserAttachment[] => {
+export const attachmentsOf = (entry: Pick<EntryRecord, "data">): UserAttachment[] => {
 	const data = entry.data;
 	if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) return [];
 	const list = (data as { attachments?: unknown }).attachments;

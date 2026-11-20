@@ -64,6 +64,20 @@ describe("queued messages", () => {
 		expect(result.projection.messages.find((message) => message.id === "m-steer")).toMatchObject({ role: "user", text: "change course", runId: "q43" });
 	});
 
+	it("reads a queued message's text without its hidden blocks, and its files as well as its images", () => {
+		const image = { type: "image", id: "i", name: "a.png", mimeType: "image/png", sizeBytes: 1 };
+		const file = { type: "file", id: "f", name: "r.pdf", mimeType: "application/pdf", sizeBytes: 2 };
+		const [item] = readQueuedInputs([
+			{
+				id: 8,
+				mode: "followUp",
+				content: [{ type: "text", text: "read this" }, { type: "text", text: "Attachments:\n- /att/r.pdf", hidden: true }],
+				entry: { kind: "app.user", data: { messageId: "m-8", attachments: [image, file] } },
+			},
+		]);
+		expect(item).toMatchObject({ text: "read this", attachments: [image, file] });
+	});
+
 	it("reads a follow-up's text and preserves image blocks when editing", () => {
 		const [item] = readQueuedInputs([
 			{ id: 7, mode: "followUp", content: "old", entry: { kind: "app.user", data: { messageId: "m-7" } } },

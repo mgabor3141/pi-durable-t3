@@ -1,6 +1,8 @@
 // The queue view over pi-durable's `pi.inbox`: queued follow-up and steer submissions not yet placed are T3's queued runs. The bridge reads
 // the inbox for the projection and mutates the same items for T3's queued-message commands; no separate store.
-import type { UserAttachment } from "./runs.ts";
+import type { ContentBlock } from "./model-types.ts";
+import { attachmentsOf, type UserAttachment } from "./runs.ts";
+import { textOf } from "./thread-search.ts";
 
 /** One queued follow-up or steer, with the inbox fields a queued-message edit or promotion changes. */
 interface QueuedInput {
@@ -14,33 +16,6 @@ interface QueuedInput {
 	/** The entry draft the submission will place, when it carries one. */
 	readonly entry: { readonly kind: string; readonly data?: Record<string, unknown> } | undefined;
 }
-
-const textOf = (content: unknown): string => {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content.flatMap((block): string[] => {
-		if (typeof block !== "object" || block === null) return [];
-		const value = block as { type?: unknown; text?: unknown };
-		return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
-	}).join("");
-};
-
-const attachmentsOf = (entry: { readonly data?: Record<string, unknown> } | undefined): UserAttachment[] => {
-	const list = entry?.data?.["attachments"];
-	if (!Array.isArray(list)) return [];
-	return list.flatMap((item): UserAttachment[] => {
-		if (typeof item !== "object" || item === null) return [];
-		const value = item as Record<string, unknown>;
-		if (value["type"] !== "image" || typeof value["id"] !== "string") return [];
-		return [{
-			type: "image",
-			id: value["id"],
-			name: typeof value["name"] === "string" ? value["name"] : "image",
-			mimeType: typeof value["mimeType"] === "string" ? value["mimeType"] : "application/octet-stream",
-			sizeBytes: typeof value["sizeBytes"] === "number" ? value["sizeBytes"] : 0,
-		}];
-	});
-};
 
 /** Read the inbox items that T3 shows as queued runs: follow-ups and steers, in inbox order. */
 export function readQueuedInputs(items: readonly unknown[] | undefined): QueuedInput[] {
@@ -57,8 +32,8 @@ export function readQueuedInputs(items: readonly unknown[] | undefined): QueuedI
 			submissionId: item.id,
 			mode: item.mode,
 			messageId,
-			text: textOf(item.content),
-			attachments: attachmentsOf(entry),
+			text: textOf(item.content as string | ContentBlock[] | undefined),
+			attachments: attachmentsOf(entry ?? {}),
 			content: item.content,
 			entry: entry === undefined || typeof entry.kind !== "string"
 				? undefined
