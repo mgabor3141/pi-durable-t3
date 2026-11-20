@@ -17,6 +17,7 @@ import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
 import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
+import { until } from "./wait.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
 
@@ -652,6 +653,65 @@ it("a child still working holds its parent: waiting on it, its work in the backg
 	expect(bridge.threadShell("a").pendingBackgroundTasks).toEqual([]);
 	await bridge.sidebar.archive("a");
 	expect(bridge.threadRecord("a")!.archivedAt).toEqual(expect.any(Number));
+});
+
+it("a child whose outcome was not written reads as its summary's ended run after a restart, and does not hold its parent", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled, f } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Adder" }, message: "What is 2+2?" } });
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	const childId = (JSON.parse(parent!.messages.find((message) => message.text.startsWith("Parent saw:"))!.text.slice("Parent saw: ".length)) as { threadId: string }).threadId;
+	// The host stopped before it wrote the child's outcome.
+	await bridge.updateThreadRecord(childId, (record) => {
+		delete record.spawn!.outcome;
+	});
+	await bridge.close();
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-threads-restart-"));
+	const again = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	again.start();
+	await again.loaded();
+	onTestFinished(async () => {
+		await again.close();
+		await rm(scratch, { recursive: true, force: true });
+	});
+	expect(again.threadShell("a").pendingBackgroundTasks).toEqual([]);
+	await again.sidebar.archive("a");
+	expect(again.threadRecord("a")!.archivedAt).toEqual(expect.any(Number));
+	expect((await again.projection("a")).projection.subagents.find((task) => (task.childThreadId as string | null) === childId)).toMatchObject({ status: "completed", result: "4" });
+});
+
+it("a closed parent keeps its children's background work, and shows when it ends", { timeout: 60_000 }, async () => {
+	// The idle release of an unwatched thread, shortened.
+	const realSetTimeout = globalThis.setTimeout;
+	vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => realSetTimeout(fn, ms === 30_000 ? 20 : ms)) as typeof setTimeout);
+	const { bridge, ask, settled, ops } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Background" }, message: "Hold on: bg2", wait: false, notify: false } });
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	const childId = (JSON.parse(parent!.messages.find((message) => message.text.startsWith("Parent saw:"))!.text.slice("Parent saw: ".length)) as { threadId: string }).threadId;
+	await new Promise((resolve) => realSetTimeout(resolve, 500));
+	expect(bridge.threadShell("a").pendingBackgroundTasks).toEqual([expect.objectContaining({ kind: "subagent", childThreadId: childId })]);
+	expect(ops.list({}, { allProjects: true }).threads.find((thread) => thread.threadId === "a")!.status).toBe("waiting");
+	gate("bg2").release();
+	await until("the parent's shell without the finished child", () => bridge.threadShell("a").pendingBackgroundTasks?.length === 0);
+	expect(ops.list({}, { allProjects: true }).threads.find((thread) => thread.threadId === "a")!.status).toBe("completed");
+});
+
+it("archiving a thread leaves a side chat whose child still works active, and archives the others", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled } = await setup();
+	await ask("a", { name: "thread_read", args: { threadId: "a" } });
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	await bridge.forkThread({ sourceThreadId: "a", targetThreadId: "busy-side", sideChat: true });
+	await bridge.forkThread({ sourceThreadId: "a", targetThreadId: "idle-side", sideChat: true });
+	for (const side of ["busy-side", "idle-side"]) {
+		await bridge.sendMessage({ threadId: side, commandId: `hello-${side}`, messageId: `hello-${side}`, text: "hello", mode: "queue" });
+		await settled(side);
+	}
+	await ask("busy-side", { name: "thread_prompt", args: { new: { title: "Side work" }, message: "Hold on: side", wait: false } });
+	await settled("busy-side", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	await bridge.sidebar.archive("a");
+	expect(bridge.threadRecord("a")!.archivedAt).toEqual(expect.any(Number));
+	expect(bridge.threadRecord("idle-side")!.archivedAt).toEqual(expect.any(Number));
+	expect(bridge.threadRecord("busy-side")!.archivedAt).toBeUndefined();
+	gate("side").release();
 });
 
 it("a webhook task's URL is returned by its creation only, and a task is listed by its id (T3 0.1.11)", { timeout: 60_000 }, async () => {

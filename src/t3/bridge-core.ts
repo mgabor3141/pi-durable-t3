@@ -4,7 +4,7 @@ import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import type { Thread, Threads } from "../threads.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { Logger } from "./logging.ts";
-import type { ProjectionResult, ThreadMeta } from "./projection.ts";
+import type { ChildCard, ProjectionResult, ThreadMeta } from "./projection.ts";
 import type { ThreadNavigator } from "./thread-navigator.ts";
 import type { ThreadView } from "./thread-view.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
@@ -33,6 +33,8 @@ export interface BridgeCore {
 	republish(threadId: string): void;
 	/** What a thread's projection is made with besides its transcript. */
 	meta(threadId: string, view: ThreadView | undefined): ThreadMeta;
+	/** The cards of the threads it started (T3's subagent rows), current whether or not any of them is open. */
+	children(threadId: string): readonly ChildCard[];
 	hasThread(threadId: string): boolean;
 	/** T3's text-generation model, when it is one of this host's. */
 	textGenerationModel(): TextGenerationModel | undefined;

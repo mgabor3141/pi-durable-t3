@@ -11,7 +11,7 @@ import type { ThreadTitles } from "./thread-titles.ts";
 /** How often T3 sweeps for threads to settle. */
 const SETTLE_SWEEP_MS = 60_000;
 
-type Core = Pick<BridgeCore, "config" | "log" | "store" | "closed" | "thread" | "threads" | "acquire" | "view" | "shell" | "republish" | "hasThread" | "projection">;
+type Core = Pick<BridgeCore, "config" | "log" | "store" | "closed" | "thread" | "threads" | "acquire" | "view" | "shell" | "republish" | "hasThread" | "projection" | "children">;
 
 export class SidebarState {
 	readonly #bridge: Core;
@@ -96,10 +96,9 @@ export class SidebarState {
 	}
 
 	/** T3's `hasRunningDelegatedTasks` (0.1.11): a child the thread started (`thread_prompt`, T3's app-owned subagent)
-	 * still works. */
-	async #delegating(threadId: string): Promise<boolean> {
-		const { projection } = await this.#bridge.projection(threadId);
-		return projection.subagents.some((task) => task.origin === "app_owned" && task.childThreadId !== null && ["pending", "running", "waiting"].includes(task.status));
+	 * still works, as its card says. */
+	#delegating(threadId: string): boolean {
+		return this.#bridge.children(threadId).some((child) => ["pending", "running", "waiting"].includes(child.status));
 	}
 
 	/** T3's `thread.archive`: out of the sidebar and into the archive; a title being generated is dropped. Refused while a
@@ -107,12 +106,12 @@ export class SidebarState {
 	async archive(threadId: string): Promise<void> {
 		if (!this.#bridge.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		if (this.#bridge.thread(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is already archived.`);
-		if (await this.#delegating(threadId)) throw new CommandError(`Thread ${threadId} has running delegated tasks. Wait for them or cancel them before archiving.`);
+		if (this.#delegating(threadId)) throw new CommandError(`Thread ${threadId} has running delegated tasks. Wait for them or cancel them before archiving.`);
 		const now = Date.now();
 		// Since 0.1.10 its side chats are archived with it (those not archived already), except one whose children still
 		// work, which stays active.
 		const sideChats: string[] = [];
-		for (const sideChat of this.#sideChats(threadId)) if (this.#bridge.thread(sideChat)?.archivedAt === undefined && !(await this.#delegating(sideChat))) sideChats.push(sideChat);
+		for (const sideChat of this.#sideChats(threadId)) if (this.#bridge.thread(sideChat)?.archivedAt === undefined && !this.#delegating(sideChat)) sideChats.push(sideChat);
 		for (const id of [threadId, ...sideChats]) {
 			this.#titles.cancel(id);
 			await this.#bridge.store.updateRecord(id, (record) => {

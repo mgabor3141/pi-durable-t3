@@ -1639,8 +1639,15 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 		// it waiting, not working). Here that is `thread_wait`, or `thread_prompt` waiting for its answer.
 		blockedOnThreadWait: blockedOnThreadWait(activeRun, turnItems),
 		// T3's `derivePendingBackgroundWork`: work the latest run left going, here the children it started without waiting
-		// (`thread_prompt` with `wait: false`) that still work, each a subagent task.
-		pendingBackgroundTasks: derivePendingBackgroundWork({ latestRun: latestRun ?? null, providerThreads: [], turnItems, runs, activeProviderThreadId: null }),
+		// (`thread_prompt` with `wait: false`) that still work, each a subagent task. Read from the cards the thread's
+		// children give it, which a thread that is not open has too, as its card rows.
+		pendingBackgroundTasks: derivePendingBackgroundWork({
+			latestRun: latestRun ?? (keptRun === null ? null : { id: id(keptRun.id), status: keptRun.status as OrchestrationV2Run["status"], ordinal: 0 }),
+			providerThreads: [],
+			turnItems: (meta.children ?? []).map((child) => ({ id: `ti-c${child.threadId}`, type: "subagent" as const, status: child.status, title: child.title, runId: child.parentRunId, prompt: child.prompt, childThreadId: id(child.threadId) })),
+			runs,
+			activeProviderThreadId: null,
+		}),
 		providerInstanceHistory: [id(PROVIDER_INSTANCE_ID)],
 		itemCount: meta.summary === undefined || view !== undefined ? turnItems.length : meta.summary.itemCount,
 		visibleItemCount: meta.summary === undefined || view !== undefined ? visibleTurnItems.length : meta.summary.visibleItemCount,

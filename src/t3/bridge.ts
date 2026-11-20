@@ -109,6 +109,9 @@ type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind
 
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
+/** How a child's run can end (its card's settled statuses, as `Spawn.outcome` keeps them). */
+const ENDED_RUN: ReadonlySet<string> = new Set(["completed", "failed", "interrupted", "cancelled"]);
+
 /**
  * T3's `hasTitleSetBeforeFirstMessage` (0.1.11): a title someone chose before the first message, which that message's
  * `titleSeed` does not replace. A rename always counts. Otherwise a thread starts as "New thread", or with an agent's
@@ -231,6 +234,7 @@ export class Bridge {
 			view: (threadId) => this.#viewOf(threadId),
 			republish: (threadId) => this.#republish(threadId),
 			meta: (threadId, view) => this.#meta(threadId, this.#thread(threadId), view),
+			children: (threadId) => this.#children(threadId),
 			hasThread: (threadId) => this.hasThread(threadId),
 			textGenerationModel: () => this.textGenerationModel(),
 		};
@@ -665,12 +669,19 @@ export class Bridge {
 		if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(shell)) return;
 		this.#shells.set(threadId, shell);
 		this.#emitShell({ kind: "thread.updated", sequence: this.nextSequence(), location: "active", thread: shell });
-		// A child's change is its parent's card: an open parent re-projects.
+		// A child's change is its parent's card and its background work: an open parent re-projects, any other shows its
+		// shell again (re-projecting a released view would read its emptied entries).
 		const parent = this.#thread(threadId)?.spawn === undefined ? undefined : this.#thread(threadId)?.lineage.parentThreadId;
-		if (parent != null) this.#views.get(parent)?.recompute();
+		if (parent != null) {
+			const view = this.#views.get(parent);
+			if (view?.result !== undefined) view.recompute();
+			else this.#publishShell(parent);
+		}
 	}
 
-	/** The cards of the threads this one started: from an open child's live shell, else from the outcome its record keeps. */
+	/** The cards of the threads this one started: from an open child's live shell, else from the outcome its record keeps,
+	 * else from the latest run its summary keeps once that ended (a child whose outcome was not written, say the host
+	 * stopped first), and only then working. */
 	#children(threadId: string): ChildCard[] {
 		const cards: ChildCard[] = [];
 		for (const child of this.#directory) {
@@ -690,6 +701,11 @@ export class Bridge {
 				status = spawn.outcome.status;
 				result = spawn.outcome.result;
 				completedAt = spawn.outcome.completedAt;
+			} else if (child.summary?.latestRun != null && ENDED_RUN.has(child.summary.latestRun.status)) {
+				const run = child.summary.latestRun;
+				status = run.status as ChildCard["status"];
+				completedAt = run.completedAt ?? run.requestedAt;
+				result = child.summary.latestVisibleMessage?.role === "assistant" ? child.summary.latestVisibleMessage.text : null;
 			} else status = "running";
 			cards.push({
 				threadId: child.threadId,
