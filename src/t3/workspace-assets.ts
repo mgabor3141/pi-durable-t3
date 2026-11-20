@@ -22,7 +22,13 @@ const MAX_ASSET_BYTES = 64 * 1024 * 1024;
 
 const WORKSPACE_IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
 const WORKSPACE_BROWSER_EXTENSIONS = new Set([".htm", ".html", ".pdf"]);
-const SUBASSET_EXTENSIONS = new Set([...WORKSPACE_IMAGE_EXTENSIONS, ...WORKSPACE_BROWSER_EXTENSIONS, ".css", ".js", ".mjs", ".otf", ".ttf", ".woff", ".woff2"]);
+/** What an HTML preview may load beside it (T3's `PREVIEW_ASSET_EXTENSIONS`): since 0.1.11 its audio and video too. */
+const SUBASSET_EXTENSIONS = new Set([
+	...WORKSPACE_IMAGE_EXTENSIONS,
+	...WORKSPACE_BROWSER_EXTENSIONS,
+	".m4v", ".mp4", ".ogv", ".webm", ".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav",
+	".css", ".js", ".mjs", ".otf", ".ttf", ".woff", ".woff2",
+]);
 const MEDIA_EXTENSIONS = new Set([...WORKSPACE_IMAGE_EXTENSIONS, ...WORKSPACE_BROWSER_EXTENSIONS, ".mp3", ".wav", ".ogg", ".oga", ".flac", ".aac", ".m4a", ".opus", ".aiff", ".mp4", ".webm", ".mov", ".m4v", ".ogv"]);
 
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -41,6 +47,11 @@ const extensionOf = (path: string): string => {
 	return dot <= 0 ? "" : name.slice(dot);
 };
 const mimeTypeOf = (path: string): string | null => MIME_BY_EXTENSION[extensionOf(path)] ?? null;
+/** A file a preview URL may be minted for: an image, an HTML page or a PDF. */
+const isEntryPath = (path: string): boolean => WORKSPACE_IMAGE_EXTENSIONS.has(extensionOf(path)) || WORKSPACE_BROWSER_EXTENSIONS.has(extensionOf(path));
+/** T3's `isPreviewDependencyPath`: no hidden segment (nor `.` or `..`), and a type an HTML preview may load. */
+const isDependencyPath = (path: string): boolean =>
+	path.length > 0 && !path.includes("\0") && !path.split(/[\\/]/).some((segment) => segment === "" || segment.startsWith(".")) && SUBASSET_EXTENSIONS.has(extensionOf(path));
 
 type Claims =
 	| { readonly version: 1; readonly kind: "workspace-file"; readonly workspaceRoot: string; readonly baseRelativePath: string; readonly expiresAt: number }
@@ -142,9 +153,10 @@ export class WorkspaceAssets {
 			const rootHint = resource._tag === "draft-workspace-file" ? resource.cwd : undefined;
 			const target = await this.#workspaceTarget(resource.path, rootHint);
 			if (target === null) throw new AssetWorkspacePathValidationError({ resource, cause: new Error("Workspace file path must be relative to the project root.") });
-			const extension = extensionOf(target.relativePath);
-			const image = WORKSPACE_IMAGE_EXTENSIONS.has(extension);
-			if (!image && !WORKSPACE_BROWSER_EXTENSIONS.has(extension)) throw new AssetPreviewTypeValidationError({ resource });
+			// The name asked for, and the file it points at (a link's target, which the answer's type follows), are both
+			// previewable, as T3 checks them.
+			if (!isEntryPath(resource.path) || !isEntryPath(target.relativePath)) throw new AssetPreviewTypeValidationError({ resource });
+			const image = WORKSPACE_IMAGE_EXTENSIONS.has(extensionOf(target.relativePath));
 			await this.#targetFile(target, resource);
 			fileName = basename(target.relativePath);
 			claims = image
@@ -221,15 +233,21 @@ export class WorkspaceAssets {
 			const root = await this.#canonical(claims.workspaceRoot);
 			if (root === null) return null;
 			const file = await this.#canonical(join(root, claims.relativePath));
-			return file !== null && inside(root, file) ? file : null;
+			// Checked again here: a link can be repointed after its URL was issued.
+			return file !== null && inside(root, file) && isEntryPath(file) ? file : null;
 		}
-		if (requested.split(/[\\/]/).some((segment) => segment === "" || segment === "." || segment === ".." || segment.startsWith("."))) return null;
-		if (!SUBASSET_EXTENSIONS.has(extensionOf(requested))) return null;
+		if (!isDependencyPath(requested)) return null;
 		const root = await this.#canonical(claims.workspaceRoot);
 		if (root === null) return null;
 		const relativePath = claims.baseRelativePath === "." ? requested : `${claims.baseRelativePath}/${requested}`;
 		const file = await this.#canonical(join(root, relativePath));
-		return file !== null && inside(root, file) ? file : null;
+		if (file === null || !inside(root, file)) return null;
+		// What a link points at must pass the same test (T3 0.1.11), so `style.css -> ../.env` is refused: its path below
+		// the page's folder, or below the root when it leads out of that folder. The page's own folder may be hidden.
+		const base = await this.#canonical(join(root, claims.baseRelativePath));
+		const belowBase = base === null ? ".." : relative(base, file);
+		const dependency = belowBase.startsWith("..") || isAbsolute(belowBase) ? relative(root, file) : belowBase;
+		return isDependencyPath(dependency) ? file : null;
 	}
 }
 
