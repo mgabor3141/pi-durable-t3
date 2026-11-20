@@ -31,7 +31,7 @@ The build on install needs the package's own devDependencies, so `pnpm install -
 That reuses the built package from the store and drops the dev tools. Once published, `pnpm add
 @mgabor3141/pi-durable-t3` needs neither.
 
-The pi packages are `^1.6.0` peers. T3's web app (release **v0.1.9**) ships in the package, and the bridge serves
+The pi packages are `^1.6.0` peers. T3's web app (release **v0.1.11**) ships in the package, and the bridge serves
 it. Node `>=22.19.0`. The public API is [listed below](#public-api); how to use it is
 [here](#attach-it-to-your-own-agent). For a
 whole agent to start from, copy the [example agent](examples/coding-agent/#use-it-as-a-template).
@@ -227,7 +227,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   or timeout is logged while the message goes on without it.
 - `updates` (an `attachT3` option): your host's own versions and how it moves between them (`check`, `install`,
   `restart`, the `command` a person would run, and your host's `name`). T3 then shows the `pi` provider's version
-  as "claw 680f25f, pi 1.5.2, t3 0.1.9" (your name and version, then what the host is built on), says when a newer
+  as "claw 680f25f, pi 1.5.2, t3 0.1.11" (your name and version, then what the host is built on), says when a newer
   one is available, and offers Update, in the web app and the desktop app: on this host the provider is your
   agent, and T3's provider update is the one update button both apps have. `install` resolves before any restart;
   the bridge answers T3 and then calls `restart`. A `note` from `check` is shown where T3 says an update is available.

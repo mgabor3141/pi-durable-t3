@@ -79,7 +79,7 @@ export function assetResponse(mimeType: string): { contentType: string; headers:
 	return { contentType: mimeType, headers };
 }
 
-export const SERVER_VERSION = "0.1.9";
+export const SERVER_VERSION = "0.1.11";
 
 // biome-ignore lint/suspicious/noExplicitAny: wire values
 type Any = any;

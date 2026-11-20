@@ -1367,7 +1367,8 @@ export class Bridge {
 	/** T3's `thread.metadata.update`: `title` renames; `regenerateTitle: true` starts a "regenerate" request (refused with
 	 * no `titleThread` hook), `false` clears it. Fields this host has no backend for are refused. */
 	async updateThreadMetadata(command: { commandId: string; threadId: string; title?: string; regenerateTitle?: boolean } & Record<string, unknown>): Promise<void> {
-		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty"].filter((field) => command[field] !== undefined);
+		// `continuation` (0.1.10) is the message a worktree move queues in the same commit: part of a git change too.
+		const refused = ["linkedPullRequest", "branch", "worktreePath", "expectedBranch", "expectedWorktreePath", "expectedEmpty", "continuation"].filter((field) => command[field] !== undefined);
 		if (refused.length > 0) {
 			throw new CommandError(
 				refused.includes("linkedPullRequest")

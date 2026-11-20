@@ -20,7 +20,7 @@ mkdir -p "$here/node_modules/@t3tools"
 ln -sfn ../../vendor/contracts "$here/node_modules/@t3tools/contracts"
 ln -sfn ../../vendor/shared "$here/node_modules/@t3tools/shared"
 ln -sfn ../../vendor/t3-server "$here/node_modules/@t3tools/t3-server"
-if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/vendor/t3-server/webhookFilter.ts" ] && [ -f "$here/web/index.html" ]; then
+if [ "$(cat "$DONE" 2>/dev/null || true)" = "$T3_TAG" ] && [ -f "$here/vendor/contracts/LICENSE" ] && [ -f "$here/vendor/t3-server/advertisedJsonSchema.ts" ] && [ -f "$here/vendor/t3-server/webhookFilter.ts" ] && [ -f "$here/vendor/t3-server/CommandPolicy.ts" ] && [ -f "$here/web/index.html" ]; then
   echo "setup:t3: already at $T3_TAG"
   exit 0
 fi
@@ -100,8 +100,15 @@ cat > "$here/vendor/t3-server/threadPullRequests.ts" <<'TS'
 export const applyThreadPullRequestLinkUpdate = <T>(thread: T, _link: unknown): T => thread;
 TS
 # T3's per-method WS authorization, as-is: the scope each RPC needs (apps/server/src/auth).
-[ -f "$CACHE/apps/server/src/auth/RpcAuthorization.ts" ] || { echo "setup:t3: apps/server/src/auth/RpcAuthorization.ts missing"; exit 1; }
-cp "$CACHE/apps/server/src/auth/RpcAuthorization.ts" "$here/vendor/t3-server/RpcAuthorization.ts"
+# Since 0.1.11 it asks CommandPolicy whether a message is `/logout` (that needs `providers:manage`); CommandPolicy imports
+# only the contracts, `@t3tools/shared` and Effect, so it sits beside it and the import is rewritten to match.
+authz="$CACHE/apps/server/src/auth/RpcAuthorization.ts"
+[ -f "$authz" ] || { echo "setup:t3: apps/server/src/auth/RpcAuthorization.ts missing"; exit 1; }
+[ -f "$CACHE/apps/server/src/orchestration-v2/CommandPolicy.ts" ] || { echo "setup:t3: apps/server/src/orchestration-v2/CommandPolicy.ts missing"; exit 1; }
+grep -q '^import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";$' "$authz" \
+  || { echo "setup:t3: RpcAuthorization's imports changed; update dev/setup-t3.sh"; exit 1; }
+sed 's#^import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";$#import { isProviderSignOutPrompt } from "./CommandPolicy.ts";#' "$authz" > "$here/vendor/t3-server/RpcAuthorization.ts"
+cp "$CACHE/apps/server/src/orchestration-v2/CommandPolicy.ts" "$here/vendor/t3-server/CommandPolicy.ts"
 # The input schema T3 advertises for an MCP tool (compacted JSON Schema), as-is.
 [ -f "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" ] || { echo "setup:t3: apps/server/src/mcp/advertisedJsonSchema.ts missing"; exit 1; }
 cp "$CACHE/apps/server/src/mcp/advertisedJsonSchema.ts" "$here/vendor/t3-server/advertisedJsonSchema.ts"

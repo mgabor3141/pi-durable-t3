@@ -264,7 +264,11 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 					return { revoked: auth.revokeClientSession(payload.sessionId) };
 				}),
 			)
-			.handle("revokeOtherClients", () => Effect.map(requireScope(AuthAccessWriteScope), (principal) => ({ revokedCount: auth.revokeOtherClientSessions(principal.sessionId) }))),
+			.handle("revokeOtherClients", () => Effect.map(requireScope(AuthAccessWriteScope), (principal) => ({ revokedCount: auth.revokeOtherClientSessions(principal.sessionId) })))
+			// T3 0.1.10's approval of T3 Connect devices. No device reaches this host through T3 Connect, so the access
+			// snapshot names none and T3 shows nothing to approve or revoke.
+			.handleRaw("approveConnectDevice", () => unsupported("auth.approveConnectDevice"))
+			.handleRaw("revokeConnectDevice", () => unsupported("auth.revokeConnectDevice")),
 	);
 
 	const issueTicket = Effect.gen(function* () {
@@ -484,6 +488,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 			.handleRaw("unlink", () => unsupported("connect.unlink"))
 			.handleRaw("preferences", () => unsupported("connect.preferences"))
 			.handleRaw("health", () => unsupported("connect.health"))
+			.handleRaw("liveActivityPreference", () => unsupported("connect.liveActivityPreference"))
 			.handleRaw("t3MintCredential", () => unsupported("connect.t3MintCredential")),
 	);
 	// Voice input (T3 0.1.9): transcription on this machine or through a cloud key. The descriptor advertises neither
