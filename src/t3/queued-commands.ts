@@ -15,7 +15,7 @@
 // they say something about the thread as it is, or need it to be at rest.
 import type { JsonValue } from "@earendil-works/chord/json";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, InboxDoc, LiveDoc, runEndTask, type CompactionInput, type ContextView, type ConversationId, type Extension, type InboxItem, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
+import { CompactionTask, defineExtension, defineTask, GenerationTask, hook, hookTask, InboxDoc, LiveDoc, type CompactionInput, type ContextView, type ConversationId, type Extension, type InboxItem, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
 import { readQueuedInputs } from "./queued.ts";
 import { APP_COMPACT_ENTRY, APP_RELOAD_ENTRY } from "./runs.ts";
 
@@ -146,7 +146,7 @@ export class QueuedCommands {
 						const next = queued.find((item) => item.mode === "steer") ?? queued[0];
 						const command = next === undefined || next.mode !== "followUp" ? undefined : queuedCommand(next.text);
 						if (next === undefined || command === undefined) return undefined;
-						return { tasks: [runEndTask(QueuedCommandsTask, { submissionId: next.submissionId })] };
+						return { tasks: [hookTask(QueuedCommandsTask, { submissionId: next.submissionId })] };
 					},
 				}),
 			],

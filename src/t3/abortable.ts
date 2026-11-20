@@ -2,7 +2,8 @@
 // tells a call to stop through `context.abortSignal` (execute's third argument); a tool that does not listen holds the
 // run, and the user's Stop, until its work ends on its own. This wrapper makes such a call return the moment it is
 // aborted. The work it started is not cancelled by this (a tool that can cancel it should pass the signal on as well);
-// its result is dropped, and a failure it ends with later is ignored.
+// its result is dropped, and a failure it ends with later is ignored. A park the tool returns passes through as the
+// tool's own (the call is the tool, not a `wrapTool` composite), and the tool's `cancel` is kept for a parked call's abort.
 import type { Context } from "@earendil-works/chord/context";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 
