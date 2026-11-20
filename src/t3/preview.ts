@@ -7,8 +7,6 @@
 // device.
 import { randomUUID } from "node:crypto";
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Dialog, type Page } from "playwright-core";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import {
 	FILL_PREVIEW_VIEWPORT,
 	PreviewInvalidUrlError,
@@ -61,14 +59,9 @@ const TAB_SWEEP_MS = 60_000;
 const BROWSER_IDLE_MS = 3 * 24 * 60 * 60_000;
 const MAX_VIEWERS = 4;
 const MAX_URL_LENGTH = 2_048;
-const SAVE_INTERVAL_MS = 30_000;
-const SAVE_DEBOUNCE_MS = 500;
 const PAGE_OPEN_TIMEOUT_MS = 20_000;
 const CDP_TIMEOUT_MS = 5_000;
-const SAVE_TIMEOUT_MS = 10_000;
 const AGENT_OPEN_TIMEOUT_MS = 60_000;
-
-type PreviewStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
 
 export type PreviewViewerSink = {
@@ -289,7 +282,6 @@ class PreviewTab {
 				canGoForward: index < count - 1,
 			});
 			this.touch();
-			this.#owner.scheduleSave();
 		} catch {
 			// A page that vanished between load and title collection has no status to report.
 		}
@@ -334,7 +326,8 @@ class PreviewTab {
 			).catch((error: unknown) => this.#owner.logWarning("could not set the preview user agent", error));
 		}
 		if (initScript !== undefined) {
-			await withTimeout(cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: initScript }), CDP_TIMEOUT_MS, "preview init script").catch(
+			// The script is installed only on a session with the Page domain on: without it the page never runs it.
+			await withTimeout(cdp.send("Page.enable").then(() => cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: initScript })), CDP_TIMEOUT_MS, "preview init script").catch(
 				(error: unknown) => this.#owner.logWarning("could not install the preview init script", error),
 			);
 		}
@@ -463,7 +456,6 @@ class PreviewTab {
 		if (this.controller !== viewer.id) return;
 		try {
 			await this.#dispatch(viewer, message);
-			this.#owner.scheduleSave();
 		} catch {
 			this.#broadcastControl();
 		}
@@ -611,7 +603,6 @@ class PreviewTab {
 		this.page = undefined;
 		this.cdp = undefined;
 		if (page !== undefined) await withTimeout(page.close(), CDP_TIMEOUT_MS, "preview page close").catch(() => undefined);
-		this.#owner.scheduleSave();
 	}
 }
 
@@ -676,9 +667,6 @@ export class PreviewSessions {
 	#browserOpening: Promise<Browser> | undefined;
 	#context: BrowserContext | undefined;
 	#contextOpening: Promise<BrowserContext> | undefined;
-	#saveTimer: NodeJS.Timeout | undefined;
-	#saveDebounce: NodeJS.Timeout | undefined;
-	#saveQueue: Promise<void> = Promise.resolve();
 	#sweepTimer: NodeJS.Timeout | undefined;
 	#browserIdleTimer: NodeJS.Timeout | undefined;
 	#recovering = false;
@@ -711,7 +699,6 @@ export class PreviewSessions {
 			browser.on("disconnected", () => {
 				if (this.#browser === browser) this.#browser = undefined;
 				this.#context = undefined;
-				this.#stopSaveTimers();
 				for (const tab of [...this.#tabs.values()]) void this.closeTab(tab, "browser disconnected");
 			});
 			return browser;
@@ -721,97 +708,27 @@ export class PreviewSessions {
 		return this.#browserOpening;
 	}
 
-	/** One context for all preview tabs: cookies and localStorage are shared and persisted by the profile. */
+	/**
+	 * One context for all preview tabs: the browser's own (Playwright gives a browser reached over CDP its default context).
+	 * Its cookies, localStorage and cache are the browser profile's: with a profile directory the deployment mounts
+	 * (Browserless), they outlive the browser process; the bridge keeps no copy of its own.
+	 */
 	async context(): Promise<BrowserContext> {
 		if (this.#context !== undefined && !this.#context.isClosed()) return this.#context;
-		this.#contextOpening ??= this.#createContext().finally(() => {
+		this.#contextOpening ??= this.#openContext().finally(() => {
 			this.#contextOpening = undefined;
 		});
 		return this.#contextOpening;
 	}
 
-	async #createContext(): Promise<BrowserContext> {
-		const browser = await this.browser();
-		const storageState = await this.#readState();
-		// The browser's own profile context, when the deployment gave it one (Browserless with a mounted profile
-		// directory): adopting it is what lets the cache, history and cookies outlive a browser process, where a
-		// context we create ourselves lives only as long as this one. Cookies from the storageState are added to it;
-		// an existing context cannot take a localStorage export, so origins keep what the profile holds.
-		const [shared] = browser.contexts();
-		const context = shared ?? await withTimeout(browser.newContext({
-			viewport: DEFAULT_VIEWPORT,
-			...(storageState === undefined ? {} : { storageState }),
-		}), PAGE_OPEN_TIMEOUT_MS, "preview context create");
-		if (shared !== undefined && storageState !== undefined && storageState.cookies.length > 0) {
-			await withTimeout(shared.addCookies(storageState.cookies), PAGE_OPEN_TIMEOUT_MS, "preview profile cookies").catch((error: unknown) =>
-				this.#log.warn("could not load the browser profile's cookies", { error: String(error) }),
-			);
-		}
+	async #openContext(): Promise<BrowserContext> {
+		const [context] = (await this.browser()).contexts();
+		if (context === undefined) throw new Error("The preview browser has no default context (is the endpoint a Chromium CDP endpoint?)");
 		this.#context = context;
 		context.on("close", () => {
 			if (this.#context === context) this.#context = undefined;
-			this.#stopSaveTimers();
 		});
-		this.#startSaveTimers();
 		return context;
-	}
-
-	async #readState(): Promise<PreviewStorageState | undefined> {
-		const path = this.#config.storageStatePath;
-		if (path === undefined) return undefined;
-		try {
-			return JSON.parse(await readFile(path, "utf8")) as PreviewStorageState;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				this.#log.warn("could not read the browser profile", { path, error: (error as Error).message });
-			}
-			return undefined;
-		}
-	}
-
-	/** Schedule a profile write after a page change; bursts collapse into one write. */
-	scheduleSave(): void {
-		if (this.#config.storageStatePath === undefined || this.#context === undefined) return;
-		if (this.#saveDebounce !== undefined) clearTimeout(this.#saveDebounce);
-		this.#saveDebounce = setTimeout(() => void this.saveState(), SAVE_DEBOUNCE_MS);
-		this.#saveDebounce.unref();
-	}
-
-	/** Write cookies and origins' localStorage. A no-op without a storageState path or an open context. */
-	saveState(): Promise<void> {
-		const path = this.#config.storageStatePath;
-		const context = this.#context;
-		if (path === undefined || context === undefined || context.isClosed()) return Promise.resolve();
-		this.#saveQueue = this.#saveQueue
-			.catch(() => undefined)
-			.then(async () => {
-				const state = await withTimeout(context.storageState(), SAVE_TIMEOUT_MS, "browser profile save");
-				await mkdir(dirname(path), { recursive: true });
-				const temporary = `${path}.tmp`;
-				await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
-				await rename(temporary, path);
-			})
-			.catch((error: unknown) => {
-				const message = (error as Error).message || String(error);
-				this.#log.warn("could not save the browser profile", { path, error: message });
-				// A crashed target leaves the context unusable; keeping it makes every later page open wait forever.
-				if (/target crashed|detached|crashed|timed out/i.test(message)) void this.#discardBrowser("browser profile context failed");
-			});
-		return this.#saveQueue;
-	}
-
-	#startSaveTimers(): void {
-		if (this.#config.storageStatePath === undefined) return;
-		this.#stopSaveTimers();
-		this.#saveTimer = setInterval(() => void this.saveState(), SAVE_INTERVAL_MS);
-		this.#saveTimer.unref();
-	}
-
-	#stopSaveTimers(): void {
-		if (this.#saveTimer !== undefined) clearInterval(this.#saveTimer);
-		if (this.#saveDebounce !== undefined) clearTimeout(this.#saveDebounce);
-		this.#saveTimer = undefined;
-		this.#saveDebounce = undefined;
 	}
 
 	#publish(draft: EventDraft): void {
@@ -857,8 +774,6 @@ export class PreviewSessions {
 		if (this.#recovering) return;
 		this.#recovering = true;
 		this.#clearBrowserIdle();
-		this.#stopSaveTimers();
-		const context = this.#context;
 		const browser = this.#browser;
 		this.#context = undefined;
 		this.#browser = undefined;
@@ -866,7 +781,6 @@ export class PreviewSessions {
 			await Promise.all([...this.#tabs.values()].map((tab) =>
 				withTimeout(this.closeTab(tab, reason), PAGE_OPEN_TIMEOUT_MS, "preview tab close").catch(() => undefined),
 			));
-			if (context !== undefined) await withTimeout(context.close(), CDP_TIMEOUT_MS, "preview context close").catch(() => undefined);
 			if (browser !== undefined) await withTimeout(browser.close(), CDP_TIMEOUT_MS, "preview browser close").catch(() => undefined);
 		} finally {
 			this.#recovering = false;
@@ -937,11 +851,7 @@ export class PreviewSessions {
 	async #closeIdleBrowser(): Promise<void> {
 		this.#browserIdleTimer = undefined;
 		if (this.#tabs.size > 0) return;
-		await this.saveState();
-		this.#stopSaveTimers();
-		const context = this.#context;
 		this.#context = undefined;
-		if (context !== undefined) await withTimeout(context.close(), CDP_TIMEOUT_MS, "preview context close").catch(() => undefined);
 		const browser = this.#browser;
 		this.#browser = undefined;
 		if (browser !== undefined) await withTimeout(browser.close(), CDP_TIMEOUT_MS, "preview browser close").catch(() => undefined);
@@ -1001,7 +911,6 @@ export class PreviewSessions {
 			if (input.hardReload === true) await tab.page.reload({ waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
 			if (input.clear === "cookies" && tab.context !== undefined) await tab.context.clearCookies().catch(() => undefined);
 			else if (input.clear === "cache") await tab.cdp?.send("Network.clearBrowserCache").catch(() => undefined);
-			this.scheduleSave();
 		}
 		await tab.applySetting();
 		return tab.snapshot;
@@ -1038,23 +947,20 @@ export class PreviewSessions {
 		void this.#clearProfile();
 	}
 
+	/** T3's "clear browser data": the profile's cookies, and its cache through an open tab (the cache is the browser's). */
 	async #clearProfile(): Promise<void> {
-		const path = this.#config.storageStatePath;
-		if (path !== undefined) await rm(path, { force: true }).catch(() => undefined);
 		await this.#context?.clearCookies().catch(() => undefined);
+		const tab = [...this.#tabs.values()].find((each) => each.cdp !== undefined);
+		await tab?.cdp?.send("Network.clearBrowserCache").catch(() => undefined);
 	}
 
 	async closeAll(): Promise<void> {
 		if (this.#sweepTimer !== undefined) clearInterval(this.#sweepTimer);
 		this.#sweepTimer = undefined;
 		this.#clearBrowserIdle();
-		await this.saveState();
 		await Promise.all([...this.#tabs.values()].map((tab) => this.closeTab(tab)));
 		this.#clearBrowserIdle();
-		this.#stopSaveTimers();
-		const context = this.#context;
 		this.#context = undefined;
-		await context?.close().catch(() => undefined);
 		const browser = this.#browser;
 		this.#browser = undefined;
 		await browser?.close().catch(() => undefined);
