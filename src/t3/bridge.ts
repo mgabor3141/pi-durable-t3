@@ -761,8 +761,11 @@ export class Bridge {
 		return memoryReport([...this.#views.values()].map((view) => view.memory()), this.#store.searchChars());
 	}
 
-	/** Keep a thread open while `hold` runs or a subscriber exists. */
+	/** Keep a thread open while `hold` runs or a subscriber exists. A thread the host does not know is refused here, for
+	 * every write path: its view would only wait for a head that never comes. Until the thread list has loaded, a write
+	 * waits for it instead (a client that reconnects to a host still starting). */
 	acquire(threadId: string): () => void {
+		if (this.#directoryBooted && !this.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		return this.#viewOf(threadId).hold();
 	}
 

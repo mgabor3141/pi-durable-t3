@@ -91,3 +91,27 @@ it("20 bogus probes leave the shell's project list byte-identical — no phantom
 		await close();
 	}
 }, 30_000);
+
+it("a write to a thread the host does not know is refused at once, and no view is kept for it", async () => {
+	const { bridge, close } = await openBridge();
+	try {
+		await bridge.loaded();
+		const threadId = randomUUID();
+		for (const run of [
+			() => bridge.sendMessage({ threadId, commandId: randomUUID(), messageId: "m", text: "hi", mode: "start" }),
+			() => bridge.interrupt(threadId),
+			() => bridge.applySelection(threadId, { model: "faux/faux-1" }),
+			() => bridge.rollback({ threadId, commandId: randomUUID(), checkpointId: "c", restoreFiles: false }),
+		]) {
+			const started = Date.now();
+			const failure = await run().then(() => undefined, (error: unknown) => error);
+			expect(failure).toBeInstanceOf(CommandError);
+			expect((failure as Error).message).toMatch(/Unknown thread/);
+			expect(Date.now() - started).toBeLessThan(1000);
+		}
+		expect(bridge.memory()).toMatchObject({ views: 0 });
+	}
+	finally {
+		await close();
+	}
+}, 120_000);
