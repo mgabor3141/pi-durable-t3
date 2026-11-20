@@ -81,6 +81,6 @@ describe("a removal is durable (F1)", () => {
 		// Leave no live run behind (the late prompt's stream): abort it, as any owner of a conversation may.
 		const late = await harness.conversation(t.head as ConversationId, BACKGROUND_CONTEXT);
 		await late!.abort(BACKGROUND_CONTEXT);
-		await Promise.allSettled([idle(harness, t.head), sleep(5000)]);
+		await Promise.race([idle(harness, t.head), sleep(5000)]);
 	}, 60_000);
 });
