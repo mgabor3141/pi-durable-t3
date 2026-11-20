@@ -128,6 +128,9 @@ const isReportRun = (run: OrchestrationV2Run) => (run.userMessageId as string).s
  * - A report's run still working: wait (`undefined`).
  * - A report's run that ended other than completed: the thread stays active.
  * - Otherwise settle, naming the latest run, so a run that starts before the settle lands refuses it.
+ * T3 0.1.11 also passes over a queued run that Send now cancelled when it moved its message into the asking run, and a
+ * report's run cancelled before it started. Neither leaves a run in this projection: a promoted message is placed in
+ * the run it steers, and a report taken back leaves the queue with its submission.
  */
 export function settleVerdict(projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">, ordinal: number): { latestRunId: string } | "leave" | undefined {
 	const following = projection.runs.filter((candidate) => candidate.ordinal > ordinal);
