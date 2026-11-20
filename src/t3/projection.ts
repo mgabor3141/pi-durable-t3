@@ -473,7 +473,7 @@ function pushBaseline(b: Build): void {
 // A compaction is the context head. Its card is emitted where the cut is: after the history it replaces and
 // before the kept entries. It is normally runless; a manual `/compact` command owns it, so T3 can fold the command
 // and the card into one compaction row rather than showing both.
-function pushCompaction(b: Build, entry: EntryRecord, ordinal: number, runId: string | null = null): void {
+function pushCompaction(b: Build, entry: EntryRecord, runId: string | null = null): void {
 	const { meta, threadId, providerThreadId, compactionTokens, turnItems } = b;
 	const message = firstMessage(entry);
 	const at = message?.timestamp ?? meta.createdAt;
@@ -488,7 +488,8 @@ function pushCompaction(b: Build, entry: EntryRecord, ordinal: number, runId: st
 		providerTurnId: null,
 		nativeItemRef: null,
 		parentItemId: null,
-		ordinal,
+		// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
+		ordinal: 0,
 		status: "completed",
 		title: "Context compacted",
 		startedAt: time(at),
@@ -503,15 +504,15 @@ function pushCompaction(b: Build, entry: EntryRecord, ordinal: number, runId: st
 }
 
 // Where each answered command stands (`ShownExchange`): the latest run a user's message began, begun by then.
-function shownAnswer(b: Build, shown: ShownExchange, ordinal: number): void {
+function shownAnswer(b: Build, shown: ShownExchange): void {
 	const { threadId, providerThreadId, messages, turnItems, shownIds } = b;
 	const answerId = `${SHOWN_MESSAGE}${shown.messageId}`;
 	const at = shown.at + 1;
 	if (shown.htmlRender !== undefined) {
 		const reference = shown.htmlRender;
-		turnItems.push({ id: id(`ti-shown-h${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: HTML_RENDER_TOOL_NAME, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "dynamic_tool", toolName: HTML_RENDER_TOOL_NAME, input: { title: reference.title, height: reference.height }, output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }) } as Any);
+		turnItems.push({ id: id(`ti-shown-h${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal: 0, status: "completed", title: HTML_RENDER_TOOL_NAME, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "dynamic_tool", toolName: HTML_RENDER_TOOL_NAME, input: { title: reference.title, height: reference.height }, output: JSON.stringify({ htmlRender: reference, message: HTML_RENDER_MESSAGE }) } as Any);
 	}
-	turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
+	turnItems.push({ id: id(`ti-shown-a${shown.messageId}`), threadId: id(threadId), runId: null, nodeId: null, providerThreadId: id(providerThreadId), providerTurnId: null, nativeItemRef: null, parentItemId: null, ordinal: 0, status: "completed", title: null, startedAt: time(at), completedAt: time(at), updatedAt: time(at), type: "assistant_message", messageId: id(answerId), text: shown.answer, streaming: false } as Any);
 	messages.push({ createdBy: "system", creationSource: "server", id: id(answerId), threadId: id(threadId), runId: null, nodeId: null, role: "assistant", text: shown.answer, attachments: [], streaming: false, createdAt: time(at), updatedAt: time(at) } as Any);
 	shownIds.add(answerId);
 	// T3 takes a sent message as received when the thread's run or its update time changes: no run does here.
@@ -526,10 +527,9 @@ const shownDraft = (b: Build, after: number): RunDraft | undefined =>
 /** One run: its rows, then its turn items in the order they happened. A draft that is only a compaction card has neither. */
 function projectRun(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, index: number): void {
 	const { drafts } = b;
-	const ordinal = index + 1;
 	const previous = index === 0 ? undefined : drafts[index - 1];
 	const compactCardRunId = previous !== undefined && isCompactCommandEntry(previous.userEntry) ? `r${previous.userEntry.id}` : null;
-	if (draft.card !== undefined) pushCompaction(b, draft.card, ordinal, compactCardRunId);
+	if (draft.card !== undefined) pushCompaction(b, draft.card, compactCardRunId);
 	if (draft.markerOnly === true) return;
 	projectRunItems(b, shownIn, draft, projectRunRows(b, draft, index));
 }
@@ -584,10 +584,9 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 			? { instanceId: PROVIDER_INSTANCE_ID, model: `${m.provider}/${m.model}`, ...(m.thinkingLevel === undefined ? {} : { options: thinkingOption(m.thinkingLevel) }) }
 			: modelSelection;
 	})();
-	const settled = !running;
 	// A synthetic run has no user turn to rewind to, so it carries no checkpoint (undo.ts maps checkpoints to prompts).
 	// History runs do: a rewind into the transcript above a compaction is a real rewind, not display-only.
-	const checkpointId = settled && !synthetic ? `cp${u.id}` : null;
+	const checkpointId = !running && !synthetic ? `cp${u.id}` : null;
 	runs.push({
 		id: id(runId),
 		threadId: id(threadId),
@@ -605,7 +604,6 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 		checkpointId: checkpointId === null ? null : id(checkpointId),
 		contextHandoffId: null,
 	});
-	const attemptStatus = status === "running" ? "running" : status === "failed" ? "failed" : status;
 	attempts.push({
 		id: id(attemptId),
 		runId: id(runId),
@@ -615,7 +613,7 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 		providerThreadId: id(providerThreadId),
 		providerTurnId: id(turnId),
 		reason: "initial",
-		status: attemptStatus as OrchestrationV2RunAttempt["status"],
+		status: status as OrchestrationV2RunAttempt["status"],
 		startedAt: time(requestedAt),
 		completedAt: completedMs === null ? null : time(completedMs),
 	});
@@ -643,7 +641,7 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 		runAttemptId: id(attemptId),
 		nativeTurnRef: null,
 		ordinal,
-		status: attemptStatus as OrchestrationV2ProviderTurn["status"],
+		status: status as OrchestrationV2ProviderTurn["status"],
 		startedAt: time(requestedAt),
 		completedAt: completedMs === null ? null : time(completedMs),
 		...(usage === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0 ? {} : { tokenUsage: {
@@ -692,13 +690,13 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 	// A synthetic run has no user turn to rewind to, but its last entry is still a valid fork point.
 	forkRuns.push(projectedRun);
 	if (!synthetic) projectedRuns.push(projectedRun);
-	return { ordinal, synthetic, u, runId, nodeId, turnId, requestedAt, running };
+	return { synthetic, u, runId, nodeId, turnId, requestedAt, running };
 }
 
 /** A run's turn items: the user's message, each response with its tool calls, failed requests, child cards, steers, and what is still streaming. */
 function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, r: ReturnType<typeof projectRunRows>): void {
 	const { meta, threadId, providerThreadId, live, nodes, messages, turnItems, shownIds, subagents, toolImages, runtimeRequests } = b;
-	const { ordinal, synthetic, u, runId, nodeId, turnId, requestedAt, running } = r;
+	const { synthetic, u, runId, nodeId, turnId, requestedAt, running } = r;
 	const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
 		id: id(itemId),
 		threadId: id(threadId),
@@ -708,7 +706,8 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		providerTurnId: id(turnId),
 		nativeItemRef: null,
 		parentItemId: null,
-		ordinal,
+		// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
+		ordinal: 0,
 		status: itemStatus,
 		title: null,
 		startedAt: time(at),
@@ -1095,7 +1094,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				messages.push({ ...author, id: id(shown.messageId), threadId: id(threadId), runId: id(runId), nodeId: id(nodeId), role: "user", text: shown.command, attachments: [], streaming: false, createdAt: time(shown.at), updatedAt: time(shown.at) });
 				shownIds.add(shown.messageId);
 			}
-			shownAnswer(b, shown, ordinal);
+			shownAnswer(b, shown);
 		}
 	};
 	// A system prompt that changed while the thread went on (`systemPromptUpdates`): a row among the run's work, where
@@ -1131,7 +1130,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
 		if (isCompactionEntry(step)) {
 			pushCards(firstMessage(step)?.timestamp ?? requestedAt);
-			pushCompaction(b, step, ordinal, runId);
+			pushCompaction(b, step, runId);
 			return;
 		}
 		// A published page: T3's html_render tool item, which its timeline shows inline (`htmlRenderFromToolItem`).
@@ -1236,7 +1235,6 @@ function projectLiveCompactions(b: Build): void {
 		const last = draft?.steps.findLast((step) => firstMessage(step)?.timestamp !== undefined) ?? draft?.userEntry;
 		return (last === undefined ? undefined : firstMessage(last)?.timestamp) ?? meta.updatedAt;
 	};
-	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
 	for (const compaction of liveCompactions) {
 		const manual = compaction === manualCompaction;
 		const runId = manual ? manualCompactionRunId : compaction.blocking ? agentRunId : null;
@@ -1252,7 +1250,8 @@ function projectLiveCompactions(b: Build): void {
 			providerTurnId: null,
 			nativeItemRef: null,
 			parentItemId: null,
-			ordinal: liveOrdinal++,
+			// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
+			ordinal: 0,
 			status: "running",
 			title: "Compacting context",
 			startedAt: time(startedAt),
@@ -1390,8 +1389,8 @@ function projectRows(b: Build) {
 			nativeThreadRef: null,
 			nativeConversationHeadRef: null,
 			status: busy ? "active" : "idle",
-			firstRunOrdinal: drafts.length > 0 ? 1 : null,
-			lastRunOrdinal: drafts.length > 0 ? drafts.length : null,
+			firstRunOrdinal: 1,
+			lastRunOrdinal: drafts.length,
 			handoffIds: [],
 			forkedFrom: null,
 			pendingBackgroundTasks: [],
@@ -1600,7 +1599,7 @@ export function projectThread(
 	drafts.forEach((draft, index) => projectRun(b, shownIn, draft, index));
 	projectCompactedSize(b);
 	// Answers with no run to stand by: an undo's, on a thread it emptied.
-	for (const shown of shownAlone) shownAnswer(b, shown, drafts.length + 1);
+	for (const shown of shownAlone) shownAnswer(b, shown);
 
 	markModelSwitches(b.runs, b.turnItems, drafts);
 	projectLiveCompactions(b);
