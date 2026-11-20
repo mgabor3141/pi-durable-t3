@@ -2,6 +2,7 @@
 // ServerConfig shows is derived from a project; with no projects it used to read `projects[0]!.path` and throw, putting a
 // paired client into a reconnect loop (B4). The derivation is the contracts-free `serverCwd`, tested here directly.
 import { describe, expect, it } from "vitest";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { serverCwd, type BridgeConfig } from "../src/t3/config.ts";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { standaloneRegistry } from "./test-registry.ts";
@@ -9,7 +10,7 @@ import { standaloneRegistry } from "./test-registry.ts";
 const ROOT = "/tmp/pi-durable-t3-t3-config";
 
 async function bridgeConfig(projects: readonly { id: string; cwd: string }[]): Promise<BridgeConfig> {
-	return { host: "127.0.0.1", port: 4903, label: "pi", stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], staticDir: undefined, settings: ServerSettingsStore.open(ROOT), registry: await standaloneRegistry(projects) };
+	return { host: "127.0.0.1", port: 4903, label: "pi", env: new NodeExecutionEnv({ cwd: "/" }), stateDir: ROOT, scratchDir: undefined, tokenTtlSeconds: 90 * 86_400, corsOrigins: [], staticDir: undefined, settings: ServerSettingsStore.open(ROOT), registry: await standaloneRegistry(projects) };
 }
 
 describe("serverCwd (empty-environment fallback, B4)", () => {

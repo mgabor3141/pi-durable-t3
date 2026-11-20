@@ -340,22 +340,16 @@ export function makeRpcLayer(deps: RpcDeps) {
 				() => bridge.ensureScratch(),
 				(message) => new OrchestrationDispatchCommandError({ message }),
 			),
-		// T3's file chips: a reply's mentioned paths, as metadata read through the environment (`browse.ts`). A host
-		// without an environment answers every path as unknown (`null`), as T3 answers one it cannot read.
+		// T3's file chips: a reply's mentioned paths, as metadata read through the environment (`browse.ts`).
 		"filesystem.getMetadata": (input) =>
 			Effect.promise(async () => {
-				const env = deps.bridge.config.env;
-				const entries = env === undefined ? input.paths.map(() => null) : await filesystemMetadata(env, input.paths, deps.bridge.config.context ?? BACKGROUND_CONTEXT);
+				const entries = await filesystemMetadata(deps.bridge.config.env, input.paths, deps.bridge.config.context ?? BACKGROUND_CONTEXT);
 				return { entries };
 			}),
 		// The read-only directory listing that feeds the "Add project" picker; T3's own semantics, this host's trust model.
 		"filesystem.browse": (input) =>
 			Effect.tryPromise({
-				try: () => {
-					const env = deps.bridge.config.env;
-					if (env === undefined) throw new Error("This host has no execution environment.");
-					return browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }), env, context: deps.bridge.config.context ?? BACKGROUND_CONTEXT });
-				},
+				try: () => browseFilesystem({ partialPath: input.partialPath, ...(input.cwd === undefined ? {} : { cwd: input.cwd }), env: deps.bridge.config.env, context: deps.bridge.config.context ?? BACKGROUND_CONTEXT }),
 				catch: (error) =>
 					new FilesystemBrowseError({
 						partialPath: input.partialPath,

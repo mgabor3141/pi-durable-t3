@@ -80,7 +80,7 @@ export function startFacet(deps: {
 	// Attachments live in the environment (`attachmentsDir`); their URLs are signed with the auth store's durable key.
 	// Without a dir, the host takes none.
 	const attachments =
-		config.attachmentsDir === undefined || config.env === undefined
+		config.attachmentsDir === undefined
 			? undefined
 			: new Attachments({ stateDir: config.stateDir, signer: auth, env: config.env, dir: config.attachmentsDir, context: config.context ?? BACKGROUND_CONTEXT });
 
@@ -112,7 +112,6 @@ export function startFacet(deps: {
 		});
 		httpServer.once("error", (error) => reject(error));
 	});
-	if (config.env === undefined) throw new Error("pi-durable-t3: attachT3 requires an execution environment.");
 	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId), { onSaved: (threadId) => bridge.sidebar.wakeForSavedSecret(threadId) });
 	// Threads that drive threads (`thread_prompt` and the rest); its followers deliver the reports the last process owed.
 	const orchestration = new Orchestration(bridge, log);
@@ -150,7 +149,7 @@ export function startFacet(deps: {
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.
-			if (attachments === undefined || config.env === undefined) throw new Error("htmlTools needs attachT3's attachmentsDir (and env): published pages are kept there.");
+			if (attachments === undefined) throw new Error("htmlTools needs attachT3's attachmentsDir: published pages are kept there.");
 			return htmlToolsExtension(
 				{
 					threads: deps.threads,

@@ -3,11 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { checkImageData, imageRefusal } from "./image-check.ts";
 import { expandEnvHome } from "./browse.ts";
-import { mkdir } from "node:fs/promises";
-import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DateTime } from "effect";
-import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type {
 	OrchestrationMessageContext,
 	OrchestrationProjectShell,
@@ -335,9 +332,7 @@ export class Bridge {
 	async ensureScratch(): Promise<{ readonly projectId: ProjectId }> {
 		const root = this.config.scratchDir;
 		if (root === undefined) throw new CommandError("This host has no Scratch folder (no scratch dir is configured).");
-		const env = this.config.env;
-		if (env === undefined) throw new CommandError("This host has no execution environment.");
-		const { projectId } = await ensureScratchProject(this.config.registry, root, env, this.config.context ?? BACKGROUND_CONTEXT);
+		const { projectId } = await ensureScratchProject(this.config.registry, root, this.config.env, this.config.context ?? BACKGROUND_CONTEXT);
 		return { projectId: ProjectId.make(projectId) };
 	}
 
@@ -447,14 +442,12 @@ export class Bridge {
 	}
 
 	/**
-	 * A workspace root as T3's `normalizeWorkspaceRoot` reads it: trimmed, `~` expanded, resolved. With an execution
-	 * environment `~` is that environment's home (the picker's own `~/`), not this host's.
+	 * A workspace root as T3's `normalizeWorkspaceRoot` reads it: trimmed, `~` expanded, resolved. `~` is the execution
+	 * environment's home (the picker's own `~/`), not this host's.
 	 */
 	async #workspaceRoot(path: string): Promise<string> {
-		const env = this.config.env;
 		const trimmed = path.trim();
-		if (env === undefined) return this.config.registry.resolvePath(trimmed);
-		const expanded = await expandEnvHome(env, trimmed, this.config.context ?? BACKGROUND_CONTEXT);
+		const expanded = await expandEnvHome(this.config.env, trimmed, this.config.context ?? BACKGROUND_CONTEXT);
 		if (expanded === undefined) throw new CommandError(`Cannot expand ${trimmed}: the environment did not say its home directory.`);
 		return this.config.registry.resolvePath(expanded);
 	}
@@ -465,26 +458,6 @@ export class Bridge {
 	 */
 	async #ensureWorkspaceRoot(path: string, createIfMissing: boolean): Promise<void> {
 		const env = this.config.env;
-		if (env !== undefined) return this.#ensureWorkspaceRootInEnv(env, path, createIfMissing);
-		const info = await stat(path).catch((error: NodeJS.ErrnoException) => {
-			if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
-			throw new ProjectWorkspaceNotCreatable(path, error);
-		});
-		if (info === undefined) {
-			if (!createIfMissing) throw new ProjectWorkspaceMissing(path);
-			try {
-				await mkdir(path, { recursive: true });
-			}
-			catch (error) {
-				throw new ProjectWorkspaceNotCreatable(path, error);
-			}
-			return;
-		}
-		if (!info.isDirectory()) throw new ProjectWorkspaceNotDirectory(path);
-	}
-
-	/** Validate (and when asked, create) a workspace root through the execution environment. */
-	async #ensureWorkspaceRootInEnv(env: ExecutionEnv, path: string, createIfMissing: boolean): Promise<void> {
 		const context = this.config.context ?? BACKGROUND_CONTEXT;
 		const canonical = await env.canonicalPath(path, context);
 		const found = canonical.ok ? await env.fileInfo(canonical.value, context) : canonical;
@@ -1074,9 +1047,7 @@ export class Bridge {
 		const scratchRoot = this.config.scratchDir;
 		let cwd: string | undefined;
 		if (options.launchText !== undefined && scratchRoot !== undefined && isScratchRoot(project.cwd, scratchRoot)) {
-			const env = this.config.env;
-			if (env === undefined) throw new CommandError("Threads without a project require an execution environment.");
-			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, env, this.config.context ?? BACKGROUND_CONTEXT);
+			cwd = await claimScratchThreadFolder(scratchRoot, id, options.launchText, this.config.env, this.config.context ?? BACKGROUND_CONTEXT);
 		}
 		await this.#store.create({
 			threadId: id,

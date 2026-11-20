@@ -184,7 +184,7 @@ export async function viewOf(harness: Harness, id: number): Promise<Conversation
  * Anything else a test is about (`messageContext`, `undo`, `scratchDir`) is passed along as it is.
  */
 export function bridgeConfig(options: Pick<BridgeConfig, "stateDir" | "registry"> & Partial<BridgeConfig>): BridgeConfig {
-	return { host: "127.0.0.1", port: 0, label: "t", scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(options.stateDir), corsOrigins: [], staticDir: undefined, ...options };
+	return { host: "127.0.0.1", port: 0, label: "t", env: new NodeExecutionEnv({ cwd: "/" }), scratchDir: undefined, tokenTtlSeconds: 60, settings: ServerSettingsStore.open(options.stateDir), corsOrigins: [], staticDir: undefined, ...options };
 }
 
 /** A log that says nothing. */

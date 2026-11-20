@@ -338,7 +338,7 @@ type Deps = {
 	readonly log: Logger;
 	/** Where pages are kept, and what they are written through; without them `/tree` is refused. */
 	readonly attachments: Attachments | undefined;
-	readonly env: ExecutionEnv | undefined;
+	readonly env: ExecutionEnv;
 	/** Show the command's answer in the thread (`ThreadCommands.show`): the same message again replaces it. */
 	show(threadId: string, said: Pick<ShownExchange, "messageId" | "answer" | "command" | "htmlRender">): void;
 	/** After the thread moved: resolves once its view shows `head`. */
@@ -382,7 +382,7 @@ export class ThreadNavigator {
 	/** Write the view's page and show it in the thread, in place of the one before. */
 	async #publish(token: string, view: View, notice?: string): Promise<void> {
 		const { attachments, env } = this.#deps;
-		if (attachments === undefined || env === undefined) throw new Error("/tree shows a page, and this host keeps none (attachT3's attachmentsDir).");
+		if (attachments === undefined) throw new Error("/tree shows a page, and this host keeps none (attachT3's attachmentsDir).");
 		const { html, rows } = treePage(view.tree, view.window, token, notice);
 		const page = await preparePublish(env, { html, title: "Thread", height: 40 + rows * 46 }, undefined, BACKGROUND_CONTEXT);
 		// A new file each time: the frame shows a page again when its address changes.
