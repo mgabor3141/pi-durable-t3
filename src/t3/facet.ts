@@ -1,5 +1,5 @@
 // Boot the T3 facet: the auth store, model catalog and bridge (over the threads layer), then the Effect HTTP/`/ws` server.
-import type { ApprovalAsk, ApprovalOutcome } from "./approvals.ts";
+import type { ApprovalRequests } from "./approvals.ts";
 import { createServer } from "node:http";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -62,8 +62,8 @@ type FacetHandle = {
 	threadOf(conversationId: number): ThreadOrigin | undefined;
 	/** A thread's origin by its id (`Bridge.threadOrigin`). */
 	threadOrigin(threadId: string): ThreadOrigin | undefined;
-	/** An approval a host's tool asks for (`approvals.ts`). */
-	requestApproval(ask: ApprovalAsk, signal?: AbortSignal): Promise<ApprovalOutcome>;
+	/** An approval a host's gate asks for (`approvals.ts`). */
+	requestApproval: ApprovalRequests["ask"];
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -112,7 +112,10 @@ export function startFacet(deps: {
 		});
 		httpServer.once("error", (error) => reject(error));
 	});
-	const secretRequests = new SecretRequests((conversationId) => bridge.threadIdForConversation(conversationId), { onSaved: (threadId) => bridge.sidebar.wakeForSavedSecret(threadId) });
+	const secretRequests = new SecretRequests(
+		{ harness: () => deps.threads.harness, liveCall: (threadId, callId) => bridge.liveCall(threadId, callId), hasThread: (threadId) => bridge.hasThread(threadId) },
+		{ onSaved: (threadId) => bridge.sidebar.wakeForSavedSecret(threadId) },
+	);
 	// Threads that drive threads (`thread_prompt` and the rest); its followers deliver the reports the last process owed.
 	const orchestration = new Orchestration(bridge, log);
 	orchestration.start();
@@ -167,7 +170,7 @@ export function startFacet(deps: {
 		hiddenModels: () => bridge.hiddenModels(),
 		threadOf: (conversationId) => bridge.threadOf(conversationId),
 		threadOrigin: (threadId) => bridge.threadOrigin(threadId),
-		requestApproval: (ask, signal) => bridge.approvals.request(ask, signal),
+		requestApproval: (api, ask, context) => bridge.approvals.ask(api, ask, context),
 		close: async () => {
 			closing = true;
 			orchestration.close();

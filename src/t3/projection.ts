@@ -231,7 +231,7 @@ export interface ThreadMeta {
 	readonly pendingContexts?: ReadonlyMap<number, ContentBlock>;
 	/** Commands answered on the spot (`/context`): shown in the thread, in memory only (`ShownExchange`). */
 	readonly shown?: readonly ShownExchange[];
-	/** The approvals a host's tools asked for (`approvals.ts`): waiting, or how they ended. In memory only. */
+	/** The approvals a host's gates asked for (`approvals.ts`): waiting (the parked calls'), or how they ended (in memory only). */
 	readonly approvals?: readonly ShownApproval[];
 	/** T3's in-progress title generation (in memory only: none survives a restart). */
 	readonly titleRegeneration?: { readonly requestId: string; readonly startedAt: number } | null;
@@ -863,6 +863,8 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				const label = typeof block.arguments["label"] === "string" && block.arguments["label"].trim() !== "" ? block.arguments["label"].trim() : "Secret";
 				turnItems.push({
 					...common,
+					// T3's card waiting for the user: its item waits too, as the call does (parked).
+					...(secretStatus === "pending" ? { status: "waiting" } : {}),
 					title: label,
 					type: "secret_request",
 					label,
@@ -886,6 +888,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				const requestStatus = itemStatus === "running" ? "pending" : answers !== undefined ? "resolved" : outcome?.status === "timed_out" ? "expired" : "cancelled";
 				turnItems.push({
 					...common,
+					...(requestStatus === "pending" ? { status: "waiting" } : {}),
 					title: questions[0]?.header ?? "Question",
 					type: "user_input_request",
 					requestId: id(requestId),
@@ -1050,8 +1053,8 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 	// items of the entries there were then and before those of any written since (a run goes on after a `/continue`,
 	// and one that runs was asked `/context`). T3 numbers items in this order.
 	const shownHere = [...(shownIn.get(draft) ?? [])];
-	// The approvals a host's tool asked for in this run (`approvals.ts`), where they were asked, as answered commands
-	// stand: T3's approval card, waiting or decided, with the runtime request it answers.
+	// The approvals a host's gates asked for in this run (`approvals.ts`), after the model's call that asked, as answered
+	// commands stand: T3's approval card, waiting or decided, with the runtime request it answers.
 	const approvalsHere = (meta.approvals ?? []).filter((card) => shownDraft(b, card.after) === draft);
 	const pushApprovals = (before: number) => {
 		for (const card of approvalsHere.filter((each) => each.after < before)) {

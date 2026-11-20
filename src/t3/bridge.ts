@@ -21,7 +21,7 @@ import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadL
 import type { PendingContext, ThreadOrigin } from "../threads.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig } from "./config.ts";
-import type { AgentChange, ConversationId, TaskGraph, TaskGraphWatch } from "@earendil-works/pi-durable";
+import { type AgentChange, type ConversationId, LiveDoc, type TaskGraph, type TaskGraphWatch, type ToolTaskInput } from "@earendil-works/pi-durable";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
@@ -34,7 +34,7 @@ import { SidebarState } from "./sidebar-state.ts";
 import { Stops } from "./stops.ts";
 import { ThreadCommands } from "./thread-commands.ts";
 import { ThreadTitles } from "./thread-titles.ts";
-import { UserInputRequests } from "./user-input.ts";
+import { type LiveCall, UserInputRequests } from "./user-input.ts";
 import { ApprovalRequests } from "./approvals.ts";
 import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
@@ -257,13 +257,13 @@ export class Bridge {
 		this.#stops = new Stops(this.#core);
 		this.sidebar = new SidebarState(this.#core, this.#titles);
 		this.#limits = new ProviderLimits(this.#core, this.sidebar);
-		this.userInput = new UserInputRequests((conversationId) => this.threadIdForConversation(conversationId));
+		this.userInput = new UserInputRequests({ harness: () => store.harness, liveCall: (threadId, callId) => this.liveCall(threadId, callId) });
 		this.approvals = new ApprovalRequests({
-			threadOf: (conversationId) => this.threadIdForConversation(conversationId),
-			place: (threadId) => {
-				const view = this.#viewOf(threadId);
-				return { after: view.transcript.at(-1)?.id ?? -1, recompute: () => view.recompute() };
-			},
+			harness: () => store.harness,
+			log,
+			threadOf: (conversationId) => this.threadOf(conversationId)?.threadId,
+			// A thread with a card waiting runs, so it is open; one that is not yet (a restart) shows its cards once it opens.
+			recompute: (threadId) => this.#views.get(threadId)?.recompute(),
 		});
 		this.messageContexts = new MessageContexts({
 			get harness() {
@@ -878,6 +878,7 @@ export class Bridge {
 
 	#onTaskGraph(graph: TaskGraph): void {
 		if (this.#closed) return;
+		this.approvals.graph(graph);
 		const arrived = new Set<number>();
 		for (const [taskId, task] of Object.entries(graph.tasks)) if (!this.#liveTasks.has(taskId)) arrived.add(Number(task.conversationId));
 		this.#liveTasks = new Set(Object.keys(graph.tasks));
@@ -994,6 +995,22 @@ export class Bridge {
 	/** The thread a conversation is shown as: the live thread whose head it is. */
 	threadIdForConversation(conversationId: number): Promise<string | undefined> {
 		return this.#store.threadIdForConversation(conversationId);
+	}
+
+	/** A model's call in `threadId`'s current round that has not ended, by its id: the card a call is (`ask_user`,
+	 * `request_secret`) is answered with a signal to its task. */
+	async liveCall(threadId: string, callId: string): Promise<LiveCall | undefined> {
+		const head = this.threadOrigin(threadId) === undefined ? undefined : (this.#thread(threadId)?.head as ConversationId | undefined);
+		if (head === undefined) return undefined;
+		const harness = this.#store.harness;
+		const slot = (await harness.snapshot(LiveDoc, head, BACKGROUND_CONTEXT))?.tools?.find((each) => each.callId === callId);
+		if (slot?.taskId === undefined || slot.status === "done") return undefined;
+		const input = (await harness.getTask(slot.taskId, BACKGROUND_CONTEXT))?.input as ToolTaskInput | undefined;
+		const conversation = await harness.conversation(head, BACKGROUND_CONTEXT);
+		if (input?.kind !== "model" || conversation === undefined) return undefined;
+		const entry = (await conversation.entries({ minEntryId: input.assistant, maxEntryId: input.assistant }, 1, undefined, BACKGROUND_CONTEXT)).items[0];
+		const call = (entry?.model ?? []).flatMap((message) => (message.role === "assistant" ? message.content : [])).find((block) => block.type === "toolCall" && block.id === callId);
+		return call?.type === "toolCall" ? { taskId: slot.taskId, arguments: call.arguments } : undefined;
 	}
 
 	/** A thread's shell: its sidebar row, current whether or not the thread is open. */

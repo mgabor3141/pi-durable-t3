@@ -27,6 +27,7 @@ import type { PreviewBrowserConfig } from "./t3/preview-config.ts";
 import type { HostRoute } from "./t3/host-route.ts";
 import type { HostCommand } from "./t3/host-command.ts";
 import type { ApprovalAsk, ApprovalOutcome } from "./t3/approvals.ts";
+import type { HookApi, SignalKey } from "@earendil-works/pi-durable";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { MessageContext } from "./t3/message-context.ts";
 import type { RemoteAccess } from "./t3/remote-access.ts";
@@ -188,13 +189,14 @@ export type T3Attachment = {
 	htmlTools(options?: { readonly callers?: readonly ("model" | "tools")[] }): Extension;
 	/**
 	 * T3's `request_secret` as a model-facing tool: the thread shows T3's secret card, and the value the user enters goes
-	 * to `sink` under the name the agent chose — never into the conversation. This host keeps no secrets itself.
+	 * to `sink` under the name the agent chose — never into the conversation. This host keeps no secrets itself. The
+	 * call parks while the card waits (no time limit, through a restart). One sink: call this once.
 	 */
 	secretRequests(sink: SecretSink): Extension;
 	/**
 	 * `ask_user` as a model-facing tool: the agent asks the user one to four questions, the thread shows T3's question
-	 * card above the composer, and the call returns the answers. The agent waits meanwhile (30 minutes unless the call
-	 * says otherwise); a card that is dismissed, or that nobody answers, tells the agent so.
+	 * card above the composer, and the call returns the answers. The call parks meanwhile: no time limit, no process
+	 * held, and the same card after a restart; a card that is dismissed tells the agent so, and Stop ends it.
 	 */
 	askUser(): Extension;
 	/**
@@ -235,13 +237,16 @@ export type T3Attachment = {
 	/** A thread's origin by its id (`threadOf`), for walking up to its parent. */
 	threadOrigin(threadId: string): ThreadOrigin | undefined;
 	/**
-	 * Ask the user to approve something a tool of yours is about to do, on T3's approval card in the thread of the call's
-	 * conversation, and wait for the decision. Every thread here is full-access, so T3 explains the card as a check the
-	 * host makes of its own. The card offers `options` (T3's decisions, in your words); a message the user types
-	 * meanwhile declines it, with that text as `feedback`. Ends without a decision when `signal` aborts (Stop), after
-	 * `timeoutMs` (default 30 minutes), or for a conversation that is no thread's head. In memory: a restart ends it.
+	 * In a `beforeTool` gate of yours (pi-durable's gates), ask the user to approve the call on T3's approval card in the
+	 * thread of the call's conversation. Every thread here is full-access, so T3 explains the card as a check the host
+	 * makes of its own. The card offers `options` (T3's decisions, in your words); a message the user types meanwhile
+	 * declines it, with that text as `feedback`. Resolves with the decision once the user made it; until then with the
+	 * `sleep` the gate returns, which parks the call: the card waits, holding no process, until the user answers or the
+	 * run is stopped, also across a restart. The gate runs again on every wake (and after a restart or a registry
+	 * change), so it asks again and decides from what this returns then; keep its side effects idempotent. Calls of one
+	 * thread that ask with the same `key` share one card. Throws for a conversation that is no thread's head.
 	 */
-	requestApproval(ask: ApprovalAsk, signal?: AbortSignal): Promise<ApprovalOutcome>;
+	requestApproval(api: Pick<HookApi, "conversationId" | "readSignal" | "memo" | "now">, ask: ApprovalAsk, context: Context): Promise<ApprovalOutcome | { readonly sleep: { readonly signals: readonly SignalKey<unknown>[] } }>;
 	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
@@ -362,7 +367,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),
 		threadOrigin: (threadId) => facet.threadOrigin(threadId),
-		requestApproval: (ask, signal) => facet.requestApproval(ask, signal),
+		requestApproval: (api, ask, context) => facet.requestApproval(api, ask, context),
 		...(facet.preview === undefined
 			? {}
 			: {

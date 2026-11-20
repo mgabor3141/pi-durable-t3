@@ -1,29 +1,40 @@
 // T3's question card (`user_input_request`), on this host: the agent asks the user one to four questions with
 // `ask_user`, the thread shows T3's card above the composer (the call is projected as the item and a pending runtime
-// request), and the user's answer (`runtime-request.respond`) is what the call returns. The agent waits meanwhile, as
-// a provider's own question tool does under T3 (its `live` response): the run goes on with the answer.
-import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
-import { arr, bool, int, opt, str } from "@earendil-works/pi-schema";
+// request), and the user's answer (`runtime-request.respond`) is what the call returns. The run waits meanwhile, as a
+// provider's own question tool does under T3 (its `live` response), and goes on with the answer.
+//
+// The call parks (pi-durable's tools that park): it holds no process while the card waits, and the answer, or the
+// dismissal, is a signal to the call's task that wakes it. The card is the parked call itself, so a restart shows the
+// same request and runs no tool code; nothing ends the wait but the user or Stop.
+import { defineExtension, defineSignal, defineTool, type Extension, type Harness, type TaskId } from "@earendil-works/pi-durable";
+import { arr, bool, lit, map, obj, opt, str, union } from "@earendil-works/pi-schema";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CommandError } from "./errors.ts";
 import { object } from "./schema.ts";
 
 /** The tool's name. */
 export const ASK_USER_TOOL = "ask_user";
-const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-const MAX_TIMEOUT_MS = 8 * 60 * 60 * 1000;
-/** How long an answer waits for its call to start waiting (a card shows as soon as the call exists, and again while
- * a call replays after a restart). */
-const ARRIVAL_MS = 5_000;
 
-/** How a call ended, in its result's details, for the card. */
-type UserInputStatus = "answered" | "dismissed" | "cancelled" | "timed_out";
+/** The user's answer to a call's card, or its dismissal: the signal that wakes the call. */
+const UserInputAnswer = defineSignal({
+	name: "t3.user-input",
+	version: 1,
+	schema: union([obj({ status: lit("answered"), answers: map(union([str(), arr(str())])) }), obj({ status: lit("dismissed") })]),
+});
+/** The one key a call waits on. */
+const ANSWER = "answer";
 
-/** What the agent reads when its card ends without an answer. */
-const UNANSWERED_NOTE: Record<Exclude<UserInputStatus, "answered">, string> = {
-	dismissed: "The user dismissed the questions without answering. Go on with your best judgement, and say what you assumed.",
-	cancelled: "The card closed with the run.",
-	timed_out: "No answer in time. Go on with your best judgement and say what you assumed, or end your turn with the questions in your reply.",
-};
+/** What the agent reads when the user dismissed its card. */
+const DISMISSED_NOTE = "The user dismissed the questions without answering. Go on with your best judgement, and say what you assumed.";
+
+/** A model's call that has not ended, in a thread's current round: its task, which an answer signals, and its arguments. */
+export type LiveCall = { readonly taskId: TaskId; readonly arguments: Readonly<Record<string, unknown>> };
+/** What answering a card the call is needs of the bridge. */
+export interface CardDeps {
+	readonly harness: () => Harness;
+	/** The call `callId` in `threadId`'s current round, unless it ended (or there is no such call or thread). */
+	readonly liveCall: (threadId: string, callId: string) => Promise<LiveCall | undefined>;
+}
 
 /** One question as T3's card takes it (`OrchestrationV2UserInputQuestion`). */
 type UserInputQuestion = {
@@ -69,22 +80,15 @@ export function userInputQuestions(args: Record<string, unknown>): UserInputQues
 	});
 }
 
-type Pending = { readonly conversationId: number; readonly questions: readonly UserInputQuestion[]; readonly settle: (outcome: { status: "answered"; answers: Answers } | { status: "dismissed" }) => void };
 /** An answer per question id: the chosen option or the user's own words, or the chosen options. */
 export type Answers = Record<string, string | string[]>;
-type Outcome = { status: UserInputStatus; answers?: Answers };
 
-/** The questions waiting for an answer, by the asking call's id. In memory: a call that replays after a restart waits again. */
+/** The answers to `ask_user` calls and their dismissals, delivered to the calls waiting for them. */
 export class UserInputRequests {
-	readonly #pending = new Map<string, Pending>();
-	readonly #arrivals = new Map<string, Set<() => void>>();
-	/** Which thread a conversation is shown as, to check an answer comes from the thread that asked. */
-	readonly #threadOf: (conversationId: number) => Promise<string | undefined>;
-	readonly #arrivalMs: number;
+	readonly #deps: CardDeps;
 
-	constructor(threadOf: (conversationId: number) => Promise<string | undefined>, options: { readonly arrivalMs?: number } = {}) {
-		this.#threadOf = threadOf;
-		this.#arrivalMs = options.arrivalMs ?? ARRIVAL_MS;
+	constructor(deps: CardDeps) {
+		this.#deps = deps;
 	}
 
 	/** Is `requestId` one of this host's question cards? */
@@ -98,30 +102,30 @@ export class UserInputRequests {
 	 * is no longer waiting.
 	 */
 	async respond(input: { readonly threadId: string; readonly requestId: string; readonly answers?: Record<string, unknown> }): Promise<void> {
-		const callId = input.requestId.slice("uq-".length);
-		const pending = await this.#waiting(callId, this.#arrivalMs);
-		if (pending === undefined || (await this.#threadOf(pending.conversationId)) !== input.threadId) throw new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
-		if (input.answers === undefined) return pending.settle({ status: "dismissed" });
-		// Only the questions asked, and only words: an answer is text the model reads.
+		const gone = new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
+		const call = await this.#deps.liveCall(input.threadId, input.requestId.slice("uq-".length));
+		if (call === undefined) throw gone;
+		// Only words: an answer is text the model reads. The call keeps the answers to the questions it asked.
 		const answers: Answers = {};
-		for (const question of pending.questions) {
-			const answer = input.answers[question.id];
-			if (typeof answer === "string") answers[question.id] = answer;
-			else if (Array.isArray(answer)) answers[question.id] = answer.filter((value): value is string => typeof value === "string");
+		for (const [id, answer] of Object.entries(input.answers ?? {})) {
+			if (typeof answer === "string") answers[id] = answer;
+			else if (Array.isArray(answer)) answers[id] = answer.filter((value): value is string => typeof value === "string");
 		}
-		pending.settle({ status: "answered", answers });
+		const value = input.answers === undefined ? ({ status: "dismissed" } as const) : ({ status: "answered", answers } as const);
+		const delivered = await this.#deps.harness().signal(call.taskId, UserInputAnswer, ANSWER, value, BACKGROUND_CONTEXT);
+		// Answered already (a second click), or the call ended meanwhile.
+		if (delivered !== "delivered") throw gone;
 	}
 
 	/** The `ask_user` tool. Model-facing: the card is the call itself. */
 	extension(): Extension {
-		const requests = this;
 		return defineExtension({
 			name: "t3-ask-user",
 			tools: [
 				defineTool({
 					name: ASK_USER_TOOL,
 					description:
-						"Ask the user one to four questions in a card in this thread, and wait for the answer. For a decision only the user can make (which of several approaches, a preference, something missing from the request) that the work is blocked on; not for what you can find out yourself, and not to ask permission for what was already asked for. Give each question two to four options when the choices are known (the user can also answer in their own words); leave options out for an open question. Returns the answers by question id, or says that none came.",
+						"Ask the user one to four questions in a card in this thread, and wait for the answer. For a decision only the user can make (which of several approaches, a preference, something missing from the request) that the work is blocked on; not for what you can find out yourself, and not to ask permission for what was already asked for. Give each question two to four options when the choices are known (the user can also answer in their own words); leave options out for an open question. Returns the answers by question id, or that the user dismissed the card.",
 					parameters: object({
 						questions: arr(
 							object({
@@ -142,59 +146,26 @@ export class UserInputRequests {
 							}),
 							{ minItems: 1, maxItems: 4 },
 						),
-						timeoutMs: opt(int({ minimum: 1000, maximum: MAX_TIMEOUT_MS, description: "How long to wait. Default 30 min." })),
 					}),
 					callers: ["model"],
-					// A rerun after a crash shows the same card (its turn item is the call) and waits again.
+					// It only reads its arguments and its signal: a rerun after a crash before it parked parks again.
 					replay: "safe",
 					async execute(args, api, context) {
 						const questions = userInputQuestions(args as unknown as Record<string, unknown>);
 						if (questions.length === 0) throw new Error("ask_user needs at least one question");
 						if (new Set(questions.map((question) => question.id)).size !== questions.length) throw new Error("ask_user: each question needs its own id");
-						const outcome = await requests.#wait(api.callId, questions, api.conversationId, args.timeoutMs ?? DEFAULT_TIMEOUT_MS, context.abortSignal);
-						const result = outcome.status === "answered" ? { status: outcome.status, answers: outcome.answers } : { status: outcome.status, note: UNANSWERED_NOTE[outcome.status] };
+						const answer = await api.readSignal(UserInputAnswer, ANSWER, context);
+						// Asked: the card shows while the call is parked, until the user answers or dismisses it.
+						if (answer === undefined || !("value" in answer)) return { sleep: { signals: [UserInputAnswer.key(ANSWER)] } };
+						const value = answer.value;
+						// Only the questions asked.
+						const outcome: { status: "answered"; answers: Answers } | { status: "dismissed" } =
+							value.status === "dismissed" ? { status: "dismissed" } : { status: "answered", answers: Object.fromEntries(questions.flatMap((question) => (value.answers[question.id] === undefined ? [] : [[question.id, value.answers[question.id]!]]))) };
+						const result = outcome.status === "answered" ? outcome : { ...outcome, note: DISMISSED_NOTE };
 						return { output: [{ type: "text", text: JSON.stringify(result) }], details: { userInput: outcome } };
 					},
 				}),
 			],
-		});
-	}
-
-	/** The call's pending request, waiting up to `ms` for it to start waiting. */
-	async #waiting(callId: string, ms: number): Promise<Pending | undefined> {
-		const now = this.#pending.get(callId);
-		if (now !== undefined) return now;
-		await new Promise<void>((resolve) => {
-			const wake = () => {
-				clearTimeout(timer);
-				this.#arrivals.get(callId)?.delete(wake);
-				resolve();
-			};
-			const timer = setTimeout(wake, ms);
-			const waiters = this.#arrivals.get(callId) ?? new Set();
-			waiters.add(wake);
-			this.#arrivals.set(callId, waiters);
-		});
-		if (this.#arrivals.get(callId)?.size === 0) this.#arrivals.delete(callId);
-		return this.#pending.get(callId);
-	}
-
-	#wait(callId: string, questions: readonly UserInputQuestion[], conversationId: number, timeoutMs: number, signal: AbortSignal | undefined): Promise<Outcome> {
-		return new Promise<Outcome>((resolve) => {
-			const finish = (outcome: Outcome) => {
-				if (this.#pending.get(callId) !== pending) return;
-				this.#pending.delete(callId);
-				clearTimeout(timer);
-				signal?.removeEventListener("abort", onAbort);
-				resolve(outcome);
-			};
-			const pending: Pending = { conversationId, questions, settle: finish };
-			const onAbort = () => finish({ status: "cancelled" });
-			const timer = setTimeout(() => finish({ status: "timed_out" }), Math.min(MAX_TIMEOUT_MS, timeoutMs));
-			this.#pending.set(callId, pending);
-			for (const wake of [...(this.#arrivals.get(callId) ?? [])]) wake();
-			if (signal?.aborted === true) onAbort();
-			else signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 }

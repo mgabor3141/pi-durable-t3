@@ -174,11 +174,11 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			case "thread.merge_back":
 				await bridge.mergeBack({ sourceThreadId: command.sourceThreadId, targetThreadId: command.targetThreadId, sourcePoint: command.sourcePoint });
 				break;
-			// T3's answer to a card: the agent's questions (`ask_user`), or an approval a host's tool asked for
+			// T3's answer to a card: the agent's questions (`ask_user`), or an approval a host's gate asked for
 			// (`approvals.ts`). pi runs tools without approvals of its own.
 			case "runtime-request.respond": {
 				if (command.decision !== undefined && bridge.approvals.owns(command.requestId)) {
-					bridge.approvals.respond({ threadId: command.threadId, requestId: command.requestId, decision: command.decision, ...(command.feedback === undefined ? {} : { feedback: command.feedback }) });
+					await bridge.approvals.respond({ threadId: command.threadId, requestId: command.requestId, decision: command.decision, ...(command.feedback === undefined ? {} : { feedback: command.feedback }) });
 					break;
 				}
 				if (!bridge.userInput.owns(command.requestId)) throw new CommandError(`Runtime request ${command.requestId} is no longer pending.`);

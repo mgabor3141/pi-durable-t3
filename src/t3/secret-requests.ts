@@ -6,32 +6,32 @@
 // One deliberate difference from T3: T3 answers with a one-use `secretRef` that only its own tools accept. Here the
 // agent gets the secret's name, which the integrator's tools resolve wherever it is written (`${NAME}`). The card says
 // so: it is projected with T3's `file` delivery, whose note reads that the agent's commands can read the value.
+//
+// The call parks (pi-durable's tools that park): it holds no process while the card waits, and the answer is a signal to
+// the call's task, sent once the store took the value (or with the decline), that wakes it. The card is the parked call
+// itself, so a restart shows the same card and runs no tool code; nothing ends the wait but the user or Stop.
 import { SecretRequestError, type SecretRequestAnswerInput } from "@t3tools/contracts";
-import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { defineExtension, defineSignal, defineTool, type Extension } from "@earendil-works/pi-durable";
 
 import type { SecretSink } from "./secret-sink.ts";
-import { int, opt, str } from "@earendil-works/pi-schema";
+import { obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { object } from "./schema.ts";
+import type { CardDeps } from "./user-input.ts";
 
 /** The tool's name, as T3's. */
 export const REQUEST_SECRET_TOOL = "request_secret";
 /** A secret's name: an environment variable's, so a shell can use it as one. */
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-const MAX_TIMEOUT_MS = 60 * 60 * 1000;
-/** How long an answer waits for its call to start waiting. */
-const ARRIVAL_MS = 5_000;
 
-/** The outcome a call reports in its details, for the card. T3's statuses, plus `timed_out` (shown as ended). */
-type SecretRequestStatus = "saved" | "declined" | "cancelled" | "timed_out";
+/** The user's answer to a call's card: the signal that wakes the call. Never the value, which goes to the store. */
+const SecretAnswer = defineSignal({ name: "t3.secret-request", version: 1, schema: obj({ status: oneOf(["saved", "declined"]) }) });
+/** The one key a call waits on. */
+const ANSWER = "answer";
 
-/** What the agent reads when its card ends without a secret (T3's `SECRET_REQUEST_UNSAVED_NOTE`, without its retry key,
- * which this tool does not have: a new call is a new card). */
-const UNSAVED_NOTE: Record<Exclude<SecretRequestStatus, "saved">, string> = {
-	declined: "The user declined. Don't ask for it in chat or another way; say what's blocked and go on without it.",
-	cancelled: "The card closed with the run. Ask again only if the secret is still needed.",
-	timed_out: "No answer in time. Don't ask in chat; ask again only if it is still needed.",
-};
+/** What the agent reads when the user declined (T3's `SECRET_REQUEST_UNSAVED_NOTE`, without its retry key, which this
+ * tool does not have: a new call is a new card). */
+const DECLINED_NOTE = "The user declined. Don't ask for it in chat or another way; say what's blocked and go on without it.";
 
 /** T3's `secretRequestPageUrl`: the http(s) page a secret card may open. */
 const isPageUrl = (value: string): boolean => {
@@ -40,61 +40,53 @@ const isPageUrl = (value: string): boolean => {
 	return (url.protocol === "https:" || url.protocol === "http:") && url.host !== "";
 };
 
-type Pending = {
-	readonly name: string;
-	readonly sink: SecretSink;
-	readonly conversationId: number;
-	settled: boolean;
-	readonly settle: (outcome: { status: "saved" } | { status: "declined" }) => void;
-};
-
-/** The requests waiting for an answer, by the asking call's id (the card's turn item is `ti-t<callId>`). */
+/** The answers to `request_secret` calls (the card's turn item is `ti-t<callId>`): saved into the store, then delivered to
+ * the call waiting for them. */
 export class SecretRequests {
-	readonly #pending = new Map<string, Pending>();
-	/** Answers that arrived before their call started waiting (the card shows as soon as the call exists, and again
-	 * while a call replays after a restart): woken when it does. */
-	readonly #arrivals = new Map<string, Set<() => void>>();
-	/** Which thread a conversation is shown as, to check an answer comes from the thread that asked. */
-	readonly #threadOf: (conversationId: number) => Promise<string | undefined>;
-	readonly #arrivalMs: number;
+	readonly #deps: CardDeps & { readonly hasThread: (threadId: string) => boolean };
 	readonly #onSaved: ((threadId: string) => Promise<void>) | undefined;
+	/** Where answers are saved: the store the tool was installed with (`extension`). */
+	#sink: SecretSink | undefined;
 
 	/** `onSaved`: told the thread of each secret saved, after the store took it (T3 wakes a snoozed thread then). */
-	constructor(threadOf: (conversationId: number) => Promise<string | undefined>, options: { readonly arrivalMs?: number; readonly onSaved?: (threadId: string) => Promise<void> } = {}) {
-		this.#threadOf = threadOf;
-		this.#arrivalMs = options.arrivalMs ?? ARRIVAL_MS;
+	constructor(deps: CardDeps & { readonly hasThread: (threadId: string) => boolean }, options: { readonly onSaved?: (threadId: string) => Promise<void> } = {}) {
+		this.#deps = deps;
 		this.#onSaved = options.onSaved;
 	}
 
-	/** The answer to the card `turnItemId` in `threadId`: saved into the asking tool's store, or declined. */
+	/** The answer to the card `turnItemId` in `threadId`: saved into the store, or declined. */
 	async answer(input: SecretRequestAnswerInput): Promise<void> {
+		if (!this.#deps.hasThread(input.threadId)) throw new SecretRequestError({ reason: "not_found" });
 		const callId = /^ti-t(.+)$/.exec(input.turnItemId)?.[1];
-		const pending = callId === undefined ? undefined : await this.#waiting(callId, this.#arrivalMs);
-		// Gone from memory: the asking call ended (answered, timed out, stopped) or the host restarted and the call is
-		// not waiting again yet.
-		if (pending === undefined) throw new SecretRequestError({ reason: "agent_stopped" });
-		if ((await this.#threadOf(pending.conversationId)) !== input.threadId) throw new SecretRequestError({ reason: "not_found" });
-		if (pending.settled) throw new SecretRequestError({ reason: "already_answered" });
-		if (input.answer.type === "decline") {
-			pending.settle({ status: "declined" });
-			return;
-		}
+		const call = callId === undefined ? undefined : await this.#deps.liveCall(input.threadId, callId);
+		// No such call waiting in the thread: it ended (answered, stopped), or it is no request_secret's card.
+		const name = call?.arguments["name"];
+		const sink = this.#sink;
+		if (call === undefined || sink === undefined || typeof name !== "string" || !SECRET_NAME.test(name)) throw new SecretRequestError({ reason: "agent_stopped" });
 		// T3 0.1.9's answer from a secret provider (1Password and the like). This host configures none and does not
 		// advertise `secretRequestReferences`, so its clients do not offer it; one that sends it anyway is told.
 		if (input.answer.type === "reference") throw new SecretRequestError({ reason: "reference_unreadable", provider: input.answer.reference.provider });
-		try {
-			await pending.sink.save(pending.name, input.answer.secret);
-		} catch (error) {
-			throw new SecretRequestError({ reason: "store_failed", cause: error });
+		if (input.answer.type === "save") {
+			try {
+				await sink.save(name, input.answer.secret);
+			} catch (error) {
+				throw new SecretRequestError({ reason: "store_failed", cause: error });
+			}
 		}
-		pending.settle({ status: "saved" });
+		const status = input.answer.type === "save" ? "saved" : "declined";
+		const delivered = await this.#deps.harness().signal(call.taskId, SecretAnswer, ANSWER, { status }, BACKGROUND_CONTEXT);
+		if (delivered === "duplicate") throw new SecretRequestError({ reason: "already_answered" });
+		if (delivered !== "delivered") throw new SecretRequestError({ reason: "agent_stopped" });
 		// The secret is saved and the call has its answer; what follows must not turn that into a failure.
-		await this.#onSaved?.(input.threadId).catch(() => {});
+		if (status === "saved") await this.#onSaved?.(input.threadId).catch(() => {});
 	}
 
 	/** The `request_secret` tool, saving answers into `sink`. Model-facing: the card is the call itself. */
 	extension(sink: SecretSink): Extension {
-		const requests = this;
+		// One store: an answer is saved where the tool that asked says, and a card may be answered after a restart, when
+		// only the store given now is known.
+		if (this.#sink !== undefined && this.#sink !== sink) throw new Error("request_secret saves into one store: secretRequests was given another one already");
+		this.#sink = sink;
 		return defineExtension({
 			name: "t3-request-secret",
 			tools: [
@@ -108,59 +100,22 @@ export class SecretRequests {
 						reason: str({ minLength: 1, description: "What it is for and where to get it. A link goes in `url`." }),
 						url: opt(str({ minLength: 1, description: "Sign-in or setup page for the value (http or https). Shown as a button." })),
 						placeholder: opt(str()),
-						timeoutMs: opt(int({ minimum: 1000, maximum: MAX_TIMEOUT_MS, description: "Default 10 min." })),
 					}),
 					callers: ["model"],
-					// A rerun after a crash shows the same card (its turn item is the call) and waits again.
+					// It only reads its arguments and its signal: a rerun after a crash before it parked parks again.
 					replay: "safe",
 					async execute(args, api, context) {
 						// Refused before the card waits: T3's schema refuses the same at the call.
 						if (args.url !== undefined && !isPageUrl(args.url.trim())) throw new Error("url must be an http(s) URL");
-						const outcome = await requests.#wait(api.callId, args.name, sink, api.conversationId, args.timeoutMs ?? DEFAULT_TIMEOUT_MS, context.abortSignal);
-						const result = outcome === "saved" ? { status: outcome, name: args.name } : { status: outcome, note: UNSAVED_NOTE[outcome] };
-						return { output: [{ type: "text", text: JSON.stringify(result) }], details: { secretRequest: { status: outcome } } };
+						const answer = await api.readSignal(SecretAnswer, ANSWER, context);
+						// Asked: the card shows while the call is parked, until the user saves a value or declines.
+						if (answer === undefined || !("value" in answer)) return { sleep: { signals: [SecretAnswer.key(ANSWER)] } };
+						const status = answer.value.status;
+						const result = status === "saved" ? { status, name: args.name } : { status, note: DECLINED_NOTE };
+						return { output: [{ type: "text", text: JSON.stringify(result) }], details: { secretRequest: { status } } };
 					},
 				}),
 			],
-		});
-	}
-
-	/** The call's pending request, waiting up to `ms` for it to start waiting. */
-	async #waiting(callId: string, ms: number): Promise<Pending | undefined> {
-		const now = this.#pending.get(callId);
-		if (now !== undefined) return now;
-		await new Promise<void>((resolve) => {
-			const wake = () => {
-				clearTimeout(timer);
-				this.#arrivals.get(callId)?.delete(wake);
-				resolve();
-			};
-			const timer = setTimeout(wake, ms);
-			const waiters = this.#arrivals.get(callId) ?? new Set();
-			waiters.add(wake);
-			this.#arrivals.set(callId, waiters);
-		});
-		if (this.#arrivals.get(callId)?.size === 0) this.#arrivals.delete(callId);
-		return this.#pending.get(callId);
-	}
-
-	#wait(callId: string, name: string, sink: SecretSink, conversationId: number, timeoutMs: number, signal: AbortSignal | undefined): Promise<SecretRequestStatus> {
-		return new Promise<SecretRequestStatus>((resolve) => {
-			const finish = (status: SecretRequestStatus) => {
-				if (this.#pending.get(callId) !== pending) return;
-				pending.settled = true;
-				this.#pending.delete(callId);
-				clearTimeout(timer);
-				signal?.removeEventListener("abort", onAbort);
-				resolve(status);
-			};
-			const pending: Pending = { name, sink, conversationId, settled: false, settle: (outcome) => finish(outcome.status) };
-			const onAbort = () => finish("cancelled");
-			const timer = setTimeout(() => finish("timed_out"), Math.min(MAX_TIMEOUT_MS, timeoutMs));
-			this.#pending.set(callId, pending);
-			for (const wake of [...(this.#arrivals.get(callId) ?? [])]) wake();
-			if (signal?.aborted === true) onAbort();
-			else signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 }

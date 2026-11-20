@@ -246,10 +246,13 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   what a failed request left is not shown once the request is sent again. A 429 is shown as T3's usage limit: a
   warning, and once the run has given up, T3's banner with Resume. The bridge only shows the number you pass; without
   it the row counts alone.
-- `requestApproval(ask, signal?)` (on the attachment): a tool of yours asks the user to approve what it is about to do,
-  on T3's approval card in the thread of the call's conversation, and gets the decision (`ApprovalAsk`,
-  `ApprovalOption`, `ApprovalDecision`, `ApprovalOutcome`). A message the user types meanwhile declines it, as feedback;
-  Stop, a timeout (30 minutes unless you say) or a restart ends it without a decision.
+- `requestApproval(api, ask, context)` (on the attachment): in a `beforeTool` gate of yours (pi-durable's gates), ask the
+  user to approve a call on T3's approval card in the thread of the call's conversation (`ApprovalAsk`,
+  `ApprovalOption`, `ApprovalDecision`). It resolves with the decision (`ApprovalOutcome`) once the user made one, and
+  until then with the `sleep` your gate returns, which parks the call: the card waits, holding no process, until the
+  user answers or the run is stopped, also across a restart (the same card, the same request). The gate runs again on
+  every wake and decides from what this returns then, so keep its side effects idempotent. A message the user types
+  meanwhile declines it, as feedback; calls of one thread that ask with the same `key` share one card.
 - `threadOrigin(threadId)` (on the attachment): `threadOf` by thread id, for walking up to a thread's parent.
 - `routes` (an `attachT3` option, `HostRoute`): HTTP routes of your own under `/host/` on the host's listener, such as
   an OAuth callback. They are public, so they check their callers.
