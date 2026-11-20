@@ -8,6 +8,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, type Harness } from "@earendil-works/pi-durable";
 import { ScheduledTask, ScheduledTaskError, type ScheduledTaskId, type ScheduledTaskThreadMode, type ScheduledTaskUpsertInput, scheduledTaskThreadMode } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import type { Bridge } from "./bridge.ts";
 import type { Provenance } from "../threads.ts";
@@ -23,6 +24,7 @@ export const NO_PLAN_MODE = "Plan mode is not supported by pi-durable-t3.";
 export const WORKTREES_UNSUPPORTED = 'Worktrees are not supported by pi-durable-t3: choose "Use the project checkout" as the workspace.';
 export const FRESH_SESSION_UNSUPPORTED = "A fresh session each run is not supported by pi-durable-t3: a thread keeps its context. Choose a new thread each run, or one thread that continues.";
 export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart.";
+export const MISSED_RUN = "Missed a scheduled run because the server was not running at that time.";
 /** T3's Scheduler cadence. */
 const POLL_INTERVAL_MS = 5_000;
 
@@ -240,7 +242,8 @@ export class ScheduledTasks {
 	async #rescheduleMissedRun(task: Task, now: Date): Promise<void> {
 		const next = nextRunAt(task, now);
 		this.#log?.info("skipping missed scheduled task run", { taskId: task.id, missedRunAt: task.nextRunAt, rescheduledTo: next });
-		await this.#write({ ...task, nextRunAt: next, updatedAt: now.toISOString() });
+		// Since 0.1.10 the skipped run is the task's last run, failed, so the task says why it did not run.
+		await this.#write({ ...task, nextRunAt: next, lastRunStatus: "failed", lastRunError: MISSED_RUN, updatedAt: now.toISOString() });
 	}
 
 	/** Run `task`: the task as the run left it, and the thread the run went to (null when none started). */
@@ -348,8 +351,13 @@ export class ScheduledTasks {
 	// ---- the RPCs ---------------------------------------------------------------------------------------------
 
 	/** T3's order: most recently updated first, then id. */
-	list(): { tasks: Task[] } {
-		return { tasks: [...this.#tasks.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)).map((task) => this.#shown(task)) };
+	/** The tasks, newest change first, and (T3 0.1.11) the zone fixed-time schedules run in: the host's, which T3 shows
+	 * in a schedule's label. */
+	list(): { tasks: Task[]; timeZone: string } {
+		return {
+			tasks: [...this.#tasks.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)).map((task) => this.#shown(task)),
+			timeZone: DateTime.zoneToString(DateTime.zoneMakeLocal()),
+		};
 	}
 
 	onChange(listener: () => void): () => void {

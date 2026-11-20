@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScheduledTaskError, type ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt, parseTimeOfDay } from "../src/t3/schedule.ts";
-import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
+import { FRESH_SESSION_UNSUPPORTED, INTERRUPTED_BY_RESTART, MISSED_RUN, SCHEDULED_MESSAGE_ID, ScheduledTasks, type ScheduledTaskDispatch, FULL_ACCESS_ONLY, NO_PLAN_MODE, WORKTREES_UNSUPPORTED } from "../src/t3/scheduled-tasks.ts";
 
 describe("schedule math (T3's Schedule.ts)", () => {
 	it("parses 24-hour times", () => {
@@ -277,7 +277,7 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		expect(tasks.list().tasks[0]!.runCount).toBe(1);
 	});
 
-	it("a missed fixed-time run (> 10 min late) is rescheduled, not run late", async () => {
+	it("a missed fixed-time run (> 10 min late) is rescheduled, not run late, and recorded as failed", async () => {
 		const { tasks, calls, clock } = await fixture();
 		clock.now = new Date(2026, 6, 1, 8, 0);
 		await tasks.upsert(input({ schedule: { type: "fixed_time", timeOfDay: "09:00" } }));
@@ -287,7 +287,9 @@ describe("scheduled tasks (T3's ScheduledTaskService)", () => {
 		clock.now = new Date(2026, 6, 2, 11, 0);
 		await tasks.tick();
 		expect(calls).toHaveLength(1);
-		expect(tasks.list().tasks[0]!.nextRunAt).toBe(new Date(2026, 6, 3, 9, 0).toISOString());
+		expect(tasks.list().tasks[0]).toMatchObject({ nextRunAt: new Date(2026, 6, 3, 9, 0).toISOString(), lastRunStatus: "failed", lastRunError: MISSED_RUN, runCount: 1 });
+		// The list names the zone fixed times are in (T3 0.1.11): the host's.
+		expect(tasks.list().timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
 	});
 
 	it("restart: a task left running is recorded failed and rescheduled; the document round-trips", async () => {

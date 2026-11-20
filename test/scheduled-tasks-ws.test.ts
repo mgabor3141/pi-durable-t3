@@ -52,7 +52,7 @@ it("subscribe, runNow (launch, then queue on the thread), and a webhook task ove
 			expect(test(), what).toBe(true);
 		};
 		await until("the snapshot", () => snapshots().length >= 1);
-		expect(snapshots()[0]).toEqual({ tasks: [] });
+		expect(snapshots()[0]).toEqual({ tasks: [], timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
 
 		const created = exitValue(await ws.call("scheduledTasks.upsert", { ...base, title: "Launcher", prompt: "scheduled hello", schedule: { type: "interval", everyMs: 3_600_000 }, threadId: null }), "upsert") as { task: Task };
 		await until("a fresh list after the save", () => snapshots().some((s) => s.tasks.some((t) => t.id === created.task.id)));
