@@ -165,6 +165,8 @@ it("T3's Resume continues the stopped run without its message: nothing is writte
 	await send("then this", "queue");
 	await bridge.interrupt("t");
 	const stopped = await runs(["interrupted", "queued"]);
+	// The provider session says it resumes natively, as T3 0.1.11 asks before it offers Resume on a stopped run.
+	expect((await bridge.projection("t")).projection.providerSessions.map((session) => session.capabilities.turns.supportsNativeResume)).toEqual([true]);
 	const user = { createdBy: "user", creationSource: "web" } as const;
 	const log = { info: () => {}, warn: () => {} };
 	const resume = (commandId: string, runId: string) =>

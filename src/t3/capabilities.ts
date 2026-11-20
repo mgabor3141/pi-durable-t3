@@ -25,6 +25,9 @@ export const PI_CAPABILITIES: OrchestrationV2ProviderCapabilities = {
 		emitsTurnStarted: true,
 		emitsTurnCompleted: true,
 		supportsInterrupt: true,
+		// T3's Resume goes on in the stopped run with no new message (pi-durable's continue, as `/continue`), which is the
+		// native resume this names (T3 0.1.11). Absent, T3 assumes the same; `false` would hide Resume after a Stop.
+		supportsNativeResume: true,
 		supportsActiveSteering: true,
 		activeSteeringInterruptsTools: no,
 		// A steer is an input like any other: its images and files go with it.
