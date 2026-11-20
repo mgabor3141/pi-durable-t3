@@ -1219,11 +1219,7 @@ export class Bridge {
 			if (await this.#queuesCommand(input, state, head)) return;
 			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/tree`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
-			const live = state.view?.docs["pi.live"];
-			const busy = live?.run !== undefined;
-			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
-			// Prompts sent while it runs must queue, not start a turn alongside the summary.
-			const compacting = (live?.compactions?.length ?? 0) > 0;
+			const busy = state.view?.docs["pi.live"]?.run !== undefined;
 			// T3's Orchestrator: the first message's `titleSeed` sets the title and starts an "initial" generation on it.
 			const seed = input.titleSeed?.trim();
 			// A side chat's own rows start empty (its inherited history is not shown), so its first message seeds its title, as
@@ -1282,7 +1278,7 @@ export class Bridge {
 				// turn, a steer for the run that is continued and the others behind it.
 				const waits = !busy && record?.limitRecovery?.autoResume === true && record.limitRecovery.head === head;
 				if (input.mode === "steer") await this.#store.submit(request, "steer", waits);
-				else if ((busy || compacting || waits) && input.mode !== "restart") await this.#store.submit(request, "followUp", waits);
+				else if ((busy || waits) && input.mode !== "restart") await this.#store.submit(request, "followUp", waits);
 				else await this.#store.submit(request, undefined);
 			})().catch((error: unknown) => {
 				if (seeded) {
