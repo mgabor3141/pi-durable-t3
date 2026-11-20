@@ -15,12 +15,13 @@ const MAX_MESSAGE = 2_000;
 const clip = (text: string, budget: number): string =>
 	text.length <= budget ? text : `${text.slice(0, Math.ceil(budget / 2))}\n[…]\n${text.slice(text.length - Math.floor(budget / 2))}`;
 
-/** The transcript as text, within the budget, oldest first. */
+/** The transcript as text, within the budget, oldest first. A hidden block (the host's note beside a message, such as
+ * a side chat's on its main thread) is not what the user wrote, and T3 titles from the message text alone. */
 export function titleContext(messages: readonly { role: string; content: unknown }[]): string {
 	const sections = messages.flatMap((message) => {
 		if (message.role !== "user" && message.role !== "assistant") return [];
 		const content = message.content;
-		const text = (typeof content === "string" ? content : Array.isArray(content) ? content.flatMap((block: { type?: string; text?: string }) => (block.type === "text" && block.text ? [block.text] : [])).join("\n") : "").trim();
+		const text = (typeof content === "string" ? content : Array.isArray(content) ? content.flatMap((block: { type?: string; text?: string; hidden?: boolean }) => (block.type === "text" && block.text && block.hidden !== true ? [block.text] : [])).join("\n") : "").trim();
 		return text === "" ? [] : [`${message.role.toUpperCase()}:\n${clip(text, MAX_MESSAGE)}`];
 	});
 	const first = sections.findIndex((section) => section.startsWith("USER:"));

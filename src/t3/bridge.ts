@@ -1586,7 +1586,7 @@ export class Bridge {
 			if (projection.runs.length > 0 || projection.messages.length > 0) return;
 		}
 		const sideChats = this.#directory.filter((thread) => thread.lineage.sideChat === true && thread.lineage.parentThreadId === threadId).map((thread) => thread.threadId);
-		this.#titles.cancel(threadId);
+		this.#titles.forget(threadId);
 		await this.#store.remove(threadId);
 		this.#forget(threadId, new CommandError(`Thread ${threadId} was deleted`));
 		this.#commands.forget(threadId);

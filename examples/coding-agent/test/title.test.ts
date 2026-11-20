@@ -76,4 +76,7 @@ it("the title context keeps text only, within T3's budget: the first user messag
 	expect(text).not.toContain("private");
 	expect(text).not.toContain("tool output");
 	expect(text.startsWith("[Earlier content left out]")).toBe(true);
+	// A hidden block beside a message (a side chat's note on its main thread) is left out.
+	const noted = titleContext([{ role: "user", content: [{ type: "text", text: "Main thread activity: deploys", hidden: true }, { type: "text", text: "what about the tests" }] }]);
+	expect(noted).toBe("USER:\nwhat about the tests");
 });

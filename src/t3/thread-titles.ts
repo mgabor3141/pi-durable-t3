@@ -137,14 +137,23 @@ export class ThreadTitles {
 	 * (none when the thread has nothing of its own after `after`). */
 	async #entry(state: ThreadView, kind: { reason: "first-message"; messageId: string } | { reason: "regenerate" }, after: EntryId | undefined, signal: AbortSignal): Promise<EntryId | undefined> {
 		if (kind.reason === "regenerate") {
-			const latest = state.view?.entries.at(-1)?.id as EntryId | undefined;
-			return latest === undefined || (after !== undefined && latest <= after) ? undefined : latest;
+			// T3 fails a regenerate with no messages to title: here, no message in what the hook would read (a `/reload` alone
+			// writes an entry the model never sees).
+			const own = state.transcript.filter((entry) => after === undefined || entry.id > after);
+			if (!own.some((entry) => USER_ENTRY_KINDS.has(entry.kind))) return undefined;
+			return state.view?.entries.at(-1)?.id as EntryId | undefined;
 		}
 		const find = (): EntryId | undefined =>
 			state.view?.entries.find(
 				(candidate) => USER_ENTRY_KINDS.has(candidate.kind) && (candidate.data as { messageId?: unknown } | undefined)?.messageId === kind.messageId,
 			)?.id as EntryId | undefined;
 		return state.waitFor(find, 60_000, () => new Error("timed out"), signal).catch(() => undefined);
+	}
+
+	/** A deleted thread: its request is dropped and its last outcome forgotten. */
+	forget(threadId: string): void {
+		this.cancel(threadId);
+		this.#outcomes.delete(threadId);
 	}
 
 	/** Abort every pending request. */

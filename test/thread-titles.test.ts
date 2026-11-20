@@ -336,6 +336,18 @@ it("a title chosen before the first message is kept; a placeholder, a side chat'
 	expect(bridge.threadRecord("side-renamed")!.titleRenamed).toBeUndefined();
 }, 30_000);
 
+it("regenerating a thread with nothing the model was told fails without asking the hook (a `/reload` alone)", async () => {
+	const fixture = await makeThreads({ projects: [{ id: "p" }] });
+	const { hook, calls } = manualHook();
+	const { bridge } = await start(fixture, fixture.threads, hook);
+	const threadId = await newThread(bridge);
+	await bridge.sendMessage({ threadId, commandId: "c1", messageId: "m1", text: "/reload", mode: "start" });
+	await bridge.updateThreadMetadata({ commandId: "g1", threadId, regenerateTitle: true });
+	await until("the outcome", () => shell(bridge, threadId).lastTitleRegeneration !== null);
+	expect(shell(bridge, threadId).lastTitleRegeneration).toMatchObject({ status: "failed", message: "This thread has no messages to title yet." });
+	expect(calls).toHaveLength(0);
+}, 30_000);
+
 it("regenerating a thread with no messages of its own fails, saying so", async () => {
 	const fixture = await makeThreads({ projects: [{ id: "p" }] });
 	const { hook, calls } = manualHook();
