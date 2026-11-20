@@ -1,6 +1,6 @@
 // T3's `.ignore` matcher (apps/server/src/workspace/IgnorePatterns.ts at v0.1.11), copied as it is: T3's file search
 // lets the nearest `.ignore` include or exclude a path ahead of git's rules, and git cannot evaluate those files (`files.ts`).
-// Copied rather than vendored by dev/setup-t3.sh because it is one small pure file with no imports.
+// It could as well be vendored by dev/setup-t3.sh, as T3's other server files are.
 
 /**
  * Gitignore-syntax matching for `.ignore` files, which git cannot evaluate for us. Patterns come
