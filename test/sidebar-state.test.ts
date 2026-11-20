@@ -152,6 +152,19 @@ it("a thread that works, or holds a message someone queued, is not settled (T3's
 	await until("it stopped", () => bridge.threadShell("busy").status !== "running");
 	await expect(dispatch(bridge, { type: "thread.settle", threadId: "busy" })).rejects.toThrow("Thread busy has a queued message. Send it or remove it from the queue before settling.");
 	expect(bridge.threadShell("busy").settledOverride).toBeNull();
+
+	// A message a scheduled task queued does not hold it (T3 0.1.11), as an agent's or a report's does not.
+	await f.create({ threadId: "auto", projectId: "p" });
+	const held2 = gated("done2");
+	f.model.respond(held2.step);
+	await bridge.sendMessage({ threadId: "auto", commandId: "c3", messageId: "m3", text: "work", mode: "start" });
+	await until("it runs", () => bridge.threadShell("auto").status === "running");
+	await bridge.sendMessage({ threadId: "auto", commandId: "c4", messageId: "scheduled-task-message:task-1:1:scheduled", text: "scheduled", mode: "queue" });
+	await bridge.interrupt("auto");
+	held2.release();
+	await until("it stopped", () => bridge.threadShell("auto").status !== "running");
+	await dispatch(bridge, { type: "thread.settle", threadId: "auto" });
+	expect(bridge.threadShell("auto").settledOverride).toBe("settled");
 });
 
 it("the settlement sweep settles quiet threads as of when they went quiet, and leaves pinned, switched-off and recent ones", { timeout: 30_000 }, async () => {
@@ -230,4 +243,66 @@ it("a thread made from old turns counts as active from when it was made", () => 
 	expect(autoSettleAt(fork(now - 8 * day), 7, now)).toBe(now - 8 * day);
 	// A thread older than its messages is as before: quiet since the newest of them.
 	expect(autoSettleAt(fork(now - 60 * day), 7, now)).toBe(now - 30 * day);
+});
+
+it("undoing a settle puts back the stamp it cleared, so the thread returns to its place (T3 0.1.10's restoreUnsettledAt)", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	await f.create({ threadId: "t", projectId: "p" });
+	await f.create({ threadId: "u", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	const anchor = "2026-01-02T03:04:05.000Z";
+	await dispatch(bridge, { type: "thread.settle", threadId: "t" });
+	await dispatch(bridge, { type: "thread.unsettle", threadId: "t", restoreUnsettledAt: anchor });
+	expect(bridge.threadShell("t").settledOverride).toBe("active");
+	expect(iso(bridge.threadShell("t").unsettledAt)).toBe(anchor);
+	await dispatch(bridge, { type: "thread.settle", threadId: "u" });
+	await dispatch(bridge, { type: "thread.unsettle", threadId: "u", restoreUnsettledAt: null });
+	expect(bridge.threadShell("u").settledOverride).toBe("active");
+	expect(bridge.threadShell("u").unsettledAt ?? null).toBeNull();
+	// Without one, as before: stamped now.
+	await dispatch(bridge, { type: "thread.settle", threadId: "u" });
+	const before = Date.now();
+	await dispatch(bridge, { type: "thread.unsettle", threadId: "u" });
+	expect(DateTime.toEpochMillis(bridge.threadShell("u").unsettledAt!)).toBeGreaterThanOrEqual(before);
+});
+
+
+it("a metadata update that moves a worktree, or queues a message with one (0.1.10's continuation), is refused: no git here", async () => {
+	const f = await fixture();
+	await f.create({ threadId: "t", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	await expect(dispatch(bridge, { type: "thread.metadata.update", threadId: "t", continuation: { messageId: "m1", text: "go on" } })).rejects.toThrow(
+		"Updating continuation is not supported by pi-durable-t3 (no git here).",
+	);
+});
+
+it("a subagent thread settles with its parent, not on its own days, whatever the setting (T3 0.1.11)", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	await f.create({ threadId: "parent", projectId: "p" });
+	const child = await f.threads.create({ threadId: "child", projectId: "p", lineage: { parentThreadId: "parent", relationshipToParent: "subagent", rootThreadId: "parent" } });
+	void child;
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	const day = 24 * 60 * 60 * 1000;
+	// Long quiet, its parent active (pinned): the child stays.
+	await dispatch(bridge, { type: "thread.pin", threadId: "parent", orderKey: "a0" });
+	await bridge.sidebar.sweep(Date.now() + 30 * day);
+	expect(bridge.threadShell("parent").settledOverride).toBeNull();
+	expect(bridge.threadShell("child").settledOverride).toBeNull();
+	// The parent settled: the next sweep settles the child as of then, even with automatic settlement off.
+	await dispatch(bridge, { type: "thread.settle", threadId: "parent" });
+	f.settings.update({ sidebarAutoSettleAfterDays: null } as never);
+	const before = Date.now();
+	// (The settings change starts a sweep of its own; this one may find it running and return.)
+	for (let i = 0; i < 40 && bridge.threadShell("child").settledOverride === null; i++) {
+		await bridge.sidebar.sweep();
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	expect(bridge.threadShell("child").settledOverride).toBe("settled");
+	expect(DateTime.toEpochMillis(bridge.threadShell("child").settledAt!)).toBeGreaterThanOrEqual(before);
 });

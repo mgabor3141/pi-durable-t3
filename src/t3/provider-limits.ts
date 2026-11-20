@@ -102,7 +102,8 @@ export class ProviderLimits {
 		}
 		const resetAt = Date.parse(update.resetAt);
 		if (update.snooze === true && resetAt <= Date.now()) throw new CommandError("The reset time has passed. Retry the thread manually.");
-		if (recovery === undefined || recovery.runId !== update.runId || recovery.resetAt !== resetAt || bridge.thread(threadId)?.settledOverride === "settled") {
+		if (bridge.thread(threadId)?.settledOverride === "settled") throw new CommandError("The thread is settled. Un-settle it to resume at the reset.");
+		if (recovery === undefined || recovery.runId !== update.runId || recovery.resetAt !== resetAt) {
 			throw new CommandError("The provider limit changed before recovery could be configured.");
 		}
 		const snoozed = recovery.snooze === true;

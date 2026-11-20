@@ -1312,8 +1312,11 @@ function projectQueued(b: Build): void {
 			checkpointId: null,
 			contextHandoffId: null,
 		} as Any);
+		// A scheduled task's message names its task while it waits too, as T3's does (a settle passes over it).
+		const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(item.messageId)?.[1];
 		messages.push({
 			...(({ senderThreadId, ...written }) => ({ ...written, ...(senderThreadId === undefined ? {} : { senderThreadId: id(senderThreadId) }) }))(authorOf(item.entry?.data)),
+			...(scheduledTaskId === undefined ? {} : { scheduledTaskId: id(scheduledTaskId) }),
 			id: id(item.messageId),
 			threadId: id(threadId),
 			runId: id(queuedRunId),

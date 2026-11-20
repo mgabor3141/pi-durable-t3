@@ -6,6 +6,7 @@ import { entryChars, type ViewMemory } from "./memory-report.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, ConversationTranscript, type Harness, type TranscriptView, type WatchHandle } from "@earendil-works/pi-durable";
 import { type ImageAt, imageDataOf, withoutImageData } from "./image-data.ts";
+import * as DateTime from "effect/DateTime";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { AppliedUndo } from "../threads.ts";
 import { CommandError } from "./errors.ts";
@@ -581,9 +582,12 @@ export class ThreadView {
 	 */
 	#withPlaced(previous: OrchestrationV2ThreadProjection, projected: OrchestrationV2ThreadProjection): OrchestrationV2ThreadProjection {
 		const runs = new Set(projected.runs.map((run) => run.id));
+		const now = DateTime.makeUnsafe(Date.now());
 		for (const run of previous.runs) {
 			if (run.status !== "queued" || runs.has(run.id)) continue;
-			this.#placed.push({ run: { ...run, status: "cancelled" }, message: previous.messages.find((message) => message.id === run.userMessageId) });
+			// As T3 cancels a queued run: out of the queue, and ended now. The end time lets the client's latest-run pick
+			// (`latestUnheldRun`, 0.1.11) pass over it when the run it was placed in outlived it.
+			this.#placed.push({ run: { ...run, status: "cancelled", queuePosition: null, completedAt: now }, message: previous.messages.find((message) => message.id === run.userMessageId) });
 		}
 		if (this.#placed.length === 0) return projected;
 		// A placed message is in the thread under its own id; one that was removed is kept with its run.

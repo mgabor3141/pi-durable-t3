@@ -165,3 +165,19 @@ it("the merge-back context keeps the last exchange and the first question when t
 	expect(note).toContain("- Earlier items truncated.");
 	expect(note).toContain("line 199 ");
 });
+
+it("archiving a thread archives its side chats, and unarchiving brings back those its archive took (T3 0.1.10)", { timeout: 30_000 }, async () => {
+	const { bridge, send } = await setup();
+	await send("main", "Start", "Started.");
+	await bridge.forkThread({ sourceThreadId: "main", targetThreadId: "kept", sideChat: true });
+	await bridge.forkThread({ sourceThreadId: "main", targetThreadId: "earlier", sideChat: true });
+	await bridge.sidebar.archive("earlier");
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await bridge.sidebar.archive("main");
+	expect(bridge.threadRecord("kept")?.archivedAt).toBe(bridge.threadRecord("main")?.archivedAt);
+	expect(bridge.threadRecord("earlier")?.archivedAt).toBeLessThan(bridge.threadRecord("main")!.archivedAt!);
+	await bridge.sidebar.unarchive("main");
+	expect(bridge.threadRecord("main")?.archivedAt).toBeUndefined();
+	expect(bridge.threadRecord("kept")?.archivedAt, "archived with it, back with it").toBeUndefined();
+	expect(bridge.threadRecord("earlier")?.archivedAt, "archived on its own before: stays").toBeTypeOf("number");
+});

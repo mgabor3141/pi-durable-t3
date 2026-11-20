@@ -138,7 +138,9 @@ it("a queued message that is removed stays in the stream as a cancelled run, as 
 	// No event of T3's takes a run away, and none is needed: the client is told the run is cancelled, which its queue
 	// leaves out. The thread is not sent again.
 	expect(reasons, "removing a queued message needs no snapshot").toEqual([]);
-	expect(watcher.current()!.runs.find((run) => run.id === queued!.id)?.status).toBe("cancelled");
+	// Out of the queue and ended, as T3 cancels a queued run: the client's latest-run pick (`latestUnheldRun`, 0.1.11)
+	// passes over a run that never started and ended before the one it was waiting behind.
+	expect(watcher.current()!.runs.find((run) => run.id === queued!.id)).toMatchObject({ status: "cancelled", queuePosition: null, startedAt: null, completedAt: expect.anything() });
 	expect((await bridge.projection("t")).projection.runs.some((run) => run.id === queued!.id), "the bridge's own readers do not see it").toBe(false);
 	await bridge.interrupt("t");
 	await idle();

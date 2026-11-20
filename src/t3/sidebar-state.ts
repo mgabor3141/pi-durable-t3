@@ -53,16 +53,20 @@ export class SidebarState {
 		const latest = projection.runs.reduce<(typeof projection.runs)[number] | undefined>((found, run) => (found === undefined || run.ordinal > found.ordinal ? run : found), undefined);
 		if (expectedLatestRunId !== undefined && latest?.id !== expectedLatestRunId) throw new CommandError("The thread received another run before settlement.");
 		if (projection.runs.some((run) => ["preparing", "starting", "running", "waiting"].includes(run.status))) throw new CommandError(`Thread ${threadId} is still running. Stop it before settling.`);
-		const written = new Set(projection.messages.filter((message) => message.role === "user" && message.createdBy === "user").map((message) => message.id));
+		// A message an agent, a report or (0.1.11) a scheduled task queued does not hold the thread; one a person did.
+		const written = new Set(projection.messages.filter((message) => message.role === "user" && message.createdBy === "user" && message.scheduledTaskId === undefined).map((message) => message.id));
 		if (projection.runs.some((run) => run.status === "queued" && written.has(run.userMessageId))) throw new CommandError(`Thread ${threadId} has a queued message. Send it or remove it from the queue before settling.`);
 		await this.#bridge.store.settle(threadId);
 		this.#bridge.republish(threadId);
 	}
 
-	/** T3's `thread.unsettle`: put the thread back in the active section, durably. */
-	async unsettle(threadId: string): Promise<void> {
+	/** T3's `thread.unsettle`: put the thread back in the active section, durably. `restoreUnsettledAt` (an ISO time, or
+	 * null) is the stamp an undone settle cleared (`Threads.unsettle`); one that is not a time is refused in T3's words. */
+	async unsettle(threadId: string, restoreUnsettledAt?: string | null): Promise<void> {
 		this.#notArchived(threadId);
-		await this.#bridge.store.unsettle(threadId);
+		const restore = restoreUnsettledAt == null ? restoreUnsettledAt : Date.parse(restoreUnsettledAt);
+		if (Number.isNaN(restore)) throw new CommandError(`Thread ${threadId} unsettle anchor ${restoreUnsettledAt} is not a valid time.`);
+		await this.#bridge.store.unsettle(threadId, restore);
 		this.#bridge.republish(threadId);
 	}
 
@@ -83,28 +87,44 @@ export class SidebarState {
 		});
 	}
 
+	/** The live side chats opened from `threadId`, which follow it into the archive and out. */
+	#sideChats(threadId: string): string[] {
+		return this.#bridge
+			.threads()
+			.filter((thread) => thread.deletedAt === null && thread.lineage.sideChat === true && thread.lineage.parentThreadId === threadId)
+			.map((thread) => thread.threadId);
+	}
+
 	/** T3's `thread.archive`: out of the sidebar and into the archive; a title being generated is dropped. */
 	async archive(threadId: string): Promise<void> {
 		if (!this.#bridge.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
 		if (this.#bridge.thread(threadId)?.archivedAt !== undefined) throw new CommandError(`Thread ${threadId} is already archived.`);
-		this.#titles.cancel(threadId);
 		const now = Date.now();
-		await this.#bridge.store.updateRecord(threadId, (record) => {
-			record.archivedAt = now;
-		});
+		// Since 0.1.10 its side chats are archived with it (those not archived already).
+		for (const id of [threadId, ...this.#sideChats(threadId).filter((sideChat) => this.#bridge.thread(sideChat)?.archivedAt === undefined)]) {
+			this.#titles.cancel(id);
+			await this.#bridge.store.updateRecord(id, (record) => {
+				record.archivedAt = now;
+			});
+		}
 	}
 
-	/** T3's `thread.unarchive`. */
+	/** T3's `thread.unarchive`: with the side chats its archive took (archived when it was or later), not older ones. */
 	async unarchive(threadId: string): Promise<void> {
 		if (!this.#bridge.hasThread(threadId)) throw new CommandError(`Unknown thread: ${threadId}`);
-		if (this.#bridge.thread(threadId)?.archivedAt === undefined) throw new CommandError(`Thread ${threadId} is not archived.`);
-		await this.#bridge.store.updateRecord(threadId, (record) => {
-			delete record.archivedAt;
-		});
+		const archivedAt = this.#bridge.thread(threadId)?.archivedAt;
+		if (archivedAt === undefined) throw new CommandError(`Thread ${threadId} is not archived.`);
+		const sideChats = this.#sideChats(threadId).filter((sideChat) => (this.#bridge.thread(sideChat)?.archivedAt ?? -Infinity) >= archivedAt);
+		for (const id of [threadId, ...sideChats]) {
+			await this.#bridge.store.updateRecord(id, (record) => {
+				delete record.archivedAt;
+			});
+		}
 	}
 
-	/** T3's `thread.snooze`: hidden until a time in the future; refused while a message waits in its queue (T3 refuses a
-	 * queued run someone sent). */
+	/** T3's `thread.snooze`: hidden until a time in the future; refused while an approval card waits, and while a message
+	 * waits in its queue (T3 refuses a queued run someone sent) unless the queue is held behind a provider's limit (0.1.11:
+	 * that work cannot start before the reset anyway, and "Snooze until reset" is for exactly that thread). */
 	async snooze(threadId: string, snoozedUntil: string): Promise<void> {
 		this.#notArchived(threadId);
 		const until = Date.parse(snoozedUntil);
@@ -113,7 +133,9 @@ export class SidebarState {
 		const release = this.#bridge.acquire(threadId);
 		try {
 			const { projection } = await this.#bridge.view(threadId).projection(15_000);
-			if (projection.runs.some((run) => run.status === "queued")) throw new CommandError(`Thread ${threadId} has a queued run and cannot be snoozed.`);
+			if (projection.runtimeRequests.some((request) => request.status === "pending" && request.kind !== "user_input")) throw new CommandError(`Thread ${threadId} has a pending approval and cannot be snoozed.`);
+			const heldBehindLimit = this.#bridge.thread(threadId)?.limitRecovery !== undefined;
+			if (!heldBehindLimit && projection.runs.some((run) => run.status === "queued")) throw new CommandError(`Thread ${threadId} has a queued run and cannot be snoozed.`);
 		} finally {
 			release();
 		}
@@ -237,10 +259,19 @@ export class SidebarState {
 		await this.#bridge.store.settle(threadId, settledAt);
 	}
 
+	/** A subagent's parent no longer holds it active: settled, archived or gone. */
+	#parentDone(parentThreadId: string | null): boolean {
+		const parent = parentThreadId === null ? undefined : this.#bridge.thread(parentThreadId);
+		return parent === undefined || parent.deletedAt !== null || parent.archivedAt !== undefined || parent.settledOverride === "settled";
+	}
+
 	/**
 	 * T3's settlement sweep (`ThreadSettlementService`): settle every thread that has been quiet for longer than its
 	 * project's `sidebarAutoSettleAfterDays` (T3's default: 7 days; `null` turns it off), as of when it went quiet. Pinned
 	 * threads, threads kept active, threads with automatic settlement turned off, and running threads stay.
+	 *
+	 * A subagent thread (a `thread_prompt` child) has no days of its own since 0.1.11: it stays while its parent is live
+	 * and active, and settles as of now once the parent is settled, archived or deleted, whatever the setting.
 	 */
 	async sweep(now = Date.now()): Promise<void> {
 		if (this.#bridge.closed() || this.#sweeping) return;
@@ -249,13 +280,14 @@ export class SidebarState {
 			const settings = this.#bridge.config.settings.current();
 			for (const thread of this.#bridge.threads()) {
 				if (this.#bridge.closed()) return;
-				const days = autoSettleDays(settings, thread.projectId);
+				const subagent = thread.lineage.relationshipToParent === "subagent";
+				const days = subagent ? (this.#parentDone(thread.lineage.parentThreadId) ? 0 : null) : autoSettleDays(settings, thread.projectId);
 				if (days === null || !this.#bridge.hasThread(thread.threadId)) continue;
 				const shell = this.#bridge.shell(thread.threadId);
 				const settledAt = autoSettleAt(shell, days, now, thread.lastSnoozeWakeAt);
 				if (settledAt === null) continue;
 				try {
-					await this.autoSettle(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), settledAt);
+					await this.autoSettle(thread.threadId, DateTime.toEpochMillis(shell.updatedAt), subagent ? undefined : settledAt);
 				} catch (error) {
 					this.#bridge.log.warn("automatic thread settlement skipped", { threadId: thread.threadId, error: messageOf(error) });
 				}

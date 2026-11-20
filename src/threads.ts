@@ -799,7 +799,9 @@ export class Threads {
 			thread.settledOverride = "settled";
 			thread.settledAt = already && thread.pinnedAt === undefined ? (thread.settledAt ?? at) : at;
 			delete thread.unsettledAt;
-			// As T3's settle: a settled thread leaves the pins, its dragged place and any snooze.
+			// As T3's settle: a settled thread leaves the pins, its dragged place and any snooze; and (0.1.11) a limit's
+			// recovery neither resumes nor snoozes it, since a settled thread refuses recovery.
+			if (thread.limitRecovery !== undefined) thread.limitRecovery = { ...thread.limitRecovery, autoResume: false, snooze: false };
 			delete thread.snoozedUntil;
 			delete thread.snoozedAt;
 			delete thread.pinnedAt;
@@ -809,14 +811,18 @@ export class Threads {
 		});
 	}
 
-	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. */
-	async unsettle(threadId: string): Promise<void> {
+	/** T3's `thread.unsettle`: the thread is explicitly active again, with a durable wake stamp. `restore` (T3 0.1.10's
+	 * undo of a settle) is the stamp the settle cleared, put back instead of now so the thread returns to its place in
+	 * the active section rather than to the top; `null`: it had none. */
+	async unsettle(threadId: string, restore?: number | null): Promise<void> {
 		await this.#commit(async (_tx, writes) => {
 			const thread = await writes.live(threadId);
 			const already = thread.settledOverride === "active";
 			thread.settledOverride = "active";
 			delete thread.settledAt;
-			thread.unsettledAt = already ? (thread.unsettledAt ?? Date.now()) : Date.now();
+			const at = already ? (thread.unsettledAt ?? Date.now()) : restore === undefined ? Date.now() : restore;
+			if (at === null) delete thread.unsettledAt;
+			else thread.unsettledAt = at;
 			await writes.putRecord(thread);
 		});
 	}

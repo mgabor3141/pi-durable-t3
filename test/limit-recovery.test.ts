@@ -129,3 +129,22 @@ it("T3's setting \"Auto-resume limited threads\" waits for a reset however far i
 	expect(waiting.recovery).toMatchObject({ autoResume: true });
 	expect(isBusy(waiting.projection)).toBe(true);
 });
+
+it("a thread waiting at a limit can be snoozed with its queue held; settling it ends the auto-resume (T3 0.1.11)", { timeout: 60_000 }, async () => {
+	const { f, bridge, send, shown, update } = await setup();
+	f.model.respond(limit(600));
+	await send("go");
+	const waiting = await shown(["failed"]);
+	expect(waiting.recovery).toMatchObject({ autoResume: true });
+	await send("queued behind the limit");
+	await bridge.waitFor("t", (projection) => (projection.runs.some((run) => run.status === "queued") ? true : undefined), 10_000);
+	// "Snooze until reset": the queued message cannot start before the reset anyway.
+	const { runId, resetAt } = waiting.recovery!;
+	await update({ runId, resetAt, snooze: true });
+	expect(bridge.threadRecord("t")?.snoozedUntil).toBe(Date.parse(resetAt));
+	await bridge.sidebar.unsnooze("t");
+	// A settled thread refuses recovery, so its armed resume is turned off with the settle, and asking again is refused.
+	await f.threads.settle("t");
+	expect(bridge.threadRecord("t")?.limitRecovery).toMatchObject({ autoResume: false, snooze: false });
+	await expect(update({ runId, resetAt, autoResume: true })).rejects.toThrow("The thread is settled. Un-settle it to resume at the reset.");
+});
