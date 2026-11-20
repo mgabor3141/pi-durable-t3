@@ -87,8 +87,8 @@ export class ApprovalRequests {
 
 	/** A thread was deleted: forget its cards (one still waiting is cancelled). */
 	forget(threadId: string): void {
-		for (const waiting of [...this.#waiting.values()]) if (waiting.threadId === threadId) waiting.settle({ status: "cancelled" });
 		this.#byThread.delete(threadId);
+		for (const waiting of [...this.#waiting.values()]) if (waiting.threadId === threadId) waiting.settle({ status: "cancelled" });
 	}
 
 	/**
@@ -118,14 +118,17 @@ export class ApprovalRequests {
 				if (!this.#waiting.delete(requestId)) return;
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
-				const status = outcome.status === "decided" ? "resolved" : outcome.status === "timed_out" ? "expired" : "cancelled";
-				this.#set(threadId, {
-					...card,
-					status,
-					...(outcome.status === "decided" ? { decision: outcome.decision, ...(outcome.feedback === undefined ? {} : { feedback: outcome.feedback }) } : {}),
-					resolvedAt: Date.now(),
-				});
-				this.#deps.place(threadId).recompute();
+				// A deleted thread's cards are gone (`forget`): nothing to show, and placing one would open its view again.
+				if (this.#byThread.has(threadId)) {
+					const status = outcome.status === "decided" ? "resolved" : outcome.status === "timed_out" ? "expired" : "cancelled";
+					this.#set(threadId, {
+						...card,
+						status,
+						...(outcome.status === "decided" ? { decision: outcome.decision, ...(outcome.feedback === undefined ? {} : { feedback: outcome.feedback }) } : {}),
+						resolvedAt: Date.now(),
+					});
+					this.#deps.place(threadId).recompute();
+				}
 				resolve(outcome);
 			};
 			const onAbort = () => settle({ status: "cancelled" });

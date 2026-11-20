@@ -140,6 +140,16 @@ it("takes a message typed meanwhile as a decline with its text, and ends unanswe
 	expect(bridge.threadShell("t").pendingRuntimeRequest).toBeNull();
 });
 
+it("a card still waiting when its thread is deleted ends cancelled, and the deleted thread is not opened again", { timeout: 60_000 }, async () => {
+	const { bridge, thread } = await setup();
+	// Asked with no abort signal, so that only the delete ends it.
+	const asked = bridge.approvals.request({ conversationId: thread.head, prompt: "ssh max@nas.lan", options: [{ decision: "decline", label: "Deny" }] });
+	await bridge.waitFor("t", () => (bridge.approvals.shown("t")?.length === 1 ? true : undefined), 10_000);
+	await bridge.deleteThread("t");
+	expect(await asked).toEqual({ status: "cancelled" });
+	expect(bridge.memory()).toMatchObject({ views: 0 });
+});
+
 it("answers the integrator's slash commands in the thread, shown only, and lists them for T3's composer", { timeout: 60_000 }, async () => {
 	const seen: unknown[] = [];
 	const { bridge } = await setup([
