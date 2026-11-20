@@ -1,9 +1,9 @@
 // A thread's queue: the messages waiting in its head conversation's inbox (T3's queued runs), and the commands on
 // them (remove, edit, send now, promote to a steer), Stop, and "send now" ahead of the queue. pi-durable's abort
-// withdraws whatever is queued, so the operations that abort hold the queue aside for the length of that commit
-// (`#aroundQueue`), in a document, so a host that dies in between does not lose it.
+// withdraws whatever is queued, so Stop holds the queue aside for the length of that commit, in a document, so a host
+// that dies in between does not lose it.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, type Harness, InboxDoc, LiveDoc, type LiveState, type Submission, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
+import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type SubmissionDraft, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
@@ -15,11 +15,22 @@ import type { MessageInput } from "./threads.ts";
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+/** Take the queued messages (steers and follow-ups; writes stay) out of an inbox's items, and return copies of them. */
+export function takeQueued(items: InboxItem[]): InboxItem[] {
+	const queued = items.filter((item) => item.mode !== "write").map((item) => copy(item));
+	for (let index = items.length - 1; index >= 0; index--) {
+		if (items[index]?.mode !== "write") items.splice(index, 1);
+	}
+	return queued;
+}
+
 /** What the queue uses of the threads layer. */
 type QueueHost = {
 	readonly harness: Harness;
 	thread(threadId: string): Promise<Thread | undefined>;
-	submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined): Promise<Submission>;
+	watermark(threadId: string): Promise<void>;
+	draft(input: MessageInput): SubmissionDraft;
+	submitted(input: MessageInput): Promise<void>;
 	compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void>;
 	reload(threadId: string, messageId?: string): Promise<void>;
 };
@@ -40,7 +51,7 @@ export class ThreadQueue {
 		this.#threads = threads;
 	}
 
-	/** A host that died while it held a conversation's queue aside (`#aroundQueue`) puts it back when it starts. */
+	/** A host that died while it held a conversation's queue aside (`abort`) puts it back when it starts. */
 	async restoreHeld(): Promise<void> {
 		const aside = await this.#threads.harness.snapshot(HeldQueueDoc, BACKGROUND_CONTEXT);
 		if (aside !== undefined && Object.keys(aside.held).length > 0) {
@@ -88,12 +99,15 @@ export class ThreadQueue {
 	}
 
 	/** T3's "Send now" (`queued-run.start`) and `queue.resume`: start the named queued input (or the first) now, leaving
-	 * the others queued. pi has no "start this queued item" primitive, so remove the queued user items, submit the
-	 * selected one as a fresh run, then restore the others in place. */
+	 * the others queued. pi has no "start this queued item" primitive, so the selected one is submitted as a fresh run
+	 * ahead of the others, as a restart's message is (`submitFirst`), in the commit that takes it out of the queue. */
 	async startQueued(threadId: string, runId: string | undefined, requestId: string): Promise<void> {
 		const { conversationId } = await this.#queueTarget(threadId);
 		const submissionId = runId === undefined ? undefined : this.#queuedSubmission(runId);
-		const held = await this.#threads.harness.commit(async (tx) => {
+		const conversation = await this.#threads.harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${conversationId}`);
+		await this.#threads.watermark(threadId);
+		const started = await this.#threads.harness.commit(async (tx) => {
 			// A read of the live run first: a Send now while a turn is live would only queue the message again.
 			const live = await tx.doc(LiveDoc, conversationId);
 			const inbox = await tx.doc(InboxDoc, conversationId);
@@ -108,47 +122,40 @@ export class ThreadQueue {
 			}
 			const target = submissionId === undefined ? candidates[0] : candidates.find((item) => item.id === submissionId);
 			if (target === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is no longer queued`);
-			const [input] = readQueuedInputs([target]);
+			const [input] = readQueuedInputs([copy(target)]);
 			if (input === undefined) throw hostError("unknown_queued_message", `queued message ${runId} is not a user message`);
 			// A queued command (`/compact`, `/reload`) is never a prompt: it leaves the queue and is answered, with every
 			// command directly behind it, since a compaction places the next queued message when its summary lands. The
 			// messages stay queued.
-			if (queuedCommand(input.text) !== undefined) return { commands: takeCommands(tx, inbox.items, inbox.items.indexOf(target)), input, rest: [], awaitsContext: false };
-			const rest = candidates.filter((item) => item.id !== target.id).map((item) => copy(item));
-			// The selected submission becomes the new run; the others keep their queued submissions while they wait.
+			if (queuedCommand(input.text) !== undefined) return { commands: takeCommands(tx, inbox.items, inbox.items.indexOf(target)) };
+			// The shown text is the message; its hidden blocks (where its attachments are saved) and its images go with it
+			// as they were sent.
+			const blocks = Array.isArray(input.content) ? (input.content as ContentBlock[]).filter((block) => block.type !== "text" || block.hidden === true) : [];
+			const message: MessageInput = {
+				threadId,
+				conversationId,
+				requestId,
+				message: input.text,
+				messageId: input.messageId,
+				...(blocks.length === 0 ? {} : { blocks }),
+				...(input.attachments.length === 0 ? {} : { attachments: input.attachments }),
+				...(input.entry?.data?.[AWAITS_CONTEXT] === true ? { awaitsContext: true } : {}),
+			};
+			const queued = takeQueued(inbox.items);
+			await conversation.submit(tx, this.#threads.draft(message));
+			// The selected submission is the new run's message now; the others keep their queued submissions and follow it.
 			tx.settleSubmission(target.id, { status: "unanswered", reason: "started" });
-			for (let index = inbox.items.length - 1; index >= 0; index--) {
-				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
-			}
-			return { input, rest, awaitsContext: input.entry?.data?.[AWAITS_CONTEXT] === true, commands: undefined };
+			(await tx.doc(InboxDoc, conversationId)).items.unshift(...queued.filter((item) => item.id !== target.id));
+			return { message };
 		}, BACKGROUND_CONTEXT);
-		if (held === undefined) return;
-		if (held.commands !== undefined) {
+		if (started === undefined) return;
+		if (started.commands !== undefined) {
 			// A compaction places the messages behind it when its summary lands. A reload starts nothing: a queue that
 			// was resumed goes on with the message behind it.
-			if (!(await this.#answerAll(threadId, held.commands)) && runId === undefined) await this.startQueued(threadId, undefined, `${requestId}:next`);
+			if (!(await this.#answerAll(threadId, started.commands)) && runId === undefined) await this.startQueued(threadId, undefined, `${requestId}:next`);
 			return;
 		}
-		const content = held.input.content;
-		const blocks = Array.isArray(content)
-			? content.filter((block): block is ContentBlock => typeof block === "object" && block !== null && (block as { type?: unknown }).type !== "text")
-			: undefined;
-		await this.#threads.submit({
-			threadId,
-			conversationId,
-			requestId,
-			message: held.input.text,
-			messageId: held.input.messageId,
-			...(blocks === undefined || blocks.length === 0 ? {} : { blocks }),
-			...(held.input.attachments.length === 0 ? {} : { attachments: held.input.attachments }),
-			...(held.awaitsContext ? { awaitsContext: true } : {}),
-		}, undefined);
-		if (held.rest.length > 0) {
-			await this.#threads.harness.commit(async (tx) => {
-				const inbox = await tx.doc(InboxDoc, conversationId);
-				inbox.items.push(...held.rest);
-			}, BACKGROUND_CONTEXT);
-		}
+		await this.#threads.submitted(started.message);
 	}
 
 	/** Edit a queued follow-up in place: keep its submission id and message id, replace the text, keep the attachments. */
@@ -229,71 +236,52 @@ export class ThreadQueue {
 	}
 
 	/**
-	 * The queued messages, taken out of the inbox for what `between` does and returned to it right after: each keeps its
-	 * queued submission, so it is the same queued message when it is back. `between` runs once it has asked for its own
-	 * commit (the Session admits commits in the order they are asked for, so the commit that returns the messages
-	 * follows it), and `settled` is awaited last. A host that dies before they are back loses them.
-	 */
-	async #aroundQueue<T>(conversationId: ConversationId, between: () => Promise<T>, settled: (result: T) => Promise<void> = async () => {}): Promise<T> {
-		const held = await this.#threads.harness.commit(async (tx) => {
-			const inbox = await tx.doc(InboxDoc, conversationId);
-			const queued = inbox.items.filter((item) => item.mode !== "write").map((item) => copy(item));
-			for (let index = inbox.items.length - 1; index >= 0; index--) {
-				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
-			}
-			// Kept where a restart finds them, until they are back.
-			if (queued.length > 0) (await tx.doc(HeldQueueDoc)).held[String(conversationId)] = queued as unknown as JsonValue[];
-			return queued;
-		}, BACKGROUND_CONTEXT);
-		const giveBack = async () => {
-			if (held.length === 0) return;
-			await this.#threads.harness.commit(async (tx) => {
-				// Ahead of anything queued since: they were queued first.
-				(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
-				delete (await tx.doc(HeldQueueDoc)).held[String(conversationId)];
-			}, BACKGROUND_CONTEXT);
-		};
-		let result: T;
-		try {
-			result = await between();
-		} catch (error) {
-			await giveBack();
-			throw error;
-		}
-		await giveBack();
-		await settled(result);
-		return result;
-	}
-
-	/**
 	 * Aborts the named conversation; never promotes. The messages queued behind the run stay queued, as T3's Stop and
 	 * restart keep them: pi-durable's abort withdraws every queued input in the commit that admits it, so they are out
-	 * of the inbox for that commit. They are back before the run has ended (the abort resolves only then).
+	 * of the inbox for that commit, kept where a restart finds them (`restoreHeld`). They are back before the run has
+	 * ended (the abort resolves only then), each with its queued submission, so it is the same queued message.
 	 */
 	async abort(input: { threadId: string; conversationId: number }): Promise<void> {
 		const conversationId = input.conversationId as ConversationId;
 		const conversation = await this.#threads.harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
-		await this.#aroundQueue(
-			conversationId,
-			// Asked for, not awaited: the abort's commit is in line, and its end is awaited once the queue is back.
-			async () => {
-				const ended = conversation.abort(BACKGROUND_CONTEXT);
-				// Its failure is thrown where it is awaited, below; until then it must not count as unhandled.
-				ended.catch(() => {});
-				return { ended };
-			},
-			({ ended }) => ended,
-		);
+		const held = await this.#threads.harness.commit(async (tx) => {
+			const queued = takeQueued((await tx.doc(InboxDoc, conversationId)).items);
+			if (queued.length > 0) (await tx.doc(HeldQueueDoc)).held[String(conversationId)] = queued as unknown as JsonValue[];
+			return queued;
+		}, BACKGROUND_CONTEXT);
+		// Asked for, not awaited: the abort's commit is in line (the Session admits commits in the order they are asked
+		// for), so the commit that returns the messages follows it, and the abort's end is awaited once they are back.
+		const ended = conversation.abort(BACKGROUND_CONTEXT);
+		// Its failure is thrown where it is awaited, below; until then it must not count as unhandled.
+		ended.catch(() => {});
+		if (held.length > 0) {
+			await this.#threads.harness.commit(async (tx) => {
+				// Ahead of anything queued since: they were queued first.
+				(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
+				delete (await tx.doc(HeldQueueDoc)).held[String(conversationId)];
+			}, BACKGROUND_CONTEXT);
+		}
+		await ended;
 	}
 
 	/**
 	 * A message that runs now, ahead of the messages queued: they follow it, as T3 puts a restart's message first in its
-	 * queue. pi-durable starts an idle conversation's next run with what is queued, so they are out of the inbox while
-	 * this message starts its run.
+	 * queue. One commit, as `Threads.continue`: pi-durable starts an idle conversation's next run with what is queued, so
+	 * they are out of the inbox while this message is admitted, and back in the same commit, behind its run however soon
+	 * it ends.
 	 */
-	async submitFirst(input: MessageInput): Promise<Submission> {
-		return this.#aroundQueue(input.conversationId as ConversationId, () => this.#threads.submit(input, undefined));
+	async submitFirst(input: MessageInput): Promise<void> {
+		const conversationId = input.conversationId as ConversationId;
+		const conversation = await this.#threads.harness.conversation(conversationId, BACKGROUND_CONTEXT);
+		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
+		await this.#threads.watermark(input.threadId);
+		await this.#threads.harness.commit(async (tx) => {
+			const queued = takeQueued((await tx.doc(InboxDoc, conversationId)).items);
+			await conversation.submit(tx, this.#threads.draft(input));
+			(await tx.doc(InboxDoc, conversationId)).items.unshift(...queued);
+		}, BACKGROUND_CONTEXT);
+		await this.#threads.submitted(input);
 	}
 
 	/**

@@ -20,6 +20,7 @@ import {
 	InboxDoc,
 	LiveDoc,
 	type Submission,
+	type SubmissionDraft,
 	type TaskId,
 	type Tx,
 	UserEntry,
@@ -45,7 +46,7 @@ const APP_USER_ENTRY = "app.user";
 /** Entry kinds that name a user turn, for the rewind's `not_rewindable` check; the facet owns a copy of this literal. */
 const USER_ENTRY_KINDS: ReadonlySet<string> = new Set([UserEntry.kind, APP_USER_ENTRY]);
 
-import { ThreadQueue } from "./thread-queue.ts";
+import { takeQueued, ThreadQueue } from "./thread-queue.ts";
 import { type Provenance, USER_WEB, type ThreadLineage, type Spawn, type ThreadSummary, type ThreadRecord, type Thread, ThreadsDoc, type StoredSummary, NO_SUMMARY, MAX_UNDOS, MAX_RECEIPTS, ThreadRecordDoc, ThreadSummaryDoc, type Directory, ReceiptsDoc } from "./thread-records.ts";
 export type { Provenance, ThreadLineage, PendingContext, NotifyRequest, Spawn, SummaryRun, ThreadSummary, AppliedUndo, LimitRecovery, ThreadRecord, ThreadOpens, Thread, ThreadOrigin } from "./thread-records.ts";
 export { USER_WEB, HeldQueueDoc, ThreadsDoc } from "./thread-records.ts";
@@ -241,7 +242,7 @@ export class Threads {
 		this.#env = deps.env;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#onWarn = deps.onWarn ?? (() => {});
-		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), submit: (input, whenBusy) => this.submit(input, whenBusy), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId), reload: (threadId, messageId) => this.reload(threadId, messageId) });
+		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), watermark: (threadId) => this.watermark(threadId), draft: (input) => this.draft(input), submitted: (input) => this.submitted(input), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId), reload: (threadId, messageId) => this.reload(threadId, messageId) });
 	}
 
 	/** The integrator's Harness; the bridge reads and watches conversation views through it. */
@@ -590,6 +591,41 @@ export class Threads {
 	async submit(input: MessageInput, whenBusy: "steer" | "followUp" | undefined, waits = false): Promise<Submission> {
 		const conversation = await this.#harness.conversation(input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
+		const { content, data } = this.#prompt(input);
+		// A note reaches the model's context without starting a turn: a write whose entry carries the user message. Idle,
+		// it is appended at once; busy, pi-durable places it at the run's next boundary.
+		if (input.note === true) {
+			const message = { role: "user", content, timestamp: Date.now() } as unknown as Message;
+			const submission = await conversation.submit({ type: "write", requestId: input.requestId, entry: { kind: APP_NOTE_ENTRY, data, model: [message] } }, BACKGROUND_CONTEXT);
+			await this.#rememberInput(input);
+			return submission;
+		}
+		// Before the run exists, so its completion is after the watermark however fast it is.
+		await this.watermark(input.threadId);
+		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
+		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
+		const live = await this.#harness.snapshot(LiveDoc, input.conversationId as ConversationId, BACKGROUND_CONTEXT);
+		const compacting = (live?.compactions?.length ?? 0) > 0;
+		// `waits`: the thread waits for a provider's limit to reset (`LimitRecovery`). Nothing runs, and the message is
+		// queued as it would be behind a run: a steer joins the run when it is continued, the others follow it.
+		// How it was sent, on its entry (`SentAs`): the projection labels it a steer or a queued message by this.
+		const sent = (mode: "steer" | "followUp") => ({ ...data, whenBusy: mode, sentAt: Date.now() });
+		if (compacting || (waits && live?.run === undefined)) {
+			const mode = waits && !compacting && whenBusy === "steer" ? "steer" : "followUp";
+			const queued = await this.#enqueueInput(input.conversationId as ConversationId, input.requestId, content, { kind: APP_USER_ENTRY, data: sent(mode) }, mode);
+			await this.#rememberInput(input);
+			return queued;
+		}
+		const submission = await conversation.submit(
+			whenBusy === undefined ? this.draft(input) : { type: "input", requestId: input.requestId, content, whenBusy, entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } },
+			BACKGROUND_CONTEXT,
+		);
+		await this.submitted(input);
+		return submission;
+	}
+
+	/** A message's model content and its entry's data. */
+	#prompt(input: MessageInput): { content: UserInput; data: Record<string, JsonValue> } {
 		// Text-only keeps a plain-string content (unchanged prompt-cache shape); an image appends its block after the
 		// text block, so the model receives [text, image] exactly as pi-ai's user content carries an image.
 		const content: UserInput =
@@ -608,40 +644,18 @@ export class Threads {
 		if (input.attachments !== undefined && input.attachments.length > 0) data.attachments = input.attachments.map((a) => ({ ...a }));
 		if (input.context !== undefined) data.context = input.context;
 		if (input.awaitsContext === true) data[AWAITS_CONTEXT] = true;
-		// A note reaches the model's context without starting a turn: a write whose entry carries the user message. Idle,
-		// it is appended at once; busy, pi-durable places it at the run's next boundary.
-		if (input.note === true) {
-			const message = { role: "user", content, timestamp: Date.now() } as unknown as Message;
-			const submission = await conversation.submit({ type: "write", requestId: input.requestId, entry: { kind: APP_NOTE_ENTRY, data, model: [message] } }, BACKGROUND_CONTEXT);
-			await this.#rememberInput(input);
-			return submission;
-		}
-		// Before the run exists, so its completion is after the watermark however fast it is.
-		await this.#watermark(input.threadId);
-		// A manual compaction is conversation-owned work, not a pi run. Queue prompts behind it explicitly: pi's
-		// admission sees no `live.run`, so it would otherwise place the prompt and start a turn alongside the summary.
-		const live = await this.#harness.snapshot(LiveDoc, input.conversationId as ConversationId, BACKGROUND_CONTEXT);
-		const compacting = (live?.compactions?.length ?? 0) > 0;
-		// `waits`: the thread waits for a provider's limit to reset (`LimitRecovery`). Nothing runs, and the message is
-		// queued as it would be behind a run: a steer joins the run when it is continued, the others follow it.
-		// How it was sent, on its entry (`SentAs`): the projection labels it a steer or a queued message by this.
-		const sent = (mode: "steer" | "followUp") => ({ ...data, whenBusy: mode, sentAt: Date.now() });
-		if (compacting || (waits && live?.run === undefined)) {
-			const mode = waits && !compacting && whenBusy === "steer" ? "steer" : "followUp";
-			const queued = await this.#enqueueInput(input.conversationId as ConversationId, input.requestId, content, { kind: APP_USER_ENTRY, data: sent(mode) }, mode);
-			await this.#rememberInput(input);
-			return queued;
-		}
-		const submission = await conversation.submit(
-			{
-				type: "input",
-				requestId: input.requestId,
-				content,
-				...(whenBusy === undefined ? {} : { whenBusy }),
-				...(whenBusy !== undefined ? { entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } } : Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }),
-			},
-			BACKGROUND_CONTEXT,
-		);
+		return { content, data };
+	}
+
+	/** The submission of a message sent with no `whenBusy`: it starts a run when the conversation is idle. For a caller
+	 * that admits it in a commit of its own (`ThreadQueue`), with `watermark` before that commit and `submitted` after. */
+	draft(input: MessageInput): SubmissionDraft {
+		const { content, data } = this.#prompt(input);
+		return { type: "input", requestId: input.requestId, content, ...(Object.keys(data).length === 0 ? {} : { entry: { kind: APP_USER_ENTRY, data } }) };
+	}
+
+	/** What follows the admission of a message that runs: its conversation promoted, and the sidebar's preview. */
+	async submitted(input: MessageInput): Promise<void> {
 		// Promote is its own commit and best-effort (design.md): the run is live, so a failed promote is a warning, not a
 		// false failure to the caller.
 		try {
@@ -651,12 +665,11 @@ export class Threads {
 		}
 		// The sidebar preview must show the prompt before the run starts; the run boundary updates the assistant reply.
 		await this.#rememberInput(input);
-		return submission;
 	}
 
 	/** T3's first-dispatch read watermark: a thread never visited gets one just before its first run, so that run's
 	 * completion shows as unread on every client. A thread with none shows nothing unread (T3 keeps imported history read). */
-	async #watermark(threadId: string): Promise<void> {
+	async watermark(threadId: string): Promise<void> {
 		if (this.#records.get(threadId)?.lastVisitedAt !== undefined) return;
 		try {
 			const at = Date.now() - 1;
@@ -950,17 +963,13 @@ export class Threads {
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
 		const { requestId } = input;
 		const last = (await conversation.context(BACKGROUND_CONTEXT)).messages.findLast((message) => message.role !== "system");
-		await this.#watermark(input.threadId);
+		await this.watermark(input.threadId);
 		await this.#harness.commit(async (tx) => {
 			if ((await tx.submissionByRequest(conversationId, requestId)) !== undefined) return;
 			const live = await tx.doc(LiveDoc, conversationId);
 			if (live.run !== undefined || (live.compactions?.length ?? 0) > 0) throw hostError("turn_running", "a turn is running");
 			if (last?.role !== "user" && last?.role !== "toolResult") throw hostError("nothing_to_continue", last === undefined ? "nothing was asked yet" : "the conversation ends with an answer");
-			const inbox = await tx.doc(InboxDoc, conversationId);
-			const held = inbox.items.filter((item) => item.mode !== "write").map((item) => copy(item));
-			for (let index = inbox.items.length - 1; index >= 0; index--) {
-				if (inbox.items[index]?.mode !== "write") inbox.items.splice(index, 1);
-			}
+			const held = takeQueued((await tx.doc(InboxDoc, conversationId)).items);
 			await conversation.submit(tx, { type: "continue", requestId });
 			(await tx.doc(InboxDoc, conversationId)).items.unshift(...held);
 			await tx.appendEntry(conversationId, { kind: APP_CONTINUE_ENTRY, data: { ...(input.messageId === undefined ? {} : { messageId: input.messageId, text: "/continue" }), timestamp: Date.now() } });

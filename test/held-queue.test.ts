@@ -1,5 +1,5 @@
-// Stop and "send now" take the queued messages out of the conversation's inbox for the length of one commit
-// (pi-durable's abort withdraws whatever is queued) and put them back after it. A host that dies between the two
+// Stop takes the queued messages out of the conversation's inbox for the length of one commit
+// (pi-durable's abort withdraws whatever is queued) and puts them back after it. A host that dies between the two
 // must not lose them: they are kept in a document meanwhile, and a start puts them back.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -19,7 +19,7 @@ it("a host that died while a queue was held aside puts it back when it starts", 
 	const queued = (await f.harness.snapshot(InboxDoc, head, BACKGROUND_CONTEXT))!.items.filter((item) => item.mode !== "write");
 	expect(queued).toHaveLength(1);
 
-	// The first half of `#aroundQueue`, and then the host is gone.
+	// The first half of a Stop's abort, and then the host is gone.
 	await f.harness.commit(async (tx) => {
 		const inbox = await tx.doc(InboxDoc, head);
 		const out = inbox.items.filter((item) => item.mode !== "write").map((item) => JSON.parse(JSON.stringify(item)));

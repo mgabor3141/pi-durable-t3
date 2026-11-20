@@ -207,7 +207,7 @@ export const ReceiptsDoc = defineDoc<{ receipts: Receipt[] }>({
 });
 
 /**
- * Queued inputs taken out of a conversation's inbox for the length of one operation (`#aroundQueue`), by conversation
+ * Queued inputs taken out of a conversation's inbox for the length of a Stop's abort (`ThreadQueue.abort`), by conversation
  * id: written in the commit that takes them out and cleared in the one that puts them back, so a host that dies in
  * between finds them here when it starts again (`load`).
  */
