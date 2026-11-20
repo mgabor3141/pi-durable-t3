@@ -8,6 +8,7 @@ import { expect, it } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { scheduledRunOutcome, scheduledTaskDispatch } from "../src/t3/scheduled-tasks.ts";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { makeThreads, bridgeConfig } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -132,7 +133,9 @@ it("a project folder that is not a Git repository is told apart from one that is
 	execFileSync("git", ["init", "-q", repo!.cwd]);
 	await rm(gone!.cwd, { recursive: true });
 	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-git-"));
-	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	// Git looks no higher than the fixture's folder, so a temp folder inside some repository still reads as plain.
+	const env = new NodeExecutionEnv({ cwd: "/", shellEnv: { ...process.env, GIT_CEILING_DIRECTORIES: f.root } });
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry, env }), log, f.threads, f.model.models);
 	try {
 		const dispatch = scheduledTaskDispatch(bridge);
 		expect(await dispatch.isNonGitProject("plain")).toBe(true);
@@ -142,5 +145,68 @@ it("a project folder that is not a Git repository is told apart from one that is
 	} finally {
 		await bridge.close();
 		await rm(scratch, { recursive: true, force: true });
+	}
+});
+
+/** A thread working on "m1" with a bound interval task, over the real bridge and the real service. */
+async function boundTaskBehindARun(steps: Parameters<Awaited<ReturnType<typeof makeThreads>>["model"]["respond"]>) {
+	const f = await makeThreads({ projects: [{ id: "p" }] });
+	const { createNamed } = await import("./threads-harness.ts");
+	const { ScheduledTasks } = await import("../src/t3/scheduled-tasks.ts");
+	await createNamed(f.threads, f.harness, f.model)({ threadId: "bound", projectId: "p" });
+	const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-sched-stop-"));
+	const bridge = new Bridge(bridgeConfig({ stateDir: scratch, registry: f.registry }), log, f.threads, f.model.models);
+	bridge.start();
+	await bridge.loaded();
+	const tasks = new ScheduledTasks({ harness: f.harness, dispatch: scheduledTaskDispatch(bridge) });
+	await tasks.load();
+	f.model.respond(...steps);
+	await bridge.sendMessage({ threadId: "bound", commandId: "c1", messageId: "m1", text: "work", mode: "start" });
+	await bridge.waitFor("bound", (p) => (p.runs.some((r) => r.status === "running") ? true : undefined), 10_000);
+	const { task } = await tasks.upsert({ title: "Hourly", prompt: "go", enabled: true, schedule: { type: "interval", everyMs: 3_600_000 }, projectId: "p", threadId: "bound", workspaceStrategy: { type: "root" }, modelSelection: { instanceId: "pi", model: "faux/faux-1" }, runtimeMode: "full-access", interactionMode: "default", creationSource: "web" } as never);
+	await tasks.runNow({ id: task.id });
+	const held = () => bridge.waitFor("bound", (p) => (p.runs.some((r) => r.status === "queued" && r.queueHeld === true) ? true : undefined), 10_000);
+	const close = async () => {
+		await tasks.stop();
+		await bridge.close();
+		await rm(scratch, { recursive: true, force: true });
+	};
+	return { bridge, tasks, held, close, model: f.model };
+}
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 200));
+
+it("a Stop of the run ahead of a task's queued message does not fail the task (T3 holds the queue)", { timeout: 30_000 }, async () => {
+	const { gated } = await import("./threads-harness.ts");
+	const busy = gated("work");
+	const { bridge, tasks, held, close } = await boundTaskBehindARun([busy.step]);
+	try {
+		await bridge.interrupt("bound");
+		busy.release();
+		await held();
+		await settled();
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null });
+	} finally {
+		await close();
+	}
+});
+
+it("a Stop on an idle thread whose queue holds a task's message leaves it waiting and followed: resumed, its end is the task's", { timeout: 30_000 }, async () => {
+	const { gated, errored } = await import("./threads-harness.ts");
+	const busy = gated("work");
+	const { bridge, tasks, held, close, model } = await boundTaskBehindARun([busy.step]);
+	try {
+		await bridge.interrupt("bound");
+		busy.release();
+		await held();
+		await bridge.interrupt("bound");
+		await settled();
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "succeeded", lastRunError: null });
+		model.respond(errored("Weekly usage limit reached"));
+		await bridge.startQueued("bound", undefined, "resume");
+		for (let i = 0; i < 200 && tasks.list().tasks[0]!.lastRunStatus === "succeeded"; i++) await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(tasks.list().tasks[0]).toMatchObject({ lastRunStatus: "failed", lastRunError: "Weekly usage limit reached" });
+	} finally {
+		await close();
 	}
 });

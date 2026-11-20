@@ -29,7 +29,7 @@ export const INTERRUPTED_BY_RESTART = "Run was interrupted by a server restart."
 export const MISSED_RUN = "Missed a scheduled run because the server was not running at that time.";
 export const HELD_OCCURRENCE = "A previous occurrence is held in the thread queue. Resume or remove it to run this task again.";
 /** T3's words for a run that did not complete and left no provider failure to quote (`UNSUCCESSFUL_RUN_ERRORS`). */
-export const UNSUCCESSFUL_RUN_ERRORS = {
+const UNSUCCESSFUL_RUN_ERRORS = {
 	failed: "The run failed.",
 	interrupted: "The run was stopped.",
 	cancelled: "The run was cancelled.",
@@ -662,7 +662,9 @@ export function scheduledTaskDispatch(bridge: Bridge): ScheduledTaskDispatch {
 			try {
 				return (await bridge.waitFor(threadId, (projection) => scheduledRunOutcome(projection, messageId), timeoutMs, signal)) ?? null;
 			} catch (error) {
-				// A Stop of the host, or the thread deleted meanwhile (T3's wait ends on `thread.deleted` with nothing recorded).
+				// A Stop of the host, or the thread deleted meanwhile. T3 cancels a deleted thread's active runs first, so its task
+				// records "The run was cancelled."; here the deletion stops the run, which this wait reads as stopped (or, for a
+				// message still queued, cancelled) when the thread shows it before it is gone, and as nothing otherwise.
 				if (signal.aborted || !bridge.hasThread(threadId)) return null;
 				throw error;
 			}
