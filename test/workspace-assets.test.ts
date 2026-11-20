@@ -1,10 +1,10 @@
 import { createHmac } from "node:crypto";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { describe, expect, it } from "vitest";
 import { WorkspaceAssets } from "../src/t3/workspace-assets.ts";
+import { tempRoot } from "./temp-root.ts";
 
 const signer = {
 	signPayload: (payload: string) => createHmac("sha256", "key").update(payload).digest("base64url"),
@@ -12,7 +12,7 @@ const signer = {
 };
 
 async function fixture() {
-	const root = await mkdtemp(join(tmpdir(), "workspace-assets-"));
+	const root = await tempRoot();
 	await mkdir(join(root, "docs"));
 	await writeFile(join(root, "docs", "index.html"), "<link rel=stylesheet href=style.css><h1>hi</h1>");
 	await writeFile(join(root, "docs", "style.css"), "h1 { color: red }");
