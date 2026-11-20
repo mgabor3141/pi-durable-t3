@@ -138,9 +138,9 @@ const iso = (at: number | null) => (at === null ? null : new Date(at).toISOStrin
 /**
  * Search `candidates` for `query` and return at most `limit` matches in T3's order. `subjects` holds each thread's
  * recent use for the ranking (a thread missing from it ranks as one never used, with no palette picks); `now` is the
- * clock T3 ranks by.
+ * clock T3 ranks by. `picks: false` leaves the palette's picks out, as T3 does for an agent's search.
  */
-export function searchThreads(candidates: readonly SearchCandidate[], subjects: ReadonlyMap<string, SearchSubject>, query: string, limit: number, now: number): ThreadSearchMatch[] {
+export function searchThreads(candidates: readonly SearchCandidate[], subjects: ReadonlyMap<string, SearchSubject>, query: string, limit: number, now: number, picks = true): ThreadSearchMatch[] {
 	if (messageSearchTokens(query).long.length === 0) return [];
 	type Hit = { readonly row: SearchCandidate; readonly quality: number; readonly offset: number };
 	const matchMessage = messageMatcher(query);
@@ -174,7 +174,7 @@ export function searchThreads(candidates: readonly SearchCandidate[], subjects: 
 		},
 		foldSearchQuery(query),
 		now,
-		{ picks: true },
+		{ picks },
 	);
 	return ranked.slice(0, limit).map(({ row, quality, offset, hits }) => ({
 		threadId: row.threadId,

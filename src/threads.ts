@@ -421,7 +421,7 @@ export class Threads {
 			candidates.push(...read.candidates.filter((candidate) => candidate.byAgent !== true));
 		}
 		for (const head of this.#searched.keys()) if (!heads.has(head)) this.#searched.delete(head);
-		return searchThreads(candidates, subjects, query, limit, Date.now());
+		return searchThreads(candidates, subjects, query, limit, Date.now(), !forAgent);
 	}
 
 	/** The characters search keeps of the threads it has read (the memory log). */
