@@ -1,6 +1,7 @@
 // The plain-data mirrors of pi-durable's view shapes that the facet reads — no service or transport API lives here;
 // writes go through the threads layer in `../threads.ts`. The `provider/model` slug helpers live here too: a leaf both
 // sides may import keeps that shared code off a facet→host edge.
+import type { LiveState } from "@earendil-works/pi-durable";
 import type { ImageAt } from "./image-data.ts";
 
 /** A `{ provider, modelId }` reference (pi-durable `ModelRef`). */
@@ -105,22 +106,7 @@ export interface EntryRecord {
 	edits?: readonly { target: number; action: "omit" | "replace"; messages?: readonly DurableMessage[] }[];
 }
 
-interface ToolSlot {
-	toolCallId?: string;
-	id?: string;
-	taskId?: number;
-	output?: string;
-	/** The last `details()` the running call published. */
-	details?: unknown;
-	[key: string]: unknown;
-}
-
-export interface LiveDoc {
-	run?: { taskId: number; inputs: number[] };
-	/** `retry`: the wait before the next request, after one that failed. */
-	generation?: { attempt: number; message?: DurableMessage; retry?: { at: number; error: string } };
-	tools?: ToolSlot[];
-}
+export type LiveDoc = LiveState;
 
 /** The head conversation's durable view, as `pi.transcript` serves it. */
 export interface ConversationView {

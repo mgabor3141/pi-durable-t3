@@ -374,7 +374,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const threadId = meta.threadId;
 	const providerThreadId = `pt-${threadId}`;
 	const live = view?.docs["pi.live"];
-	const liveCompactions = ((live as { compactions?: readonly Any[] } | undefined)?.compactions ?? []);
+	const liveCompactions = live?.compactions ?? [];
 	// The thread's selection, reported as the client named it: the model and the `thinking` level the conversation
 	// carries. No model yet is the `"default"` slug, which answers no catalog entry (capabilities.md).
 	const modelSelection: Any = {
@@ -392,7 +392,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
 	// that entry as its run, so T3 paints the compacting state with a real run id (its composer queues instead of
 	// starting a parallel turn). An older /compact, long done, is not the run of a compaction that runs now.
-	const manualCompaction = liveCompactions.find((compaction) => compactionTrigger(compaction) === "manual");
+	const manualCompaction = liveCompactions.find((compaction) => compaction.trigger === "manual");
 	const newestDraft = drafts.at(-1);
 	const compactDraft = newestDraft !== undefined && isCompactCommandEntry(newestDraft.userEntry) && !newestDraft.steps.some(isCompactionEntry) ? newestDraft : undefined;
 	const manualCompactionRunId = manualCompaction === undefined || compactDraft === undefined ? null : `r${compactDraft.userEntry.id}`;
@@ -977,10 +977,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 	}
 	const liveTools = new Map<string, LiveToolSlot>();
 	if (running) {
-		for (const slot of live?.tools ?? []) {
-			const key = (slot["callId"] ?? slot.toolCallId ?? slot.id) as string | undefined;
-			if (key !== undefined) liveTools.set(key, slot);
-		}
+		for (const slot of live?.tools ?? []) liveTools.set(slot.callId, slot);
 	}
 	// An assistant message is keyed by its run and its place among the run's assistant messages, not by its entry: the
 	// message streaming now and the entry it is committed as are one item, so a client keeps updating the same record.
@@ -1242,12 +1239,12 @@ function projectLiveCompactions(b: Build): void {
 	let liveOrdinal = turnItems.reduce((max, item) => Math.max(max, item.ordinal ?? 0), 0) + 1;
 	for (const compaction of liveCompactions) {
 		const manual = compaction === manualCompaction;
-		const runId = manual ? manualCompactionRunId : compaction.blocking === true ? agentRunId : null;
+		const runId = manual ? manualCompactionRunId : compaction.blocking ? agentRunId : null;
 		if (runId === null && !manual) continue;
 		// Stable across projections: when it was asked for (the /compact) or when the agent's run paused for it.
 		const startedAt = manual && compactDraft !== undefined ? (firstMessage(compactDraft.userEntry)?.timestamp ?? meta.updatedAt) : lastActivityAt(newestDraft);
 		turnItems.push({
-			id: id(`ti-live-compaction-${compaction.taskId ?? liveOrdinal}`),
+			id: id(`ti-live-compaction-${compaction.taskId}`),
 			threadId: id(threadId),
 			runId: runId === null ? null : id(runId),
 			nodeId: null,
@@ -1633,11 +1630,6 @@ function projectCompactedSize(b: Build): void {
 /** A compaction summary entry: shown as T3's compaction card where it landed. */
 function isCompactionEntry(entry: EntryRecord): boolean {
 	return entry.kind === "pi.compaction";
-}
-
-/** Why a live compaction runs, as pi-durable records it in `pi.live` (`manual`, `threshold`, `overflow`). */
-function compactionTrigger(compaction: Any): string | undefined {
-	return typeof compaction?.trigger === "string" ? compaction.trigger : undefined;
 }
 
 /**

@@ -1174,8 +1174,8 @@ export class Bridge {
 	 * any other way, it is answered now, as any command is.
 	 */
 	async #queuesCommand(input: { readonly threadId: string; readonly commandId: string; readonly messageId: string; readonly text: string; readonly mode: string }, state: ThreadView, head: number): Promise<boolean> {
-		const resting = state.view?.docs as { "pi.live"?: { run?: unknown }; "pi.inbox"?: { items?: readonly unknown[] } } | undefined;
-		if (resting?.["pi.live"]?.run === undefined && (resting?.["pi.inbox"]?.items?.length ?? 0) > 0) await this.#store.queue.answerLeading(input.threadId);
+		const inbox = state.view?.docs["pi.inbox"] as { items?: readonly unknown[] } | undefined;
+		if (state.view?.docs["pi.live"]?.run === undefined && (inbox?.items?.length ?? 0) > 0) await this.#store.queue.answerLeading(input.threadId);
 		if (input.mode !== "queue" || !this.queuedCommands.active || queuedCommand(input.text) === undefined) return false;
 		return this.#store.queueBehindRun({ conversationId: head, requestId: input.commandId, message: input.text.trim(), messageId: input.messageId });
 	}
@@ -1219,7 +1219,7 @@ export class Bridge {
 			if (await this.#queuesCommand(input, state, head)) return;
 			// A slash command this host answers itself (`/compact`, `/reload`, `/context`, `/undo`, `/redo`, `/tree`, `/continue`).
 			if (await this.#commands.run(input.threadId, input.messageId, input.text.trim(), state, head)) return;
-			const live = state.view?.docs["pi.live"] as { run?: unknown; compactions?: readonly unknown[] } | undefined;
+			const live = state.view?.docs["pi.live"];
 			const busy = live?.run !== undefined;
 			// A manual compaction owns the thread even though pi models it as conversation-owned work, not a run.
 			// Prompts sent while it runs must queue, not start a turn alongside the summary.
