@@ -502,7 +502,9 @@ export class ThreadOps {
 		if (found === undefined) return fail("orchestration_error", `The message to thread ${input.threadId} was sent, but its run did not appear.`);
 		// T3's `restartedAsNextTurn` (0.1.9): a restart that stopped the turn and ran the message as the next one is a
 		// restart, not a start. Here every restart is that: the running turn is aborted and the message starts a new run.
-		const restartedAsNextTurn = mode === "restart" && found.run.id !== running?.id;
+		// A retry (`sent`) finds the restart's own run running: a restart that reached the thread was one, as T3 answers
+		// from the command's own events.
+		const restartedAsNextTurn = mode === "restart" && (sent || found.run.id !== running?.id);
 		const delivery = restartedAsNextTurn ? "restarted" : found.run.status === "queued" || found.intent === "queued_turn" ? "queued" : found.intent === "turn_start" ? "started" : mode === "restart" ? "restarted" : "steered";
 		return {
 			threadId: input.threadId as never,

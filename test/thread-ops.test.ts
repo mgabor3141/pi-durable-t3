@@ -152,6 +152,20 @@ it("answers a retried steer whose turn has ended, and queues an auto send behind
 	expect(messages, "sent once").toHaveLength(1);
 });
 
+it("a retried restart answers restarted while its own run still runs", { timeout: 60_000 }, async () => {
+	const { f, ops } = await setup();
+	const first = gated("first");
+	const second = gated("second");
+	f.model.respond(first.step, second.step);
+	await ops.send(client, { threadId: tid("b"), message: "long" });
+	const restarted = await ops.send(client, { threadId: tid("b"), message: "instead", mode: "restart", clientRequestId: "r1" });
+	expect(restarted).toMatchObject({ delivery: "restarted", status: "running" });
+	const retry = await ops.send(client, { threadId: tid("b"), message: "instead", mode: "restart", clientRequestId: "r1" });
+	expect(retry).toMatchObject({ delivery: "restarted", runId: restarted.runId, messageId: restarted.messageId });
+	first.release();
+	second.release();
+});
+
 it("refuses create_threads: it acts as the calling thread, and a client has none", async () => {
 	const { ops } = await setup();
 	expect(await failureOf(() => ops.create(client, { threads: [{ prompt: "x" }] }))).toBe("thread_credential_required");
