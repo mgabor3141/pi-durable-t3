@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type ConversationId, type Extension, LiveDoc } from "@earendil-works/pi-durable";
+import { type ConversationId, defineExtension, defineTool, type Extension, LiveDoc } from "@earendil-works/pi-durable";
 import { SecretRequestError, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { expect, it, onTestFinished } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
 import type { Logger } from "../src/t3/logging.ts";
 import { SecretRequests } from "../src/t3/secret-requests.ts";
+import { dispatchCommand } from "../src/t3/dispatch.ts";
+import { object } from "../src/t3/schema.ts";
 import { createNamed, makeThreads, bridgeConfig, restart } from "./threads-harness.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -166,4 +168,21 @@ it("refuses an answer that comes after the card was answered before it stores an
 	// A second answer right after (a double click, a retry): refused, and the declined secret is not saved.
 	await expect(requests.answer({ ...card, answer: { type: "save", secret: "SECOND" } })).rejects.toMatchObject({ reason: expect.stringMatching(/^(already_answered|agent_stopped)$/) });
 	expect(saves).toEqual([]);
+});
+
+it("takes an answer to a card only for a call that is the card: another tool's call is no card", { timeout: 60_000 }, async () => {
+	let release = () => {};
+	const running = new Promise<void>((resolve) => (release = resolve));
+	let started = false;
+	const slow = defineExtension({ name: "test-slow", tools: [defineTool({ name: "slow", description: "Waits.", parameters: object({}), execute: async () => ((started = true), await running, { output: [{ type: "text", text: "ran" }] }) })] });
+	const { f, bridge, requests, saves } = await secretThread([slow]);
+	onTestFinished(() => release());
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", { name: "TOKEN" }, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("Done."));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "Go.", mode: "start" });
+	for (let tries = 0; tries < 200 && !started; tries++) await new Promise((resolve) => setTimeout(resolve, 25));
+	expect(started).toBe(true);
+	await expect(requests.answer({ threadId: ThreadId.make("t"), turnItemId: TurnItemId.make("ti-tcall-1"), answer: { type: "save", secret: SECRET } })).rejects.toMatchObject({ reason: "agent_stopped" });
+	expect(saves).toEqual([]);
+	await expect(dispatchCommand(bridge, { commandId: "x", threadId: "t", type: "runtime-request.respond", requestId: "uq-call-1", answers: { q1: "hi" } } as never, { createdBy: "user", creationSource: "web" }, log)).rejects.toThrow("Runtime request uq-call-1 is no longer pending.");
+	release();
 });

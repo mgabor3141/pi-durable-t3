@@ -59,10 +59,11 @@ export class SecretRequests {
 		if (!this.#deps.hasThread(input.threadId)) throw new SecretRequestError({ reason: "not_found" });
 		const callId = /^ti-t(.+)$/.exec(input.turnItemId)?.[1];
 		const call = callId === undefined ? undefined : await this.#deps.liveCall(input.threadId, callId);
-		// No such call waiting in the thread: it ended (answered, stopped), or it is no request_secret's card.
+		// No such call waiting in the thread: it ended (answered, stopped), or it is no request_secret's card (an answer
+		// never reaches another tool's call).
 		const name = call?.arguments["name"];
 		const sink = this.#sink;
-		if (call === undefined || sink === undefined || typeof name !== "string" || !SECRET_NAME.test(name)) throw new SecretRequestError({ reason: "agent_stopped" });
+		if (call?.name !== REQUEST_SECRET_TOOL || sink === undefined || typeof name !== "string" || !SECRET_NAME.test(name)) throw new SecretRequestError({ reason: "agent_stopped" });
 		// T3 0.1.9's answer from a secret provider (1Password and the like). This host configures none and does not
 		// advertise `secretRequestReferences`, so its clients do not offer it; one that sends it anyway is told.
 		if (input.answer.type === "reference") throw new SecretRequestError({ reason: "reference_unreadable", provider: input.answer.reference.provider });

@@ -1010,7 +1010,7 @@ export class Bridge {
 		if (input?.kind !== "model" || conversation === undefined) return undefined;
 		const entry = (await conversation.entries({ minEntryId: input.assistant, maxEntryId: input.assistant }, 1, undefined, BACKGROUND_CONTEXT)).items[0];
 		const call = (entry?.model ?? []).flatMap((message) => (message.role === "assistant" ? message.content : [])).find((block) => block.type === "toolCall" && block.id === callId);
-		return call?.type === "toolCall" ? { taskId: slot.taskId, arguments: call.arguments } : undefined;
+		return call?.type === "toolCall" ? { name: call.name, taskId: slot.taskId, arguments: call.arguments } : undefined;
 	}
 
 	/** A thread's shell: its sidebar row, current whether or not the thread is open. */

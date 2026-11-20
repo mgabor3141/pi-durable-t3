@@ -27,8 +27,9 @@ const ANSWER = "answer";
 /** What the agent reads when the user dismissed its card. */
 const DISMISSED_NOTE = "The user dismissed the questions without answering. Go on with your best judgement, and say what you assumed.";
 
-/** A model's call that has not ended, in a thread's current round: its task, which an answer signals, and its arguments. */
-export type LiveCall = { readonly taskId: TaskId; readonly arguments: Readonly<Record<string, unknown>> };
+/** A model's call that has not ended, in a thread's current round: its tool, its task, which an answer signals, and its
+ * arguments. */
+export type LiveCall = { readonly name: string; readonly taskId: TaskId; readonly arguments: Readonly<Record<string, unknown>> };
 /** What answering a card the call is needs of the bridge. */
 export interface CardDeps {
 	readonly harness: () => Harness;
@@ -104,7 +105,8 @@ export class UserInputRequests {
 	async respond(input: { readonly threadId: string; readonly requestId: string; readonly answers?: Record<string, unknown> }): Promise<void> {
 		const gone = new CommandError(`Runtime request ${input.requestId} is no longer pending.`);
 		const call = await this.#deps.liveCall(input.threadId, input.requestId.slice("uq-".length));
-		if (call === undefined) throw gone;
+		// Only a question card's call: an answer never reaches another tool's.
+		if (call?.name !== ASK_USER_TOOL) throw gone;
 		// Only words: an answer is text the model reads. The call keeps the answers to the questions it asked.
 		const answers: Answers = {};
 		for (const [id, answer] of Object.entries(input.answers ?? {})) {
