@@ -1297,7 +1297,7 @@ export class Bridge {
 							this.#log.warn("pending context could not be built; it waits for the next message", { threadId: input.threadId, error: String(error) });
 							return undefined;
 						});
-			// Who sent it, when no person did; a child's report names its thread in its own header, so it gets none.
+			// Who sent it, when no person did. A child's report gets none, as in T3: its wake notices name no sender.
 			const note = input.automatic === true ? undefined : senderNote(input.provenance ?? USER_WEB, input.messageId, input.text);
 			const contextBlocks: ContentBlock[] = [...(note === undefined ? [] : [note]), ...(transfer?.block === undefined ? [] : [transfer.block])];
 			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];

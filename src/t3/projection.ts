@@ -1549,13 +1549,11 @@ function blockedOnThreadWait(activeRun: OrchestrationV2Run | undefined, turnItem
 	return waits;
 }
 
-/** T3's `isSilentRunForShell`: a run of T3's own idle compaction (`idle-compaction.ts`) that did not fail. */
-function isSilentRun(run: OrchestrationV2Run, messages: readonly OrchestrationV2ConversationMessage[], turnItems: readonly OrchestrationV2TurnItem[]): boolean {
-	return (
-		run.status !== "failed" &&
-		messages.some((message) => message.id === run.userMessageId && idleCompactionOf(message) !== undefined) &&
-		!turnItems.some((item) => item.runId === run.id && item.type === "compaction" && item.status === "failed")
-	);
+/** T3's `isSilentRunForShell`: a run of T3's own idle compaction (`idle-compaction.ts`, its message among `idle`) that
+ * did not fail. Neither failure can happen here yet (a compaction that fails leaves no row, and its run reads completed);
+ * the checks are T3's, kept so the rule stays T3's. */
+function isSilentRun(run: OrchestrationV2Run, idle: ReadonlySet<string>, turnItems: readonly OrchestrationV2TurnItem[]): boolean {
+	return run.status !== "failed" && idle.has(run.userMessageId as string) && !turnItems.some((item) => item.runId === run.id && item.type === "compaction" && item.status === "failed");
 }
 
 /** The thread's shell: its sidebar row, with the latest run and message as T3's shell reads them. */
@@ -1564,7 +1562,8 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 	const { visibleTurnItems, updatedAt, author, sidebar, thread } = rows;
 	// T3's own idle compactions stay out of the shell unless they fail, so thread lists, notifications and the relay keep
 	// presenting the user's last turn (T3's `isSilentRunForShell`): a compaction is neither the latest run nor work.
-	const silent = new Set(allRuns.filter((run) => isSilentRun(run, messages, turnItems)).map((run) => run.id as string));
+	const idle = new Set(messages.flatMap((message) => (idleCompactionOf(message) === undefined ? [] : [message.id as string])));
+	const silent = new Set(idle.size === 0 ? [] : allRuns.filter((run) => isSilentRun(run, idle, turnItems)).map((run) => run.id as string));
 	const runs = silent.size === 0 ? allRuns : allRuns.filter((run) => !silent.has(run.id as string));
 	// Nor does the shell show the thread working while only such a compaction runs.
 	const working = busy && !(b.live?.run === undefined && b.manualCompactionRunId !== null && silent.has(b.manualCompactionRunId));
@@ -1575,7 +1574,7 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
 	// The thread's own messages: a command the host answered on the spot is not the thread's latest message, nor is
 	// T3's idle `/compact` (T3's shell leaves it out of the user's messages).
-	const durable = messages.filter((message) => !shownIds.has(message.id as string) && idleCompactionOf(message) === undefined);
+	const durable = messages.filter((message) => !shownIds.has(message.id as string) && !idle.has(message.id as string));
 	const lastVisibleMessage = durable.at(-1);
 	const lastUser = durable.findLast((message) => message.role === "user");
 	const lastUserAuthored = durable.findLast((message) => message.role === "user" && ((message as Any).createdBy ?? "user") === "user");
