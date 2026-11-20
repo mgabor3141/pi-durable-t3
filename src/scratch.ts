@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { foldLatinDiacritics } from "@t3tools/shared/path";
 import { ProjectConflict, type ProjectRegistry } from "./registry.ts";
 
 /** What T3 titles the project (`title: "No project"` in `ensureScratchProject`). */
@@ -59,9 +60,9 @@ export async function ensureScratchProject(registry: ProjectRegistry, root: stri
 }
 
 /** T3's `folderWords`: only `[a-z0-9]` reaches a folder name, so it stays one path segment, capped so a pasted blob
- * cannot outgrow a file name. */
+ * cannot outgrow a file name. Accented Latin letters are folded first, so "Résumé" keeps its letters as "resume". */
 function folderWords(text: string): string {
-	return text
+	return foldLatinDiacritics(text)
 		.toLowerCase()
 		.split(/[^a-z0-9]+/)
 		.filter(Boolean)
