@@ -9,7 +9,7 @@ import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
 import type { Thread } from "./thread-records.ts";
 import type { ContentBlock } from "./t3/model-types.ts";
 import { readQueuedInputs, withQueuedText } from "./t3/queued.ts";
-import { APP_UNREAD_STEER_ENTRY } from "./t3/runs.ts";
+import { APP_UNREAD_STEER_ENTRY, authorOf } from "./t3/runs.ts";
 import { queuedCommand, takeCommands, type TakenCommand } from "./t3/queued-commands.ts";
 import type { MessageInput } from "./threads.ts";
 
@@ -230,11 +230,13 @@ export class ThreadQueue {
 	 * restart keep them: each was submitted with `onAbort: "keep"`, so pi-durable's abort leaves it in the inbox, with
 	 * its queued submission, and nothing starts it until the next message or Resume (T3's held queue).
 	 *
-	 * `stop`: a Stop someone asked for. A steer the stopped run had not read when it ended is cancelled, as T3 0.1.11
-	 * cancels one (`requeueUnreadSteers`): it leaves the queue, its submission unanswered, and an entry where the run
-	 * ended shows it cancelled with a notice that it may not have been delivered. In one commit, once the run has ended,
-	 * so a host that dies before then keeps the steer queued, held. A restart or a provider's limit keeps it: it steers
-	 * the run that follows.
+	 * `stop`: a Stop someone asked for. A person's steer that was waiting when Stop came and that the stopped run had not
+	 * read when it ended is cancelled, as T3 0.1.11 cancels one (`requeueUnreadSteers`): it leaves the queue, its
+	 * submission unanswered, and an entry where the run ended shows it cancelled with a notice that it may not have been
+	 * delivered. In one commit, once the run has ended, so a host that dies before then keeps the steer queued, held. A
+	 * message sent while the run stops is kept, held first, as T3 queues it to run next. Unlike T3, an agent's message
+	 * (another thread's, a child's report) is kept too: its sender cannot send it again, and a report's text is nowhere
+	 * else. A restart or a provider's limit keeps every steer: it steers the run that follows.
 	 */
 	async abort(input: { threadId: string; conversationId: number }, stop = false): Promise<void> {
 		const conversationId = input.conversationId as ConversationId;
@@ -243,13 +245,15 @@ export class ThreadQueue {
 		// Only a run the Stop reached has steers to drop: one waiting with no run (a provider's limit) waits for the run
 		// to go on.
 		const reached = stop && (await this.#threads.harness.snapshot(LiveDoc, conversationId, BACKGROUND_CONTEXT))?.run !== undefined;
+		const waiting = reached ? readQueuedInputs((await this.#threads.harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT))?.items) : [];
+		const dropped = new Set(waiting.filter((item) => item.mode === "steer" && authorOf(item.entry?.data).createdBy === "user").map((item) => item.submissionId));
 		await conversation.abort(BACKGROUND_CONTEXT);
-		if (!reached) return;
+		if (dropped.size === 0) return;
 		await this.#threads.harness.commit(async (tx) => {
 			// A message sent since the run ended started a run with the steers: they were read.
 			if ((await tx.doc(LiveDoc, conversationId)).run !== undefined) return;
 			const inbox = await tx.doc(InboxDoc, conversationId);
-			const steers = readQueuedInputs(inbox.items).filter((item) => item.mode === "steer");
+			const steers = readQueuedInputs(inbox.items).filter((item) => item.mode === "steer" && dropped.has(item.submissionId));
 			const cancelledAt = Date.now();
 			for (const steer of steers) {
 				tx.settleSubmission(steer.submissionId as unknown as SubmissionId, { status: "unanswered", reason: "aborted" });

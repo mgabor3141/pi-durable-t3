@@ -142,3 +142,26 @@ it("a steer waiting when the run is stopped is cancelled where it waited, with T
 	expect(JSON.stringify(context.messages)).not.toContain("a steer");
 	expect(row(done, "m2")?.status).toBe("cancelled");
 });
+
+// Unlike T3, which cancels it too: an agent's message steered into a stopped turn (here a child's report) is kept, held
+// first, since its sender cannot send it again and the report's text is nowhere else; the next message takes it in.
+it("an agent's steer waiting when the run is stopped is kept, held, and reaches the model with the next message", { timeout: 60_000 }, async () => {
+	const { f, bridge, send, until } = await setup();
+	const held = gated("never finished");
+	f.model.respond(held.step, fauxAssistantMessage("to the report and the next one"));
+	await send("m1", "go", "start");
+	await until((projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined));
+	await bridge.sendMessage({ threadId: "t", commandId: "notify-n-x", messageId: "n-x", text: "[Report from thread c]\nTHE REPORT", mode: "steer", provenance: { createdBy: "agent", creationSource: "server", senderThreadId: "c" }, automatic: true });
+	await until((projection) => (row(projection, "n-x")?.status === "pending" ? true : undefined));
+	await bridge.interrupt("t");
+	held.release();
+	const stopped = await until((projection) => (queuedRuns(projection).includes("n-x") && !projection.runs.some((run) => run.status === "running") ? projection : undefined));
+	expect(stopped.turnItems.some((item) => item.type === "system_notice"), "no unread-steer notice").toBe(false);
+	expect(stopped.runs.find((run) => run.userMessageId === "n-x")).toMatchObject({ status: "queued", queueHeld: true });
+
+	await send("m2", "next", "start");
+	await until((projection) => (projection.messages.some((message) => message.text === "to the report and the next one") && settled(projection) ? true : undefined));
+	const head = (await f.threads.thread("t"))!.head;
+	const context = await (await conversation(f.harness, head)).context(BACKGROUND_CONTEXT);
+	expect(JSON.stringify(context.messages)).toContain("THE REPORT");
+});

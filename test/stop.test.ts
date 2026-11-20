@@ -185,6 +185,25 @@ it("Stop keeps the messages queued behind the run, held until Resume", { timeout
 	expect(answers).toEqual(["to the queued one", "to the last"]);
 });
 
+// T3 queues a message sent while Stop is reaching the run ("instead of steering text the agent never receives"); T3's
+// composer sends it as `auto`, a steer here. Only a steer that waited when Stop came is cancelled as unread.
+it("a message sent while the run is stopping is kept, held first, not cancelled as an unread steer", { timeout: 60_000 }, async () => {
+	const { f, thread, bridge } = await setup([defineExtension({ name: "deaf", tools: [deaf("slow", 1_500)] })]);
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("to the one sent while stopping"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });
+	await toolRunning("slow");
+	await bridge.interrupt("t");
+	expect((await lastRun(bridge)).status, "still stopping").toBe("running");
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "typed while stopping", mode: "steer" });
+	await idle(f.harness, thread.head);
+	const stopped = await bridge.waitFor("t", (projection) => (projection.runs[0]!.status === "interrupted" ? projection : undefined), 5_000);
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	const after = (await bridge.projection("t")).projection;
+	expect(stopped).toBeDefined();
+	expect(after.turnItems.some((item) => item.type === "system_notice"), "no unread-steer notice").toBe(false);
+	expect((after.runs as unknown as QueueRun[]).map((run) => [run.userMessageId, run.status, run.queueHeld])).toEqual([["m1", "interrupted", undefined], ["m2", "queued", true]]);
+});
+
 it("a restart keeps the queue: its message runs now and the queued one follows", { timeout: 60_000 }, async () => {
 	const { f, thread, bridge } = await setup([defineExtension({ name: "deaf", tools: [abortable(deaf("slow", 30_000))] })]);
 	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }), fauxAssistantMessage("to the restart"), fauxAssistantMessage("to the queued one"));
