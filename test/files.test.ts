@@ -441,6 +441,14 @@ describe("search", () => {
 		expect(resolved.filter((path) => path.includes("app-link.ts"))).toHaveLength(1);
 	});
 
+	it("links do not count toward the 25k-entry cap", async () => {
+		const { root, files } = await fixture();
+		await writeFile(join(root, ".ignore"), "node_modules/\n");
+		await mkdir(join(root, "node_modules"), { recursive: true });
+		for (let i = 0; i < 25_000; i += 1000) await Promise.all(Array.from({ length: 1000 }, (_, j) => symlink(join(root, "src"), join(root, "node_modules", `pkg-${i + j}`))));
+		expect((await files.list({ cwd: root })).truncated).toBe(false);
+	});
+
 	it("a project inside a repository gets the repository's ignore rules", async () => {
 		const { base, root, files } = await fixture();
 		const { execFileSync } = await import("node:child_process");

@@ -110,12 +110,13 @@ async function walk(env: ExecutionEnv, root: string, context: Context, options: 
 	const entries: ProjectEntry[] = [];
 	const links: string[] = [];
 	const queue: string[] = [root];
-	while (queue.length > 0 && entries.length + links.length < limit) {
+	// Links are not counted, as the walk did not count them before it noted them: most sit in ignored folders.
+	while (queue.length > 0 && entries.length < limit) {
 		const directory = queue.shift()!;
 		const listed = await env.listDir(directory, context);
 		if (!listed.ok) continue;
 		for (const info of listed.value) {
-			if (entries.length + links.length >= limit) return { entries, truncated: true, links };
+			if (entries.length >= limit) return { entries, truncated: true, links };
 			if (info.name === ".git" && options.skipGit !== false) continue;
 			const rel = toPosix(relative(root, info.path));
 			if (rel === "" || rel.startsWith("../") || rel === "..") continue;
