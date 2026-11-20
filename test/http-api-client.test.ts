@@ -135,6 +135,12 @@ it("every supported endpoint answers what the contract's client decodes, and ref
 	expect(await run(client.mcpOAuth.mcpProtectedResource({}))).toMatchObject({ resource: `${origin}/mcp`, authorization_servers: [origin] });
 	expect(await run(client.mcpOAuth.authorizationServer({}))).toMatchObject({ issuer: origin, token_endpoint: `${origin}/oauth/mcp/token`, code_challenge_methods_supported: ["S256"] });
 	expect(await failure(client.mcpOAuth.register({ payload: { redirect_uris: ["http://example.com/cb"] } }))).toMatchObject({ name: "AuthMcpRegistrationError", error: "invalid_redirect_uri" });
+	// Metadata that is not JSON, or not the contract's shape, is RFC 7591's `invalid_client_metadata` (T3 0.1.11).
+	for (const body of ["{not json", JSON.stringify({ redirect_uris: "http://127.0.0.1:9/cb" })]) {
+		const malformed = await fetch(`${origin}/oauth/mcp/register`, { method: "POST", headers: { "content-type": "application/json" }, body });
+		expect(malformed.status, body).toBe(400);
+		expect(await malformed.json(), body).toMatchObject({ error: "invalid_client_metadata", error_description: expect.stringMatching(/^Invalid client metadata: ./) });
+	}
 	const registered = await run(client.mcpOAuth.register({ payload: { client_name: "Api agent", redirect_uris: ["http://127.0.0.1:9/cb"] } }));
 	expect(registered).toMatchObject({ client_name: "Api agent", token_endpoint_auth_method: "none" });
 	const { createHash } = await import("node:crypto");

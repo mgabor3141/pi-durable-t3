@@ -11,7 +11,7 @@ export interface SignedIn {
 
 export const REDIRECT_URI = "http://127.0.0.1:9/callback";
 
-export async function signInMcpClient(origin: string, options: { code: string; access: string; name?: string }): Promise<SignedIn> {
+export async function signInMcpClient(origin: string, options: { code: string; access: string; name?: string; softwareId?: string }): Promise<SignedIn> {
 	const challenge = (await fetch(`${origin}/mcp`, { method: "POST" })).headers.get("www-authenticate") ?? "";
 	const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge)?.[1];
 	if (metadataUrl === undefined) throw new Error(`no resource_metadata in ${challenge}`);
@@ -22,7 +22,7 @@ export async function signInMcpClient(origin: string, options: { code: string; a
 		registration_endpoint: string;
 	};
 	const registered = (await (
-		await fetch(server.registration_endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: options.name ?? "test agent", redirect_uris: [REDIRECT_URI] }) })
+		await fetch(server.registration_endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: options.name ?? "test agent", ...(options.softwareId === undefined ? {} : { software_id: options.softwareId }), redirect_uris: [REDIRECT_URI] }) })
 	).json()) as { client_id: string };
 	const verifier = randomBytes(32).toString("base64url");
 	const authorization = {

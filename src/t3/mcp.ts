@@ -154,7 +154,10 @@ export function makeMcpLayer(deps: McpDeps) {
 			const access: AuthMcpClientAccess = session.access ?? (session.scopes.includes(AuthOrchestrationOperateScope) ? "approval-required" : "read-only");
 			// A peer link's links open in its own environment; any other client's, in this host's web app.
 			const webOrigin = session.peerLink === true ? undefined : deps.originOf(request);
-			return yield* httpEffect.pipe(Effect.provideService(McpSession, { sessionId: session.id, scopes: session.scopes, access, webOrigin }));
+			const answer = httpEffect.pipe(Effect.provideService(McpSession, { sessionId: session.id, scopes: session.scopes, access, webOrigin }));
+			// A peer link is told how long its session now lasts (T3's `t3-link-expires-at`): each use extends it.
+			if (session.peerLink !== true) return yield* answer;
+			return yield* Effect.map(answer, (response) => HttpServerResponse.setHeader(response, "t3-link-expires-at", new Date(session.expiresAt).toISOString()));
 		}),
 	).layer;
 

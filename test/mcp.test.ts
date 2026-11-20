@@ -5,11 +5,12 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OrchestratorMcpThreadListResult, OrchestratorMcpThreadReadResult } from "@t3tools/contracts";
+import { MCP_PEER_LINK_SOFTWARE_ID, OrchestratorMcpThreadListResult, OrchestratorMcpThreadReadResult } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { afterAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, seedProjects, t3Dir } from "./host-process-harness.ts";
+import { SETTINGS_FILE } from "../src/settings.ts";
 import { signInMcpClient } from "./mcp-oauth-client.ts";
 
 const PORT = 4963;
@@ -23,8 +24,8 @@ afterAll(async () => {
 });
 
 /** One JSON-RPC exchange; the answer may come as JSON or as one SSE event. */
-async function rpc(token: string | undefined, session: string | undefined, body: unknown): Promise<{ status: number; session: string | undefined; message: Record<string, unknown> | undefined }> {
-	const response = await fetch(`http://127.0.0.1:${PORT}/mcp`, {
+async function rpc(token: string | undefined, session: string | undefined, body: unknown, port = PORT): Promise<{ status: number; session: string | undefined; message: Record<string, unknown> | undefined; headers: Headers }> {
+	const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json",
@@ -37,7 +38,7 @@ async function rpc(token: string | undefined, session: string | undefined, body:
 	});
 	const text = await response.text();
 	const data = text.startsWith("{") ? text : text.split("\n").find((line) => line.startsWith("data:"))?.slice(5).trim();
-	return { status: response.status, session: response.headers.get("mcp-session-id") ?? session, message: data ? (JSON.parse(data) as Record<string, unknown>) : undefined };
+	return { status: response.status, session: response.headers.get("mcp-session-id") ?? session, message: data ? (JSON.parse(data) as Record<string, unknown>) : undefined, headers: response.headers };
 }
 
 it("serves T3's orchestrator tools to a signed-in MCP client, within its access", async () => {
@@ -155,4 +156,27 @@ it("serves T3's orchestrator tools to a signed-in MCP client, within its access"
 		code: "runtime_mode_escalation_denied",
 		message: expect.stringContaining('Thread "mcp-a" runs in full-access/default, above this caller\'s approval-required/default limit.'),
 	});
+}, 60_000);
+
+it("tells a peer link how long its session now lasts, on every answer (T3 0.1.11's t3-link-expires-at)", async () => {
+	const port = 5601;
+	const root = join(scratch, "peer-link-host");
+	await mkdir(t3Dir(root), { recursive: true });
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
+	await writeFile(join(t3Dir(root), SETTINGS_FILE), JSON.stringify({ linkedEnvironmentsEnabled: true }), "utf8");
+	await seedProjects(root, []);
+	const host = launch(root, port, {}, join(scratch, "agent"));
+	launched.push(host);
+	expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
+	const origin = `http://127.0.0.1:${port}`;
+	const link = await signInMcpClient(origin, { code: pairCode(root), access: "read-only", name: "other environment", softwareId: MCP_PEER_LINK_SOFTWARE_ID });
+	const agent = await signInMcpClient(origin, { code: pairCode(root), access: "read-only", name: "agent" });
+	const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } };
+	const before = Date.now();
+	const linked = await rpc(link.token, undefined, initialize, port);
+	expect(linked.status).toBe(200);
+	const expiresAt = Date.parse(linked.headers.get("t3-link-expires-at") ?? "");
+	expect(expiresAt - before, "a full thirty days").toBeGreaterThanOrEqual(30 * 86_400_000 - 60_000);
+	expect(expiresAt - before).toBeLessThanOrEqual(30 * 86_400_000 + 60_000);
+	expect((await rpc(agent.token, undefined, initialize, port)).headers.get("t3-link-expires-at"), "not a link: no header").toBeNull();
 }, 60_000);

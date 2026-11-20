@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { AuthAccessReadScope, AuthAccessWriteScope, AuthClientSession, AuthPairingCredentialResult, AuthPairingLink, AuthOrchestrationReadScope } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { afterAll, expect, it } from "vitest";
-import { connectWs, getJson, pair, postJson, waitListening, type WsRpc } from "./ws-rpc.ts";
+import WebSocket from "ws";
+import { connectWs, getJson, pair, postJson, waitListening, wsTicket, type WsRpc } from "./ws-rpc.ts";
 import { launch, pairCode, t3Dir, type Launched, seedProjects } from "./host-process-harness.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-conn-"));
@@ -43,10 +44,10 @@ const TOKEN_EXCHANGE = {
 };
 
 /** POST a form body (the pairing exchange), with the client's own label/device fields. */
-async function formPost(port: number, path: string, form: Record<string, string>) {
+async function formPost(port: number, path: string, form: Record<string, string>, headers: Record<string, string> = {}) {
 	const response = await fetch(`http://127.0.0.1:${port}${path}`, {
 		method: "POST",
-		headers: { "content-type": "application/x-www-form-urlencoded" },
+		headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
 		body: new URLSearchParams({ ...TOKEN_EXCHANGE, ...form }).toString(),
 		signal: AbortSignal.timeout(8000),
 	});
@@ -257,4 +258,54 @@ it("revoking a client cuts its live WebSocket", async () => {
 	await until("the revoked client's live WebSocket closes", Date.now() + 8000, async () => wsB.isClosed());
 	expect((await getJson(port, "/api/auth/session", auth(tokenB))).body["authenticated"]).toBe(false);
 	host.child.kill("SIGKILL");
+}, 30000);
+
+it("behind a proxy on loopback, a device is listed at the address the proxy appended to X-Forwarded-For (T3 0.1.11)", async () => {
+	const { host, token } = await start("conn-forwarded", 5600);
+	const port = 5600;
+	try {
+		const exchange = async (label: string, forwardedFor: string) =>
+			formPost(port, "/oauth/token", { subject_token: (await mint(port, token, { label })).body["credential"] as string }, { "x-forwarded-for": forwardedFor });
+		// The proxy appends the address it saw; whatever came before it is the client's own claim, and is not trusted.
+		expect((await exchange("proxied", "198.51.100.7, 203.0.113.9")).status).toBe(200);
+		// A last entry that is not an address leaves the socket's.
+		expect((await exchange("garbled", "203.0.113.10, not-an-address")).status).toBe(200);
+		const clients = asArray((await listClients(port, token)).body) as Record<string, Record<string, unknown>>[];
+		const addressOf = (label: string) => clients.find((client) => client["client"]!["label"] === label)?.["client"]!["ipAddress"];
+		expect(addressOf("proxied")).toBe("203.0.113.9");
+		expect(addressOf("garbled")).toBe("127.0.0.1");
+	} finally {
+		host.child.kill("SIGKILL");
+	}
+}, 30000);
+
+it("subscribeAuthAccess: a change made while the snapshot is on its way is not lost (T3 0.1.11)", async () => {
+	const { host, token } = await start("conn-snapshot-gap", 5602);
+	const port = 5602;
+	// A socket that holds back its acknowledgements: the server sends one chunk, the snapshot, and waits for the ack
+	// before the next. A change made in that window must still arrive after it.
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent(await wsTicket(port, token))}`, { perMessageDeflate: true });
+	const events: AccessEvent[] = [];
+	ws.on("message", (data) => {
+		const frame = JSON.parse(data.toString()) as { _tag: string; values?: AccessEvent[] };
+		if (frame._tag === "Chunk") events.push(...(frame.values ?? []));
+	});
+	try {
+		await new Promise<void>((resolve, reject) => {
+			ws.once("open", () => resolve());
+			ws.once("error", reject);
+		});
+		ws.send(JSON.stringify({ _tag: "Request", id: "1", tag: "subscribeAuthAccess", payload: {}, headers: [] }));
+		await until("snapshot event", Date.now() + 8000, async () => events.some((event) => event.type === "snapshot"));
+		expect((await mint(port, token, { label: "minted-meanwhile" })).status).toBe(200);
+		await sleep(300);
+		ws.send(JSON.stringify({ _tag: "Ack", requestId: "1" }));
+		await until("the link minted meanwhile", Date.now() + 8000, async () =>
+			events.some((event) => event.type === "pairingLinkUpserted" && event.payload["label"] === "minted-meanwhile"),
+		);
+		expect(events.find((event) => event.type === "pairingLinkUpserted")!.revision).toBe(2);
+	} finally {
+		ws.close();
+		host.child.kill("SIGKILL");
+	}
 }, 30000);

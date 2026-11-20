@@ -77,6 +77,12 @@ it("browser-session: exchange a credential, then ride the cookie across the guar
 	const cookie = sessionCookie(exchange.headers.get("set-cookie"));
 	expect(exchange.headers.get("set-cookie")).toContain("HttpOnly");
 	expect(exchange.headers.get("set-cookie")).toContain("SameSite=Lax");
+	// Over plain http the cookie cannot be `Secure`; behind a proxy that terminated TLS (`X-Forwarded-Proto: https`) it
+	// is, as T3 0.1.11 sets it.
+	expect(exchange.headers.get("set-cookie")).not.toMatch(/;\s*Secure/i);
+	const overHttps = await fetch(`${base}/api/auth/browser-session`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-proto": "https", origin: `https://127.0.0.1:${PORT}` }, body: JSON.stringify({ credential: pairCode(root) }), signal: AbortSignal.timeout(8000) });
+	expect(overHttps.status).toBe(200);
+	expect(overHttps.headers.get("set-cookie")).toMatch(/;\s*Secure(;|$)/);
 
 	// The session endpoint, authenticated BY THE COOKIE, reports the browser-session method (what T3's web app reads).
 	const session = await fetch(`${base}/api/auth/session`, { headers: { cookie, ...ORIGIN }, });

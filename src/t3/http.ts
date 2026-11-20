@@ -133,10 +133,11 @@ export const authDescriptor: ServerConfig["auth"] = {
 };
 
 /** A browser session cookie: `HttpOnly`, `Path=/`, `SameSite=Lax`, and the session's expiry — exactly the cookie
- * T3 sets (`Cookies.set` with those options), so a re-pair replaces it in place. No `Secure`: the cookie arrives over
- * the loopback http listener — behind a proxy that terminates TLS too, since it forwards plain http. */
-function sessionCookieHeader(token: string, expiresAtMs: number): string {
-	return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${new Date(expiresAtMs).toUTCString()}`;
+ * T3 sets (`Cookies.set` with `sessionCookieOptions`), so a re-pair replaces it in place. `Secure` when the request
+ * came over HTTPS, which here means a proxy that terminates TLS and says so in `X-Forwarded-Proto` (T3 0.1.11); a
+ * plain http listener on a LAN still needs the cookie without it. */
+function sessionCookieHeader(token: string, expiresAtMs: number, secure: boolean): string {
+	return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${new Date(expiresAtMs).toUTCString()}${secure ? "; Secure" : ""}`;
 }
 
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });

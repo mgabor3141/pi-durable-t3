@@ -3,12 +3,14 @@
 // encodes every answer and every error, so a route here cannot drift from the HttpApi client the web app calls it with.
 // An endpoint this host does not serve answers 404, as an unregistered route would, and is logged.
 import { randomUUID } from "node:crypto";
+import { isIP, isIPv4 } from "node:net";
 import {
 	AuthAccessTokenType,
 	AuthAccessWriteScope,
 	AuthMcpApprovalError,
 	type AuthMcpAuthorizationRequest,
 	AuthMcpClientAccess,
+	AuthMcpClientRegistration,
 	AuthMcpRegistrationError,
 	AuthMcpTokenError,
 	mcpClientScopes,
@@ -57,6 +59,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpEffect from "effect/http/HttpEffect";
 import * as ByteSize from "effect/ByteSize";
@@ -83,7 +86,7 @@ interface HttpApiDeps {
 	/** The request's session: a bearer token, else the same-origin browser session cookie. */
 	readonly resolveSession: (request: HttpServerRequest.HttpServerRequest) => StoredToken | undefined;
 	/** The browser session cookie for a session token. */
-	readonly sessionCookie: (token: string, expiresAtMs: number) => string;
+	readonly sessionCookie: (token: string, expiresAtMs: number, secure: boolean) => string;
 	readonly sessionCookieName: string;
 	readonly mcpOAuth: McpOAuth;
 	readonly scheduledTasks: ScheduledTasks;
@@ -113,6 +116,16 @@ const notFound = () => Effect.fail(new EnvironmentResourceNotFoundError({ code: 
 
 /** T3's credential response headers: an answer that carries a credential is never cached. */
 const noStore = HttpEffect.appendPreResponseHandler((_request, response) => Effect.succeed(HttpServerResponse.setHeaders(response, { "cache-control": "no-store", pragma: "no-cache" })));
+
+/** T3's `decodeClientRegistration`: the registration body, read as JSON and decoded by the contract's schema. */
+const decodeClientRegistration = Schema.decodeUnknownEffect(Schema.fromJsonString(AuthMcpClientRegistration));
+
+/** T3's `normalizeIpAddress`: trimmed, empty as absent, an IPv4-mapped IPv6 address as its IPv4 form. */
+const normalizeIpAddress = (value: string | undefined): string | undefined => {
+	const trimmed = value?.trim();
+	if (!trimmed) return undefined;
+	return trimmed.startsWith("::ffff:") ? trimmed.slice("::ffff:".length) : trimmed;
+};
 
 /** The scope check every authenticated handler starts with (T3's `requireEnvironmentScope`). */
 const requireScope = (scope: AuthEnvironmentScope) =>
@@ -158,6 +171,14 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 	/** The socket's address keys the pairing limiter, never a header (design.md). A blocked address never reaches these
 	 * handlers (`pairingRateLimit` in http.ts); a failed attempt is counted here. */
 	const addressOf = (request: HttpServerRequest.HttpServerRequest) => Option.getOrElse(request.remoteAddress, () => "unknown");
+	/** The address a session records for the device list (T3's `resolveClientIpAddress`): the socket's, or behind a proxy
+	 * on loopback (Tailscale Serve) the last `X-Forwarded-For` entry, the one that proxy appended. Shown, never a key. */
+	const clientAddressOf = (request: HttpServerRequest.HttpServerRequest): string | undefined => {
+		const peer = normalizeIpAddress(Option.getOrUndefined(request.remoteAddress));
+		if (peer === undefined || !((isIPv4(peer) && peer.startsWith("127.")) || peer === "::1")) return peer;
+		const forwarded = normalizeIpAddress(request.headers["x-forwarded-for"]?.split(",").at(-1));
+		return forwarded !== undefined && isIP(forwarded) !== 0 ? forwarded : peer;
+	};
 
 	const metadata = HttpApiBuilder.group(EnvironmentHttpApi, "metadata", (handlers) => handlers.handle("descriptor", () => Effect.sync(deps.descriptor)));
 
@@ -185,7 +206,8 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 					const cookie = request.cookies[deps.sessionCookieName];
 					const previous = cookie === undefined ? undefined : auth.verifySessionToken(cookie);
 					const userAgent = request.headers["user-agent"];
-					const presented: ClientMetadata = { ipAddress: address, label: "browser", ...(userAgent ? { userAgent } : {}), deviceType: "desktop" };
+					const ipAddress = clientAddressOf(request);
+					const presented: ClientMetadata = { ...(ipAddress ? { ipAddress } : {}), label: "browser", ...(userAgent ? { userAgent } : {}), deviceType: "desktop" };
 					const exchanged = auth.createBrowserSession(payload.credential, presented, previous?.id);
 					if (!("session" in exchanged)) {
 						deps.pairingLimit.fail(address);
@@ -195,7 +217,7 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 					const issued = exchanged.session;
 					log.info("browser session paired", { label: issued.session.label ?? issued.session.deviceType });
 					yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-						Effect.succeed(HttpServerResponse.setHeader(response, "set-cookie", deps.sessionCookie(issued.token, issued.session.expiresAt))),
+						Effect.succeed(HttpServerResponse.setHeader(response, "set-cookie", deps.sessionCookie(issued.token, issued.session.expiresAt, requestOrigin(request).startsWith("https:")))),
 					);
 					yield* noStore;
 					return {
@@ -213,8 +235,9 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 					const requested = payload.scope === undefined ? undefined : parseOAuthScope(payload.scope);
 					if (requested === null || requested?.length === 0) return yield* invalidRequest("invalid_scope");
 					const userAgent = request.headers["user-agent"];
+					const ipAddress = clientAddressOf(request);
 					const presented: ClientMetadata = {
-						ipAddress: address,
+						...(ipAddress ? { ipAddress } : {}),
 						...(payload.client_label === undefined ? {} : { label: payload.client_label }),
 						...(userAgent ? { userAgent } : {}),
 						...(payload.client_device_type === undefined ? {} : { deviceType: payload.client_device_type }),
@@ -381,8 +404,14 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 			.handle("protectedResource", () => Effect.map(urls, protectedResourceMetadata))
 			.handle("mcpProtectedResource", () => Effect.map(urls, protectedResourceMetadata))
 			.handle("authorizationServer", () => Effect.map(urls, authorizationServerMetadata))
-			.handle("register", ({ payload }) =>
+			// Decoded here rather than by the HttpApi, so malformed metadata gets RFC 7591's error, not an empty 400 (T3 0.1.11).
+			.handleRaw("register", ({ request }) =>
 				Effect.gen(function* () {
+					const payload = yield* request.text.pipe(
+						Effect.orDie,
+						Effect.flatMap(decodeClientRegistration),
+						Effect.mapError((cause) => new AuthMcpRegistrationError({ error: "invalid_client_metadata", error_description: `Invalid client metadata: ${cause.message}` })),
+					);
 					let client: McpOAuthClient;
 					try {
 						client = oauth.register(payload);
@@ -459,11 +488,12 @@ export function makeHttpApiLayer(deps: HttpApiDeps) {
 				Effect.gen(function* () {
 					yield* noStore;
 					const userAgent = request.headers["user-agent"];
+					const ipAddress = clientAddressOf(request);
 					const { code, code_verifier: verifier, ...token } = payload;
 					try {
 						const { session: _session, ...result } = oauth.exchangeCode({
 							urls: yield* urls,
-							client: { ipAddress: addressOf(request), ...(userAgent ? { userAgent } : {}) },
+							client: { ...(ipAddress ? { ipAddress } : {}), ...(userAgent ? { userAgent } : {}) },
 							token: {
 								...token,
 								...(code === undefined ? {} : { code: Redacted.value(code) }),

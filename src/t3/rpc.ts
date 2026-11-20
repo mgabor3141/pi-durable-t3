@@ -472,17 +472,19 @@ export function makeRpcLayer(deps: RpcDeps) {
 		},
 		// The Connections access stream (T3's `subscribeAuthAccess`): the snapshot first (links + sessions, `current` for
 		// this socket's session), then the store's changes as incremental events at an increasing revision (the client
-		// reducer folds each into the snapshot; it never re-reads the store). `current` is the viewer's own client.
+		// reducer folds each into the snapshot; it never re-reads the store). `current` is the viewer's own client. The
+		// changes are listened to from the moment the snapshot is read (T3 0.1.11), so none made while the snapshot is
+		// on its way is lost.
 		subscribeAuthAccess: () =>
 			Stream.unwrap(
-				Effect.map(CurrentAuthSession, ({ sessionId }) => {
-					let revision = 1;
-					const snapshot = { version: 1 as const, revision: 1, type: "snapshot" as const, payload: accessSnapshot(deps.auth, sessionId) };
-					return Stream.concat(
-						Stream.make(snapshot),
-						fromListener<WsItem<"subscribeAuthAccess">>((emit) => deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }))),
-					);
-				}),
+				Effect.map(CurrentAuthSession, ({ sessionId }) =>
+					fromListener<WsItem<"subscribeAuthAccess">>((emit) => {
+						let revision = 1;
+						const stop = deps.auth.onAccessChange((change) => emit({ ...accessChangeEvent(deps.auth, change, sessionId), revision: ++revision }));
+						emit({ version: 1, revision: 1, type: "snapshot", payload: accessSnapshot(deps.auth, sessionId) });
+						return stop;
+					}),
+				),
 			),
 		// T3's thread links and relationship rows (`ProjectionStore.getThreadTitles`, `getThreadLinkMetadata`): the
 		// requested threads that exist, archived ones and side chats included; a deleted or unknown id is absent.

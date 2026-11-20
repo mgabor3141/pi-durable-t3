@@ -19,6 +19,9 @@ const ONE_TIME_TOKEN_SUBJECT = "one-time-token";
 const MCP_CLIENT_SUBJECT = "mcp-client";
 /** T3's `MCP_CLIENT_SESSION_TTL`. */
 const MCP_CLIENT_SESSION_TTL_MS = 30 * 86_400_000;
+/** T3's `PEER_LINK_RENEWAL_STEP`: a peer link's session moves back out to its full term when a call finds it this far
+ * short, so a link in use never expires, and a busy one writes at most once a day. */
+const PEER_LINK_RENEWAL_STEP_MS = 86_400_000;
 
 type DeviceType = "desktop" | "mobile" | "tablet" | "bot" | "unknown";
 
@@ -415,7 +418,22 @@ export class AuthStore {
 	 * `authenticateMcpClient`). */
 	verifyMcpClient(header: string | undefined): StoredToken | undefined {
 		const session = this.#bearer(header);
-		return session?.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token" ? session : undefined;
+		if (session?.subject !== MCP_CLIENT_SUBJECT || session.method !== "bearer-access-token") return undefined;
+		return session.peerLink === true ? this.#renewPeerLink(session) : session;
+	}
+
+	/** T3's `renewPeerLinkSession`: a peer link's session, its expiry moved out to a full term when this use finds it a
+	 * step short. One revoked in between is refused, as T3 refuses it. */
+	#renewPeerLink(session: StoredToken): StoredToken | undefined {
+		const renewed = Date.now() + MCP_CLIENT_SESSION_TTL_MS;
+		if (renewed - session.expiresAt < PEER_LINK_RENEWAL_STEP_MS) return session;
+		const data = this.#read();
+		const stored = data.tokens.find((token) => token.id === session.id);
+		if (stored === undefined) return undefined;
+		stored.expiresAt = renewed;
+		this.#write(data);
+		this.#emit({ type: "clientUpserted", session: stored });
+		return stored;
 	}
 
 	#bearer(header: string | undefined): StoredToken | undefined {
