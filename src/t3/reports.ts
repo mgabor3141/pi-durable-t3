@@ -3,7 +3,7 @@
 // merge into it, and it settles once for everybody. The report lists every message that entered it (the reader's own as
 // [YOU]), how much tool work it took, and the final answer, in the order they happened: a note placed after the answer
 // is listed after it. The verdict is beside the report, never inside the prose.
-import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import type { OrchestrationV2Run, OrchestrationV2ThreadProjection, OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import { isMessageContextItem } from "./projection.ts";
 
 /** How an activity ended: `active` when it has not (a wait that timed out, or a read of running work). */
@@ -21,6 +21,8 @@ const MESSAGE_BUDGET = 2_000;
 const OWN_PROMPT_CHARS = 120;
 
 export const isActiveRun = (run: OrchestrationV2Run) => ACTIVE_RUN.has(run.status);
+/** Whether a shell's thread is working: it has an active or queued run, or activity of its own. */
+export const isActiveShell = (shell: OrchestrationV2ThreadShell) => shell.activityRunStatus != null || ACTIVE_RUN.has(shell.status);
 /**
  * Is `run` still the thread's work? A run that a provider's limit ended and that the host continues when the limit
  * resets (T3's limit recovery with `autoResume`) is: whoever waits for the thread waits for that, and is not told it

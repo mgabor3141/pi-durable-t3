@@ -49,10 +49,8 @@ import { MessageContexts } from "./message-contexts.ts";
 import { ThreadNavigator } from "./thread-navigator.ts";
 import { memoryReport } from "./memory-report.ts";
 import { queuedCommand, QueuedCommands } from "./queued-commands.ts";
+import { isActiveRun, isActiveShell } from "./reports.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
-
-/** T3's `isActiveRun` and a queued run: a thread with either takes no fork brought back. */
-const ACTIVE_OR_QUEUED: ReadonlySet<string> = new Set(["preparing", "starting", "running", "waiting", "queued"]);
 
 export { CommandError, type StreamUpdate };
 
@@ -672,7 +670,7 @@ export class Bridge {
 			let result: string | null = null;
 			let completedAt: number | null = null;
 			if (shell !== undefined) {
-				const active = shell.activityRunStatus != null || ["queued", "preparing", "starting", "running", "waiting"].includes(shell.status);
+				const active = isActiveShell(shell);
 				status = active ? (shell.activityRunStatus === "waiting" ? "waiting" : "running") : shell.status === "idle" ? "pending" : (shell.status as ChildCard["status"]);
 				if (!active && shell.latestRunCompletedAt != null) completedAt = DateTime.toEpochMillis(shell.latestRunCompletedAt);
 				if (!active && shell.latestVisibleMessage?.role === "assistant") result = shell.latestVisibleMessage.text;
@@ -1578,7 +1576,7 @@ export class Bridge {
 			const target = this.#summary(input.targetThreadId);
 			if (target === undefined) throw new CommandError(`Unknown thread: ${input.targetThreadId}`);
 			const { projection: targetProjection } = await this.projection(input.targetThreadId);
-			if (targetProjection.runs.some((run) => ACTIVE_OR_QUEUED.has(run.status))) {
+			if (targetProjection.runs.some(isActiveRun)) {
 				throw new CommandError("Finish or stop the target thread's active work and clear its queue before merging back.");
 			}
 			const pending = target.pendingContext;

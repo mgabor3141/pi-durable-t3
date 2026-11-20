@@ -22,7 +22,7 @@ import type { Bridge } from "./bridge.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import { childCardNodeId } from "./projection.ts";
-import { exchanges, isActiveIn, isActiveRun, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
+import { exchanges, isActiveIn, isActiveRun, isActiveShell, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
 import { subagentThreadTitle } from "./child-title.ts";
 import { messageOf } from "../host-errors.ts";
 
@@ -221,8 +221,7 @@ export class Orchestration {
 	}
 
 	#isActive(threadId: string): boolean {
-		const shell = this.#bridge.threadShell(threadId);
-		return shell.activityRunStatus != null || ["queued", "preparing", "starting", "running", "waiting"].includes(shell.status);
+		return isActiveShell(this.#bridge.threadShell(threadId));
 	}
 
 	// ---- waiting ----------------------------------------------------------------------------------------------

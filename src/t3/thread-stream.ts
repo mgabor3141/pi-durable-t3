@@ -34,6 +34,7 @@ import {
 	THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
 } from "./t3-server.ts";
 import type { WsItem } from "./ws-types.ts";
+import { isActiveRun } from "./reports.ts";
 
 export type ThreadStreamItem = WsItem<"orchestration.subscribeThread">;
 type Projection = OrchestrationV2ThreadProjection;
@@ -174,7 +175,6 @@ function reproduces(previous: Projection, events: readonly UnsequencedEvent[], n
 	return undefined;
 }
 
-const ACTIVE_RUN = new Set(["queued", "preparing", "starting", "running", "waiting"]);
 const ACTIVE_WORK = new Set(["pending", "starting", "running", "waiting"]);
 
 /**
@@ -205,7 +205,7 @@ export function windowedProjection(projection: Projection): Projection {
 	for (const attempt of projection.attempts) {
 		if (ACTIVE_WORK.has(attempt.status) || runIds.has(attempt.runId)) if (attempt.rootNodeId !== null) nodeIds.add(attempt.rootNodeId);
 	}
-	for (const run of projection.runs) if ((ACTIVE_RUN.has(run.status) || runIds.has(run.id)) && run.rootNodeId !== null) nodeIds.add(run.rootNodeId);
+	for (const run of projection.runs) if ((isActiveRun(run) || runIds.has(run.id)) && run.rootNodeId !== null) nodeIds.add(run.rootNodeId);
 	for (const request of projection.runtimeRequests) if ((is(request.status, "pending") || is(request.status, "waiting")) && request.nodeId !== null) nodeIds.add(request.nodeId);
 	for (const subagent of projection.subagents) if (ACTIVE_WORK.has(subagent.status)) nodeIds.add(subagent.parentNodeId);
 	for (const turn of projection.providerTurns) if ((is(turn.status, "starting") || is(turn.status, "running") || is(turn.status, "waiting")) && turn.nodeId !== null) nodeIds.add(turn.nodeId);
@@ -219,7 +219,7 @@ export function windowedProjection(projection: Projection): Projection {
 	const keptProviderThreads = new Set(providerThreads.map((thread) => thread.id as string));
 	return {
 		...projection,
-		runs: projection.runs.filter((run) => ACTIVE_RUN.has(run.status) || has(runIds, run.id)),
+		runs: projection.runs.filter((run) => isActiveRun(run) || has(runIds, run.id)),
 		attempts: projection.attempts.filter((attempt) => ACTIVE_WORK.has(attempt.status) || has(runIds, attempt.runId)),
 		nodes: projection.nodes.filter((node) => has(nodeIds, node.id)),
 		subagents: projection.subagents.filter((subagent) => ACTIVE_WORK.has(subagent.status) || has(runIds, subagent.runId) || has(nodeIds, subagent.parentNodeId)),
@@ -229,7 +229,7 @@ export function windowedProjection(projection: Projection): Projection {
 		providerThreads,
 		providerTurns: projection.providerTurns.filter((turn) => is(turn.status, "starting") || is(turn.status, "running") || is(turn.status, "waiting") || has(providerTurnIds, turn.id) || has(nodeIds, turn.nodeId)),
 		runtimeRequests: projection.runtimeRequests.filter((request) => is(request.status, "pending") || is(request.status, "waiting") || has(nodeIds, request.nodeId) || has(providerTurnIds, request.providerTurnId)),
-		messages: projection.messages.filter((message) => has(messageIds, message.id) || projection.runs.some((run) => run.id === message.runId && ACTIVE_RUN.has(run.status))),
+		messages: projection.messages.filter((message) => has(messageIds, message.id) || projection.runs.some((run) => run.id === message.runId && isActiveRun(run))),
 		plans: projection.plans.filter((plan) => is(plan.status, "active") || has(planIds, plan.id)),
 		turnItems: window.turnItems,
 		visibleTurnItems: window.visibleTurnItems,
