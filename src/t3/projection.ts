@@ -1559,6 +1559,19 @@ function isSilentRun(run: OrchestrationV2Run, idle: ReadonlySet<string>, turnIte
 	return run.status !== "failed" && idle.has(run.userMessageId as string) && !turnItems.some((item) => item.runId === run.id && item.type === "compaction" && item.status === "failed");
 }
 
+/** The line an answer ends with to end its run silently. */
+export const SILENT_REPLY = "SILENT";
+
+/**
+ * Whether an answer ends its run silently: its last line is `SILENT_REPLY` and nothing else. The agent's way to say
+ * that a run left nothing the user needs to see (a scheduled check that found nothing): the run completes, and the
+ * shell presents it as T3 presents a run that was stopped, which no client announces. Nor does the run make its
+ * thread unread (`Bridge`, as the run ends), as a stopped run does not in T3.
+ */
+export function endsSilent(answer: string | undefined): boolean {
+	return answer !== undefined && answer.trimEnd().split("\n").at(-1)?.trim() === SILENT_REPLY;
+}
+
 /** The thread's shell: its sidebar row, with the latest run and message as T3's shell reads them. */
 function projectShell(b: Build, rows: ReturnType<typeof projectRows>): OrchestrationV2ThreadShell {
 	const { meta, view, threadId, providerThreadId, modelSelection, drafts, busy, worktreePath, runs: allRuns, messages, turnItems, shownIds } = b;
@@ -1575,6 +1588,8 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 	// reached a limit shows that, and not "queued", while messages wait behind it.
 	const latestRun = liveRuns.findLast((run) => !(run.status === "queued" && (run as { queueHeld?: boolean }).queueHeld === true));
 	const activeRun = liveRuns.findLast((run) => run.status === "running");
+	// The latest run ended silent (`endsSilent`): its last answer says so.
+	const endedSilent = latestRun?.status === "completed" && endsSilent(messages.findLast((message) => message.role === "assistant" && message.runId === latestRun.id)?.text);
 	// The thread's own messages: a command the host answered on the spot is not the thread's latest message, nor is
 	// T3's idle `/compact` (T3's shell leaves it out of the user's messages).
 	const durable = messages.filter((message) => !shownIds.has(message.id as string) && !idle.has(message.id as string));
@@ -1606,10 +1621,12 @@ function projectShell(b: Build, rows: ReturnType<typeof projectRows>): Orchestra
 		// T3's `latestRunStopRequested`: the latest run was stopped, so T3's clients do not announce it completed. T3 keeps
 		// the run's `run_interrupt_request` row, which goes with the run's end here; but only a Stop, an agent's stop or a
 		// restart's send ends a run interrupted (each of which leaves that row in T3), so an interrupted run was stopped.
-		// One that completed although Stop was pressed as it ended is not flagged once it has ended.
+		// One that completed although Stop was pressed as it ended is not flagged once it has ended. A run that ended
+		// silent is flagged too: the flag's one use in T3 is to keep a completion from being announced (its clients'
+		// notification gate, and `projectThreadAwarenessV2` for its phone alerts).
 		latestRunStopRequested: (() => {
 			const shown = latestRun ?? keptRun ?? undefined;
-			return shown !== undefined && (shown.status === "interrupted" || turnItems.some((item) => item.runId === shown.id && item.type === "run_interrupt_request"));
+			return shown !== undefined && (endedSilent || shown.status === "interrupted" || turnItems.some((item) => item.runId === shown.id && item.type === "run_interrupt_request"));
 		})(),
 		activeRunId: activeRun?.id ?? null,
 		activityRunStartedAt: activeRun?.startedAt ?? null,

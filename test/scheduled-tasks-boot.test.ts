@@ -211,7 +211,7 @@ it("a Stop on an idle thread whose queue holds a task's message leaves it waitin
 	}
 });
 
-it("a scheduled task's prompt tells the model which task sent it, and T3 shows the prompt as written (T3's withMessageSenderNote)", { timeout: 30_000 }, async () => {
+it("a scheduled task's prompt tells the model which task sent it (T3's withMessageSenderNote) and how to end the run silently, and T3 shows the prompt as written", { timeout: 30_000 }, async () => {
 	const { createNamed } = await import("./threads-harness.ts");
 	const { fauxAssistantMessage } = await import("@earendil-works/pi-ai");
 	// What the model reads of each prompt: the last message of its request.
@@ -233,7 +233,13 @@ it("a scheduled task's prompt tells the model which task sent it, and T3 shows t
 		await ran("scheduled-task-message:task-1:1:scheduled");
 		expect(read[0]).toEqual([
 			{ type: "text", text: "hourly report" },
-			{ type: "text", text: '[T3 Code: scheduled task "task-1" sent this prompt, not the user typing in this chat.]', hidden: true },
+			{
+				type: "text",
+				text:
+					'[T3 Code: scheduled task "task-1" sent this prompt, not the user typing in this chat.]\n' +
+					"[If this run finds nothing the user needs to see, make the last line of your reply the single word SILENT: the thread then finishes without notifying them.]",
+				hidden: true,
+			},
 		]);
 		const { projection } = await bridge.projection("bound");
 		expect(projection.messages.find((message) => message.id === "scheduled-task-message:task-1:1:scheduled")).toMatchObject({ text: "hourly report", scheduledTaskId: "task-1" });

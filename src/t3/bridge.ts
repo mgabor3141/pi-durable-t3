@@ -38,7 +38,7 @@ import { type LiveCall, UserInputRequests } from "./user-input.ts";
 import { ApprovalRequests } from "./approvals.ts";
 import { type ContentBlock, type EntryRecord, type ModelRef, splitSlug, thinkingOf } from "./model-types.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
-import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID } from "./projection.ts";
+import { type ChildCard, type ProjectionResult, projectThread, type ThreadMeta, PROVIDER_INSTANCE_ID, SILENT_REPLY } from "./projection.ts";
 import { MERGE_BACK_ROW, SIDE_CHAT_ROW, mergeBackContext, ownRuns, sideChatNote } from "./side-chats.ts";
 import { USER_ENTRY_KINDS } from "./runs.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
@@ -112,8 +112,15 @@ function senderNote(provenance: Provenance, messageId: string, text: string): Co
 	const scheduledTaskId = SCHEDULED_MESSAGE_ID.exec(messageId)?.[1];
 	const message = { ...provenance, ...(scheduledTaskId === undefined ? {} : { scheduledTaskId }) } as Parameters<typeof withMessageSenderNote>[0];
 	if (withMessageSenderNote(message, text) === text) return undefined;
-	return { type: "text", text: withMessageSenderNote(message, ""), hidden: true };
+	const note = withMessageSenderNote(message, "");
+	return { type: "text", text: scheduledTaskId === undefined ? note : `${note}\n${SILENT_NOTE}`, hidden: true };
 }
+
+/**
+ * Said with a scheduled task's prompt, after T3's sender note: nobody asked for this run just now, so the agent may end
+ * it silently (`endsSilent`). Any run may end so; a scheduled one is where it is offered.
+ */
+const SILENT_NOTE = `[If this run finds nothing the user needs to see, make the last line of your reply the single word ${SILENT_REPLY}: the thread then finishes without notifying them.]`;
 
 const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -820,10 +827,28 @@ export class Bridge {
 		if (change.loaded || change.settled || runChanged) this.#remember(view, run);
 		if (change.settled) this.#recordOutcome(view);
 		if (change.settled) this.#idle.arm(view.threadId);
+		// The first sight of a run as the thread's latest that ended: the summary still keeps the one before it.
+		if (run != null && run.id !== kept?.id) this.#passOver(view, kept ?? null, run);
 		this.#stops.settle(view);
 		this.#holdWhileRunning(view);
 		this.#limits.reached(view);
 		this.#publishShell(view.threadId);
+	}
+
+	/**
+	 * A run that ended silent (`endsSilent`) leaves its thread as read as it was: the read watermark moves over the run,
+	 * unless the run before it is still unread (T3's `hasUnseenCompletion`). T3's other unannounced run, a stopped one, is
+	 * never unread either. Done once, as the run ends: a later "Mark unread" stands. A completed run that carries T3's
+	 * stop flag is a silent one (a Stop leaves its run interrupted, and its row goes with the run's end).
+	 */
+	#passOver(view: ThreadView, before: SummaryRun | null, run: SummaryRun): void {
+		const shell = view.result?.shell;
+		const visited = this.#thread(view.threadId)?.lastVisitedAt;
+		if (shell?.status !== "completed" || shell.latestRunStopRequested !== true || run.completedAt === null || visited === undefined) return;
+		if (before !== null && before.completedAt !== null && before.status !== "interrupted" && before.status !== "cancelled" && before.completedAt > visited) return;
+		void this.sidebar
+			.visit(view.threadId, new Date(run.completedAt).toISOString(), false, undefined)
+			.catch((error: unknown) => this.#log.warn("a silent run's read watermark was not moved", { threadId: view.threadId, error: messageOf(error) }));
 	}
 
 	/** The latest run as the summary keeps it, from an open thread's shell: `null` with no run, `undefined` while one runs
