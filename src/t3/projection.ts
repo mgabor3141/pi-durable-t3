@@ -390,7 +390,9 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	// A side chat shows only its own rows: what it inherited reaches the model, and T3 links the main thread instead.
 	const transcript = [...history, ...(view?.entries ?? [])].filter((entry) => meta.forkEntryId === undefined || entry.id > meta.forkEntryId);
 	const drafts = groupRuns(transcript);
-	const compactionTokens = compactionTokenCounts(transcript);
+	// What is left after the newest compaction, estimated until a request measures it: the meter's size and the card's.
+	const sizeAfter = sizeAfterCompaction(transcript);
+	const compactionTokens = compactionTokenCounts(transcript, sizeAfter);
 	const contextEdits = messageContextEdits(transcript);
 	const promptUpdates = systemPromptUpdates(transcript);
 	// A live manual compaction has a durable /compact user entry: the newest run, whose summary has not landed yet. Treat
@@ -422,7 +424,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const forkRuns: ProjectedRun[] = [];
 	const toolImages = new Map<string, readonly ToolImage[]>();
 	const lastActivity = meta.updatedAt;
-	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, compactionTokens, contextEdits, promptUpdates, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
+	return { meta, view, memory, threadId, providerThreadId, live, liveCompactions, modelSelection, transcript, drafts, sizeAfter, compactionTokens, contextEdits, promptUpdates, manualCompaction, newestDraft, compactDraft, manualCompactionRunId, busy, worktreePath, runs, attempts, nodes, providerTurns, messages, turnItems, runtimeRequests, shownIds, subagents, checkpointScopes, checkpoints, projectedRuns, forkRuns, toolImages, lastActivity };
 }
 
 function pushBaseline(b: Build): void {
@@ -1721,10 +1723,9 @@ export function projectThread(
  * (`context-size.ts`). T3's meter shows the newest report, which would be the size from before.
  */
 function projectCompactedSize(b: Build): void {
-	const { meta, transcript, providerTurns } = b;
+	const { meta, transcript, providerTurns, sizeAfter: usedTokens } = b;
 	const turn = providerTurns.at(-1);
 	if (turn === undefined || meta.contextWindow === undefined || meta.contextWindow <= 0) return;
-	const usedTokens = sizeAfterCompaction(transcript);
 	if (usedTokens === undefined) return;
 	const compactedAt = firstMessage(transcript.findLast(isCompactionEntry)!)?.timestamp ?? 0;
 	// Not older than the report it replaces: T3 takes the newest by this time.
@@ -1742,9 +1743,11 @@ function isCompactionEntry(entry: EntryRecord): boolean {
 /**
  * The context size before and after each compaction, as T3's card shows it ("Context compacted 183k → 41k tokens"):
  * before, what the last request before the summary used (its input, cache and answer); after, what the first request
- * after it sent. A request without usage (one that failed) does not count. Each is absent until there is such a request.
+ * after it sent. A request without usage (one that failed) does not count. Until a request follows the newest
+ * compaction, its after is `estimatedAfter` (`sizeAfterCompaction`, what the meter shows), as T3's pi driver reports
+ * pi's estimate; before is absent when no request preceded it.
  */
-function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord["id"], { before?: number; after?: number }> {
+function compactionTokenCounts(entries: readonly EntryRecord[], estimatedAfter: number | undefined): Map<EntryRecord["id"], { before?: number; after?: number }> {
 	const counts = new Map<EntryRecord["id"], { before?: number; after?: number }>();
 	let lastContext: number | undefined;
 	let waiting: { before?: number; after?: number }[] = [];
@@ -1764,5 +1767,6 @@ function compactionTokenCounts(entries: readonly EntryRecord[]): Map<EntryRecord
 		waiting = [];
 		lastContext = sent + (usage?.output ?? 0);
 	}
+	if (estimatedAfter !== undefined) for (const count of waiting) count.after = estimatedAfter;
 	return counts;
 }

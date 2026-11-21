@@ -1,6 +1,7 @@
 // T3's context meter shows the newest usage report among a thread's provider turns. Two cases where the newest report
 // was not the context's size: after a compaction (no request has measured what is left, so the report from before
-// stayed), and after a request that failed (its usage is zeros). The first gets an estimate until a request answers.
+// stayed), and after a request that failed (its usage is zeros). The first gets an estimate until a request answers,
+// and so does the compaction card's size after.
 import { expect, it } from "vitest";
 import type { ConversationView, EntryRecord } from "../src/t3/model-types.ts";
 import { sizeAfterCompaction } from "../src/t3/context-size.ts";
@@ -26,6 +27,12 @@ const shown = (entries: EntryRecord[]) => {
 	return turns.reduce<{ usedTokens: number; updatedAt: string } | undefined>((latest, turn) => (turn.tokenUsage !== undefined && (latest === undefined || Date.parse(turn.tokenUsage.updatedAt) >= Date.parse(latest.updatedAt)) ? turn.tokenUsage : latest), undefined);
 };
 
+/** The compaction card's token counts, which T3 shows as "before → after tokens" when it has both. */
+const card = (entries: EntryRecord[]) => {
+	const item = (projectThread(meta, view(entries), { rolledBack: [] }).projection.turnItems as unknown as { type: string; beforeTokenCount?: number; afterTokenCount?: number }[]).find((each) => each.type === "compaction");
+	return item === undefined ? undefined : { before: item.beforeTokenCount, after: item.afterTokenCount };
+};
+
 // A thread whose every request carries 12,000 tokens of system prompt and tools; the first sent 12,010.
 const history: EntryRecord[] = [
 	user(1, "Hello.", 1_000),
@@ -46,6 +53,8 @@ it("after a compaction the meter shows an estimate of what is left, until a requ
 	expect(size).toBeGreaterThan(12_000);
 	expect(size).toBeLessThan(20_000);
 	expect(shown(compacted)).toEqual({ usedTokens: size, maxTokens: 200_000, updatedAt: new Date(7_000).toISOString() });
+	// The compaction's card says the same: the size before it, and the estimate as the size after.
+	expect(card(compacted)).toEqual({ before: 63_500, after: size });
 
 	// A message since, not answered yet, counts; a request that failed measures nothing.
 	const waiting = [...compacted, user(8, WORDS(4_000), 8_000), assistant(9, "", 9_000, 0, { stopReason: "error", errorMessage: "overloaded" })];
@@ -56,6 +65,8 @@ it("after a compaction the meter shows an estimate of what is left, until a requ
 	const answered = [...compacted, user(8, "Go on.", 8_000), assistant(9, "Done.", 9_000, 15_200)];
 	expect(sizeAfterCompaction(answered)).toBeUndefined();
 	expect(shown(answered)?.usedTokens).toBe(15_700);
+	// Once a request follows, the card's after is what it sent.
+	expect(card(answered)).toEqual({ before: 63_500, after: 15_200 });
 });
 
 it("a request that failed does not empty the meter", () => {
