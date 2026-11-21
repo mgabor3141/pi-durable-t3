@@ -37,9 +37,14 @@ describe.skipIf(chrome === undefined)("preview in a browser", () => {
 	});
 
 	afterAll(async () => {
-		browser?.kill();
 		server?.close();
-		await rm(profile, { recursive: true, force: true });
+		// Chrome writes its profile as it exits: remove the directory once it has.
+		if (browser !== undefined && browser.exitCode === null && browser.signalCode === null) {
+			const exited = new Promise((resolve) => browser.once("exit", resolve));
+			browser.kill();
+			await exited;
+		}
+		await rm(profile, { recursive: true, force: true, maxRetries: 5 });
 	});
 
 	it("opens tabs in the browser's own context with the configured identity, and clears its cookies", { timeout: 60_000 }, async () => {
