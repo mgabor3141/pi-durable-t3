@@ -31,6 +31,7 @@ import type { HookApi, SignalKey } from "@earendil-works/pi-durable";
 import type { TextGenerationModel } from "./t3/title-thread.ts";
 import type { MessageContext } from "./t3/message-context.ts";
 import type { RemoteAccess } from "./t3/remote-access.ts";
+import type { NotifyUser } from "./t3/notify-user.ts";
 import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
@@ -48,6 +49,7 @@ export type { MessageContext, MessageContextAnswer, MessageContextRequest } from
 export { DISPLAY_ONLY_RULE, messageContextData } from "./t3/message-context.ts";
 export type { HostUpdates } from "./t3/updates-config.ts";
 export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
+export type { NotifyUser, UserNotification } from "./t3/notify-user.ts";
 export { abortable } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
 
@@ -151,6 +153,21 @@ type AttachT3Options = {
 	 */
 	readonly commands?: readonly HostCommand[];
 	/**
+	 * Tell a user who is not looking: called once when a thread needs them (an approval, a question, a secret), fails
+	 * or finishes its run, and no T3 client has shown them so. You deliver it (a push to a phone, say). The same threads
+	 * stay quiet as for T3's own alerts: children and side chats (what a child asks of the user is told for its
+	 * top-level thread), archived threads, threads hidden by their tags, a completion while the thread is snoozed, and
+	 * a run that was stopped or ended silent.
+	 *
+	 * Whether the user is looking is what T3's clients report of themselves. With no client in front and no input in
+	 * the last two minutes it is called at once (a completion after 5 seconds, as T3 confirms one). Otherwise it waits
+	 * 90 seconds and is not called at all when the user proves to be there: input since then, or a thread opened, in a
+	 * web or desktop window that is in front; the thread on the screen of the phone app; a message of theirs in the
+	 * thread. It is not called either for a request that was answered, or for a run's end that the thread's next
+	 * request or run's end takes the place of. A rejection is logged as a warning. Absent: nobody is told.
+	 */
+	readonly notifyUser?: NotifyUser;
+	/**
 	 * Optional per-call observation for debugging the T3 wire: `onSuccess` for a request handler that succeeds or a
 	 * stream that opens, `onFailure` for a failing request, and `onStubbed` for a method this host does not implement.
 	 * The callbacks run synchronously and their exceptions are caught and logged, so a debug sink never breaks a call.
@@ -248,6 +265,12 @@ export type T3Attachment = {
 	 */
 	requestApproval(api: Pick<HookApi, "conversationId" | "readSignal" | "memo" | "now">, ask: ApprovalAsk, context: Context): Promise<ApprovalOutcome | { readonly sleep: { readonly signals: readonly SignalKey<unknown>[] } }>;
 	/**
+	 * Send now the notifications that wait for the user to come back (`notifyUser`), and resolve once they are sent.
+	 * Nothing is kept on disk, so a process that stops would lose them: call this first when you shut down. `close()`
+	 * starts with it too, but a shutdown that closes other things before the bridge may run out of time.
+	 */
+	flushNotifications(): Promise<void>;
+	/**
 	 * A T3-visible preview page for an agent conversation, when the preview browser is configured and the conversation
 	 * is a thread's head. The page is the one T3 streams to the user; `undefined` falls back to a private browser.
 	 */
@@ -338,6 +361,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		...(options.remoteAccess === undefined ? {} : { remoteAccess: options.remoteAccess }),
 		...(options.preview === undefined ? {} : { preview: options.preview }),
 		...(options.rpcLog === undefined ? {} : { rpcLog: options.rpcLog }),
+		...(options.notifyUser === undefined ? {} : { notifyUser: options.notifyUser }),
 		...(options.routes === undefined ? {} : { routes: options.routes }),
 		...(options.commands === undefined ? {} : { commands: options.commands }),
 	};
@@ -368,6 +392,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		threadOf: (conversationId) => facet.threadOf(conversationId),
 		threadOrigin: (threadId) => facet.threadOrigin(threadId),
 		requestApproval: (api, ask, context) => facet.requestApproval(api, ask, context),
+		flushNotifications: () => facet.flushNotifications(),
 		...(facet.preview === undefined
 			? {}
 			: {

@@ -47,6 +47,7 @@ import { ThreadOps } from "./thread-ops.ts";
 import type { WorkspaceFiles } from "./files.ts";
 import type { ScheduledTasks } from "./scheduled-tasks.ts";
 import { CurrentAuthSession } from "./session-context.ts";
+import type { UserNotifications } from "./user-notifications.ts";
 import type { PreviewSessions } from "./preview.ts";
 import { makePreviewStreamHandler } from "./preview-http.ts";
 import { McpOAuth } from "./mcp-oauth.ts";
@@ -242,10 +243,11 @@ export function makeServerLayer(deps: {
 	files: WorkspaceFiles;
 	preview: PreviewSessions | undefined;
 	secretRequests: SecretRequests;
+	userNotifications: UserNotifications | undefined;
 }) {
-	const { bridge, auth, log, httpServer, attachments, assets, preview } = deps;
+	const { bridge, auth, log, httpServer, attachments, assets, preview, userNotifications } = deps;
 	const descriptor = makeDescriptor(bridge, auth, preview, attachments);
-	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, preview, secretRequests: deps.secretRequests });
+	const rpcLayer = makeRpcLayer({ bridge, files: deps.files, catalog: deps.catalog, descriptor, authDescriptor, auth, log, attachments, assets, scheduledTasks: deps.scheduledTasks, preview, secretRequests: deps.secretRequests, userNotifications });
 	const pairingLimit = new PairingRateLimit();
 	// The built web app, when configured.
 	const staticHandler = bridge.config.staticDir === undefined ? undefined : makeStaticHandler(bridge.config.staticDir);
@@ -408,6 +410,8 @@ export function makeServerLayer(deps: {
 					).pipe(Effect.orDie);
 				}
 				const connectedAt = Date.now();
+				// The socket's own name: what its client reports of itself is kept under it, and dropped with it.
+				const connectionId = randomUUID();
 				// The socket's session: the Connections list marks this client `current`, and the access stream filters by it.
 				const session = auth.sessionOfTokenHash(tokenHash);
 				const sessionId = session?.id ?? "";
@@ -434,7 +438,7 @@ export function makeServerLayer(deps: {
 								yield* RpcServer.make(WsRpcGroup, { disableTracing: true, disableFatalDefects: true } as Any).pipe(
 									Effect.provideService(RpcServer.Protocol, protocol),
 									Effect.provide(rpcLayer),
-									Effect.provideService(CurrentAuthSession, { sessionId, scopes: session?.scopes ?? [] }),
+									Effect.provideService(CurrentAuthSession, { sessionId, scopes: session?.scopes ?? [], connectionId }),
 									Effect.forkScoped,
 								);
 								return httpEffect;
@@ -460,6 +464,7 @@ export function makeServerLayer(deps: {
 						}),
 					() => Effect.sync(() => {
 						auth.markDisconnected(tokenHash);
+						userNotifications?.disconnected(connectionId);
 						log.info("client disconnected", { ...client, durationMs: Date.now() - connectedAt });
 						log.info("memory", bridge.memory());
 					}),

@@ -60,6 +60,7 @@ import type { WsHandlers, WsItem, WsPayload, WsSuccess } from "./ws-types.ts";
 import { attachmentRecords, clientProvenance, dispatchCommand } from "./dispatch.ts";
 import { TEXT_GENERATORS_UNSUPPORTED, unsupportedMessage } from "./unsupported.ts";
 import type { SecretRequests } from "./secret-requests.ts";
+import type { UserNotifications } from "./user-notifications.ts";
 import { messageOf } from "../host-errors.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: handler payloads are decoded by the RPC schemas
@@ -98,6 +99,8 @@ interface RpcDeps {
 	readonly scheduledTasks: ScheduledTasks;
 	readonly preview: PreviewSessions | undefined;
 	readonly secretRequests: SecretRequests;
+	/** Absent: the integrator sends no notifications (`notifyUser`), and what clients report of themselves is dropped. */
+	readonly userNotifications: UserNotifications | undefined;
 	readonly log: Logger;
 }
 
@@ -260,6 +263,8 @@ export function makeRpcLayer(deps: RpcDeps) {
 			() => dispatchCommand(bridge, command, clientProvenance(command), log),
 			(message) => new OrchestrationV2DispatchCommandError({ commandId: command.commandId, commandType: command.type, message }),
 		).pipe(
+			// What a client does says where its user is: whether a notification is still needed turns on it.
+			Effect.tap(() => (deps.userNotifications === undefined ? Effect.void : Effect.map(CurrentAuthSession, ({ connectionId }) => deps.userNotifications?.command(connectionId, command)))),
 			Effect.map((sequence) => ({ sequence })),
 			Effect.tapError((error) => Effect.sync(() => log.warn("command failed", { type: command.type, error: error.message }))),
 		);
@@ -375,7 +380,10 @@ export function makeRpcLayer(deps: RpcDeps) {
 			Effect.tryPromise({ try: () => deps.files.readFile(input), catch: (error) => new ProjectReadFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
 		"projects.writeFile": (input) =>
 			Effect.tryPromise({ try: () => deps.files.writeFile(input), catch: (error) => new ProjectWriteFileError({ cwd: input.cwd, relativePath: input.relativePath, ...fileFailure(error) }) }),
-		"server.reportClientActivity": () => Effect.void,
+		// What a client says of itself (in front, focused, touched lately). T3 paces its background polling by it; here
+		// it decides whether the user needs telling (`user-notifications.ts`), and without `notifyUser` it is dropped.
+		"server.reportClientActivity": (input) =>
+			deps.userNotifications === undefined ? Effect.void : Effect.map(CurrentAuthSession, ({ connectionId }) => deps.userNotifications?.report(connectionId, input)),
 		// T3's secret card: the user's answer to a `request_secret` call, saved into the asking tool's store (`secret-requests.ts`).
 		"secrets.answerRequest": (input) =>
 			Effect.tryPromise({

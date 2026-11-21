@@ -139,8 +139,9 @@ URL paired clients learn as the one `directEndpoint`, and the SSH host for "Open
 Git and terminals are refused on purpose: the agent works in real folders with `bash`. Workspace images, HTML and
 PDFs preview through signed asset URLs served from the execution environment; audio and video files preview the same
 way, and an HTML page's relative CSS, scripts, fonts and images load under its token. T3's Browser panel is available
-only when the host configures `preview`; it is a real browser tab, not a file viewer. Every call and its status:
-[`docs/capabilities.md`](docs/capabilities.md).
+only when the host configures `preview`; it is a real browser tab, not a file viewer. With `notifyUser`, a user who
+is not looking at any T3 client is told once when a thread needs them or finishes (you deliver it). Every call and its
+status: [`docs/capabilities.md`](docs/capabilities.md).
 
 Known limitations:
 - T3 shows only threads created through T3, not conversations started by other code on the same Harness.
@@ -260,12 +261,20 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   host's and answered in the thread they are sent in, shown there only. A name this host answers itself is refused.
 - `promptUpdateTitle` (an `attachT3` option): your words for a change of the system prompt while a thread goes on,
   given the sections that differ (`PromptSectionChange`); T3 shows it as a quiet row in the run.
+- `notifyUser` (an `attachT3` option, `NotifyUser`): tell a user who is not looking. It is called once, with a
+  `UserNotification` (what kind, the thread, T3's words for it), when a thread needs the user, fails or finishes and
+  no T3 client has shown them so: at once with nobody near, else after 90 seconds unless the user proves to be there
+  (input or a thread opened in a window in front, the thread on the phone app's screen, a message of theirs in the
+  thread) or the thread has something newer to tell. You deliver it, as a push to a phone, say. Nothing is stored:
+  `flushNotifications()` (on the attachment) sends what still waits, for your shutdown to call first. An answer whose
+  last line is the word `SILENT` ends its run with none of this, in T3's own clients too. More in
+  [docs/capabilities.md](docs/capabilities.md#notifications).
 - `imageCheckExtension()`: only images a provider can read reach the model. A truncated or unreadable image in a
   tool result, or in a request, becomes a text saying why; without it, one broken image in the transcript makes every
   later request fail. Install it on the Harness's registry.
 - `ConfigError`, and the types `Logger`, `RpcCall`, `RpcCallFailure`, `RpcCallStub`, `RpcLog`, `TitleThread`,
   `TitleThreadRequest`, `TextGenerationModel`, `ThreadOrigin`, `MessageContext`, `MessageContextRequest`,
-  `MessageContextAnswer`, `HostUpdates`, `RemoteAccess` and `RemoteAccessState`.
+  `MessageContextAnswer`, `HostUpdates`, `RemoteAccess`, `RemoteAccessState`, `NotifyUser` and `UserNotification`.
 
 T3's `@t3tools/contracts` (not on npm) is bundled into `dist/`. `effect` and `@effect/platform-node` stay external,
 exact dependencies, so the bridge and the bundled contracts share one Effect: do not override `effect`.

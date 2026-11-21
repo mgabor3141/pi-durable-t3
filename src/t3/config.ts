@@ -11,6 +11,7 @@ import type { RpcLog } from "./logging.ts";
 import type { HostRoute } from "./host-route.ts";
 import type { HostCommand } from "./host-command.ts";
 import type { SectionChange } from "./prompt-updates.ts";
+import type { NotifyUser } from "./notify-user.ts";
 
 export type { TitleThread, TitleThreadRequest } from "./title-thread.ts";
 
@@ -51,6 +52,8 @@ interface FacetConfig {
 	readonly commands?: readonly HostCommand[];
 	/** Optional per-call RPC observation for debugging the wire. Absent: nothing is called. */
 	readonly rpcLog?: RpcLog;
+	/** Tells a user who is not looking (`user-notifications.ts`). Absent: nobody is told. */
+	readonly notifyUser?: NotifyUser;
 }
 
 /** The fully-assembled facet config: the integrator's static fields plus the two live sources of truth. */

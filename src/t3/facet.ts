@@ -28,6 +28,7 @@ import type { SecretSink } from "./secret-sink.ts";
 import { threadToolsExtension } from "./thread-tools.ts";
 import { htmlToolsExtension } from "./html-tools.ts";
 import { Orchestration } from "./orchestration.ts";
+import { UserNotifications } from "./user-notifications.ts";
 import type { TextGenerationModel } from "./title-thread.ts";
 import { messageOf } from "../host-errors.ts";
 
@@ -64,6 +65,8 @@ type FacetHandle = {
 	threadOrigin(threadId: string): ThreadOrigin | undefined;
 	/** An approval a host's gate asks for (`approvals.ts`). */
 	requestApproval: ApprovalRequests["ask"];
+	/** Send the notifications that wait (`T3Attachment.flushNotifications`). */
+	flushNotifications(): Promise<void>;
 	/** The preview browser, when configured. */
 	readonly preview?: PreviewSessions;
 };
@@ -85,6 +88,8 @@ export function startFacet(deps: {
 			: new Attachments({ stateDir: config.stateDir, signer: auth, env: config.env, dir: config.attachmentsDir, context: config.context ?? BACKGROUND_CONTEXT });
 
 	const bridge = new Bridge(config, log, deps.threads, deps.models, attachments);
+	// Listening before the bridge reads its threads: what each says at its first sight is what was told before.
+	const userNotifications = config.notifyUser === undefined ? undefined : new UserNotifications(bridge, auth.environmentId, config.notifyUser, log);
 	const preview = config.preview === undefined ? undefined : new PreviewSessions(config.preview, log);
 	// Read before the host is ready (tasks the host cannot read stop it), polled while the facet runs.
 	const scheduledTasks = new ScheduledTasks({ harness: deps.threads.harness, dispatch: scheduledTaskDispatch(bridge), log, ...(bridge.config.webhookOrigin === undefined ? {} : { webhookOrigin: bridge.config.webhookOrigin }) });
@@ -121,7 +126,7 @@ export function startFacet(deps: {
 	orchestration.start();
 	const files = new WorkspaceFiles({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots() });
 	const assets = new WorkspaceAssets({ env: config.env, ...(config.context === undefined ? {} : { context: config.context }), roots: () => bridge.workspaceRoots(), signer: auth, toolImage: (threadId, itemId, index) => bridge.toolOutputImage(threadId, itemId, index) });
-	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, files, preview, secretRequests })) as Effect.Effect<never>);
+	const serverFiber = Effect.runFork(Layer.launch(makeServerLayer({ bridge, auth, catalog, log, httpServer, attachments, assets, scheduledTasks, files, preview, secretRequests, userNotifications })) as Effect.Effect<never>);
 	let closing = false;
 	// Armed only after `ready` (a bind failure rejects `ready` instead): a server that stops serving is the integrator's
 	// call, never the library's.
@@ -171,8 +176,13 @@ export function startFacet(deps: {
 		threadOf: (conversationId) => bridge.threadOf(conversationId),
 		threadOrigin: (threadId) => bridge.threadOrigin(threadId),
 		requestApproval: (api, ask, context) => bridge.approvals.ask(api, ask, context),
+		flushNotifications: async () => {
+			await userNotifications?.flush();
+		},
 		close: async () => {
 			closing = true;
+			// What still waits to be told is sent while the rest closes, and waited for last: a slow send holds nothing up.
+			const told = userNotifications?.close();
 			orchestration.close();
 			await scheduledTasks.stop();
 			await preview?.closeAll();
@@ -180,6 +190,7 @@ export function startFacet(deps: {
 			await bridge.close();
 			// Interrupting the launch fiber runs the server layer's finalizers, which close the listener and release the port.
 			await Effect.runPromise(Fiber.interrupt(serverFiber) as Effect.Effect<never>);
+			await told;
 		},
 	};
 }

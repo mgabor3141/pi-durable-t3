@@ -13,8 +13,8 @@ import type { Provenance } from "../threads.ts";
 /** A dispatched command, as the contract decoded it. */
 export type DispatchCommand = WsPayload<"orchestration.dispatchCommand">;
 
-/** Commands acknowledged without host state: a notification's delivery receipt, which T3 records for its mobile push
- * and this host does not send. Everything else unknown fails. */
+/** Commands acknowledged without host state: the receipt T3's server writes once a child's report was handed to the
+ * parent's provider (`EffectWorker.ts`), which no client sends. Everything else unknown fails. */
 const SIDEBAR_NO_OPS = new Set(["notification.delivery.accept"]);
 
 /** The image and file attachments of a command (the persisted records the client sent), shaped for

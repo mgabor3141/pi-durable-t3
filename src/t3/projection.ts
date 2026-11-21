@@ -703,6 +703,12 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 /** A run's turn items: the user's message, each response with its tool calls, failed requests, child cards, steers, and what is still streaming. */
 function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[]>, draft: RunDraft, r: ReturnType<typeof projectRunRows>): void {
 	const { meta, threadId, providerThreadId, live, nodes, messages, turnItems, shownIds, subagents, toolImages, runtimeRequests } = b;
+	/** A request of the user is activity of the thread, in the middle of a run too: T3's `updatedAt` moves with every
+	 * event, and a client that shows the thread visits it at each move (`threadVisits.ts`), which says that its user
+	 * has the request before them (`user-notifications.ts`). */
+	const asked = (at: number): void => {
+		b.lastActivity = Math.max(b.lastActivity, at);
+	};
 	const { synthetic, u, runId, nodeId, turnId, requestedAt, running } = r;
 	const base = (itemId: string, at: number, itemStatus: OrchestrationV2TurnItem["status"], done: boolean, end = at) => ({
 		id: id(itemId),
@@ -878,6 +884,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 					delivery: "file",
 					secretStatus,
 				} as Any);
+				asked(at);
 				continue;
 			}
 			// T3's question card: the call is the request (`user-input.ts`). T3 reads whether it still waits, and the
@@ -910,6 +917,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 					resolvedAt: requestStatus === "pending" ? null : time(resultAt),
 					...(answers === undefined ? {} : { answers }),
 				} as Any);
+				asked(at);
 				continue;
 			}
 			if (block.name === "bash" && typeof block.arguments.command === "string") {
@@ -1090,6 +1098,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				...(card.decision === undefined ? {} : { decision: card.decision }),
 				...(card.feedback === undefined ? {} : { feedback: card.feedback }),
 			} as Any);
+			asked(card.at);
 		}
 	};
 	const pushShown = (before: number) => {
