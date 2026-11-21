@@ -262,7 +262,8 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `promptUpdateTitle` (an `attachT3` option): your words for a change of the system prompt while a thread goes on,
   given the sections that differ (`PromptSectionChange`); T3 shows it as a quiet row in the run.
 - `notifyUser` (an `attachT3` option, `NotifyUser`): tell a user who is not looking. It is called once, with a
-  `UserNotification` (what kind, the thread, T3's words for it), when a thread needs the user, fails or finishes and
+  `UserNotification` (what kind, the thread, T3's words for it: "Usage limit reached" for a run a provider's limit
+  ended), when a thread needs the user, fails or finishes and
   no T3 client has shown them so: at once with nobody near, else after 90 seconds unless the user proves to be there
   (input or a thread opened in a window in front, the thread on the phone app's screen, a message of theirs in the
   thread) or the thread has something newer to tell. You deliver it, as a push to a phone, say. Nothing is stored:

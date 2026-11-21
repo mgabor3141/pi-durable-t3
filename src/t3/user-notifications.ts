@@ -323,7 +323,8 @@ export class UserNotifications {
 			at: request ? (own === undefined ? asked!.at : ms(own.createdAt)) : ms(shell.latestRunCompletedAt ?? shell.updatedAt),
 			updatedAt: ms(shell.updatedAt),
 			...(request || shell.latestRunId === null ? {} : { run: shell.latestRunId }),
-			notification: { kind, threadId, environmentId: this.#environmentId, threadTitle: loud.threadTitle || "New thread", projectTitle: loud.projectTitle, headline: loud.headline },
+			// A run a provider's limit ended is T3's failure in its phone alerts, and "Usage limit reached" in its desktop ones.
+			notification: { kind, threadId, environmentId: this.#environmentId, threadTitle: loud.threadTitle || "New thread", projectTitle: loud.projectTitle, headline: kind === "failed" && shell.lastErrorClass === "usage_limit" ? "Usage limit reached" : loud.headline },
 		};
 	}
 

@@ -13,7 +13,7 @@ export type UserNotification = {
 	readonly threadTitle: string;
 	readonly projectTitle: string;
 	/** T3's words for `kind`, as its own phone alerts say them: "Approval needed", "Waiting for input", "Agent finished",
-	 * "Agent failed". */
+	 * "Agent failed"; and of a run that a provider's limit ended, as its desktop alerts say it: "Usage limit reached". */
 	readonly headline: string;
 };
 

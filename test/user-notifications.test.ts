@@ -162,6 +162,28 @@ it("with nobody near, a request and a failure are told at once, and a completion
 	expect(told.at(-1)).toMatchObject({ headline: "Agent failed" });
 });
 
+it("a run that a provider's limit ended is told as that, in T3's words for it", async () => {
+	const { told, show } = setup();
+	clock.pass(AWAY);
+	show(shell({ id: "t" }));
+	show(running("t", "r1"));
+	show({ ...failed("t", "r1"), lastError: "429 Too Many Requests", lastErrorClass: "usage_limit" } as never);
+	await sent();
+	expect(told).toEqual([{ kind: "failed", threadId: "t", environmentId: "env-1", threadTitle: "Fix the build", projectTitle: "claw", headline: "Usage limit reached" }]);
+	// What a child asks of the user meanwhile is a request, in a request's words.
+	show(shell({ id: "child", creationSource: "mcp", lineage: { parentThreadId: "t", relationshipToParent: "subagent", rootThreadId: "t" } }));
+	show(running("child", "c1", { creationSource: "mcp", lineage: { parentThreadId: "t", relationshipToParent: "subagent", rootThreadId: "t" }, pendingRuntimeRequest: approval("req-1") }));
+	await sent();
+	expect(told.at(-1)).toMatchObject({ kind: "approval", threadId: "t", headline: "Approval needed" });
+	// Any other failure keeps T3's "Agent failed".
+	show(shell({ id: "u" }));
+	show(running("u", "r2"));
+	show({ ...failed("u", "r2"), lastError: "boom", lastErrorClass: "provider_error" } as never);
+	await sent();
+	expect(told.at(-1)).toMatchObject({ kind: "failed", threadId: "u", headline: "Agent failed" });
+	expect(told).toHaveLength(3);
+});
+
 it("each request and each run is told once, whatever else changes on the thread", async () => {
 	const { told, show } = setup();
 	clock.pass(AWAY);
