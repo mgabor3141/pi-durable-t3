@@ -46,7 +46,9 @@ import {
   ProjectUpdatePayload,
   IsoDateTime,
   OrchestrationV2DispatchCommandResult,
+  ProviderUserInputAnswers,
   RunId,
+  RuntimeRequestId,
   ScheduledTask,
   ScheduledTaskId,
   ThreadId,
@@ -364,10 +366,10 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 
 export const ProjectToolkit = Toolkit.make(ProjectListTool, ProjectReadTool, ProjectCreateTool, ProjectUpdateTool, ProjectDeleteTool);
 
-// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.11), the same way: the three tools this
-// host does, `t3_thread_organize`, `t3_queue` and `run_scheduled_task_now`. Left out: `t3_thread_search` (an agent
-// here has `thread_search`), `t3_thread_configure` (its values come from `orchestrator_capabilities`, not served),
-// `t3_thread_transfer` (fork and merge-back) and `t3_pending_request` (no user questions here).
+// From T3's thread toolkit (apps/server/src/mcp/toolkits/thread/tools.ts at v0.1.11), the same way: the four tools this
+// host does, `t3_thread_organize`, `t3_pending_request`, `t3_queue` and `run_scheduled_task_now`. Left out:
+// `t3_thread_search` (an agent here has `thread_search`), `t3_thread_configure` (its values come from
+// `orchestrator_capabilities`, not served) and `t3_thread_transfer` (fork and merge-back).
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
     "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
@@ -418,6 +420,43 @@ const QueueTool = Tool.make("t3_queue", {
   ]),
 }).annotate(Tool.Destructive, true);
 
+const question = Schema.Struct({
+  id: Schema.String,
+  header: Schema.String,
+  question: Schema.String,
+  options: Schema.Array(
+    Schema.Struct({
+      label: Schema.String,
+      description: Schema.String,
+      value: Schema.optional(Schema.String),
+      preview: Schema.optional(Schema.String),
+    }),
+  ),
+  multiSelect: Schema.optional(Schema.Boolean),
+  allowCustomAnswer: Schema.optional(Schema.Boolean),
+  initialAnswer: Schema.optional(Schema.String),
+  required: Schema.optional(Schema.Boolean),
+});
+const PendingRequestTool = Tool.make("t3_pending_request", {
+  ...commandTool,
+  description:
+    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request.",
+  parameters: Schema.Struct({
+    action: Schema.Literals(["list", "read", "respond"]),
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    requestId: Schema.optional(RuntimeRequestId),
+    answers: Schema.optional(ProviderUserInputAnswers),
+  }),
+  success: Schema.Union([
+    Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
+    Schema.Struct({ requestId: RuntimeRequestId, questions: Schema.Array(question) }),
+    OrchestrationV2DispatchCommandResult,
+  ]),
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   ...commandTool,
   description:
@@ -439,4 +478,4 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
-export const ThreadToolkit = Toolkit.make(ScheduledTaskRunTool, ThreadOrganizeTool, QueueTool);
+export const ThreadToolkit = Toolkit.make(ScheduledTaskRunTool, ThreadOrganizeTool, PendingRequestTool, QueueTool);

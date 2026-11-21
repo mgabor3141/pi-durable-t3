@@ -38,6 +38,7 @@ import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 import { type AuthMcpClientAccess, ProjectId, type RuntimeMode, scheduledTaskThreadMode } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import type { Bridge } from "./bridge.ts";
+import { pendingQuestions } from "./child-questions.ts";
 import { type DispatchCommand, dispatchCommand } from "./dispatch.ts";
 import { CommandError } from "./errors.ts";
 import { FRESH_SESSION_UNSUPPORTED, type ScheduledTasks } from "./scheduled-tasks.ts";
@@ -79,6 +80,8 @@ const fail = (code: Failure, message: string): never => {
 	throw new OrchestratorMcpFailure({ code, message });
 };
 
+/** How long an answer to a question card waits to see the card answered, before it returns all the same. */
+const RESOLVE_WAIT_MS = 10_000;
 // T3's defaults and bounds (`OrchestratorMcpService`).
 const DEFAULT_THREAD_LIST_LIMIT = 10;
 const DEFAULT_THREAD_READ_LIMIT = 10;
@@ -1019,6 +1022,36 @@ export class ThreadOps {
 			default:
 				return this.#command({ type: "queued-run.cancel", threadId, runId });
 		}
+	}
+
+	/**
+	 * `t3_pending_request`: the question cards (`ask_user`) that wait in a thread, and an answer to one, through the same
+	 * command as the card's own. An approval is not listed and not answered here (T3's words), and neither is a secret
+	 * card, which is no request of T3's: both are the user's. An answer names each question by its id: T3 hands a
+	 * provider's own question the answers as they come, and here the asking call would take one without them for an answer
+	 * of nothing.
+	 */
+	async pendingRequest(caller: Caller, input: { readonly action: "list" | "read" | "respond"; readonly threadId?: string; readonly requestId?: string; readonly answers?: Readonly<Record<string, unknown>> }): Promise<unknown> {
+		const threadId = this.#target(caller, input.threadId);
+		if (input.action === "respond") this.#mayWrite(caller, threadId);
+		const projection = await this.#projection(threadId);
+		if (input.action === "list") return { requestIds: pendingQuestions(projection) };
+		const requestId = input.requestId ?? fail("invalid_request", "This action needs `requestId`.");
+		const answers = input.action === "read" ? {} : (input.answers ?? fail("invalid_request", "This action needs `answers`."));
+		// T3's `readQuestion`.
+		const request = projection.runtimeRequests.find((candidate) => candidate.id === requestId && candidate.kind === "user_input");
+		const item = projection.turnItems.find((candidate) => candidate.type === "user_input_request" && candidate.requestId === requestId);
+		if (request === undefined || item?.type !== "user_input_request") return fail("invalid_request", "The pending user-input request was not found.");
+		if (request.status !== "pending") return fail("invalid_request", request.status === "resolved" ? "The user-input request was already answered." : `The user-input request is no longer pending (${request.status}).`);
+		if (input.action === "read") return { requestId, questions: item.questions };
+		const said = (answer: unknown) => (typeof answer === "string" ? answer.trim() !== "" : Array.isArray(answer) && answer.length > 0 && answer.every((each) => typeof each === "string" && each.trim() !== ""));
+		const ids = item.questions.map((question) => question.id);
+		if (!ids.every((id) => said(answers[id]))) fail("invalid_request", `Answer each question before sending: \`answers\` takes text, or a list of texts, under each question's id (${ids.join(", ")}).`);
+		const done = await this.#command({ type: "runtime-request.respond", threadId, requestId, answers });
+		// T3 resolves the request in the dispatch itself; here the asking call does, a moment after the answer woke it.
+		// What the caller reads next (the list, a wait for the thread) is to be after its answer.
+		await this.#bridge.waitFor(threadId, (after) => (after.runtimeRequests.some((candidate) => candidate.id === requestId && candidate.status === "pending") ? undefined : true), RESOLVE_WAIT_MS);
+		return done;
 	}
 
 	/** `run_scheduled_task_now`: start a task's run; success means started, not finished. */

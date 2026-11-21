@@ -15,14 +15,19 @@
 //   none is cancelled, as T3 acknowledges a task's result (`dispatchDelegatedTaskCompletionDeliveryResolution`).
 // The request is kept on the receiving thread's record until it is delivered; the message it goes into is written on it
 // first, so a restart finds that message and does not send it twice.
+// A child that asks a question (`ask_user`) is blocked until it is answered, and the answer is its parent's to give
+// (`child-questions.ts`): the question ends the parent's wait for it, as T3's ends a wait for a delegated task
+// (`hasPendingQuestion`), with a report that names the request. The report of the work is still owed, and sent later.
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import type { NotifyRequest, Provenance, Thread } from "../threads.ts";
 import type { Bridge } from "./bridge.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
+import { ChildQuestions, pendingQuestions, questionNotice } from "./child-questions.ts";
 import { childCardNodeId } from "./projection.ts";
-import { exchanges, isActiveIn, isActiveRun, isActiveShell, isBusy, type Report, report, settledReport, type Verdict, worstVerdict } from "./reports.ts";
+import { exchanges, isActiveIn, isActiveRun, isActiveShell, isBusy, type Report, report, settledReport, takesSteer, type Verdict, worstVerdict } from "./reports.ts";
 import { subagentThreadTitle } from "./child-title.ts";
 import { messageOf } from "../host-errors.ts";
 
@@ -85,6 +90,10 @@ export const reportChild = (block: string): string | undefined => {
 	return REPORT_HEADER.exec(header)?.[1];
 };
 
+/** A report for a parent whose child waits on `requestIds`: it says so, and how each is answered. */
+const asking = (entry: Report, requestIds: readonly string[]): Report =>
+	requestIds.length === 0 ? entry : { ...entry, text: [entry.text, ...requestIds.map((requestId) => `[Agent ${questionNotice(entry.threadId, requestId)}]`)].join("\n"), pendingRequestIds: requestIds };
+
 /** A report ready for its caller: the child it is from, the request it answers, and the report. */
 type OutboxItem = { readonly child: string; readonly request: NotifyRequest; readonly report: Report };
 
@@ -101,16 +110,20 @@ export class Orchestration {
 	readonly #awaited = new Map<string, Map<string, number>>();
 	/** The threads a follower is watching, so each has one. */
 	readonly #following = new Set<string>();
+	/** What children ask, told to their parents. */
+	readonly #questions: ChildQuestions;
 	#closed = false;
 	readonly #stop = new AbortController();
 
 	constructor(bridge: Bridge, log: Logger) {
 		this.#bridge = bridge;
 		this.#log = log;
+		this.#questions = new ChildQuestions(bridge, log, (parent, child) => (this.#awaited.get(parent)?.get(child) ?? 0) > 0);
 	}
 
 	/** Resume delivering what the last process owed: every thread whose record keeps a request to be answered. */
 	start(): void {
+		this.#questions.start();
 		void this.#bridge.loaded().then(() => {
 			for (const thread of this.#bridge.threadRecords()) if ((thread.notify?.length ?? 0) > 0) this.#follow(thread.threadId);
 		});
@@ -118,6 +131,7 @@ export class Orchestration {
 
 	close(): void {
 		this.#closed = true;
+		this.#questions.close();
 		this.#stop.abort();
 	}
 
@@ -148,19 +162,21 @@ export class Orchestration {
 		}
 		await this.#bridge.sendMessage({ threadId, commandId, messageId, text: input.message, mode: mode === "steer" ? "steer" : "queue", provenance });
 		if (!wait) return { threadId, messageId, notify };
-		const settled = await this.#awaiting(caller, [threadId], async () => {
+		const answer = await this.#awaiting(caller, [threadId], signal, async () => {
 			const report = await this.#waitSettled(threadId, messageId, caller, waitMs(input.timeoutMs), signal);
+			if (report?.pendingRequestIds !== undefined) await this.#handed(caller, [report]);
 			// The caller has the report now: a request it also made (`notify: true`) is answered.
-			if (report !== undefined && notify) await this.#answered(threadId, caller!);
+			else if (report !== undefined && notify) await this.#answered(threadId, caller!);
 			return report;
 		});
-		if (settled !== undefined) return { threadId, messageId, report: settled, notify: false };
-		// The wait ran out (or a restart ended it): the work goes on, and its report is sent when it settles.
+		if (answer !== undefined && answer.pendingRequestIds === undefined) return { threadId, messageId, report: answer, notify: false };
+		// The wait ran out (or a restart ended it), or the child asks its parent a question: the work goes on, and its
+		// report is sent when it settles.
 		if (!notify && caller !== undefined) {
 			await this.#ask(threadId, caller, commandId, messageId, "settled_only");
 			notify = true;
 		}
-		return { threadId, messageId, report: this.#activeReport(await this.#projection(threadId), messageId, caller), notify };
+		return { threadId, messageId, report: answer ?? this.#activeReport(await this.#projection(threadId), messageId, caller), notify };
 	}
 
 	#existing(threadId: string, caller: string | undefined): string {
@@ -228,21 +244,27 @@ export class Orchestration {
 
 	// ---- waiting ----------------------------------------------------------------------------------------------
 
-	/** Wait for several threads' current activities; a thread with none answers its latest exchange at once. */
+	/** Wait for several threads' current activities; a thread with none answers its latest exchange at once. A child of
+	 * the caller's that asks a question ends the wait for all of them. */
 	async wait(caller: string | undefined, threadIds: readonly string[], timeoutMs: number | undefined, signal?: AbortSignal): Promise<{ readonly reports: readonly Report[]; readonly verdict: Verdict }> {
 		if (threadIds.length === 0) throw new ThreadToolError("Name at least one thread.");
 		for (const threadId of threadIds) this.#existing(threadId, caller);
 		const deadline = Date.now() + waitMs(timeoutMs);
-		const reports = await this.#awaiting(caller, threadIds, () =>
-			Promise.all(
+		// A child's question ends the whole wait: the child is blocked until its parent answers, however long the others work.
+		const asked = new AbortController();
+		const reports = await this.#awaiting(caller, threadIds, signal, async () => {
+			const all = await Promise.all(
 				threadIds.map(async (threadId) => {
-					const report = await this.#waitOne(threadId, caller, deadline, signal);
+					const report = await this.#waitOne(threadId, caller, deadline, signal === undefined ? asked.signal : AbortSignal.any([signal, asked.signal]));
+					if (report.pendingRequestIds !== undefined) asked.abort();
 					// Collected here: the caller's requests this report answers are withdrawn, so it is not posted again.
 					if (caller !== undefined && report.verdict !== "active") await this.#answered(threadId, caller);
 					return report;
 				}),
-			),
-		);
+			);
+			await this.#handed(caller, all);
+			return all;
+		});
 		return { reports, verdict: worstVerdict(reports.map((entry) => entry.verdict)) };
 	}
 
@@ -253,14 +275,40 @@ export class Orchestration {
 		const from = runs.find(isActiveIn(before)) ?? runs.at(-1);
 		const options = { ...(caller === undefined ? {} : { reader: caller }), label: (id: string) => this.#label(id) };
 		if (!isBusy(before) || from === undefined) return report(before, { ...options, fromRunId: from?.id as string | undefined });
+		const current = (projection: OrchestrationV2ThreadProjection, asks: readonly string[]) => asking(report(projection, { ...options, fromRunId: from.id as string }), asks);
 		const combined = this.#signal(signal);
 		const settled = await this.#bridge
-			.waitFor(threadId, (projection) => (isBusy(projection) ? undefined : report(projection, { ...options, fromRunId: from.id as string })), Math.max(1, deadline - Date.now()), combined)
+			.waitFor(
+				threadId,
+				(projection) => {
+					const asks = this.#asks(caller, threadId, projection);
+					return asks.length === 0 && isBusy(projection) ? undefined : current(projection, asks);
+				},
+				Math.max(1, deadline - Date.now()),
+				combined,
+			)
 			.catch((error: unknown) => {
 				if (combined.aborted) return undefined;
 				throw error;
 			});
-		return settled ?? report(await this.#projection(threadId), { ...options, fromRunId: from.id as string });
+		if (settled !== undefined) return settled;
+		const after = await this.#projection(threadId);
+		return current(after, this.#asks(caller, threadId, after));
+	}
+
+	/** The questions `threadId` waits on that are `caller`'s to answer: those of a thread it started. */
+	#asks(caller: string | undefined, threadId: string, projection: OrchestrationV2ThreadProjection): string[] {
+		const record = this.#bridge.threadRecord(threadId);
+		return caller !== undefined && record?.spawn !== undefined && record.lineage.parentThreadId === caller ? pendingQuestions(projection) : [];
+	}
+
+	/** The questions a wait answered with are in the caller's hands while this turn of it runs: it is not told of them
+	 * again unless the turn ends with them open. */
+	async #handed(caller: string | undefined, reports: readonly Report[]): Promise<void> {
+		const asked = reports.filter((entry) => entry.pendingRequestIds !== undefined);
+		if (caller === undefined || asked.length === 0) return;
+		const runId = (await this.#projection(caller)).runs.find(isActiveRun)?.id as string | undefined;
+		for (const entry of asked) this.#questions.handed(caller, entry.threadId, entry.pendingRequestIds!, runId);
 	}
 
 	/** Take `child`'s reports out of the report messages still waiting in `caller`'s queue (a steer not placed yet, or a
@@ -282,12 +330,16 @@ export class Orchestration {
 	}
 
 	/** Run `work`, a wait of `caller` for `threadIds`: meanwhile their reports to it are held, as it is collecting them. */
-	async #awaiting<T>(caller: string | undefined, threadIds: readonly string[], work: () => Promise<T>): Promise<T> {
+	async #awaiting<T>(caller: string | undefined, threadIds: readonly string[], signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
 		if (caller === undefined) return work();
 		const children = this.#awaited.get(caller) ?? new Map<string, number>();
 		this.#awaited.set(caller, children);
 		for (const threadId of threadIds) children.set(threadId, (children.get(threadId) ?? 0) + 1);
 		try {
+			// A loop of waits that a child's question keeps ending turns slowly (`ChildQuestions.pause`). The caller waits
+			// already: a question asked meanwhile is the wait's to answer with. A Stop ends the pause.
+			const pause = this.#questions.pause(caller, threadIds);
+			if (pause > 0) await sleep(pause, undefined, { signal: this.#signal(signal), ref: false }).catch(() => {});
 			return await work();
 		} finally {
 			for (const threadId of threadIds) {
@@ -296,8 +348,9 @@ export class Orchestration {
 				else children.set(threadId, count);
 			}
 			if (children.size === 0) this.#awaited.delete(caller);
-			// What it did not collect (a wait that ran out) goes out now.
+			// What it did not collect (a wait that ran out) goes out now, and so does a question the wait did not answer with.
 			this.#deliverTo(caller);
+			for (const threadId of threadIds) this.#questions.waitEnded(threadId);
 		}
 	}
 
@@ -315,9 +368,21 @@ export class Orchestration {
 		});
 	}
 
+	/** The report of the activity `messageId` started, once it settled; or, for the thread's parent, the activity so far
+	 * with the questions the thread waits on, as soon as it asks any. */
 	async #waitSettled(threadId: string, messageId: string, reader: string | undefined, timeoutMs: number, signal?: AbortSignal): Promise<Report | undefined> {
 		try {
-			return await this.#bridge.waitFor(threadId, (projection) => settledReport(projection, messageId, this.#reportOptions(messageId, reader)), timeoutMs, this.#signal(signal));
+			return await this.#bridge.waitFor(
+				threadId,
+				(projection) => {
+					const settled = settledReport(projection, messageId, this.#reportOptions(messageId, reader));
+					if (settled !== undefined) return settled;
+					const asks = this.#asks(reader, threadId, projection);
+					return asks.length === 0 ? undefined : asking(this.#activeReport(projection, messageId, reader), asks);
+				},
+				timeoutMs,
+				this.#signal(signal),
+			);
 		} catch (error) {
 			if ((error as Error).name === "AbortError" || this.#signal(signal)?.aborted === true) return undefined;
 			throw error;
@@ -590,10 +655,8 @@ export class Orchestration {
 	 * takes a steer, else queued (a new turn when it is idle). The command id is the message's, so a resend is a no-op. */
 	async #send(caller: string, items: readonly OutboxItem[], messageId: string, projection: OrchestrationV2ThreadProjection): Promise<void> {
 		const text = items.map(({ child, report }) => `${reportHeader(report.title, child, report.verdict)}\n${report.text}`).join("\n\n");
-		const active = projection.runs.find((run) => run.status === "running");
-		const activeText = active === undefined ? undefined : projection.messages.find((message) => message.id === active.userMessageId)?.text;
 		// T3 steers a notice only for tasks that wake their parent while it works, and never into a compaction.
-		const steer = active !== undefined && items.every((item) => item.request.wake !== "settled_only") && !(activeText ?? "").startsWith("/compact");
+		const steer = takesSteer(projection) && items.every((item) => item.request.wake !== "settled_only");
 		const single = items.length === 1 ? items[0]!.child : undefined;
 		await this.#bridge.sendMessage({
 			threadId: caller,

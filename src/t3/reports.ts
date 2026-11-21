@@ -37,6 +37,12 @@ const byOrdinal = (runs: readonly OrchestrationV2Run[]) => runs.toSorted((left, 
 
 /** Is the thread doing anything (a live or queued run)? */
 export const isBusy = (projection: OrchestrationV2ThreadProjection) => projection.runs.some(isActiveIn(projection));
+/** Does the thread have a running turn that a message of the host's own is steered into? T3 steers a notice into the
+ * turn that works (pi steers without interrupting tools), and never into a compaction. */
+export function takesSteer(projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">): boolean {
+	const active = projection.runs.find((run) => run.status === "running");
+	return active !== undefined && !(projection.messages.find((message) => message.id === active.userMessageId)?.text ?? "").startsWith("/compact");
+}
 
 const verdictOf = (run: OrchestrationV2Run, projection: OrchestrationV2ThreadProjection): Verdict =>
 	isActiveIn(projection)(run) ? "active" : run.status === "completed" ? "completed" : run.status === "failed" ? "failed" : "interrupted";
@@ -51,6 +57,8 @@ export interface Report {
 	readonly text: string;
 	/** The final answer was cut at the budget; `thread_read` has all of it. */
 	readonly truncated: boolean;
+	/** The questions the thread waits on that are the reader's to answer, which ended its wait (`child-questions.ts`). */
+	readonly pendingRequestIds?: readonly string[];
 }
 
 const clip = (text: string, max: number): { text: string; cut: boolean } => (text.length <= max ? { text, cut: false } : { text: `${text.slice(0, max)}…`, cut: true });

@@ -46,6 +46,7 @@ const SUPPORTED = new Set([
 	"t3_project_update",
 	"t3_project_delete",
 	"t3_thread_organize",
+	"t3_pending_request",
 	"t3_queue",
 	"run_scheduled_task_now",
 ]);
@@ -134,6 +135,7 @@ export function makeMcpLayer(deps: McpDeps) {
 		t3_project_update: call("t3_project_update", (caller, input) => ops.projectUpdate(caller, input as never)),
 		t3_project_delete: call("t3_project_delete", (caller, input) => ops.projectDelete(caller, input as never)),
 		t3_thread_organize: call("t3_thread_organize", (caller, input) => ops.organize(caller, input as never)),
+		t3_pending_request: call("t3_pending_request", (caller, input) => ops.pendingRequest(caller, input as never)),
 		t3_queue: call("t3_queue", (caller, input) => ops.queue(caller, input as never)),
 		run_scheduled_task_now: call("run_scheduled_task_now", (caller, input) => ops.runScheduledTaskNow(caller, input as never)),
 	});

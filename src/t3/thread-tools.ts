@@ -11,6 +11,8 @@ import { OrchestratorToolkit, ProjectToolkit, ThreadToolkit } from "./mcp-toolki
 /** What T3's descriptions leave unsaid about this host, added to the agent's tools. */
 const PROJECT_CREATE_NOTE = "Here a project needs `workspaceRoot` (no git repositories are made), and has only a title and a folder.";
 const QUEUE_NOTE = "Here `reorder` is refused: the queue keeps the order messages were sent in.";
+/** T3's schema leaves the answers' shape open (a provider's question tool sets it); here it is `ask_user`'s. */
+const ANSWERS_NOTE = "Here `answers` holds each question's answer under its `id` (from read): an option's label, a list of labels where several may be chosen, or your own words.";
 /** T3 0.1.11 returns a task's `webhookUrl` from its creation only; its own description says so in words that would change
  * the first sentence (`mcp-toolkit.ts`). */
 const SCHEDULE_NOTE = "Only the creation returns `webhookUrl`; a list or an update leaves it out, and the user can copy it from Settings.";
@@ -27,8 +29,9 @@ import { literal, object } from "./schema.ts";
 type Callers = readonly ("model" | "tools")[];
 type Api = { readonly conversationId: number; readonly taskId: unknown; readonly callId: string };
 
-const PROMPT = `Prompt a thread and, by default, wait for its answer. Start a new thread with "new" (a child of yours: it nests under your thread, and you can prompt it again later), or name an existing "threadId" to follow up. The answer is the activity's report: every message that entered it, how many tool calls it took, and the final response; "verdict" says how it ended (completed, interrupted, failed, or active when the wait ran out). With wait: false it returns at once, and when the work settles its report is posted into your thread: into your current turn if you are working, or starting your next turn if you are idle. Reports that settle before you have read the first join it, in one message: fan out several, end your turn, and they arrive together. A report you collect with thread_wait or thread_read is not posted, or is taken back if it is still waiting for you. A wait that runs out also sends the report later. "mode": auto (start, or queue behind running work), followUp (queue), steer (redirect running work), notify (add the message to its context without starting work). A new thread starts with only your message unless "fork" (then it has your history up to your last finished turn). Threads nest at most ${MAX_DEPTH} deep, and at most ${MAX_ACTIVE_CHILDREN} of your children work at once.`;
-const WAIT = "Wait until threads settle and get their reports, with the worst verdict among them. A thread that is not working answers with its latest exchange at once. Waiting never affects the threads.";
+const PROMPT = `Prompt a thread and, by default, wait for its answer. Start a new thread with "new" (a child of yours: it nests under your thread, and you can prompt it again later), or name an existing "threadId" to follow up. The answer is the activity's report: every message that entered it, how many tool calls it took, and the final response; "verdict" says how it ended (completed, interrupted, failed, or active when the wait ran out). A child of yours that asks a question is blocked until you answer, so it ends the wait too (active, with "pendingRequestIds"): answer with t3_pending_request, or ask the user first; the report of its work is sent when that settles. While you do not wait for it, you get a message about its question instead. With wait: false it returns at once, and when the work settles its report is posted into your thread: into your current turn if you are working, or starting your next turn if you are idle. Reports that settle before you have read the first join it, in one message: fan out several, end your turn, and they arrive together. A report you collect with thread_wait or thread_read is not posted, or is taken back if it is still waiting for you. A wait that runs out also sends the report later. "mode": auto (start, or queue behind running work), followUp (queue), steer (redirect running work), notify (add the message to its context without starting work). A new thread starts with only your message unless "fork" (then it has your history up to your last finished turn). Threads nest at most ${MAX_DEPTH} deep, and at most ${MAX_ACTIVE_CHILDREN} of your children work at once.`;
+const WAIT =
+	'Wait until threads settle and get their reports, with the worst verdict among them. A thread that is not working answers with its latest exchange at once. A child of yours that asks a question is blocked until you answer, so it ends the whole wait (its report is active, with "pendingRequestIds"): answer with t3_pending_request, or ask the user first, and wait again. Waiting never affects the threads.';
 const READ = "Read a thread's exchanges (the prompt, the messages that entered it, its tool-call count and answer), newest last; your own thread when no threadId is named, back past any compaction. last: how many (default 1); before: an exchange number, to page back. Reading never starts anything.";
 const SEARCH = "Search every thread's messages (full text). Returns threads with a matching snippet; read one with thread_read.";
 const LIST = 'List threads, newest first. parent: "self" lists your children; status filters active or idle ones.';
@@ -61,7 +64,16 @@ const list = object({
 });
 const cancel = object({ threadId: str(), cascade: opt(bool({ description: "Default true" })) });
 
-const reportJson = (entry: Report) => ({ threadId: entry.threadId, title: entry.title, runId: entry.runId, verdict: entry.verdict, toolCalls: entry.toolCalls, truncated: entry.truncated, report: entry.text });
+const reportJson = (entry: Report) => ({
+	threadId: entry.threadId,
+	title: entry.title,
+	runId: entry.runId,
+	verdict: entry.verdict,
+	toolCalls: entry.toolCalls,
+	truncated: entry.truncated,
+	report: entry.text,
+	...(entry.pendingRequestIds === undefined ? {} : { pendingRequestIds: entry.pendingRequestIds }),
+});
 
 /** The thread tools, as one extension. `callers`: who may call them (default: the model and scripts). */
 export function threadToolsExtension(bridge: Bridge, orchestration: Orchestration, options: { readonly callers?: Callers; readonly ops?: ThreadOps } = {}): Extension {
@@ -117,6 +129,7 @@ export function threadToolsExtension(bridge: Bridge, orchestration: Orchestratio
 			run_scheduled_task_now: { writes: false, run: (caller, input) => ops.runScheduledTaskNow(caller, input) },
 			t3_thread_update: { writes: true, run: (caller, input) => ops.update(caller, input) },
 			t3_thread_organize: { writes: false, run: (caller, input) => ops.organize(caller, input) },
+			t3_pending_request: { writes: false, run: (caller, input) => ops.pendingRequest(caller, input), note: ANSWERS_NOTE },
 			t3_queue: { writes: false, run: (caller, input) => ops.queue(caller, input), note: QUEUE_NOTE },
 		};
 		const contracts: Record<string, (typeof OrchestratorToolkit.tools)[keyof typeof OrchestratorToolkit.tools] | (typeof ProjectToolkit.tools)[keyof typeof ProjectToolkit.tools] | (typeof ThreadToolkit.tools)[keyof typeof ThreadToolkit.tools]> = {

@@ -133,7 +133,8 @@ T3's server discovers these on its own machine; this host is told.
 
 Threads, "No project" threads, thread titles (rename, generated titles, "Regenerate title"), prompts, steering, queued follow-ups (send now, edit, cancel, promote to steer), the sidebar (settle, automatic settlement, pins and their order, the dragged order, archive, snooze, unread across devices, live order and status for threads nobody is looking at), inline HTML pages the agent publishes (`T3Attachment.htmlTools`: T3's `html_render`, and `html_preview` with `preview`), interrupts, per-thread model and thinking level, undo,
 crash resume, T3's settings (star, hide and reorder models in the picker), adding, renaming, repointing and removing projects (an agent too, with T3's project tools), image attachments, thread search, the Usage page, scheduled tasks (interval, fixed time, one-time and webhook triggers), threads that start and drive other threads (`T3Attachment.threadTools`: a child shows as T3's subagent card and
-nests under its parent as a full thread; the example agent has them),
+nests under its parent as a full thread, and what it asks with `ask_user` is its parent's to answer, with T3's
+`t3_pending_request`; the example agent has them),
 and Connections (pairing links, paired devices, revoking), plus a route you run advertised to T3 (`remoteAccess`: the
 URL paired clients learn as the one `directEndpoint`, and the SSH host for "Open in VS Code" and file links). T3's file panel works through the execution environment: browse, open, edit and save in any folder the agent can see (writes stay on a project root; the agent may edit the same file, last write wins), with quick-open and content search. Search walks the environment.
 Git and terminals are refused on purpose: the agent works in real folders with `bash`. Workspace images, HTML and
