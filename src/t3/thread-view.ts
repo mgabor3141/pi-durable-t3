@@ -499,12 +499,13 @@ export class ThreadView {
 
 	// ---- projection and stream --------------------------------------------------------------------------------
 
-	/** Project the current view (the thread's metadata may have changed too), and schedule a flush for subscribers. */
+	/** Project the current view (the thread's metadata may have changed too), and schedule a flush for subscribers.
+	 * Only the head's own view: a released one keeps its documents and none of its entries (`release`), and projected,
+	 * it would show a thread that never ran. Its shell is made from the thread's record until it is opened again. */
 	recompute(): void {
-		if (this.#view === undefined) return;
+		if (this.#view === undefined || this.#conversationId === undefined) return;
 		const wasRunning = this.#result?.shell.status === "running";
-		// Only a projection of the head's real view counts as loaded.
-		const loaded = this.#conversationId !== undefined && !this.#loaded;
+		const loaded = !this.#loaded;
 		if (loaded) this.#loaded = true;
 		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history, ordinals: this.#ordinals });
 		this.#host.projected(this, { loaded, settled: wasRunning && this.#result.shell.status !== "running" });

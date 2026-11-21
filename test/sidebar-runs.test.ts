@@ -75,6 +75,39 @@ it("a closed thread keeps its latest run: its shell and the page-load snapshot m
 	expect(runFields(fresh.threadShell("t"))).toEqual(open);
 });
 
+// A released view keeps its small documents and none of its entries. A change to the thread's record (a pin, a tag,
+// "Mark unread") projected it again, as a thread that never ran: the sidebar showed it idle, and the summary lost its run.
+it("a change to a closed thread's record keeps its latest run, in the shell and in the summary", { timeout: 30_000 }, async () => {
+	shortIdle();
+	const f = await fixture();
+	await f.create({ threadId: "t", projectId: "p" });
+	const bridge = f.bridge();
+	bridge.start();
+	await bridge.loaded();
+	f.model.respond(fauxAssistantMessage("pong"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "one", mode: "start" });
+	await until("the reply", () => bridge.threadShell("t").status === "completed");
+	const open = runFields(bridge.threadShell("t"));
+	await until("the summary keeps the run", () => bridge.threadRecord("t")?.summary?.latestRun?.id === open.latestRunId);
+	const items = bridge.threadShell("t").itemCount;
+	await sleep(300); // released
+
+	const shown: unknown[] = [];
+	bridge.onShell((item) => void (item.kind === "thread.updated" && shown.push(runFields(item.thread))));
+	await bridge.sidebar.markUnread("t");
+	await bridge.sidebar.setTag("t", "later", true);
+	await sleep(100);
+	expect(shown.length).toBeGreaterThan(0);
+	for (const fields of shown) expect(fields).toEqual(open);
+	expect(bridge.threadShell("t")).toMatchObject({ itemCount: items, tags: ["later"] });
+	expect(bridge.threadRecord("t")?.summary?.latestRun).toMatchObject({ id: open.latestRunId, status: "completed" });
+	// A new bridge (a restart) reads the same from what was kept.
+	const fresh = f.bridge();
+	fresh.start();
+	await fresh.loaded();
+	expect(runFields(fresh.threadShell("t"))).toEqual(open);
+});
+
 it("a run that outlives its view still reaches the sidebar when it ends", { timeout: 30_000 }, async () => {
 	shortIdle();
 	const f = await fixture();
