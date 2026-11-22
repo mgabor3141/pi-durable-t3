@@ -515,12 +515,21 @@ export function makeServerLayer(deps: {
 		{ global: true },
 	);
 
-	const cors = HttpRouter.cors({
+	const browserCors = HttpMiddleware.cors({
 		allowedOrigins: bridge.config.corsOrigins,
 		allowedMethods: ["GET", "POST", "OPTIONS"],
 		allowedHeaders: ["authorization", "content-type", "dpop", "b3", "traceparent", ORCHESTRATION_PROTOCOL_HEADER],
 		maxAge: 600,
 	});
+	// As T3's `layerBrowserApiCors`: `/mcp` refuses every browser origin itself (`mcp.ts`), preflights included, so the
+	// CORS layer does not answer for it.
+	const cors = HttpRouter.middleware(
+		(httpEffect) => {
+			const withCors = browserCors(httpEffect);
+			return Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) => (request.url.split("?", 1)[0] === "/mcp" ? httpEffect : withCors));
+		},
+		{ global: true },
+	);
 
 	// As T3's server (`layerHttpCompression`, and `websocket: { perMessageDeflate: true }` in its `server.ts`): HTTP
 	// answers are compressed when the client accepts it, and the socket's frames share one compression window, which is

@@ -1,6 +1,12 @@
 // `/mcp`: T3's orchestrator MCP server for this host's threads (T3's `McpHttpServer`: its orchestrator, project and thread toolkits).
-// Streamable HTTP at protocol 2025-06-18, the toolkit T3 advertises (`mcp-toolkit.ts`, with T3's compacted input
-// schemas), and handlers over `ThreadOps`. A tool this host does not do answers the contract's failure and is logged.
+// Streamable HTTP at T3's protocols (2025-06-18 with sessions, 2026-07-28 without), the toolkit T3 advertises
+// (`mcp-toolkit.ts`, with T3's compacted input schemas), and handlers over `ThreadOps`. A tool this host does not do
+// answers the contract's failure and is logged.
+//
+// A 2025-06-18 session is the transport's, kept in memory (Effect's `McpServer`, as in T3): after a restart its id is
+// answered 404, and the MCP spec has the client begin a new one with `initialize`. The sign-in is not part of it: the
+// bearer session is stored (`auth.ts`) and is what every request is admitted by, so a client that starts over needs no
+// new sign-in.
 //
 // Who calls: an MCP client that signed in over OAuth (`mcp-oauth.ts`), with the bearer session `/mcp` alone accepts and
 // the access the user approved; no other credential works here, and a request without one is told where to sign in
@@ -11,6 +17,7 @@ import { McpProtocol, McpSchema, McpServer, type Tool, Toolkit } from "effect/ai
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
@@ -27,6 +34,22 @@ class McpSession extends Context.Service<
 	McpSession,
 	{ readonly sessionId: string; readonly scopes: readonly string[]; readonly access: AuthMcpClientAccess; readonly webOrigin: string | undefined }
 >()("pi-durable-t3/McpSession") {}
+
+/** The protocols `/mcp` speaks: T3's, in T3's order. */
+const PROTOCOLS = [McpProtocol.v2025_06_18, McpProtocol.v2026_07_28] as const;
+
+/**
+ * T3's `isUndefinedNotification`: Effect answers 400 to a notification a sessionless protocol does not define, because
+ * it requires `_meta` before it checks the method. The Go MCP SDK still sends `notifications/roots/list_changed` there
+ * and closes its connection on that 400. Remove once Effect ignores undefined notifications.
+ */
+const isUndefinedNotification = Effect.fnUntraced(function* (request: HttpServerRequest.HttpServerRequest) {
+	const method = request.headers["mcp-method"];
+	const protocol = PROTOCOLS.find((candidate) => candidate.protocolVersion === request.headers["mcp-protocol-version"]);
+	if (request.method !== "POST" || protocol?.runtime._tag !== "Stateless" || !method?.startsWith("notifications/") || protocol.clientRpcs.requests.has(method)) return false;
+	const message = yield* Effect.orElseSucceed(request.json, () => undefined);
+	return Predicate.isReadonlyObject(message) && message.jsonrpc === "2.0" && message.method === method && !Predicate.hasProperty(message, "id");
+});
 
 /** The tools this host answers; every other tool of the toolkit is refused. */
 const SUPPORTED = new Set([
@@ -146,6 +169,8 @@ export function makeMcpLayer(deps: McpDeps) {
 	const auth = HttpRouter.middleware<{ provides: McpSession }>()((httpEffect) =>
 		Effect.gen(function* () {
 			const request = yield* HttpServerRequest.HttpServerRequest;
+			// The transport lets no browser origin in; as T3, that is said before the credentials are looked at.
+			if (request.headers.origin !== undefined) return HttpServerResponse.empty({ status: 403 });
 			const session = deps.resolveClient(request);
 			if (session === undefined) {
 				const presented = request.headers.authorization !== undefined;
@@ -162,6 +187,7 @@ export function makeMcpLayer(deps: McpDeps) {
 					{ status: 403, headers: { "cache-control": "no-store" } },
 				);
 			}
+			if (yield* isUndefinedNotification(request)) return HttpServerResponse.empty({ status: 202 });
 			const access: AuthMcpClientAccess = session.access ?? (session.scopes.includes(AuthOrchestrationOperateScope) ? "approval-required" : "read-only");
 			// A peer link's links open in its own environment; any other client's, in this host's web app.
 			const webOrigin = session.peerLink === true ? undefined : deps.originOf(request);
@@ -172,7 +198,7 @@ export function makeMcpLayer(deps: McpDeps) {
 		}),
 	).layer;
 
-	const transport = McpServer.layerHttp({ name: "pi-durable-t3", version: deps.version, path: "/mcp", protocols: [McpProtocol.v2025_06_18], allowSessionTermination: true }).pipe(Layer.provide(auth));
+	const transport = McpServer.layerHttp({ name: "pi-durable-t3", version: deps.version, path: "/mcp", protocols: PROTOCOLS, allowSessionTermination: true }).pipe(Layer.provide(auth));
 	const registration = Layer.effectDiscard(withAdvertisedSchemas(ServedToolkit as never, McpServer.registerToolkit(decodeAsAdvertised(ServedToolkit)))).pipe(Layer.provide(handlersLayer));
 	return registration.pipe(Layer.provideMerge(transport));
 }

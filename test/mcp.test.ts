@@ -11,7 +11,7 @@ import { afterAll, expect, it } from "vitest";
 import { connectWs, exitValue, pair, waitListening } from "./ws-rpc.ts";
 import { launch, type Launched, pairCode, seedProjects, t3Dir } from "./host-process-harness.ts";
 import { SETTINGS_FILE } from "../src/settings.ts";
-import { signInMcpClient } from "./mcp-oauth-client.ts";
+import { REDIRECT_URI, signInMcpClient } from "./mcp-oauth-client.ts";
 
 const PORT = 4963;
 const scratch = await mkdtemp(join(tmpdir(), "pi-durable-t3-mcp-"));
@@ -191,4 +191,99 @@ it("tells a peer link how long its session now lasts on every answer, and refuse
 	expect(refused.status).toBe(403);
 	expect(await refused.json()).toEqual({ error: "linked_environments_off", message: "Linked environments is off on this machine. Turn it on in its Settings → Labs." });
 	expect((await rpc(agent.token, undefined, initialize, port)).status).toBe(200);
+}, 60_000);
+
+it("speaks T3's two protocols, and a restart costs a client its session, never its sign-in", async () => {
+	const port = 4957;
+	const root = join(scratch, "restart-host");
+	const projectId = "c0ffee00-5555-4555-8555-555555555555";
+	await mkdir(join(root, "projects", "m"), { recursive: true });
+	await mkdir(t3Dir(root), { recursive: true });
+	await writeFile(join(root, "config.toml"), `listen = "127.0.0.1:${port}"\n`, "utf8");
+	await seedProjects(root, [{ id: projectId, title: "M", path: join(root, "projects", "m") }]);
+	const start = async () => {
+		const host = launch(root, port, {}, join(scratch, "agent"));
+		launched.push(host);
+		expect(await waitListening(port), `the host booted: ${host.out()}`).toBe(true);
+		return host;
+	};
+	const host = await start();
+	const origin = `http://127.0.0.1:${port}`;
+	const { token, clientId } = await signInMcpClient(origin, { code: pairCode(root), access: "full-access" });
+	const initialize = (protocolVersion: string) => ({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion, capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+	const toolNames = (message: Record<string, unknown> | undefined) => (message?.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+	/** A request of the 2026-07-28 protocol: no session, and each says who asks (`_meta`) and what for (the headers). */
+	const sessionless = async (body: { id?: number; method: string; params?: { name?: string; arguments?: unknown } }, meta = true) => {
+		const _meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": { name: "test", version: "1" } };
+		const response = await fetch(`${origin}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: `Bearer ${token}`,
+				"mcp-method": body.method,
+				"mcp-protocol-version": "2026-07-28",
+				...(body.params?.name === undefined ? {} : { "mcp-name": body.params.name }),
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", ...body, ...(meta ? { params: { ...body.params, _meta } } : {}) }),
+		});
+		const text = await response.text();
+		const data = text.startsWith("{") ? text : text.split("\n").find((line) => line.startsWith("data:"))?.slice(5).trim();
+		return { status: response.status, session: response.headers.get("mcp-session-id"), message: data ? (JSON.parse(data) as Record<string, unknown>) : undefined };
+	};
+
+	// 2025-06-18: `initialize` begins a session, which this process alone knows. A client that offers a version this
+	// server does not speak (pi-mcp's 2025-11-25) gets that one.
+	const begun = await rpc(token, undefined, initialize("2025-11-25"), port);
+	expect((begun.message?.result as { protocolVersion: string }).protocolVersion).toBe("2025-06-18");
+	expect(begun.session).toEqual(expect.any(String));
+	expect((await rpc(token, begun.session, { jsonrpc: "2.0", method: "notifications/initialized" }, port)).status).toBe(202);
+	expect(toolNames((await rpc(token, begun.session, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, port)).message)).toContain("t3_thread_list");
+	// The MCP spec's two answers, which a client tells apart: no session id is its mistake, an unknown one is a session to begin again.
+	expect((await rpc(token, undefined, { jsonrpc: "2.0", id: 3, method: "ping" }, port)).status).toBe(400);
+	expect((await rpc(token, "0b9a4e6c-1d2f-4a3b-8c5d-6e7f8a9b0c1d", { jsonrpc: "2.0", id: 3, method: "ping" }, port)).status).toBe(404);
+
+	// 2026-07-28 (T3 0.1.11): no session at all.
+	const discovered = await sessionless({ id: 1, method: "server/discover" });
+	expect(discovered.status).toBe(200);
+	expect((discovered.message?.result as { supportedVersions: string[] }).supportedVersions.toSorted()).toEqual(["2025-06-18", "2026-07-28"]);
+	expect(discovered.session).toBeNull();
+	expect(toolNames((await sessionless({ id: 2, method: "tools/list" })).message)).toContain("t3_thread_list");
+	const called = await sessionless({ id: 3, method: "tools/call", params: { name: "t3_project_list", arguments: {} } });
+	expect(called.message?.result).toMatchObject({ isError: false, structuredContent: { projects: [expect.objectContaining({ id: projectId })] } });
+	// T3's answer to a notification the protocol does not define, which the Go MCP SDK sends without `_meta`.
+	expect((await sessionless({ method: "notifications/roots/list_changed" }, false)).status).toBe(202);
+	expect((await sessionless({ id: 4, method: "notifications/roots/list_changed" }, false)).status, "a request is not acknowledged: it is answered").toBe(400);
+
+	// No browser origin is let in (T3 0.1.11): refused before the credentials are looked at, a preflight too.
+	const withOrigin = async (method: string, headers: Record<string, string>) => (await fetch(`${origin}/mcp`, { method, headers: { origin: "https://untrusted.invalid", ...headers } })).status;
+	expect(await withOrigin("POST", {})).toBe(403);
+	expect(await withOrigin("POST", { authorization: `Bearer ${token}` })).toBe(403);
+	expect(await withOrigin("OPTIONS", { "access-control-request-method": "POST" })).toBe(403);
+	// The web app's routes keep their CORS answer.
+	const preflight = await fetch(`${origin}/api/auth/session`, { method: "OPTIONS", headers: { origin: "t3code://app", "access-control-request-method": "GET" } });
+	expect([preflight.status, preflight.headers.get("access-control-allow-origin")]).toEqual([204, "t3code://app"]);
+
+	// The host restarts. The session is gone with the process, and its id is answered 404...
+	host.child.kill("SIGTERM");
+	await host.exited;
+	await start();
+	const gone = await fetch(`${origin}/mcp`, {
+		method: "POST",
+		headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, "mcp-protocol-version": "2025-06-18", "mcp-session-id": begun.session! },
+		body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
+	});
+	expect([gone.status, await gone.text()]).toEqual([404, ""]);
+	// ...and the client begins another with the sign-in it has, which is stored.
+	const again = await rpc(token, undefined, initialize("2025-06-18"), port);
+	expect(again.status).toBe(200);
+	expect(again.session).not.toBe(begun.session);
+	expect(toolNames((await rpc(token, again.session, { jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }, port)).message)).toContain("t3_thread_list");
+	// A sessionless client has nothing to begin again.
+	expect(toolNames((await sessionless({ id: 6, method: "tools/list" })).message)).toContain("t3_thread_list");
+	// Nor is the client's registration forgotten: its id is the registration, signed with the store's key.
+	const registered = await fetch(`${origin}/oauth/mcp/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "test agent", redirect_uris: [REDIRECT_URI] }) });
+	expect(((await registered.json()) as { client_id: string }).client_id).toBe(clientId);
+	const authorize = await fetch(`${origin}/oauth/mcp/authorize?${new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: REDIRECT_URI, code_challenge: "c".repeat(43), code_challenge_method: "S256" })}`, { redirect: "manual" });
+	expect(authorize.headers.get("location")).toMatch(/^\/connect-agent\?/);
 }, 60_000);
