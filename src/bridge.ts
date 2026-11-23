@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai";
-import type { ConversationId, Extension, Harness } from "@earendil-works/pi-durable";
+import type { ConversationId, Extension, Harness, RegistryReader } from "@earendil-works/pi-durable";
 import type { SecretSink } from "./t3/secret-sink.ts";
 export type { SecretSink } from "./t3/secret-sink.ts";
 export type { HostRoute } from "./t3/host-route.ts";
@@ -52,6 +52,9 @@ export type { RemoteAccess, RemoteAccessState } from "./t3/remote-access.ts";
 export type { NotifyUser, UserNotification } from "./t3/notify-user.ts";
 export { abortable } from "./t3/abortable.ts";
 export { imageCheckExtension } from "./t3/image-check.ts";
+// Tool results with their notes as plain lines: `T3Attachment.plainResults` is this with the bridge's knowledge of
+// who stopped a run; a host without a bridge at hand (a test of its tools) installs it with its own `stopOf`.
+export { type PlainResultsHost, plainResultsExtension, type StopBy } from "./t3/plain-results.ts";
 
 /** T3's desktop app origin (its Electron scheme, `t3code://app`). Allowed by default. */
 const DESKTOP_APP_ORIGIN = "t3code://app";
@@ -234,6 +237,18 @@ export type T3Attachment = {
 	 */
 	queuedCommands(): Extension;
 	/**
+	 * Tool results written for the model as pi coding agent writes them, as an extension to install on the Harness's
+	 * registry: the output, then one plain line for each thing to know (`Command exited with code 3`, `Command timed out
+	 * after 60 seconds`, `[Showing the last 2000 lines. Full output: <file>]`, `(no output)`), where pi-durable puts
+	 * them in a `<harness>` block. A call that was cut off says by whom (`Command interrupted by the user; it may have
+	 * partially run`, `... by another agent`, `... by a restart of the harness`), and one that did not run says so (`Not
+	 * run: ...`). For the calls the model makes; a script's call gets its result as before. Install it last: after every
+	 * extension whose `afterTool` adds a note or changes a result. `registry`: the one the Harness reads, for each
+	 * tool's output bound. A call that had not started when its run was stopped gets pi-durable's own result (`Tool
+	 * <name> was aborted`, in its block): pi-durable writes that one without asking a hook.
+	 */
+	plainResults(registry: RegistryReader): Extension;
+	/**
 	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
 	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
 	 */
@@ -387,6 +402,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		askUser: () => facet.askUser(),
 		messageContext: (messageContext) => facet.messageContext(messageContext),
 		queuedCommands: () => facet.queuedCommands(),
+		plainResults: (registry) => facet.plainResults(registry),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),

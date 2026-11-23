@@ -2,6 +2,7 @@
 // A leaf: it reads entry shapes only, so the projection, a test, or any other reader groups a conversation the same way.
 import type { OrchestrationMessageContext } from "@t3tools/contracts";
 import type { DurableMessage, EntryRecord } from "./model-types.ts";
+import { notesOf } from "./result-notes.ts";
 
 export interface RunDraft {
 	/** The entry that anchors the run: normally the user prompt; a compaction summary when a compaction kept a tail
@@ -188,12 +189,9 @@ export const stopReason = (entry: EntryRecord | undefined) => {
 	return message?.role === "assistant" ? message.stopReason : undefined;
 };
 
-/** A tool result the Harness wrote because the run was aborted (interrupt) while the tool ran. */
-export const isAbortedToolResult = (entry: EntryRecord) =>
-	entry.kind === "pi.tool-result" &&
-	((entry.data as { diagnostics?: { code?: string }[] } | undefined)?.diagnostics ?? []).some(
-		(diagnostic) => diagnostic.code === "aborted",
-	);
+/** A tool result the Harness wrote because the run was aborted (interrupt) while the tool ran: one of its notes says
+ * so, wherever the result keeps them (`notesOf`). */
+export const isAbortedToolResult = (entry: EntryRecord) => entry.kind === "pi.tool-result" && notesOf(entry).some((note) => note.code === "aborted");
 
 /**
  * Split active entries into runs. A user entry is a steer of the current run only when the run was demonstrably

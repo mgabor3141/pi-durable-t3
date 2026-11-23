@@ -96,6 +96,35 @@ it("Stop shows at once and answers at once; a run held by a deaf tool shows not 
 	expect((ended!.turnItems as unknown as Item[]).some((item) => item.type === "run_interrupt_request")).toBe(false);
 });
 
+// T3 says who stopped a run on its banner: a person, or an agent with the reason it gave (`agentStopReason`).
+it("an agent's Stop says so on the banner, with its reason", { timeout: 60_000 }, async () => {
+	const { f, bridge } = await setup([defineExtension({ name: "deaf", tools: [deaf("slow", 2_000)] })]);
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-1" })], { stopReason: "toolUse" }));
+	await bridge.sendMessage({ threadId: "t", commandId: "c1", messageId: "m1", text: "go", mode: "start" });
+	await toolRunning("slow");
+	await bridge.interrupt("t", { by: "agent", reason: "the plan changed" });
+	expect((await itemsOf(bridge)).find((item) => item.type === "run_interrupt_request")).toMatchObject({ message: "Stopped by an agent: the plan changed" });
+	await runEnded(bridge, 10_000);
+
+	started.clear();
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-2" })], { stopReason: "toolUse" }), fauxAssistantMessage("after"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c2", messageId: "m2", text: "again", mode: "start" });
+	await toolRunning("slow");
+	await bridge.interrupt("t", { by: "agent" });
+	expect((await itemsOf(bridge)).find((item) => item.type === "run_interrupt_request")).toMatchObject({ message: "Stopped by an agent" });
+	await runEnded(bridge, 10_000);
+
+	// A message that restarts the run stops it too: T3's words for that stop.
+	started.clear();
+	f.model.respond(fauxAssistantMessage([fauxToolCall("slow", {}, { id: "call-3" })], { stopReason: "toolUse" }), fauxAssistantMessage("instead"));
+	await bridge.sendMessage({ threadId: "t", commandId: "c3", messageId: "m3", text: "once more", mode: "start" });
+	await toolRunning("slow");
+	const restarted = bridge.sendMessage({ threadId: "t", commandId: "c4", messageId: "m4", text: "no, this", mode: "restart" });
+	const banner = await bridge.waitFor("t", (projection) => (projection.turnItems as unknown as Item[]).find((item) => item.type === "run_interrupt_request"), 5_000);
+	expect(banner).toMatchObject({ message: "Stopped to send a new message" });
+	await restarted;
+});
+
 // T3's shell says the user stopped the latest run (`latestRunStopRequested`, from its `run_interrupt_request`), so its
 // web app does not announce "Thread completed" for it, while it stops and after it ended; the next run is not stopped.
 it("the shell says the latest run was stopped, while it stops and after it ended, until another run is the latest", { timeout: 60_000 }, async () => {

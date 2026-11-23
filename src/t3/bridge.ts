@@ -21,7 +21,7 @@ import { type Provenance, type Spawn, type SummaryRun, type Thread, type ThreadL
 import type { PendingContext, ThreadOrigin } from "../threads.ts";
 import type { AttachmentRecord, Attachments, KeptAttachment } from "./attachments.ts";
 import type { BridgeConfig } from "./config.ts";
-import { type AgentChange, type ConversationId, LiveDoc, type TaskGraph, type TaskGraphWatch, type ToolTaskInput } from "@earendil-works/pi-durable";
+import { type AgentChange, type ConversationId, type Extension, LiveDoc, type RegistryReader, type TaskGraph, type TaskGraphWatch, type ToolTaskInput } from "@earendil-works/pi-durable";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Logger } from "./logging.ts";
@@ -31,7 +31,8 @@ import type { BridgeCore } from "./bridge-core.ts";
 import { IdleCompaction } from "./idle-compaction.ts";
 import { ProviderLimits, type RecoveryUpdate } from "./provider-limits.ts";
 import { SidebarState } from "./sidebar-state.ts";
-import { Stops } from "./stops.ts";
+import { RESTART_STOP_MESSAGE, Stops } from "./stops.ts";
+import { plainResultsExtension, type StopBy } from "./plain-results.ts";
 import { ThreadCommands } from "./thread-commands.ts";
 import { ThreadTitles } from "./thread-titles.ts";
 import { type LiveCall, UserInputRequests } from "./user-input.ts";
@@ -121,6 +122,17 @@ function senderNote(provenance: Provenance, messageId: string, text: string): Co
  * it silently (`endsSilent`). Any run may end so; a scheduled one is where it is offered.
  */
 const SILENT_NOTE = `[If this run finds nothing the user needs to see, make the last line of your reply the single word ${SILENT_REPLY}: the thread then finishes without notifying them.]`;
+
+/**
+ * Said with the first message after a stop: the model's context may show nothing of it (a Stop while it was writing
+ * leaves no trace there, and its unfinished answer is not sent again), and what it shows of a call that was cut off
+ * does not say that the turn ended there. Who stopped it, where that is still known (`Stops`).
+ */
+function stopNote(by: StopBy | undefined): ContentBlock {
+	const reason = by?.by === "agent" ? by.reason?.trim() : undefined;
+	const who = by === undefined ? "Your previous turn was stopped" : by.by === "user" ? "The user stopped your previous turn" : "Another agent stopped your previous turn";
+	return { type: "text", text: `[${who} before it finished${reason === undefined || reason === "" ? "" : `, saying: ${reason}`}.]`, hidden: true };
+}
 
 const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -1338,8 +1350,14 @@ export class Bridge {
 						});
 			// Who sent it, when no person did. A child's report gets none, as in T3: its wake notices name no sender.
 			const note = input.automatic === true ? undefined : senderNote(input.provenance ?? USER_WEB, input.messageId, input.text);
-			const contextBlocks: ContentBlock[] = [...(note === undefined ? [] : [note]), ...(transfer?.block === undefined ? [] : [transfer.block])];
-			const promptBlocks = contextBlocks.length === 0 && attachmentBlocks === undefined ? undefined : [...contextBlocks, ...(attachmentBlocks ?? [])];
+			// The stop the message may be the first to follow: the one a restart's message makes itself, or one before it.
+			// Whether it is, is known where the message is admitted (`afterStop`): another may have started a run since,
+			// and a run the restart ends after its answer was not kept from anything.
+			const sender: StopBy = { by: (input.provenance ?? USER_WEB).createdBy === "user" ? "user" : "agent" };
+			const restarts = input.mode === "restart" && busy;
+			const stopped: { readonly by?: StopBy } | undefined = restarts ? { by: sender } : await this.#stopBefore(input.threadId, state);
+			const blocksWith = (stop?: ContentBlock): ContentBlock[] => [...(note === undefined ? [] : [note]), ...(stop === undefined ? [] : [stop]), ...(transfer?.block === undefined ? [] : [transfer.block]), ...(attachmentBlocks ?? [])];
+			const promptBlocks = blocksWith();
 			const request = {
 				threadId: input.threadId,
 				conversationId: head,
@@ -1347,7 +1365,8 @@ export class Bridge {
 				message: input.text,
 				messageId: input.messageId,
 				...(input.provenance === undefined ? {} : { provenance: input.provenance }),
-				...(promptBlocks === undefined ? {} : { blocks: promptBlocks }),
+				...(promptBlocks.length === 0 ? {} : { blocks: promptBlocks }),
+				...(stopped === undefined ? {} : { afterStop: { blocks: blocksWith(stopNote(stopped.by)) } }),
 				...(attachments === undefined || attachments.length === 0 ? {} : { attachments: [...attachments] }),
 				// T3's composer context is JSON by construction: the contract decoded it from the wire.
 				...(context === undefined ? {} : { context: context as unknown as JsonValue }),
@@ -1359,8 +1378,10 @@ export class Bridge {
 			// become a follow-up. Each is one submission, keyed by the commandId for wire idempotency.
 			await (async () => {
 				if (input.note === true) return void (await this.#store.submit({ ...request, note: true }, undefined));
-				if (input.mode === "restart" && busy) {
-					// The run ends and this message runs now; what was queued behind the run follows it.
+				if (restarts) {
+					// The run ends and this message runs now; what was queued behind the run follows it. The calls it cuts off
+					// say who did (`plainResults`), as a Stop's do, and the banner says what T3's says of such a stop.
+					this.#stops.requested(input.threadId, state, sender, RESTART_STOP_MESSAGE);
 					await this.#store.queue.abort({ threadId: input.threadId, conversationId: head });
 					return void (await this.#store.queue.submitFirst(request));
 				}
@@ -1484,16 +1505,17 @@ export class Bridge {
 	 * Stop: shown at once, answered within `STOP_ADMIT_MS`. Every live task of the thread is marked aborted; the run ends
 	 * when its tools have returned, which is at once for a tool that listens for its abort. The thread shows "Stopping"
 	 * until then, and "not responding" past `Bridge.stopConfirmMs`. A run whose tasks have all ended already (its state
-	 * written outside pi-durable) has nothing to abort, so Stop ends it (`Threads.endDeadRun`).
+	 * written outside pi-durable) has nothing to abort, so Stop ends it (`Threads.endDeadRun`). `by`: who asked, a person
+	 * unless said; T3's banner says it, and so do the calls the stop cuts off and the next message (`Stops`).
 	 */
-	async interrupt(threadId: string): Promise<void> {
+	async interrupt(threadId: string, by: StopBy = { by: "user" }): Promise<void> {
 		const release = this.acquire(threadId);
 		try {
 			const state = this.#viewOf(threadId);
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.
 			const head = await state.head();
 			const input = { threadId, conversationId: head };
-			this.#stops.requested(threadId, state);
+			this.#stops.requested(threadId, state, by);
 			// The abort resolves once every task it marked has ended, so a tool that does not listen would hold the answer.
 			// Its failure surfaces when it fails at once; a later one is logged.
 			const aborting = this.#store.queue.abort(input, true).then(
@@ -1514,6 +1536,35 @@ export class Bridge {
 		} finally {
 			release();
 		}
+	}
+
+	/**
+	 * The stop a message may be the first to follow: the run the thread last ran was stopped. pi-durable keeps why the
+	 * newest run ended without an answer until another starts (`pi.live.runFailure`): `aborted` is a stop, wherever in
+	 * the run it came, and it is not there while a run is live, after a Resume, or after an undo. That run must still be
+	 * the thread's last: this host aborts a run for a provider's limit too, and that one failed (its last request's
+	 * error is what the thread shows); and with messages waiting behind the stopped run, they run before this one.
+	 * All of this is the thread as its view shows it now; whether the message still is the first is read where it is
+	 * admitted (`MessageInput.afterStop`). `by`: who asked for the stop of that run, where that is still known (`Stops`).
+	 */
+	async #stopBefore(threadId: string, state: ThreadView): Promise<{ readonly by?: StopBy } | undefined> {
+		const failure = state.view?.docs["pi.live"]?.runFailure;
+		if (failure?.reason !== "aborted") return undefined;
+		if ((await state.projection(30_000)).projection.runs.at(-1)?.status !== "interrupted") return undefined;
+		const by = this.#stops.last(threadId, failure.taskId as number);
+		return by === undefined ? {} : { by };
+	}
+
+	/** `T3Attachment.plainResults`: tool results with their notes as plain lines, and who stopped a call. */
+	plainResults(registry: RegistryReader): Extension {
+		return plainResultsExtension({
+			registry,
+			log: this.#log,
+			stopOf: (conversationId) => {
+				const threadId = this.threadOf(conversationId)?.threadId;
+				return threadId === undefined ? undefined : this.#stops.underWay(threadId);
+			},
+		});
 	}
 
 	/** The messages waiting in a thread's inbox, steers among them (`ThreadQueue.waiting`). */

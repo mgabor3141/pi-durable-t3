@@ -41,6 +41,8 @@ export async function makeThreads(
 		readonly responses?: FauxResponseStep[];
 		readonly tokensPerSecond?: number;
 		readonly coding?: boolean;
+		/** One tool call of a message after another, as an integrator may set it (pi-durable runs them side by side). */
+		readonly sequential?: boolean;
 		/** Extensions installed on the Harness's registry (an agent's own tools, such as the example's `subagent`). */
 		readonly extensions?: readonly Extension[];
 	} = { projects: [{ id: "p" }] },
@@ -63,6 +65,7 @@ export async function makeThreads(
 		models: model.models,
 		registry,
 		...(options.coding === true ? { env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? dir }) } : {}),
+		...(options.sequential === true ? { settings: { toolExecution: "sequential" as const } } : {}),
 	}, ctx);
 	onTestFinished(async () => {
 		await harness.close(ctx).catch(() => {});

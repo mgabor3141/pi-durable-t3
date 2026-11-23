@@ -93,6 +93,15 @@ export type MessageInput = {
 	readonly note?: boolean;
 	/** Marked in the entry's data: the run that answers the message asks the integrator for its context first. */
 	readonly awaitsContext?: boolean;
+	/**
+	 * The message's blocks, in place of `blocks`, when it is the first to be admitted after a run that was stopped: what
+	 * is said to the model of that stop. Whether it is the first is read in the commit that admits it (`admitting`),
+	 * from pi-durable's record of why the newest run ended without an answer (`pi.live.runFailure`: `aborted`), which
+	 * goes when the next run starts: so of two messages sent at once only one has them, and a run that had answered when
+	 * it was ended (a restart's message ends the run itself) left none. A note, which starts no run, and a message queued
+	 * behind a summary never have them.
+	 */
+	readonly afterStop?: { readonly blocks: readonly ContentBlock[] };
 };
 type RewindInput = {
 	readonly threadId: string;
@@ -242,7 +251,7 @@ export class Threads {
 		this.#env = deps.env;
 		this.#context = deps.context ?? BACKGROUND_CONTEXT;
 		this.#onWarn = deps.onWarn ?? (() => {});
-		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), watermark: (threadId) => this.watermark(threadId), draft: (input) => this.draft(input), submitted: (input) => this.submitted(input), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId), reload: (threadId, messageId) => this.reload(threadId, messageId) });
+		this.queue = new ThreadQueue({ harness: deps.harness, thread: (threadId) => this.thread(threadId), watermark: (threadId) => this.watermark(threadId), draft: (input) => this.draft(input), admitting: (tx, input) => this.admitting(tx, input), submitted: (input) => this.submitted(input), compact: (threadId, guidance, messageId) => this.compact(threadId, guidance, messageId), reload: (threadId, messageId) => this.reload(threadId, messageId) });
 	}
 
 	/** The integrator's Harness; the bridge reads and watches conversation views through it. */
@@ -623,12 +632,27 @@ export class Threads {
 			await this.#rememberInput(input);
 			return queued;
 		}
-		const submission = await conversation.submit(
-			whenBusy === undefined ? this.draft(input) : { type: "input", requestId: input.requestId, content, whenBusy, onAbort: "keep", entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } },
-			BACKGROUND_CONTEXT,
-		);
+		const draft = (message: MessageInput): SubmissionDraft =>
+			whenBusy === undefined ? this.draft(message) : { type: "input", requestId: message.requestId, content: this.#prompt(message).content, whenBusy, onAbort: "keep", entry: { kind: APP_USER_ENTRY, data: sent(whenBusy) } };
+		let submission: Submission;
+		if (input.afterStop === undefined) submission = await conversation.submit(draft(input), BACKGROUND_CONTEXT);
+		else {
+			// In one commit with the read that says whether the stop is still the last thing that happened.
+			const id = await this.#harness.commit(async (tx) => conversation.submit(tx, draft(await this.admitting(tx, input))), BACKGROUND_CONTEXT);
+			submission = (await this.#harness.submission(id, BACKGROUND_CONTEXT))!;
+		}
 		await this.submitted(input);
 		return submission;
+	}
+
+	/** The message as the commit `tx` admits it: with its `afterStop` blocks while pi-durable's record still says that
+	 * the newest run was stopped. A message admitted before it started a run, and the record went with that; a run that
+	 * had answered when it was ended left none. */
+	async admitting(tx: Tx, input: MessageInput): Promise<MessageInput> {
+		const after = input.afterStop;
+		if (after === undefined) return input;
+		const failure = (await tx.doc(LiveDoc, input.conversationId as ConversationId)).runFailure;
+		return failure?.reason === "aborted" ? { ...input, blocks: after.blocks } : input;
 	}
 
 	/** A message's model content and its entry's data. */

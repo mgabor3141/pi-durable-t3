@@ -205,7 +205,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `attachT3(harness, options): Promise<T3Attachment>` (the options are documented in the comments of its options type,
   which has no exported name).
 - `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, `threadTools(options)`, `htmlTools(options)` (needs
-  `attachmentsDir`), `secretRequests(sink)` (a `SecretSink`), `askUser()`, `textGenerationModel()`, and (when `preview`
+  `attachmentsDir`), `secretRequests(sink)` (a `SecretSink`), `askUser()`, `plainResults(registry)`, `textGenerationModel()`, and (when `preview`
   is configured) `previewBrowser.open(conversationId, url)`, whose session has `id`, `page`, `touch()` and `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
 - `abortable(tool)`: a tool whose call returns the moment Stop aborts it, for a tool that does not listen for
@@ -217,6 +217,14 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   message's request renders the system prompt again. Without the extension, with no run to wait behind, or sent any
   other way, each is answered at once. It relies on pi-durable placing queued messages one at a time (`followUpMode`,
   the default). The other commands (`/context`, `/undo`, `/redo`, `/tree`, `/continue`) are answered when they arrive.
+- `t3.plainResults(registry)` (an extension to install on the Harness's registry, last): what a tool result says
+  besides its output is written for the model as pi coding agent writes it, a plain line after the output (`Command
+  exited with code 3`, `[Showing the last 1998 lines. Full output: <file>]`, `(no output)`), where pi-durable puts it
+  in a `<harness>` block. A call that was cut off says by whom (`Command interrupted by the user; it may have
+  partially run`, another agent with its reason, a restart of the harness), and one that did not run says `Not run:`
+  and why. For the calls the model makes. Install it after every extension whose `afterTool` changes a result, and
+  pass the registry the Harness reads (a tool's output bound is read from it). The rows of
+  [capabilities.md](docs/capabilities.md) say what it cannot reach.
 - `t3.messageContext(hook)` (an extension to install on the Harness's registry): context for the model about each
   message that starts or steers a turn, such as memories recalled for it. The message itself is taken at once; the run
   that answers it asks the hook before its next request, so a slow recall delays the model's answer, not the sender,

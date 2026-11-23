@@ -7,7 +7,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import type { Models } from "@earendil-works/pi-ai";
-import type { Extension } from "@earendil-works/pi-durable";
+import type { Extension, RegistryReader } from "@earendil-works/pi-durable";
 import type { ThreadOrigin, Threads } from "../threads.ts";
 import { AuthStore } from "./auth.ts";
 import { Attachments } from "./attachments.ts";
@@ -48,6 +48,8 @@ type FacetHandle = {
 	askUser(): Extension;
 	/** The commands that wait in the queue (`T3Attachment.queuedCommands`). */
 	queuedCommands(): Extension;
+	/** Tool results with their notes as plain lines (`T3Attachment.plainResults`). */
+	plainResults(registry: RegistryReader): Extension;
 	/** A message's context from the integrator (`T3Attachment.messageContext`). */
 	messageContext(messageContext: MessageContext): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
@@ -154,6 +156,7 @@ export function startFacet(deps: {
 		askUser: () => bridge.userInput.extension(),
 		messageContext: (messageContext) => bridge.messageContexts.extension(messageContext),
 		queuedCommands: () => bridge.queuedCommands.extension(),
+		plainResults: (registry) => bridge.plainResults(registry),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.

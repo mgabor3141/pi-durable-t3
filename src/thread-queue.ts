@@ -2,7 +2,7 @@
 // them (remove, edit, send now, promote to a steer), Stop, and "send now" ahead of the queue. Every message is
 // submitted with `onAbort: "keep"` (`Threads.draft`), so Stop's abort leaves the queue where it is.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type SubmissionDraft, type SubmissionId, type TaskId } from "@earendil-works/pi-durable";
+import { type ConversationId, type Harness, InboxDoc, type InboxItem, LiveDoc, type LiveState, type SubmissionDraft, type SubmissionId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { hostError } from "./host-errors.ts";
 import { AWAITS_CONTEXT } from "./t3/message-contexts.ts";
@@ -30,6 +30,7 @@ type QueueHost = {
 	thread(threadId: string): Promise<Thread | undefined>;
 	watermark(threadId: string): Promise<void>;
 	draft(input: MessageInput): SubmissionDraft;
+	admitting(tx: Tx, input: MessageInput): Promise<MessageInput>;
 	submitted(input: MessageInput): Promise<void>;
 	compact(threadId: string, guidance: string | undefined, messageId?: string): Promise<void>;
 	reload(threadId: string, messageId?: string): Promise<void>;
@@ -277,7 +278,8 @@ export class ThreadQueue {
 		await this.#threads.watermark(input.threadId);
 		await this.#threads.harness.commit(async (tx) => {
 			const queued = takeQueued((await tx.doc(InboxDoc, conversationId)).items);
-			await conversation.submit(tx, this.#threads.draft(input));
+			// What it says of the run it replaced is decided here, where that run has ended (`MessageInput.afterStop`).
+			await conversation.submit(tx, this.#threads.draft(await this.#threads.admitting(tx, input)));
 			(await tx.doc(InboxDoc, conversationId)).items.unshift(...queued);
 		}, BACKGROUND_CONTEXT);
 		await this.#threads.submitted(input);

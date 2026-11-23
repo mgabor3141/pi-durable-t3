@@ -149,12 +149,26 @@ it("waits with a timeout, interrupts a running turn, and refuses to steer an idl
 	const sent = await ops.send(caller, { threadId: tid("b"), message: "long task" });
 	const early = await ops.wait(caller, { threadId: tid("b"), timeoutMs: 200 });
 	expect(early).toMatchObject({ runId: sent.runId, timedOut: true });
-	const interrupted = await ops.interrupt(caller, { threadId: tid("b") });
+	const interrupted = await ops.interrupt(caller, { threadId: tid("b"), reason: "the plan changed" });
 	encodes(OrchestratorMcpThreadInterruptResult, interrupted);
 	expect(interrupted).toMatchObject({ runId: sent.runId, status: "interrupt_requested" });
 	const ended = await ops.wait(caller, { threadId: tid("b"), timeoutMs: 10_000 });
 	expect(ended).toMatchObject({ timedOut: false, status: "interrupted" });
 	expect(await ops.interrupt(caller, { threadId: tid("b") })).toMatchObject({ status: "no_active_run", runId: null });
+
+	// The stopped agent is told with its next message that an agent stopped it, and why (T3's `agentStopReason`).
+	const read: unknown[] = [];
+	f.model.respond(async (context: { messages: readonly { content: unknown }[] }) => {
+		read.push(context.messages.at(-1)!.content);
+		return fauxAssistantMessage("ok");
+	});
+	await ops.send(caller, { threadId: tid("b"), message: "go on" });
+	await ops.wait(caller, { threadId: tid("b"), timeoutMs: 10_000 });
+	expect(read[0]).toEqual([
+		{ type: "text", text: "go on" },
+		{ type: "text", text: "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]", hidden: true },
+		{ type: "text", text: "[Another agent stopped your previous turn before it finished, saying: the plan changed.]", hidden: true },
+	]);
 });
 
 // T3 0.1.11: a retried send is answered from its receipt, so a steer whose turn has ended since is not refused; and an

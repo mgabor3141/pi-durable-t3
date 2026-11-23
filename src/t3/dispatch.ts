@@ -74,6 +74,8 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 			}
 			case "run.interrupt":
 			case "thread.stop":
+				// A person's Stop: every command here is a client's. An agent stops a thread through its tools
+				// (`ThreadOps.interrupt`, `Orchestration.cancel`), which say so themselves.
 				await bridge.interrupt(command.threadId);
 				break;
 			case "queued-run.cancel":

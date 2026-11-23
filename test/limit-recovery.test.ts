@@ -7,6 +7,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
@@ -119,6 +120,10 @@ it("a limit that resets in more than five hours ends the run and is not waited f
 	await send("try again");
 	const after = await shown(["failed", "completed"]);
 	expect(after.recovery).toBeNull();
+	// The host ended that run itself, for the limit: it was not stopped, and the message does not say it was.
+	const head = (await f.threads.thread("t"))!.head;
+	const messages = (await (await f.harness.conversation(head as never, BACKGROUND_CONTEXT))!.context(BACKGROUND_CONTEXT)).messages;
+	expect(messages.findLast((message) => message.role === "user")!.content).toBe("try again");
 });
 
 it("T3's setting \"Auto-resume limited threads\" waits for a reset however far it is", { timeout: 60_000 }, async () => {

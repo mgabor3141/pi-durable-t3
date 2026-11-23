@@ -119,6 +119,8 @@ async function main(): Promise<void> {
 	runtime.registry.install(t3.askUser());
 	// A `/compact` or `/reload` sent as a queued message waits its turn in the queue.
 	runtime.registry.install(t3.queuedCommands());
+	// What a tool result says besides its output, as plain lines; last, after every extension that changes a result.
+	runtime.registry.install(t3.plainResults(runtime.registry));
 
 	// Crash resume: the caller resumes the harness, AFTER the attach resolved (an interrupted run resumes on its own;
 	// capabilities.md).

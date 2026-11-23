@@ -614,7 +614,8 @@ export class ThreadOps {
 		}
 		if (input.runId !== undefined && active!.id !== input.runId) fail("thread_not_interruptible", `Run ${input.runId} is not the running turn of thread ${input.threadId}.`);
 		try {
-			await this.#bridge.interrupt(input.threadId);
+			// T3's `agentStopReason`: an agent's stop says so, with the reason it gave.
+			await this.#bridge.interrupt(input.threadId, { by: "agent", ...(input.reason === undefined || input.reason === "" ? {} : { reason: input.reason }) });
 		} catch (error) {
 			fail("orchestration_error", `Unable to interrupt thread ${input.threadId}: ${(error as Error).message}`);
 		}

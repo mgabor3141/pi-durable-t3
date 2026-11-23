@@ -5,6 +5,7 @@
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -16,7 +17,7 @@ import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks
 import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
-import { createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
+import { conversation, createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 import { until } from "./wait.ts";
 
 const log: Logger = { info: () => {}, warn: () => {} };
@@ -209,7 +210,7 @@ it("a note joins a thread's context without starting work; reads, lists and the 
 });
 
 it("thread_cancel stops a thread and its children, and nobody is woken by the stopped work", { timeout: 60_000 }, async () => {
-	const { bridge, ask, sawAll } = await setup();
+	const { bridge, f, ask, sawAll, settled } = await setup();
 	// The child starts a grandchild that holds, without waiting, then finishes its own turn.
 	const grand = { name: "thread_prompt", args: { new: { title: "Grandchild" }, message: "Hold on: g1", wait: false } };
 	await ask("a", { name: "thread_prompt", args: { new: { title: "Child" }, message: `Delegate ${JSON.stringify(grand)}` } });
@@ -227,6 +228,16 @@ it("thread_cancel stops a thread and its children, and nobody is woken by the st
 	const stopped = await bridge.waitFor(grandchild, (projection) => (projection.runs.every((run) => run.status !== "running") ? projection : undefined), 10_000);
 	expect(stopped!.runs.at(-1)!.status).toBe("interrupted");
 	expect((await bridge.projection(child)).projection.runs, "the child did not start again").toHaveLength(1);
+
+	// The stopped agent is told with its next message that an agent stopped it, not the user.
+	await bridge.sendMessage({ threadId: grandchild, commandId: "after-cancel", messageId: "after-cancel", text: "What is 1+1?", mode: "queue" });
+	await settled(grandchild, (projection) => projection.messages.some((message) => message.text === "2"));
+	const head = (await f.threads.thread(grandchild))!.head;
+	const asked = (await (await conversation(f.harness, head)).context(BACKGROUND_CONTEXT)).messages.findLast((message) => message.role === "user")!;
+	expect(asked.content).toEqual([
+		{ type: "text", text: "What is 1+1?" },
+		{ type: "text", text: "[Another agent stopped your previous turn before it finished.]", hidden: true },
+	]);
 });
 
 it("Stop on a parent waiting for its child ends the parent at once; the child works on", { timeout: 60_000 }, async () => {

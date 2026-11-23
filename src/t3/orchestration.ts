@@ -473,7 +473,7 @@ export class Orchestration {
 		const stopped: string[] = [];
 		for (const id of subtree) {
 			if (!this.#isActive(id)) continue;
-			await this.#bridge.interrupt(id);
+			await this.#bridge.interrupt(id, { by: "agent" });
 			stopped.push(id);
 		}
 		this.#log.info("threads stopped", { by: caller, stopped });

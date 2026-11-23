@@ -25,6 +25,7 @@ import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMes
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { APP_CONTINUE_ENTRY, APP_UNREAD_STEER_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, sentAs, stopReason, authorOf, unreadSteerOf } from "./runs.ts";
+import { exitCodeOf, notesOf, withoutExitLine } from "./result-notes.ts";
 import type { ThreadSummary } from "../threads.ts";
 import { readQueuedInputs } from "./queued.ts";
 import { type Answers, ASK_USER_TOOL, userInputQuestions, userInputRequestId } from "./user-input.ts";
@@ -63,8 +64,6 @@ type LiveToolSlot = NonNullable<LiveDoc["tools"]>[number];
 export const PROVIDER_INSTANCE_ID = "pi";
 export const PROVIDER_DRIVER = "pi";
 const BASELINE_SCOPE_ID = "cs-baseline";
-/** T3's message on a Stop the user asked for (`RunExecutionService.USER_STOP_REASON`). */
-const USER_STOP_REASON = "Stopped by user";
 
 // biome-ignore lint/suspicious/noExplicitAny: branded IDs are plain strings on the wire
 type Any = any;
@@ -220,7 +219,7 @@ export interface ThreadMeta {
 	readonly running: boolean;
 	/** A Stop of the running run: when it was asked for, and when the run was found not ending (T3's
 	 * `run_interrupt_request`, which its clients show as "Stopping", then "Agent not responding to Stop"). */
-	readonly stop?: { readonly requestedAt: number; readonly unresponsiveAt?: number };
+	readonly stop?: { readonly requestedAt: number; readonly message: string; readonly unresponsiveAt?: number };
 	/** The last rollback asked of the thread and its failure, from the thread record. */
 	readonly rollback?: { readonly requestId: string; readonly failure: string | null };
 	/** T3's limit recovery, from the thread record: the run a provider's limit ended, when the limit resets, and whether
@@ -932,13 +931,22 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 				continue;
 			}
 			if (block.name === "bash" && typeof block.arguments.command === "string") {
+				// T3 shows a command's exit code itself (a red "exit 3" under the output) and trusts a code over what the
+				// output reads like, so the code goes in its own field, 0 for a command that ended well, and the line that
+				// says it is left out of the output. A command that was cut off (a timeout, a Stop) has no code: its line
+				// stays in the output, and says why.
+				const notes = result === undefined ? [] : notesOf(result);
+				const exitCode = result === undefined ? undefined : failed ? exitCodeOf(notes) : 0;
+				const machine = typeof block.arguments.machine === "string" ? block.arguments.machine.trim() : "";
 				turnItems.push({
 					...common,
 					title: "bash",
 					type: "command_execution",
-					input: block.arguments.command,
-					...(output === undefined ? {} : { output }),
-					...(failed ? { outputIndicatesFailure: true } : {}),
+					// A command the call sent to another machine (an integrator's `machine` argument) says where it ran, in a
+					// comment above it: the row would read as one that ran in the workspace.
+					input: machine === "" ? block.arguments.command : `# on ${machine}\n${block.arguments.command}`,
+					...(output === undefined ? {} : { output: exitCode === undefined ? output : withoutExitLine(output, notes) }),
+					...(exitCode !== undefined ? { exitCode } : failed ? { outputIndicatesFailure: true } : {}),
 				} as Any);
 			} else if (block.name === CODEMODE_TOOL && typeof block.arguments.code === "string") {
 				// T3 shows a JavaScript tool (`js`, `isJavaScriptReplTool` in T3's shared toolActivity) with a code icon, its
@@ -1279,7 +1287,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 			providerTurnId: null,
 			title: "Interrupt requested",
 			type: "run_interrupt_request",
-			message: USER_STOP_REASON,
+			message: stop.message,
 			...(stop.unresponsiveAt === undefined ? {} : { unresponsiveAt: time(stop.unresponsiveAt) }),
 		} as Any);
 	}
