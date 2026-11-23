@@ -4,7 +4,8 @@
 // the history above a compaction, and the runs the head's undos rolled back.
 import { entryChars, type ViewMemory } from "./memory-report.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type Conversation, type ConversationId, ConversationTranscript, type Harness, type TranscriptView, type WatchHandle } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord/json";
+import { type CompactionFailure, type Conversation, type ConversationId, ConversationTranscript, type Cursor, type Harness, type TaskRecord, type TranscriptView, type WatchHandle } from "@earendil-works/pi-durable";
 import { type ImageAt, imageDataOf, withoutImageData } from "./image-data.ts";
 import * as DateTime from "effect/DateTime";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
@@ -12,7 +13,8 @@ import type { AppliedUndo } from "../threads.ts";
 import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import type { ConversationView, EntryRecord, ModelRef } from "./model-types.ts";
-import { type ProjectionResult, projectThread, type ThreadMeta, type TurnItemOrdinals } from "./projection.ts";
+import { type CompactOutcome, type CompactOutcomes, type ProjectionResult, projectThread, type ThreadMeta, type TurnItemOrdinals } from "./projection.ts";
+import { isCompactCommandEntry } from "./runs.ts";
 import { decideThreadResume, THREAD_RESUME_MAX_REPLAY_EVENTS } from "./t3-server.ts";
 import { diffProjection, eventItem, type ThreadStreamItem } from "./thread-stream.ts";
 import { type RolledBackRun, rolledBackRuns, undoneHeads } from "./undo.ts";
@@ -80,6 +82,10 @@ interface Follower {
 	history: EntryRecord[];
 	/** The head's `pi.agent` document as last read; its configuration is re-read only when it changes. */
 	agentKey: string | undefined;
+	/** How each `/compact` ended that wrote no summary, by its entry id (`CompactOutcomes`): final, so read once. */
+	compactOutcomes: Map<number, CompactOutcome>;
+	/** What the outcomes were last looked up for; looked up again only when it changes. */
+	compactOutcomesKey: string | undefined;
 	closed: boolean;
 }
 
@@ -160,6 +166,7 @@ export class ThreadView {
 	#view: ConversationView | undefined;
 	/** Display-only transcript above the active context's compaction cut. */
 	#history: EntryRecord[] | undefined;
+	#compactOutcomes: CompactOutcomes | undefined;
 	#rolledBack: RolledBackRun[] = [];
 	/** The ordinals this view has given the thread's rows, for as long as it is open: every client of it was sent these. */
 	readonly #ordinals: TurnItemOrdinals = { byId: new Map(), high: 0 };
@@ -294,7 +301,7 @@ export class ThreadView {
 			this.#idleTimer = undefined;
 		}
 		if (this.#follower !== undefined) return;
-		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, transcript: undefined, itemsOf: undefined, entries: [], splitOf: undefined, active: [], history: [], agentKey: undefined, closed: false };
+		this.#follower = { head: undefined, watch: undefined, generation: 0, viewSeq: 0, transcript: undefined, itemsOf: undefined, entries: [], splitOf: undefined, active: [], history: [], agentKey: undefined, compactOutcomes: new Map(), compactOutcomesKey: undefined, closed: false };
 		this.#catalog = this.#host.catalog();
 		const head = this.#host.head(this.threadId);
 		if (head !== undefined) void this.#follow(head);
@@ -367,6 +374,7 @@ export class ThreadView {
 		follower.active = [];
 		follower.history = [];
 		follower.agentKey = undefined;
+		follower.compactOutcomesKey = undefined;
 		await previous?.stop().catch(() => {});
 		const current = (): boolean => this.#follower === follower && !follower.closed && follower.generation === generation;
 		try {
@@ -484,10 +492,63 @@ export class ThreadView {
 				thinkingLevel: agent?.thinkingLevel ?? "off",
 			};
 		}
+		// Awaited only when there is something to read: a view is otherwise taken in the turn it arrives.
+		const reading = this.#readCompactOutcomes(follower, head, view, latest);
+		if (reading !== undefined) {
+			await reading;
+			if (!latest()) return;
+		}
 		this.#view = view;
 		this.#history = follower.history;
+		this.#compactOutcomes = follower.compactOutcomes;
 		this.#conversationId = head;
 		this.recompute();
+	}
+
+	/**
+	 * How the head's `/compact`s that are not known yet ended (`CompactOutcomes`): each is the first manual compaction
+	 * task of the head after its command (task and entry ids share one sequence) and before the next command. Read when a
+	 * command is unknown and the head's compactions changed since the last look; a task that has not ended stays unknown.
+	 */
+	#readCompactOutcomes(follower: Follower, head: number, view: ConversationView, latest: () => boolean): Promise<void> | undefined {
+		const commands = [...follower.history, ...follower.active].filter(isCompactCommandEntry).map((entry) => entry.id as number);
+		const unknown = commands.filter((entryId) => !follower.compactOutcomes.has(entryId));
+		if (unknown.length === 0) return undefined;
+		const live = view.docs["pi.live"];
+		const key = JSON.stringify([unknown, (live?.compactions ?? []).map((compaction) => compaction.taskId), live?.compactionFailure?.taskId ?? null]);
+		if (key === follower.compactOutcomesKey) return undefined;
+		return this.#lookUpCompactOutcomes(follower, head, live, commands, unknown, key, latest);
+	}
+
+	async #lookUpCompactOutcomes(follower: Follower, head: number, live: ConversationView["docs"]["pi.live"], commands: readonly number[], unknown: readonly number[], key: string, latest: () => boolean): Promise<void> {
+		const since = Math.min(...unknown);
+		let tasks: CompactionTaskRecord[];
+		try {
+			// The Harness reads tasks one by one; a scan is a transaction's (one that writes nothing), newest first, down to
+			// the oldest command that is not known.
+			tasks = await this.#host.harness.commit(async (tx) => {
+				const found: CompactionTaskRecord[] = [];
+				let cursor: Cursor | undefined;
+				do {
+					const page = await tx.scanTasks({ conversationId: head as ConversationId, kind: "pi.compaction", order: "descending" }, 50, cursor);
+					found.push(...page.items.filter((task) => (task.id as number) > since));
+					cursor = page.items.some((task) => (task.id as number) <= since) ? undefined : page.next;
+				} while (cursor !== undefined);
+				return found;
+			}, BACKGROUND_CONTEXT);
+		} catch (error) {
+			this.#host.log.warn("could not read how a thread's compactions ended", { threadId: this.threadId, head, error: messageOf(error) });
+			return;
+		}
+		if (!latest()) return;
+		follower.compactOutcomesKey = key;
+		const manual = tasks.filter((task) => (task.input as { reason?: unknown } | null)?.reason === "manual").sort((a, b) => (a.id as number) - (b.id as number));
+		for (const entryId of unknown) {
+			const next = commands.find((other) => other > entryId) ?? Number.POSITIVE_INFINITY;
+			const task = manual.find((candidate) => (candidate.id as number) > entryId && (candidate.id as number) < next);
+			if (task === undefined || task.state.status !== "terminal") continue;
+			follower.compactOutcomes.set(entryId, compactOutcome(task, live?.compactionFailure));
+		}
 	}
 
 	/** The head's configuration was just written: show it now, and re-read it on the next view. */
@@ -507,7 +568,7 @@ export class ThreadView {
 		const wasRunning = this.#result?.shell.status === "running";
 		const loaded = !this.#loaded;
 		if (loaded) this.#loaded = true;
-		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history, ordinals: this.#ordinals });
+		this.#result = projectThread(this.#host.meta(this.threadId, this), this.#view, { rolledBack: this.#rolledBack, history: this.#history, ordinals: this.#ordinals, ...(this.#compactOutcomes === undefined ? {} : { compactOutcomes: this.#compactOutcomes }) });
 		this.#host.projected(this, { loaded, settled: wasRunning && this.#result.shell.status !== "running" });
 		// A change of what is kept in memory only (an answered command, an approval card) wakes a wait as a new view does.
 		this.#signal();
@@ -635,4 +696,20 @@ export class ThreadView {
 			release();
 		};
 	}
+}
+
+type CompactionTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
+
+/**
+ * How a `/compact`'s task ended. One the host gave up at a provider's stated wait completed without a summary and
+ * left its reason as pi's `compactionFailure` (pi-durable-claw's compaction hook): that is a failure too.
+ */
+function compactOutcome(task: CompactionTaskRecord, failure: CompactionFailure | undefined): CompactOutcome {
+	const outcome = (task.state as { outcome?: { status: string; error?: { message?: string }; reason?: string } }).outcome;
+	const endedAt = task.endedAt === undefined ? {} : { endedAt: task.endedAt };
+	if (outcome?.status === "aborted") return { status: "aborted", ...endedAt };
+	if (outcome?.status === "completed") {
+		return failure !== undefined && (failure.taskId as number) === (task.id as number) ? { status: "failed", error: failure.error, ...endedAt } : { status: "completed", ...endedAt };
+	}
+	return { status: "failed", error: outcome?.error?.message ?? outcome?.reason ?? "The compaction failed.", ...endedAt };
 }

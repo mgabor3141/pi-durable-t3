@@ -249,7 +249,14 @@ interface ThreadMemory {
 	readonly history?: readonly EntryRecord[];
 	/** The ordinals this view of the thread has given its rows (`TurnItemOrdinals`); absent, rows are numbered by place. */
 	readonly ordinals?: TurnItemOrdinals;
+	/** How the `/compact`s that wrote no summary ended, as far as known (`CompactOutcomes`). */
+	readonly compactOutcomes?: CompactOutcomes;
 }
+
+/** How a `/compact`'s compaction task ended: `completed` without a summary found nothing to compact. */
+export type CompactOutcome = { readonly status: "completed" | "failed" | "aborted"; readonly error?: string; readonly endedAt?: number };
+/** By the `/compact`'s entry id. Read from the head's tasks by the `ThreadView`, which keeps them: an outcome is final. */
+export type CompactOutcomes = ReadonlyMap<number, CompactOutcome>;
 
 /**
  * The ordinal each turn item was given, kept by whoever projects a thread again and again (a `ThreadView`). T3 numbers
@@ -566,7 +573,11 @@ function projectRunRows(b: Build, draft: RunDraft, index: number) {
 	const compactCommand = isCompactCommandEntry(u);
 	let status: OrchestrationV2Run["status"];
 	if (running) status = "running";
-	else if ((synthetic || compactCommand) && lastAssistant === undefined) status = "completed";
+	else if ((synthetic || compactCommand) && lastAssistant === undefined) {
+		// A `/compact` that wrote no summary ended as its task did (`projectCompactOutcomes`).
+		const outcome = compactOutcomeOf(b, b.memory.compactOutcomes, draft)?.status;
+		status = outcome === "failed" ? "failed" : outcome === "aborted" ? "interrupted" : "completed";
+	}
 	else {
 		const reason = stopReason(lastAssistant);
 		status =
@@ -1314,39 +1325,53 @@ function projectLiveCompactions(b: Build): void {
 }
 
 /**
- * A manual compaction that ended without a summary because it failed (pi's `compactionFailure`: the provider refused,
- * retries ran out, the host gave it up at a provider's stated wait): T3's failed compaction card on its `/compact`, "Context
- * compaction failed · <why>", where the run would otherwise read as done. The failure is the newest one pi keeps; it is
- * this `/compact`'s when its task came after the command (task and entry ids share one sequence) and no summary did.
+ * The end of a `/compact` that wrote no summary, as T3 shows a compaction's: stopped ("Context compaction stopped"),
+ * or failed ("Context compaction failed · <why>"). A provider's limit, whose error states the wait (pi's own words, or
+ * the host's that gave the compaction up at it), is T3's usage limit card instead, with the time it resets.
  */
-function projectCompactionFailure(b: Build): void {
-	const { threadId, providerThreadId, live, drafts, turnItems } = b;
-	const failure = live?.compactionFailure;
-	if (failure === undefined || failure.trigger !== "manual") return;
-	const taskId = failure.taskId as unknown as number;
-	const draft = drafts.findLast((candidate) => isCompactCommandEntry(candidate.userEntry) && candidate.userEntry.id < taskId);
-	if (draft === undefined || draft.steps.some(isCompactionEntry) || b.manualCompactionRunId === `r${draft.userEntry.id}`) return;
-	const at = firstMessage(draft.userEntry)?.timestamp ?? b.meta.updatedAt;
-	turnItems.push({
-		id: id(`ti-failed-compaction-${String(taskId)}`),
-		threadId: id(threadId),
-		runId: id(`r${draft.userEntry.id}`),
-		nodeId: null,
-		providerThreadId: id(providerThreadId),
-		providerTurnId: null,
-		nativeItemRef: null,
-		parentItemId: null,
-		// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
-		ordinal: 0,
-		status: "failed",
-		title: "Context compaction failed",
-		summary: failure.error,
-		startedAt: time(at),
-		completedAt: time(at),
-		updatedAt: time(at),
-		type: "compaction",
-		driver: id(PROVIDER_DRIVER),
-	} as Any);
+function projectCompactOutcomes(b: Build, outcomes: CompactOutcomes | undefined): void {
+	const { threadId, providerThreadId, drafts, turnItems } = b;
+	if (outcomes === undefined || outcomes.size === 0) return;
+	for (const draft of drafts) {
+		const outcome = compactOutcomeOf(b, outcomes, draft);
+		if (outcome === undefined || outcome.status === "completed") continue;
+		const at = firstMessage(draft.userEntry)?.timestamp ?? b.meta.updatedAt;
+		const endedAt = Math.max(at, outcome.endedAt ?? at);
+		const item = (key: string, status: string, fields: object) => ({
+			id: id(`ti-${key}${draft.userEntry.id}`),
+			threadId: id(threadId),
+			runId: id(`r${draft.userEntry.id}`),
+			nodeId: null,
+			providerThreadId: id(providerThreadId),
+			providerTurnId: null,
+			nativeItemRef: null,
+			parentItemId: null,
+			// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
+			ordinal: 0,
+			status,
+			startedAt: time(at),
+			completedAt: time(endedAt),
+			updatedAt: time(endedAt),
+			...fields,
+		});
+		if (outcome.status === "aborted") {
+			turnItems.push(item("kx", "interrupted", { type: "compaction", title: "Context compaction stopped", driver: id(PROVIDER_DRIVER) }) as Any);
+			continue;
+		}
+		const message = (outcome.error ?? "").trim().slice(0, 4000).trim() || "The compaction failed.";
+		const wait = requestedRetryDelayMs(message);
+		turnItems.push(item("kx", "failed", { type: "compaction", title: "Context compaction failed", ...(wait === undefined ? { summary: message } : {}), driver: id(PROVIDER_DRIVER) }) as Any);
+		if (wait !== undefined) {
+			turnItems.push(item("ke", "failed", { type: "error", failure: { class: "usage_limit", message, code: null, retryable: null, resetAt: new Date(endedAt + wait).toISOString() } }) as Any);
+		}
+	}
+}
+
+/** The outcome of `draft` when it is a `/compact` that wrote no summary and does not run now. */
+function compactOutcomeOf(b: Build, outcomes: CompactOutcomes | undefined, draft: RunDraft): CompactOutcome | undefined {
+	if (outcomes === undefined || !isCompactCommandEntry(draft.userEntry) || draft.steps.some(isCompactionEntry)) return undefined;
+	if (b.manualCompactionRunId === `r${draft.userEntry.id}`) return undefined;
+	return outcomes.get(draft.userEntry.id as number);
 }
 
 /** A user message's turn item, keyed by its message id as T3 keys one (`userTurnItem({ messageId })`) when the entry
@@ -1775,7 +1800,7 @@ export function projectThread(
 
 	markModelSwitches(b.runs, b.turnItems, drafts);
 	projectLiveCompactions(b);
-	projectCompactionFailure(b);
+	projectCompactOutcomes(b, memory.compactOutcomes);
 	projectQueued(b);
 	const rows = projectRows(b);
 	return { projection: rows.projection, shell: projectShell(b, rows), runs: b.projectedRuns, forkRuns: b.forkRuns, toolImages: b.toolImages };
