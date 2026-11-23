@@ -1313,6 +1313,42 @@ function projectLiveCompactions(b: Build): void {
 	}
 }
 
+/**
+ * A manual compaction that ended without a summary because it failed (pi's `compactionFailure`: the provider refused,
+ * retries ran out, the host gave it up at a provider's stated wait): T3's failed compaction card on its `/compact`, "Context
+ * compaction failed · <why>", where the run would otherwise read as done. The failure is the newest one pi keeps; it is
+ * this `/compact`'s when its task came after the command (task and entry ids share one sequence) and no summary did.
+ */
+function projectCompactionFailure(b: Build): void {
+	const { threadId, providerThreadId, live, drafts, turnItems } = b;
+	const failure = live?.compactionFailure;
+	if (failure === undefined || failure.trigger !== "manual") return;
+	const taskId = failure.taskId as unknown as number;
+	const draft = drafts.findLast((candidate) => isCompactCommandEntry(candidate.userEntry) && candidate.userEntry.id < taskId);
+	if (draft === undefined || draft.steps.some(isCompactionEntry) || b.manualCompactionRunId === `r${draft.userEntry.id}`) return;
+	const at = firstMessage(draft.userEntry)?.timestamp ?? b.meta.updatedAt;
+	turnItems.push({
+		id: id(`ti-failed-compaction-${String(taskId)}`),
+		threadId: id(threadId),
+		runId: id(`r${draft.userEntry.id}`),
+		nodeId: null,
+		providerThreadId: id(providerThreadId),
+		providerTurnId: null,
+		nativeItemRef: null,
+		parentItemId: null,
+		// Numbered with every other turn item in `projectRows` (`numberTurnItems`).
+		ordinal: 0,
+		status: "failed",
+		title: "Context compaction failed",
+		summary: failure.error,
+		startedAt: time(at),
+		completedAt: time(at),
+		updatedAt: time(at),
+		type: "compaction",
+		driver: id(PROVIDER_DRIVER),
+	} as Any);
+}
+
 /** A user message's turn item, keyed by its message id as T3 keys one (`userTurnItem({ messageId })`) when the entry
  * records how it was sent: a steer's row is the same while it waits and once it is placed. Older entries keep theirs. */
 const userItemId = (data: unknown, messageId: string): string | undefined => (sentAs(data) === undefined ? undefined : `ti-m${messageId}`);
@@ -1739,6 +1775,7 @@ export function projectThread(
 
 	markModelSwitches(b.runs, b.turnItems, drafts);
 	projectLiveCompactions(b);
+	projectCompactionFailure(b);
 	projectQueued(b);
 	const rows = projectRows(b);
 	return { projection: rows.projection, shell: projectShell(b, rows), runs: b.projectedRuns, forkRuns: b.forkRuns, toolImages: b.toolImages };
