@@ -623,11 +623,12 @@ export class Threads {
 		const live = await this.#harness.snapshot(LiveDoc, input.conversationId as ConversationId, BACKGROUND_CONTEXT);
 		const compacting = (live?.compactions?.length ?? 0) > 0;
 		// `waits`: the thread waits for a provider's limit to reset (`LimitRecovery`). Nothing runs, and the message is
-		// queued as it would be behind a run: a steer joins the run when it is continued, the others follow it.
+		// queued as it would be behind a run. Either way it keeps the mode it was sent with: a steer joins the run that
+		// comes next (with every other steer waiting, at the harness's `steeringMode: "all"`), a queued message follows it.
 		// How it was sent, on its entry (`SentAs`): the projection labels it a steer or a queued message by this.
 		const sent = (mode: "steer" | "followUp") => ({ ...data, whenBusy: mode, sentAt: Date.now() });
 		if (compacting || (waits && live?.run === undefined)) {
-			const mode = waits && !compacting && whenBusy === "steer" ? "steer" : "followUp";
+			const mode = whenBusy === "steer" ? "steer" : "followUp";
 			const queued = await this.#enqueueInput(input.conversationId as ConversationId, input.requestId, content, { kind: APP_USER_ENTRY, data: sent(mode) }, mode);
 			await this.#rememberInput(input);
 			return queued;
@@ -963,7 +964,8 @@ export class Threads {
 
 	async #finishCompaction(threadId: string, conversationId: ConversationId, taskId: TaskId<unknown>): Promise<void> {
 		try {
-			await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT);
+			// Stopped: what waits behind it is held, as behind a stopped run (`ThreadQueue.abort`).
+			if ((await this.#harness.waitForTask(taskId, BACKGROUND_CONTEXT)).state.outcome.status === "aborted") return;
 		} catch (error) {
 			this.#onWarn("manual compaction task ended without a summary", error);
 		}

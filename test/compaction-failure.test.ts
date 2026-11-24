@@ -11,7 +11,7 @@ import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
 import { bridgeConfig, createNamed, idle, makeThreads } from "./threads-harness.ts";
 
-type Item = { type: string; runId: string | null; status: string; title?: string; summary?: string; failure?: { class: string; message: string; resetAt?: string } };
+type Item = { type: string; runId: string | null; ordinal: number; text?: string; status: string; title?: string; summary?: string; failure?: { class: string; message: string; resetAt?: string } };
 
 /** A host's compaction hook that gives a compaction up at a provider's stated wait, as pi-durable-claw's does: it
  * records pi's `compactionFailure` and declines. */
@@ -70,6 +70,9 @@ it("shows a /compact whose summary failed as a failed compaction, after a later 
 	await bridge.sendMessage({ threadId: "t", commandId: "c-compact2", messageId: "m-compact2", text: "/compact", mode: "start" });
 	await expect.poll(async () => (await compactions()).map((item) => `${item.runId}:${item.status}`).sort(), { timeout: 20_000 }).toEqual([`${run.id}:failed`, expect.stringMatching(/:completed$/)]);
 	expect((await live())?.compactionFailure).toBeUndefined();
+	const items = [...((await bridge.projection("t")).projection.turnItems as unknown as Item[])].sort((a, b) => a.ordinal - b.ordinal);
+	const at = (found: (item: Item) => boolean) => items.findIndex(found);
+	expect(at((item) => item.type === "compaction" && item.status === "failed"), "the failed card stands in its run").toBeLessThan(at((item) => item.type === "user_message" && item.runId !== run.id && item.text === "/compact"));
 });
 
 it("shows a /compact given up at a provider's stated wait as T3's usage limit, with the time it resets", { timeout: 60_000 }, async () => {
@@ -99,4 +102,16 @@ it("Stop ends a manual compaction that waits to retry, and the /compact shows it
 	expect((await live())?.compactions ?? []).toEqual([]);
 	await expect.poll(async () => (await bridge.projection("t")).projection.runs.at(-1)?.status, { timeout: 20_000 }).toBe("interrupted");
 	expect(await compactions()).toEqual([expect.objectContaining({ status: "interrupted", title: "Context compaction stopped" })]);
+
+	// The card stays in its run, before what the thread says after it.
+	await bridge.sendMessage({ threadId: "t", commandId: "c-after", messageId: "m-after", text: "hello", mode: "start" });
+	await idle(f.harness, thread.head);
+	await expect.poll(async () => (await inOrder(bridge)).slice(0, 3), { timeout: 20_000 }).toEqual(["user_message /compact", "compaction Context compaction stopped", "user_message hello"]);
 });
+
+/** The rows from the last `/compact` on, by ordinal, as T3's client places them. */
+async function inOrder(bridge: Bridge): Promise<string[]> {
+	const items = [...((await bridge.projection("t")).projection.turnItems as unknown as Item[])].sort((a, b) => a.ordinal - b.ordinal);
+	const shown = items.map((item) => `${item.type} ${item.title ?? item.text ?? ""}`);
+	return shown.slice(shown.lastIndexOf("user_message /compact"));
+}

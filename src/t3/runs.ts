@@ -100,6 +100,15 @@ export const sentAs = (data: unknown): SentAs | undefined => {
 };
 /** The task that wrote an entry, or placed it (pi-durable's `byTaskId`); none for a message placed by its own admission. */
 const placedBy = (entry: EntryRecord | undefined): number | undefined => (entry as { byTaskId?: number } | undefined)?.byTaskId;
+/** Two user entries one boundary placed: by the same task, or, with no task, by one admission (a message that started a
+ * run with the held messages before it), whose entries share the time pi-durable gave them. A message admitted on its
+ * own while a run is live is queued, and placed later by a task. */
+const placedTogether = (a: EntryRecord, b: EntryRecord): boolean => {
+	const task = placedBy(a);
+	if (task !== undefined) return task === placedBy(b);
+	const at = firstMessage(a)?.timestamp;
+	return placedBy(b) === undefined && at !== undefined && at === firstMessage(b)?.timestamp;
+};
 /** The client's message id a user entry carries in its `data` (`app.user` entries set it), if it carries one. */
 export const messageIdOf = (entry: EntryRecord): string | undefined => {
 	const data = entry.data;
@@ -240,9 +249,9 @@ export function groupRuns(entries: readonly EntryRecord[]): RunDraft[] {
 		}
 		if (isUserEntry(entry)) {
 			const current = runs.at(-1);
-			// Messages a run's end placed together (a steer and the message queued behind it) begin one run: the answer
-			// that follows is to both. Each alone would leave the first a run that nothing answered, shown as interrupted.
-			const together = current !== undefined && current.steps.length === 0 && current.synthetic !== true && isUserEntry(current.userEntry) && placedBy(entry) !== undefined && placedBy(entry) === placedBy(current.userEntry);
+			// Messages a run's end placed together (steers and the message queued behind them) begin one run: the answer
+			// that follows is to all. Each alone would leave the first a run that nothing answered, shown as interrupted.
+			const together = current !== undefined && current.synthetic !== true && isUserEntry(current.userEntry) && [...current.steps, entry].every((step) => isUserEntry(step) && placedTogether(current.userEntry, step));
 			const atToolRound = current !== undefined && steerable && endsWithCompletedToolRound(current.steps);
 			const sent = sentAs(entry.data);
 			// A steer is a step of the run it was sent into whenever that run placed it: at a tool round, or at its end,

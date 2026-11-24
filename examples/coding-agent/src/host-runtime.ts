@@ -42,6 +42,8 @@ export async function openCodingHarness(
 			registry,
 			// A fresh env per invocation, honoring the conversation's `cwd` (its project dir); the data dir is the fallback.
 			env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? config.dataDir }),
+			// Every steer that waits reaches the model at the run's next boundary, together, as T3's providers take them.
+			settings: { steeringMode: "all" },
 		},
 		BACKGROUND_CONTEXT,
 	);

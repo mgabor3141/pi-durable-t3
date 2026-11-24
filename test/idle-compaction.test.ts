@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { afterEach, expect, it, onTestFinished } from "vitest";
 import { ServerSettingsStore } from "../src/settings.ts";
 import { Bridge } from "../src/t3/bridge.ts";
@@ -107,16 +108,19 @@ it("leaves a thread alone under T3's other settings, under the floor, and when t
 	await sleep(1500);
 	expect(await busy.compactions(), "2.5 seconds after the first run, 1.5 after the second").toBe(0);
 	await expect.poll(busy.compactions, { timeout: 20_000 }).toBe(1);
+});
 
-	// A snoozed thread is left alone.
+it("compacts a snoozed thread too, which stays snoozed", { timeout: 60_000 }, async () => {
+	// A snoozed thread is compacted too (T3 leaves it alone): it is put aside to be taken up again, and its context
+	// would otherwise be read again whole by the first message after the snooze. It stays snoozed.
 	IdleCompaction.limits = { minTokens: 1000, leadMs: 298_500 };
 	const snoozed = await setup({ idleCompaction: "beforeCacheExpires" });
 	await snoozed.turn("one", "first" + long);
-	await snoozed.turn("two", "second" + long);
-	await snoozed.bridge.sidebar.snooze("t", new Date(Date.now() + 3_600_000).toISOString());
-	await sleep(3000);
-	expect(await snoozed.compactions()).toBe(0);
-	expect(snoozed.logged.some((line) => line.includes("the thread is snoozed"))).toBe(true);
+	await snoozed.turn("two", "second" + long, summary);
+	const until = new Date(Date.now() + 3_600_000).toISOString();
+	await snoozed.bridge.sidebar.snooze("t", until);
+	await expect.poll(snoozed.compactions, { timeout: 20_000 }).toBe(1);
+	expect(String((await snoozed.bridge.projection("t")).shell.snoozedUntil)).toBe(String(DateTime.makeUnsafe(until)));
 });
 
 it("turning the setting on covers a thread that is idle already, as a start of the bridge does", { timeout: 60_000 }, async () => {

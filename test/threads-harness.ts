@@ -65,7 +65,8 @@ export async function makeThreads(
 		models: model.models,
 		registry,
 		...(options.coding === true ? { env: (target: EnvTarget) => new NodeExecutionEnv({ cwd: target.cwd ?? dir }) } : {}),
-		...(options.sequential === true ? { settings: { toolExecution: "sequential" as const } } : {}),
+		// Steers go to the model together, as an integrator sets it (the README's host).
+		settings: { steeringMode: "all", ...(options.sequential === true ? { toolExecution: "sequential" as const } : {}) },
 	}, ctx);
 	onTestFinished(async () => {
 		await harness.close(ctx).catch(() => {});

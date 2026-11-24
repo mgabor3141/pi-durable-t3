@@ -737,7 +737,7 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		completedAt: done ? time(end) : null,
 		updatedAt: time(end),
 	});
-	const pushUser = (entry: EntryRecord, intent: "turn_start" | "steer" | "promoted_queued_to_steer") => {
+	const pushUser = (entry: EntryRecord, intent: "turn_start" | "queued_turn" | "steer" | "promoted_queued_to_steer") => {
 		const message = firstMessage(entry)!;
 		const messageId = messageIdOf(entry) ?? `m${entry.id}`;
 		// The compaction anchor is shown as the card, not as the summary in a bubble: report the prompt the clients
@@ -1162,7 +1162,10 @@ function projectRunItems(b: Build, shownIn: ReadonlyMap<RunDraft, ShownExchange[
 		// A continue is not a retry: the requests that failed before it are a row that failed, and the count starts over.
 		if (step.kind === APP_CONTINUE_ENTRY) pushFailures("failed");
 		if (isUserEntry(step) || isNoteEntry(step)) {
-			pushUser(step, sentAs(step.data)?.promoted === true ? "promoted_queued_to_steer" : "steer");
+			// Labelled as it was sent: a queued message placed with the steers before it (`groupRuns`' `together`) is T3's
+			// queued turn.
+			const sent = sentAs(step.data);
+			pushUser(step, sent?.promoted === true ? "promoted_queued_to_steer" : sent?.whenBusy === "followUp" ? "queued_turn" : "steer");
 			return;
 		}
 		// A compaction that landed in this run: its card where it took effect, as T3 shows a provider's compaction.
@@ -1362,16 +1365,18 @@ function projectCompactOutcomes(b: Build, outcomes: CompactOutcomes | undefined)
 			updatedAt: time(endedAt),
 			...fields,
 		});
+		// At the end of its run, not of the thread: items are numbered in the order they stand here (`numberTurnItems`).
+		const runId = `r${draft.userEntry.id}`;
+		const place = (...cards: object[]) => turnItems.splice(turnItems.findLastIndex((candidate) => (candidate.runId as string | null) === runId) + 1 || turnItems.length, 0, ...(cards as Any[]));
 		if (outcome.status === "aborted") {
-			turnItems.push(item("kx", "interrupted", { type: "compaction", title: "Context compaction stopped", driver: id(PROVIDER_DRIVER) }) as Any);
+			place(item("kx", "interrupted", { type: "compaction", title: "Context compaction stopped", driver: id(PROVIDER_DRIVER) }));
 			continue;
 		}
 		const message = (outcome.error ?? "").trim().slice(0, 4000).trim() || "The compaction failed.";
 		const wait = requestedRetryDelayMs(message);
-		turnItems.push(item("kx", "failed", { type: "compaction", title: "Context compaction failed", ...(wait === undefined ? { summary: message } : {}), driver: id(PROVIDER_DRIVER) }) as Any);
-		if (wait !== undefined) {
-			turnItems.push(item("ke", "failed", { type: "error", failure: { class: "usage_limit", message, code: null, retryable: null, resetAt: new Date(endedAt + wait).toISOString() } }) as Any);
-		}
+		const failed = item("kx", "failed", { type: "compaction", title: "Context compaction failed", ...(wait === undefined ? { summary: message } : {}), driver: id(PROVIDER_DRIVER) });
+		if (wait === undefined) place(failed);
+		else place(failed, item("ke", "failed", { type: "error", failure: { class: "usage_limit", message, code: null, retryable: null, resetAt: new Date(endedAt + wait).toISOString() } }));
 	}
 }
 
@@ -1391,7 +1396,8 @@ const inboxOf = (b: Build) => readQueuedInputs((b.view?.docs["pi.inbox"] as { it
 /** The run a waiting steer is shown in: the agent's run while it works. Nothing runs (a Stop, a failure, a wait for a
  * limit): the steer waits in the queue, held, as pi keeps it. A manual compaction is no run a steer joins. */
 const steeredDraft = (b: Build): RunDraft | undefined =>
-	b.live?.run !== undefined && b.manualCompactionRunId === null && b.newestDraft?.markerOnly !== true ? b.newestDraft : undefined;
+	// A `/compact` that runs: its steers start the run its summary begins, and wait in it as T3 shows one the agent holds.
+	b.manualCompactionRunId !== null ? b.newestDraft : b.live?.run !== undefined && b.newestDraft?.markerOnly !== true ? b.newestDraft : undefined;
 
 const waitingSteers = (b: Build) => inboxOf(b).filter((item) => item.mode === "steer");
 
@@ -1631,8 +1637,7 @@ function blockedOnThreadWait(activeRun: OrchestrationV2Run | undefined, turnItem
 }
 
 /** T3's `isSilentRunForShell`: a run of T3's own idle compaction (`idle-compaction.ts`, its message among `idle`) that
- * did not fail. Neither failure can happen here yet (a compaction that fails leaves no row, and its run reads completed);
- * the checks are T3's, kept so the rule stays T3's. */
+ * did not fail: one that failed reads failed, with its failed card (`projectCompactOutcomes`), and shows. */
 function isSilentRun(run: OrchestrationV2Run, idle: ReadonlySet<string>, turnItems: readonly OrchestrationV2TurnItem[]): boolean {
 	return run.status !== "failed" && idle.has(run.userMessageId as string) && !turnItems.some((item) => item.runId === run.id && item.type === "compaction" && item.status === "failed");
 }

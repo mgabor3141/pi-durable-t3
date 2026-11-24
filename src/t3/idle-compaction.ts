@@ -2,7 +2,6 @@
 // with a large context is compacted shortly before the provider drops its prompt cache, while the summary can still
 // read the conversation from it. After that the same summary pays for every token, and so does the next message.
 import { globalIdleCompaction, isListedThreadLineage, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import { messageOf } from "../host-errors.ts";
 import type { BridgeCore } from "./bridge-core.ts";
 import { ThreadTimers } from "./thread-timers.ts";
@@ -36,7 +35,6 @@ function idleCompactionWindow(
 	const shown = projection.thread;
 	if (shown.deletedAt !== null || shown.archivedAt !== null) return { skip: "the thread is archived or deleted" };
 	if (shown.settledAt !== null || shown.settledOverride === "settled") return { skip: "the thread is settled" };
-	if (shown.snoozedUntil != null && DateTime.toEpochMillis(shown.snoozedUntil) > nowMs) return { skip: "the thread is snoozed" };
 	if (!isListedThreadLineage(shown.lineage)) return { skip: "a side chat" };
 	if (projection.runs.some((run) => run.status === "queued")) return { skip: "messages are queued" };
 	// A removed or steered queued message leaves a cancelled run that never started.

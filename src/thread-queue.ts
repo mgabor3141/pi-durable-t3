@@ -245,10 +245,14 @@ export class ThreadQueue {
 		if (conversation === undefined) throw hostError("unknown_thread", `no such conversation: ${input.conversationId}`);
 		// Only a run the Stop reached has steers to drop: one waiting with no run (a provider's limit) waits for the run
 		// to go on.
-		const reached = stop && (await this.#threads.harness.snapshot(LiveDoc, conversationId, BACKGROUND_CONTEXT))?.run !== undefined;
+		const live = stop ? await this.#threads.harness.snapshot(LiveDoc, conversationId, BACKGROUND_CONTEXT) : undefined;
+		const reached = live?.run !== undefined;
+		// A Stop of a `/compact` (no run): what waits behind it is held for the user to take up again, steers too.
+		const compacting = stop && !reached && (live?.compactions ?? []).some((compaction) => compaction.trigger === "manual");
 		const waiting = reached ? readQueuedInputs((await this.#threads.harness.snapshot(InboxDoc, conversationId, BACKGROUND_CONTEXT))?.items) : [];
 		const dropped = new Set(waiting.filter((item) => item.mode === "steer" && authorOf(item.entry?.data).createdBy === "user").map((item) => item.submissionId));
 		await conversation.abort(BACKGROUND_CONTEXT);
+		if (compacting) return this.#holdSteers(conversationId);
 		if (dropped.size === 0) return;
 		await this.#threads.harness.commit(async (tx) => {
 			// A message sent since the run ended started a run with the steers: they were read.
@@ -261,6 +265,27 @@ export class ThreadQueue {
 				inbox.items.splice(inbox.items.findIndex((item) => item.id === (steer.submissionId as unknown as SubmissionId)), 1);
 				const data = { ...(steer.entry?.data === undefined ? {} : copy(steer.entry.data)), messageId: steer.messageId, text: steer.text, cancelledAt };
 				await tx.appendEntry(conversationId, { kind: APP_UNREAD_STEER_ENTRY, data: data as JsonValue });
+			}
+		}, BACKGROUND_CONTEXT);
+	}
+
+	/**
+	 * After a Stop of a `/compact`: every steer that waited for its summary becomes a queued message, held in its place
+	 * with the others (the compaction's end starts nothing, `Threads.compact`). Each is then T3's queued message, which
+	 * its Edit opens in the composer, Send now starts and Remove takes away; Resume or the next message starts the
+	 * first. Unless a message started a run with them meanwhile (the summary landed first).
+	 */
+	async #holdSteers(conversationId: ConversationId): Promise<void> {
+		await this.#threads.harness.commit(async (tx) => {
+			if ((await tx.doc(LiveDoc, conversationId)).run !== undefined) return;
+			for (const item of (await tx.doc(InboxDoc, conversationId)).items) {
+				if (item.mode !== "steer") continue;
+				item.mode = "followUp";
+				const data = item.entry?.data;
+				if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) continue;
+				if (data.whenBusy === "steer") data.whenBusy = "followUp";
+				// A queued message promoted to a steer meanwhile is a queued message again.
+				delete data.promoted;
 			}
 		}, BACKGROUND_CONTEXT);
 	}
