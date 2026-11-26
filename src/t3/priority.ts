@@ -12,17 +12,19 @@ const INHERIT = "inherit";
 export const PRIORITIES = { high: -5, normal: 0, low: 5 } as const;
 export type Priority = keyof typeof PRIORITIES;
 
-/** The option as a model declares it (T3's `SelectProviderOptionDescriptor`). Inherit is the default: a thread that
- * chose nothing has none of its own. */
+/** The option as a model declares it (T3's `SelectProviderOptionDescriptor`). The labels are words no thinking level
+ * uses: T3 can show both options' values side by side ("High · Relaxed"). Inherit is not marked the default, so a thread
+ * that chose nothing shows no value at all rather than "Inherit"; it stays a choice, to go back to. The ids are what a
+ * thread's record keeps. */
 export const PRIORITY_DESCRIPTOR = {
 	id: PRIORITY_OPTION,
 	label: "Priority",
 	type: "select",
 	options: [
-		{ id: INHERIT, label: "Inherit", isDefault: true },
-		{ id: "high", label: "High" },
+		{ id: INHERIT, label: "Inherit" },
+		{ id: "high", label: "Urgent" },
 		{ id: "normal", label: "Normal" },
-		{ id: "low", label: "Low" },
+		{ id: "low", label: "Relaxed" },
 	],
 } as const;
 

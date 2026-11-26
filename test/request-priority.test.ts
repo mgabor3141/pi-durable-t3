@@ -82,10 +82,10 @@ it("a thread's priority is the request's priority field, only for a provider wit
 			label: "Priority",
 			type: "select",
 			options: [
-				{ id: "inherit", label: "Inherit", isDefault: true },
-				{ id: "high", label: "High" },
+				{ id: "inherit", label: "Inherit" },
+				{ id: "high", label: "Urgent" },
 				{ id: "normal", label: "Normal" },
-				{ id: "low", label: "Low" },
+				{ id: "low", label: "Relaxed" },
 			],
 		});
 		expect(plain.capabilities?.optionDescriptors?.find((option) => option.id === "priority")).toBeUndefined();
