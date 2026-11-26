@@ -206,7 +206,7 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
 - `attachT3(harness, options): Promise<T3Attachment>` (the options are documented in the comments of its options type,
   which has no exported name).
 - `T3Attachment`: `closed`, `close()`, `setTitle(threadId, title)`, `threadTools(options)`, `htmlTools(options)` (needs
-  `attachmentsDir`), `secretRequests(sink)` (a `SecretSink`), `askUser()`, `plainResults(registry)`, `textGenerationModel()`, and (when `preview`
+  `attachmentsDir`), `secretRequests(sink)` (a `SecretSink`), `askUser()`, `plainResults(registry)`, `requestPriority()`, `textGenerationModel()`, and (when `preview`
   is configured) `previewBrowser.open(conversationId, url)`, whose session has `id`, `page`, `touch()` and `close()`.
 - `mintPairingCode(stateDir): { code }`: a single-use pairing code, no server needed.
 - `abortable(tool)`: a tool whose call returns the moment Stop aborts it, for a tool that does not listen for
@@ -218,6 +218,13 @@ Releasing (bumping T3 or pi, versions, the npm release on a `v*` tag): [`.agents
   message's request renders the system prompt again. Without the extension, with no run to wait behind, or sent any
   other way, each is answered at once. It relies on pi-durable placing queued messages one at a time (`followUpMode`,
   the default). The other commands (`/context`, `/undo`, `/redo`, `/tree`, `/continue`) are answered when they arrive.
+- `t3.requestPriority()` (an extension to install on the Harness's registry): each thread's request priority, T3's
+  "Priority" option (Inherit, High, Normal, Low). pi sends a request the `priority` field (vLLM's: lower is taken
+  sooner) only for a model whose `compat.vllmPriority` is set in models.json, on its provider or on the model, and
+  only those models show the option. A thread's choice replaces that value: High -5, Normal 0, Low 5. On Inherit, the
+  default, a thread runs at its parent's (a subagent's, a side chat's), else at models.json's value. A fork takes its
+  source's choice when it is made and goes its own way after. A model without the setting keeps the thread's choice
+  for when it is back. Without the extension a choice is kept and shown, not sent.
 - `t3.plainResults(registry)` (an extension to install on the Harness's registry, last): what a tool result says
   besides its output is written for the model as pi coding agent writes it, a plain line after the output (`Command
   exited with code 3`, `[Showing the last 1998 lines. Full output: <file>]`, `(no output)`), where pi-durable puts it

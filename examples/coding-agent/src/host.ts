@@ -119,6 +119,8 @@ async function main(): Promise<void> {
 	runtime.registry.install(t3.askUser());
 	// A `/compact` or `/reload` sent as a queued message waits its turn in the queue.
 	runtime.registry.install(t3.queuedCommands());
+	// Each thread's priority in its requests, for a model with `compat.vllmPriority` in models.json (T3's "Priority").
+	runtime.registry.install(t3.requestPriority());
 	// What a tool result says besides its output, as plain lines; last, after every extension that changes a result.
 	runtime.registry.install(t3.plainResults(runtime.registry));
 

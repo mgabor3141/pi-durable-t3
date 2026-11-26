@@ -1,6 +1,7 @@
 // The documents the threads layer keeps in the Harness, and the shapes in them: one record per thread (a named
 // pointer to its head conversation, shaped after T3's `OrchestrationV2AppThread`), one sidebar summary per thread,
 // the directory of thread ids and heads, and the command receipts. `threads.ts` is their only writer.
+import type { Priority } from "./t3/priority.ts";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 
 /** Who created a thread or a message (T3's `OrchestrationV2Actor`). */
@@ -150,6 +151,8 @@ export type ThreadRecord = {
 	snoozedUntil?: number;
 	snoozedAt?: number;
 	lastSnoozeWakeAt?: number;
+	/** The thread's own request priority (T3's "Priority" option, `priority.ts`); absent: Inherit. */
+	priority?: Priority;
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;
 };

@@ -6,11 +6,13 @@ import type { HostUpdateWatch } from "./host-updates.ts";
 import { type ModelThinkingLevel, PI_AI_VERSION } from "@earendil-works/pi-ai";
 import type { ModelCapabilities, ServerProvider } from "@t3tools/contracts";
 import { modelSlug, type ModelRef, THINKING_OPTION } from "./model-types.ts";
+import { PRIORITY_DESCRIPTOR } from "./priority.ts";
 import type { Logger } from "./logging.ts";
 import { PROVIDER_DRIVER, PROVIDER_INSTANCE_ID } from "./projection.ts";
 import { messageOf } from "../host-errors.ts";
 
-export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[]; contextWindow: number };
+/** `priority`: pi sends the model a `priority` field, so it shows T3's "Priority" option (`priority.ts`). */
+export type CatalogModel = ModelRef & { name: string; thinkingLevels: readonly ModelThinkingLevel[]; contextWindow: number; priority?: true };
 
 /** Bring the model lists up to date (pi-ai's `Models.refresh`): `force` downloads even a list checked recently. */
 export type ModelListUpdate = (options: { force: boolean; signal: AbortSignal }) => Promise<{ readonly errors: ReadonlyMap<string, Error> }>;
@@ -35,19 +37,14 @@ const LEVEL_LABELS: Record<ModelThinkingLevel, string> = {
 	max: "Max",
 };
 
-/** The picker capabilities: pi's ladder, restricted to the model's levels; fewer than two declares no control. */
-function thinkingCapabilities(levels: readonly ModelThinkingLevel[]): ModelCapabilities | null {
-	if (levels.length < 2) return null;
-	return {
-		optionDescriptors: [
-			{
-				id: THINKING_OPTION,
-				label: "Thinking",
-				type: "select",
-				options: levels.map((level) => ({ id: level, label: LEVEL_LABELS[level] })),
-			},
-		],
-	};
+/** The picker capabilities: pi's ladder, restricted to the model's levels (fewer than two declares no control), then
+ * the priority where the model takes one. Thinking first: T3 takes a model's first select as its reasoning control. */
+function modelCapabilities(model: CatalogModel): ModelCapabilities | null {
+	const levels = model.thinkingLevels;
+	const descriptors: NonNullable<ModelCapabilities["optionDescriptors"]>[number][] = [];
+	if (levels.length >= 2) descriptors.push({ id: THINKING_OPTION, label: "Thinking", type: "select", options: levels.map((level) => ({ id: level, label: LEVEL_LABELS[level] })) });
+	if (model.priority === true) descriptors.push({ ...PRIORITY_DESCRIPTOR, options: [...PRIORITY_DESCRIPTOR.options] });
+	return descriptors.length === 0 ? null : { optionDescriptors: descriptors };
 }
 
 /** The slash commands this host answers itself (`thread-commands.ts`), as T3's composer lists them. */
@@ -192,7 +189,7 @@ export class ModelCatalog {
 					shortName: model.modelId,
 					subProvider: model.provider,
 					isCustom: false,
-					capabilities: thinkingCapabilities(model.thinkingLevels),
+					capabilities: modelCapabilities(model),
 				})),
 				slashCommands: [
 					...BUILT_IN_COMMANDS,

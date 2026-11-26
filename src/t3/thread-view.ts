@@ -36,6 +36,8 @@ export type CatalogEntry = {
 	contextWindow: number;
 	/** How long the provider keeps a prompt cache entry, in seconds, by retention (pi-ai's `Model.promptCache`). */
 	promptCache?: { readonly short?: number; readonly long?: number };
+	/** pi sends the model a `priority` field: the thread's priority is reported for it (`priority.ts`). */
+	priority?: true;
 };
 
 /** The head conversation's model and thinking level. */

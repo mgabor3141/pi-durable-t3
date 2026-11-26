@@ -36,6 +36,7 @@ import type { Page } from "playwright-core";
 import type { TitleThread } from "./t3/title-thread.ts";
 import { type Logger, nullLogger, type RpcLog } from "./t3/logging.ts";
 import { ModelCatalog } from "./t3/models.ts";
+import { takesPriority } from "./t3/priority.ts";
 import { startFacet } from "./t3/facet.ts";
 import { ConfigError } from "./config.ts";
 import { messageOf } from "./host-errors.ts";
@@ -249,6 +250,14 @@ export type T3Attachment = {
 	 */
 	plainResults(registry: RegistryReader): Extension;
 	/**
+	 * Each thread's request priority (T3's "Priority" model option: Inherit, High, Normal, Low), as an extension to
+	 * install on the Harness's registry: a request that pi gives a `priority` field (a model whose `compat.vllmPriority`
+	 * is set in models.json, on its provider or on the model) carries the thread's instead, -5, 0 or 5 (lower is taken
+	 * sooner). A thread on Inherit takes its parent's (a subagent's, a side chat's), else keeps models.json's value.
+	 * The option shows only on such models; without this extension, a choice is kept and shown but not sent.
+	 */
+	requestPriority(): Extension;
+	/**
 	 * T3's text-generation model (Settings), read at each call: the model to use for generated text such as summaries,
 	 * when the setting names one of this host's models; `undefined` means use the conversation's own model.
 	 */
@@ -333,6 +342,8 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 			contextWindow: model.contextWindow,
 			// pi-ai's own rule for which thinking levels a model has — the picker declares exactly these (capabilities.md).
 			thinkingLevels: getSupportedThinkingLevels(model),
+			// pi sends these a `priority` field: they show T3's "Priority" option (`priority.ts`).
+			...(takesPriority(model) ? { priority: true as const } : {}),
 		})),
 		// pi's lists, downloaded as pi downloads them (its runtime keeps PI_OFFLINE: then nothing is downloaded).
 		({ force, signal }) => options.models.refresh({ force, signal }),
@@ -403,6 +414,7 @@ export async function attachT3(harness: Harness, options: AttachT3Options): Prom
 		messageContext: (messageContext) => facet.messageContext(messageContext),
 		queuedCommands: () => facet.queuedCommands(),
 		plainResults: (registry) => facet.plainResults(registry),
+		requestPriority: () => facet.requestPriority(),
 		textGenerationModel: () => facet.textGenerationModel(),
 		hiddenModels: () => facet.hiddenModels(),
 		threadOf: (conversationId) => facet.threadOf(conversationId),

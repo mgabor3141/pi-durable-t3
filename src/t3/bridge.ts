@@ -33,6 +33,7 @@ import { ProviderLimits, type RecoveryUpdate } from "./provider-limits.ts";
 import { SidebarState } from "./sidebar-state.ts";
 import { RESTART_STOP_MESSAGE, Stops } from "./stops.ts";
 import { plainResultsExtension, type StopBy } from "./plain-results.ts";
+import { PRIORITIES, type Priority, priorityChoice, priorityExtension, takesPriority, threadPriority } from "./priority.ts";
 import { ThreadCommands } from "./thread-commands.ts";
 import { ThreadTitles } from "./thread-titles.ts";
 import { type LiveCall, UserInputRequests } from "./user-input.ts";
@@ -250,7 +251,15 @@ export class Bridge {
 			log,
 			head: (threadId) => this.#thread(threadId)?.head,
 			undos: (threadId) => this.#thread(threadId)?.undos ?? [],
-			catalog: (): CatalogEntry[] => this.#models.getModels().map((model) => ({ provider: model.provider, modelId: model.id, input: [...model.input], contextWindow: model.contextWindow, ...(model.promptCache === undefined ? {} : { promptCache: model.promptCache }) })),
+			catalog: (): CatalogEntry[] =>
+				this.#models.getModels().map((model) => ({
+					provider: model.provider,
+					modelId: model.id,
+					input: [...model.input],
+					contextWindow: model.contextWindow,
+					...(model.promptCache === undefined ? {} : { promptCache: model.promptCache }),
+					...(takesPriority(model) ? { priority: true as const } : {}),
+				})),
 			meta: (threadId, view) => this.#meta(threadId, this.#thread(threadId), view),
 			nextSequence: () => bridge.nextSequence(),
 			projected: (view, change) => this.#projected(view, change),
@@ -592,6 +601,8 @@ export class Bridge {
 			...(this.config.promptUpdateTitle === undefined ? {} : { promptUpdateTitle: this.config.promptUpdateTitle }),
 			...(this.messageContexts.pending.size === 0 ? {} : { pendingContexts: this.messageContexts.pending }),
 			...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			// Reported where the thread's model offers the option, as T3's client keeps only the options a model declares.
+			...(thread?.priority === undefined || listed?.priority !== true ? {} : { priority: thread.priority }),
 			...(listed === undefined ? {} : { contextWindow: listed.contextWindow, ...(listed.promptCache === undefined ? {} : { promptCache: listed.promptCache }) }),
 			...(thread === undefined
 				? {}
@@ -1272,6 +1283,14 @@ export class Bridge {
 	 * because the bridge computes no defaults (design.md, north star).
 	 */
 	async applySelection(threadId: string, selection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined): Promise<void> {
+		// The priority is kept last, so a refused selection keeps none of it; its value is checked first.
+		const priority = this.#priorityChoice(selection?.options);
+		await this.#applyModel(threadId, selection);
+		if (priority !== undefined) await this.#applyPriority(threadId, priority);
+	}
+
+	/** A selection's model and thinking level, applied to the thread's head. */
+	async #applyModel(threadId: string, selection: { model?: string; options?: readonly { id: string; value: string | boolean }[] } | undefined): Promise<void> {
 		const model = selection?.model === undefined ? undefined : splitSlug(selection.model);
 		if (model === undefined) return;
 		const thinking = thinkingOf(selection?.options);
@@ -1617,6 +1636,36 @@ export class Bridge {
 		if ((await state.projection(30_000)).projection.runs.at(-1)?.status !== "interrupted") return undefined;
 		const by = this.#stops.last(threadId, failure.taskId as number);
 		return by === undefined ? {} : { by };
+	}
+
+	/** A selection's "Priority" choice (`priorityChoice`), an unknown value refused as a command's error. */
+	#priorityChoice(options: readonly { id: string; value: string | boolean }[] | undefined): Priority | null | undefined {
+		try {
+			return priorityChoice(options);
+		} catch (error) {
+			throw new CommandError((error as Error).message);
+		}
+	}
+
+	/** A "Priority" choice, kept on the thread's record: Inherit (`null`) clears it. A selection that names none (a
+	 * message on a model without the option) keeps the thread's. */
+	async #applyPriority(threadId: string, choice: Priority | null): Promise<void> {
+		await this.updateThreadRecord(threadId, (record) => {
+			if ((record.priority ?? null) === choice) return false;
+			if (choice === null) delete record.priority;
+			else record.priority = choice;
+		});
+	}
+
+	/** `T3Attachment.requestPriority`: a thread's priority in the requests pi gives a `priority` field. */
+	requestPriority(): Extension {
+		return priorityExtension({
+			priorityOf: (conversationId) => {
+				const threadId = this.threadOf(conversationId)?.threadId;
+				const priority = threadId === undefined ? undefined : threadPriority(threadId, (id) => this.#thread(id));
+				return priority === undefined ? undefined : PRIORITIES[priority];
+			},
+		});
 	}
 
 	/** `T3Attachment.plainResults`: tool results with their notes as plain lines, and who stopped a call. */

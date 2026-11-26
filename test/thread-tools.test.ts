@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
+import { GenerationTask } from "@earendil-works/pi-durable";
 import { Bridge } from "../src/t3/bridge.ts";
 import { dispatchCommand } from "../src/t3/dispatch.ts";
 import { USER_WEB } from "../src/threads.ts";
@@ -884,4 +885,28 @@ it("a webhook task's URL is returned by its creation only, and a task is listed 
 	expect(updated).toMatchObject({ title: "Hook renamed", webhookSignature: "none" });
 	expect(updated).not.toHaveProperty("webhookUrl");
 	expect(other).not.toHaveProperty("webhookUrl");
+});
+
+it("a child runs at its parent's priority until it has one of its own (`priority.ts`)", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Adder" }, message: "What is 2+2?" } });
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	const child = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a")!;
+	const handler = bridge.requestPriority().hooks!.find((installed) => installed.task === GenerationTask.definition.name)!.handlers as {
+		beforeProviderRequest: (request: { model: unknown; payload: unknown }, api: { conversationId: number }) => { payload: { priority: number } } | undefined;
+	};
+	const sent = (threadId: string) => handler.beforeProviderRequest({ model: {}, payload: { priority: 3 } }, { conversationId: bridge.threadRecord(threadId)!.head })?.payload.priority;
+	expect(sent(child.threadId), "nothing chosen: models.json's value stands").toBeUndefined();
+	await bridge.applySelection("a", { options: [{ id: "priority", value: "low" }] });
+	expect(sent("a")).toBe(5);
+	expect(sent(child.threadId)).toBe(5);
+	await bridge.applySelection(child.threadId, { options: [{ id: "priority", value: "high" }] });
+	expect(sent(child.threadId)).toBe(-5);
+	expect(bridge.threadRecord(child.threadId)!.priority).toBe("high");
+	// A refused selection keeps none of its choices.
+	await expect(bridge.applySelection(child.threadId, { model: "ghost/none", options: [{ id: "priority", value: "low" }] })).rejects.toThrow("Not in the catalog: ghost/none");
+	expect(sent(child.threadId)).toBe(-5);
+	await bridge.applySelection(child.threadId, { options: [{ id: "priority", value: "inherit" }] });
+	expect(sent(child.threadId)).toBe(5);
+	await expect(bridge.applySelection("a", { options: [{ id: "priority", value: "urgent" }] })).rejects.toThrow("Unknown priority: urgent");
 });

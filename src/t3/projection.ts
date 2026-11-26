@@ -22,6 +22,7 @@ import { idleCompactionOf } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { PI_CAPABILITIES } from "./capabilities.ts";
 import { type ContentBlock, type ConversationView, type LiveDoc, type DurableMessage, type EntryRecord, modelSlug, type ModelRef, thinkingOf as thinkingLevelOf, thinkingOption } from "./model-types.ts";
+import { PRIORITY_OPTION } from "./priority.ts";
 import { textOf } from "./thread-search.ts";
 import { SCHEDULED_MESSAGE_ID } from "./scheduled-tasks.ts";
 import { APP_CONTINUE_ENTRY, APP_UNREAD_STEER_ENTRY, attachmentsOf, contextFromText, contextOf, firstMessage, groupRuns, htmlRenderOf, isAbortedToolResult, isAssistantEntry, isCompactCommandEntry, isNoteEntry, isUserEntry, messageIdOf, type RunDraft, sentAs, stopReason, authorOf, unreadSteerOf } from "./runs.ts";
@@ -184,6 +185,8 @@ export interface ThreadMeta {
 	readonly promptUpdateTitle?: (changes: readonly SectionChange[]) => string | undefined;
 	/** The Session's thinking level, reported back as the selection's `thinking` option. */
 	readonly thinkingLevel?: string;
+	/** The thread's own request priority (`ThreadRecord.priority`), reported back as the selection's `priority` option. */
+	readonly priority?: string;
 	/** The selected model's context window, for T3's context meter. */
 	readonly contextWindow?: number;
 	/** How long the selected model's provider keeps a prompt cache entry, in seconds (`CatalogEntry.promptCache`). */
@@ -391,7 +394,10 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const modelSelection: Any = {
 		instanceId: PROVIDER_INSTANCE_ID,
 		model: meta.model === null ? "default" : modelSlug(meta.model),
-		...(meta.thinkingLevel === undefined ? {} : { options: thinkingOption(meta.thinkingLevel) }),
+		// The thread's own priority, as the option it was chosen with (`priority.ts`); Inherit is the option's default.
+		...(meta.thinkingLevel === undefined && meta.priority === undefined
+			? {}
+			: { options: [...(meta.thinkingLevel === undefined ? [] : thinkingOption(meta.thinkingLevel)), ...(meta.priority === undefined ? [] : [{ id: PRIORITY_OPTION, value: meta.priority }])] }),
 	};
 	const history = memory.history ?? [];
 	// A side chat shows only its own rows: what it inherited reaches the model, and T3 links the main thread instead.

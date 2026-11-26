@@ -50,6 +50,8 @@ type FacetHandle = {
 	queuedCommands(): Extension;
 	/** Tool results with their notes as plain lines (`T3Attachment.plainResults`). */
 	plainResults(registry: RegistryReader): Extension;
+	/** Each thread's priority in its requests (`T3Attachment.requestPriority`). */
+	requestPriority(): Extension;
 	/** A message's context from the integrator (`T3Attachment.messageContext`). */
 	messageContext(messageContext: MessageContext): Extension;
 	/** The thread tools as an extension (`T3Attachment.threadTools`). */
@@ -157,6 +159,7 @@ export function startFacet(deps: {
 		messageContext: (messageContext) => bridge.messageContexts.extension(messageContext),
 		queuedCommands: () => bridge.queuedCommands.extension(),
 		plainResults: (registry) => bridge.plainResults(registry),
+		requestPriority: () => bridge.requestPriority(),
 		threadTools: (options) => threadToolsExtension(bridge, orchestration, { ...options, ops: new ThreadOps(bridge, auth.environmentId, log, scheduledTasks) }),
 		htmlTools: (options) => {
 			// A page is kept where attachments are: without `attachmentsDir` there is nowhere to keep one.

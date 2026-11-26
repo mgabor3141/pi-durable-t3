@@ -510,10 +510,10 @@ export class Threads {
 	}
 
 	/** A promoted child thread of `via`: an undo fork of a head that moved on, or a conversation written to after its
-	 * thread moved past it. It inherits its parent's provenance, title and root. */
+	 * thread moved past it. It inherits its parent's provenance, title, root and priority. */
 	#childOf(via: ThreadRecord | undefined, viaThreadId: string, head: number, projectId: string): ThreadRecord {
 		const threadId = randomUUID();
-		return this.#newRecord({
+		const record = this.#newRecord({
 			threadId,
 			projectId,
 			head,
@@ -521,6 +521,9 @@ export class Threads {
 			provenance: via === undefined ? USER_WEB : { createdBy: via.createdBy, creationSource: via.creationSource },
 			lineage: { parentThreadId: viaThreadId, relationshipToParent: "fork", rootThreadId: via?.lineage.rootThreadId ?? viaThreadId },
 		});
+		// A fork: its parent's priority as it is now (`priority.ts`).
+		if (via?.priority !== undefined) record.priority = via.priority;
+		return record;
 	}
 
 	/**
@@ -1294,6 +1297,8 @@ export class Threads {
 							: { type: "run", threadId: source.threadId, runId: input.runId },
 				...(input.child === undefined ? {} : { spawn: input.child.spawn }),
 			});
+			// A fork takes its source's priority as it is now (Inherit too); a side chat and a child follow theirs (`priority.ts`).
+			if (input.child === undefined && input.sideChat !== true && source.priority !== undefined) record.priority = source.priority;
 			if (input.sideChat === true) {
 				record.pendingContext = { type: "side_chat" };
 				if (input.entryId !== undefined) record.forkEntryId = input.entryId;
