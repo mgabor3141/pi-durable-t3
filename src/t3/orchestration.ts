@@ -35,6 +35,7 @@ import { CommandError } from "./errors.ts";
 import type { Logger } from "./logging.ts";
 import { ChildQuestions, pendingQuestions, questionNotice } from "./child-questions.ts";
 import { childCardNodeId } from "./projection.ts";
+import { reportBlocks, reportChild, reportHeader } from "./notices.ts";
 import { awaitsChildren, exchanges, isActiveIn, isActiveRun, isActiveShell, isBusy, type Report, report, settledReport, takesSteer, type Verdict, worstVerdict } from "./reports.ts";
 import { subagentThreadTitle } from "./child-title.ts";
 import { messageOf } from "../host-errors.ts";
@@ -91,11 +92,6 @@ interface ThreadSummaryRow {
 	readonly lastMessage: string | null;
 }
 
-/** One report in a report message: its header names the thread it is from, and the reports are separated by a blank
- * line before the next header. */
-const reportHeader = (title: string, child: string, verdict: string) => `[Report from thread "${title}" (${child}), ${verdict}]`;
-const REPORT_HEADER = /^\[Report from thread ".*" \(([^()\s]+)\), (?:completed|failed|interrupted|active)\]$/m;
-const REPORT_SPLIT = /\n\n(?=\[Report from thread ".*" \([^()\s]+\), (?:completed|failed|interrupted|active)\]\n)/;
 /** What one report message holds of its reports' text, as T3 inlines delegated results up to 16 KB in one wake
  * (`DELEGATED_RESULT_INLINE_BYTES`): ten children that settle together do not post ten long reports in one turn. The
  * first report in a message is whole (its own budget cuts it, `reports.ts`); a later one that does not fit says where to
@@ -117,13 +113,6 @@ const reportsText = (items: readonly { readonly child: string; readonly report: 
 		.join("\n\n");
 };
 
-/** A report message's reports, each from its header on. */
-export const reportBlocks = (text: string): string[] => text.split(REPORT_SPLIT);
-/** The thread a report is from, read from its header. */
-export const reportChild = (block: string): string | undefined => {
-	const header = block.split("\n", 1)[0] ?? "";
-	return REPORT_HEADER.exec(header)?.[1];
-};
 
 /** A report for a parent whose child waits on `requestIds`: it says so, and how each is answered. */
 const asking = (entry: Report, requestIds: readonly string[]): Report =>
@@ -435,7 +424,7 @@ export class Orchestration {
 		await this.#bridge.updateThreadRecord(threadId, (record) => {
 			record.notify = (record.notify ?? []).filter((request) => !answered.has(request.id));
 		});
-		this.#nudge(caller);
+		this.#owedChanged(caller);
 	}
 
 	/** The report of the activity `messageId` started, once it settled; or, for the thread's parent, the activity so far
@@ -498,6 +487,13 @@ export class Orchestration {
 	/** Wake the waits on `threadId`'s projection to look again (`#watch`). */
 	#nudge(threadId: string): void {
 		for (const wake of this.#nudges.get(threadId) ?? []) wake();
+	}
+
+	/** A request owed to `threadId` was taken off its child's record: its waits look again, and so does its parent's card
+	 * of it, which shows it working while it waits for its children (`Bridge.refreshCard`). */
+	#owedChanged(threadId: string): void {
+		this.#nudge(threadId);
+		this.#bridge.refreshCard(threadId);
 	}
 
 	/**
@@ -580,7 +576,7 @@ export class Orchestration {
 				record.notify = (record.notify ?? []).filter((request) => !silenced.has(request.threadId));
 			});
 		}
-		for (const id of silenced) this.#nudge(id);
+		for (const id of silenced) this.#owedChanged(id);
 		const stopped: string[] = [];
 		for (const id of subtree) {
 			if (!this.#isActive(id)) continue;
@@ -612,7 +608,7 @@ export class Orchestration {
 						record.notify = (record.notify ?? []).filter((request) => !silenced.has(request.threadId));
 					});
 				}
-				for (const id of silenced) this.#nudge(id);
+				for (const id of silenced) this.#owedChanged(id);
 				for (const id of subtree) {
 					const parent = this.#bridge.threadRecord(id)?.lineage.parentThreadId;
 					if (parent != null) await this.#retract(parent, id);
@@ -689,7 +685,7 @@ export class Orchestration {
 		await this.#bridge.updateThreadRecord(threadId, (record) => {
 			record.notify = (record.notify ?? []).filter((candidate) => candidate.id !== id);
 		});
-		this.#nudge(request.threadId);
+		this.#owedChanged(request.threadId);
 	}
 
 	// ---- answering --------------------------------------------------------------------------------------------
@@ -703,6 +699,8 @@ export class Orchestration {
 			if (notify.some((request) => request.id === id)) return false;
 			record.notify = [...notify, { id, threadId: caller, messageId, createdAt: Date.now(), wake, ...(runId === undefined ? {} : { runId }) } satisfies NotifyRequest];
 		});
+		// The caller now waits for this child: its parent's card of it shows it working (`Bridge.refreshCard`).
+		this.#bridge.refreshCard(caller);
 		this.#follow(threadId);
 	}
 
@@ -932,8 +930,8 @@ export class Orchestration {
 			await this.#bridge.updateThreadRecord(child, (record) => {
 				record.notify = (record.notify ?? []).filter((candidate) => candidate.id !== request.id);
 			});
-			this.#nudge(request.threadId);
 		}
+		for (const caller of new Set(items.map((item) => item.request.threadId))) this.#owedChanged(caller);
 	}
 
 	// ---- helpers ----------------------------------------------------------------------------------------------

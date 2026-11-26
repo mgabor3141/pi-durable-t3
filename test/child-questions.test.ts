@@ -233,6 +233,13 @@ it("a parent that does not wait is told by a message that names the request, onc
 	);
 	// The model reads it as it is: a message of the host's own carries no note of who sent it, as T3's notices carry none.
 	expect(noticed).toEqual([told[0]!.text]);
+	// A person sees T3's notice row for it; the child's report after it is the one that opens the card (`noticeItems`).
+	const card = parent.subagents.find((subagent) => subagent.childThreadId === kid)!;
+	expect(parent.turnItems.filter((item) => item.type === "notification")).toEqual([
+		expect.objectContaining({ source: { kind: "delegated_task", taskIds: [], childThreadId: kid }, outcome: "updated", summary: 'Delegated task "Kid" has a question', detail: told[0]!.text }),
+		expect.objectContaining({ source: { kind: "delegated_task", taskIds: [card.id], childThreadId: kid }, outcome: "completed", summary: 'Delegated task "Kid" finished' }),
+	]);
+	expect(parent.turnItems.some((item) => item.type === "user_message" && item.messageId === told[0]!.id)).toBe(false);
 	expect(request).toMatchObject({ status: "resolved", answers: { q1: "Postgres" } });
 	expect(parent.messages.find((message) => message.text.startsWith("Got the report"))!.text).toContain("Child got:");
 });

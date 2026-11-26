@@ -44,3 +44,16 @@ it("marks a change of model or thinking level on the message that brought it, an
 		m5: null,
 	});
 });
+
+it("a run a child's report started is no turn of a person's: the switch shows on the person's next message", () => {
+	const report = (messageId: string, model: string): EntryRecord[] => [
+		{ id: ++id, kind: "app.user", data: { messageId, createdBy: "agent", creationSource: "server" }, model: [{ role: "user", content: '[Report from thread "Child" (t-child), completed]\n[AGENT]: done', timestamp: id }] },
+		{ id: ++id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "ok" }], provider: "p", model, stopReason: "stop", timestamp: id }] },
+	] as unknown as EntryRecord[];
+	const entries = [...turn("r1", "a"), ...report("n-report", "b"), ...turn("r2", "b")];
+	const { projection } = projectThread(meta, view(entries), { rolledBack: [] });
+	const items = projection.turnItems as unknown as { type: string; messageId?: string; modelSwitch?: { from: { model: string }; to: { model: string } } }[];
+	expect(items.filter((item) => item.type === "notification")).toHaveLength(1);
+	const switches = Object.fromEntries(items.filter((item) => item.type === "user_message").map((item) => [item.messageId, item.modelSwitch === undefined ? null : [item.modelSwitch.from.model, item.modelSwitch.to.model]]));
+	expect(switches).toEqual({ r1: null, r2: ["p/a", "p/b"] });
+});

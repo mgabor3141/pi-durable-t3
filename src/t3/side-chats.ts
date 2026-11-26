@@ -34,6 +34,9 @@ function digestLine(item: OrchestrationV2TurnItem): string | null {
 	switch (item.type) {
 		case "user_message":
 			return `- User: ${compactText(any.text ?? "")}`;
+		// A child's report or question, which the model read as a message (`notices.ts`).
+		case "notification":
+			return `- User: ${compactText((item as { detail?: string }).detail ?? "")}`;
 		case "assistant_message":
 			return `- Assistant: ${compactText(any.text ?? "")}`;
 		case "command_execution":
@@ -103,8 +106,9 @@ export function mergeBackContext(
 	const runs = ownRuns(projection, forkedFromRunId);
 	const through = runs.findIndex((run) => (run.id as string) === runId);
 	const messages = itemsOf(projection, runs.slice(0, through + 1)).flatMap((item) => {
-		const text = (item as { text?: string }).text ?? "";
-		return (item.type === "user_message" || item.type === "assistant_message") && text.trim() !== "" ? [{ role: item.type === "user_message" ? "User" : "Assistant", text }] : [];
+		// A child's report or question shows as a notice; the model read its text (`detail`) as a message.
+		const text = (item.type === "notification" ? (item as { detail?: string }).detail : (item as { text?: string }).text) ?? "";
+		return (item.type === "user_message" || item.type === "assistant_message" || item.type === "notification") && text.trim() !== "" ? [{ role: item.type === "assistant_message" ? "Assistant" : "User", text }] : [];
 	});
 	const kind = source.sideChat ? "side chat" : "fork";
 	const header = `Context brought back from the ${kind} "${source.title}" (${source.threadId}) of this thread: its conversation since it started from here. It is context, not a new request.`;

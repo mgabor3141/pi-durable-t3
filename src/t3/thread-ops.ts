@@ -191,6 +191,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
 	};
 	const it = item as Record<string, unknown> & { type: string };
 	switch (it.type) {
+		case "notification":
+			return [it.summary as string, it.detail as string | undefined].filter((part) => part !== undefined).join("\n");
 		case "user_message":
 		case "assistant_message":
 		case "reasoning":

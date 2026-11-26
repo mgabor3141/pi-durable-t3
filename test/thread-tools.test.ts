@@ -17,6 +17,7 @@ import { ScheduledTasks, scheduledTaskDispatch } from "../src/t3/scheduled-tasks
 import { ThreadOps } from "../src/t3/thread-ops.ts";
 import { childCardNodeId } from "../src/t3/projection.ts";
 import { threadToolsExtension } from "../src/t3/thread-tools.ts";
+import { mergeBackContext, sideChatNote } from "../src/t3/side-chats.ts";
 import { conversation, createNamed, makeThreads, bridgeConfig } from "./threads-harness.ts";
 import { until } from "./wait.ts";
 
@@ -172,6 +173,16 @@ it("a child started without waiting reports back into its parent, which wakes fo
 	expect(delivered!.text).toContain("[AGENT]: 10");
 	expect(parent!.messages.find((message) => message.text.startsWith("Got the report"))!.text).toBe("Got the report: [AGENT]: 10");
 	expect(bridge.threadRecord(saw.threadId)!.notify ?? []).toEqual([]);
+	// A person sees T3's notice row, which opens the child's card, not a bubble of the report's text.
+	const card = parent!.subagents.find((subagent) => subagent.childThreadId === saw.threadId)!;
+	const rows = parent!.turnItems.filter((item) => (item as { messageId?: string }).messageId === delivered!.id || (item.type === "notification" && item.runId === delivered!.runId));
+	expect(rows).toEqual([
+		expect.objectContaining({ type: "notification", source: { kind: "delegated_task", taskIds: [card.id], childThreadId: saw.threadId }, outcome: "completed", summary: `Delegated task "${card.title}" finished`, detail: delivered!.text }),
+	]);
+	// What other threads are told of this one still holds the report the model read: a side chat's digest, and what a
+	// fork brings back.
+	expect(sideChatNote("a", parent!, undefined)).toContain("- User: [Report from thread");
+	expect(mergeBackContext({ threadId: "a", title: "Parent", sideChat: false }, parent!, undefined, parent!.runs.at(-1)!.id as string)).toContain("[User]\n[Report from thread");
 });
 
 it("a note joins a thread's context without starting work; reads, lists and the restart delivery", { timeout: 60_000 }, async () => {
@@ -283,7 +294,9 @@ it("a child that hands work on without waiting reports once that work is done, n
 	// The child's turn ends once it has started the grandchild; the grandchild still works.
 	await settled(child, (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
 	await new Promise((resolve) => setTimeout(resolve, 300));
-	expect((await bridge.projection("a")).projection.messages.filter((message) => message.text.startsWith("[Report from thread")), "no report before the grandchild's work is done").toEqual([]);
+	const waiting = (await bridge.projection("a")).projection;
+	expect(waiting.messages.filter((message) => message.text.startsWith("[Report from thread")), "no report before the grandchild's work is done").toEqual([]);
+	expect(waiting.subagents.find((subagent) => subagent.childThreadId === child), "its card shows it working, waiting for the grandchild").toMatchObject({ status: "running", result: null });
 	gate("g1").release();
 	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
 	const reports = parent!.messages.filter((message) => message.text.startsWith("[Report from thread"));
@@ -331,12 +344,41 @@ it("a person's message to a child that finished is reported to its parent; anoth
 	const report = parent!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text;
 	expect(report).toContain("[USER]: And 3+4?");
 	expect(report.split("\n").at(-1)).toBe("[AGENT]: 7");
+	// Its notice opens the child's card, which shows the newest result. (The first report came back to the parent's wait,
+	// so it has no notice.)
+	const card = parent!.subagents.find((subagent) => subagent.childThreadId === child)!;
+	expect(parent!.turnItems.filter((item) => item.type === "notification")).toEqual([expect.objectContaining({ source: { kind: "delegated_task", taskIds: [card.id], childThreadId: child } })]);
 	// Another thread that writes to the child (T3's `t3_thread_send`) asked for its own answer: the parent is not told.
 	await create({ threadId: "b", projectId: "p", title: "Other" });
 	await ops.send({ threadId: "b" }, { threadId: child, message: "And 1+1?" } as never);
 	await settled(child, (projection) => projection.messages.some((message) => message.role === "assistant" && message.text === "2"));
 	await new Promise((resolve) => setTimeout(resolve, 300));
 	expect((await bridge.projection("a")).projection.messages.filter((message) => message.text.startsWith("[Report from thread"))).toHaveLength(1);
+	// The person writes again: of the two notices, only the newest opens the card (which shows that result); the earlier
+	// is its line alone.
+	await dispatchCommand(bridge, { type: "message.dispatch", commandId: "person-2", threadId: child, messageId: "person-m2", text: "And 5+5?", dispatchMode: { type: "queue_after_active" } } as never, USER_WEB, log);
+	const again = await settled("a", (projection) => projection.messages.filter((message) => message.text.startsWith("Got the report:")).length === 2);
+	expect(again!.turnItems.filter((item) => item.type === "notification").map((item) => (item as { source: unknown }).source)).toEqual([
+		{ kind: "delegated_task", taskIds: [], childThreadId: child },
+		{ kind: "delegated_task", taskIds: [card.id], childThreadId: child },
+	]);
+});
+
+it("a child shows as working in its parent while a person's message to its own child is answered", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled } = await setup();
+	const inner = JSON.stringify({ name: "thread_prompt", args: { new: { title: "Grandchild" }, message: "What is 1+1?", wait: false } });
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Child" }, message: `Delegate ${inner}`, wait: false } });
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
+	const child = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a")!.threadId;
+	const grandchild = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === child)!.threadId;
+	expect((await bridge.projection("a")).projection.subagents[0]).toMatchObject({ status: "completed" });
+	// A person writes to the grandchild: the child waits for its report now, and its card in the parent says so.
+	await dispatchCommand(bridge, { type: "message.dispatch", commandId: "person-g", threadId: grandchild, messageId: "person-g1", text: "Hold on: z", dispatchMode: { type: "queue_after_active" } } as never, USER_WEB, log);
+	const working = await bridge.waitFor("a", (projection) => (projection.subagents[0]?.status === "running" ? projection.subagents[0] : undefined), 3_000);
+	expect(working, "the child's card shows it working").toMatchObject({ status: "running", result: null });
+	gate("z").release();
+	const done = await bridge.waitFor("a", (projection) => (projection.subagents[0]?.status === "completed" ? projection.subagents[0] : undefined), 10_000);
+	expect(done).toMatchObject({ status: "completed" });
 });
 
 it("one message holds at most 16,000 characters of reports; a report past that says where to read it", { timeout: 60_000 }, async () => {
@@ -358,6 +400,8 @@ it("one message holds at most 16,000 characters of reports; a report past that s
 	expect(text).not.toContain("b".repeat(100));
 	const second = bridge.threadRecords().find((thread) => thread.title === "Second")!.threadId;
 	expect(text).toContain(`[Not shown: this message holds enough reports already. Read it with thread_read, threadId ${second}]`);
+	const row = parent!.turnItems.find((item) => item.type === "notification");
+	expect(row).toMatchObject({ outcome: "completed", summary: "2 delegated tasks finished: First, Second", source: { kind: "delegated_task", taskIds: parent!.subagents.map((subagent) => subagent.id) } });
 });
 
 it("thread_wait collects several children's reports with the worst verdict", { timeout: 60_000 }, async () => {
@@ -411,15 +455,17 @@ it("a busy parent gets its children's reports in its turn, joined into one messa
 	}
 	// One message, steered at the running turn, which the next two joined; it waits in that turn, to be read at its
 	// next boundary, and is never queued.
+	// It shows as T3's notice row, waiting with it.
 	const during = await bridge.waitFor("a", (projection) => {
-		const waiting = projection.turnItems.filter((item) => item.type === "user_message" && item.status === "pending") as { messageId: string }[];
-		const message = waiting.length === 1 ? projection.messages.find((candidate) => candidate.id === waiting[0]!.messageId) : undefined;
-		return message !== undefined && message.text.includes("released b3") && !projection.runs.some((run) => run.status === "queued") ? { message } : undefined;
+		const waiting = projection.turnItems.filter((item) => item.type === "notification" && item.status === "pending") as { detail?: string }[];
+		const message = waiting.length === 1 ? projection.messages.find((candidate) => candidate.text === waiting[0]!.detail) : undefined;
+		return message !== undefined && message.text.includes("released b3") && !projection.runs.some((run) => run.status === "queued") ? { message, row: waiting[0] } : undefined;
 	}, 10_000);
 	expect(during, "one pending message holding all three").toBeDefined();
 	expect(during!.message.text).toContain("[AGENT]: released b1");
 	expect(during!.message.text).toContain("[AGENT]: released b2");
 	expect(during!.message.text.indexOf("released b1")).toBeLessThan(during!.message.text.indexOf("released b3"));
+	expect(during!.row).toMatchObject({ summary: "3 delegated tasks finished: b1, b2, b3", outcome: "completed" });
 	gate("parent").release();
 	const after = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report")));
 	const posted = after!.messages.filter((message) => message.role === "user" && message.text.includes("[Report from thread"));
@@ -460,7 +506,7 @@ it("a report the parent collects while it still waits in its queue is taken out,
 });
 
 it("a report message splits into its reports by their headers", async () => {
-	const { reportBlocks, reportChild } = await import("../src/t3/orchestration.ts");
+	const { reportBlocks, reportChild } = await import("../src/t3/notices.ts");
 	const one = '[Report from thread "A \"quoted\" title" (t-a1), completed]\n[YOU]: go\n\n[AGENT]: done\n\nwith a blank line';
 	const two = '[Report from thread "B" (t-b2), failed]\n[AGENT]: [Report from thread "X" (t-x), completed] is quoted, not a header';
 	const blocks = reportBlocks(`${one}\n\n${two}`);

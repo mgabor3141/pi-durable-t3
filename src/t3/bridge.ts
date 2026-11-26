@@ -51,7 +51,7 @@ import { MessageContexts } from "./message-contexts.ts";
 import { ThreadNavigator } from "./thread-navigator.ts";
 import { memoryReport } from "./memory-report.ts";
 import { queuedCommand, QueuedCommands } from "./queued-commands.ts";
-import { isActiveRun, isActiveShell } from "./reports.ts";
+import { awaitsChildren, isActiveRun, isActiveShell } from "./reports.ts";
 import { type CatalogEntry, type StreamUpdate, ThreadView, type ThreadViewHost } from "./thread-view.ts";
 
 export { CommandError, type StreamUpdate };
@@ -783,6 +783,13 @@ export class Bridge {
 				completedAt = run.completedAt ?? run.requestedAt;
 				result = child.summary.latestVisibleMessage?.role === "assistant" ? child.summary.latestVisibleMessage.text : null;
 			} else status = "running";
+			// A child that waits for reports of its own children works on when they come (T3's `waiting_for_children`):
+			// its card is working, with no result yet.
+			if (status !== "running" && status !== "waiting" && awaitsChildren(this.#directory, child.threadId)) {
+				status = "running";
+				result = null;
+				completedAt = null;
+			}
 			cards.push({
 				threadId: child.threadId,
 				title: child.title,
@@ -796,6 +803,16 @@ export class Bridge {
 			});
 		}
 		return cards;
+	}
+
+	/** Show `childThreadId`'s card again in its parent: what the card reads besides the child's own shell has changed
+	 * (`awaitsChildren`, the requests of the child's children). */
+	refreshCard(childThreadId: string): void {
+		const parent = this.#thread(childThreadId)?.spawn === undefined ? undefined : this.#thread(childThreadId)?.lineage.parentThreadId;
+		if (parent == null || !this.hasThread(parent)) return;
+		const view = this.#views.get(parent);
+		if (view?.result !== undefined) view.recompute();
+		else this.#publishShell(parent);
 	}
 
 	/** A child's run settled: keep its outcome on its record, so its parent's card is right after the child's view closes. */

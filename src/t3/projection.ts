@@ -39,6 +39,7 @@ import { type SectionChange, systemPromptUpdates, updateDetails, updateTitle } f
 import { sentTokens, sizeAfterCompaction } from "./context-size.ts";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, MAX_TOOL_OUTPUT_IMAGES, readToolOutputImage } from "@t3tools/shared/toolOutput";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { noticeItems } from "./notices.ts";
 
 /** pi-durable's codemode tool (`CODEMODE_TOOL_NAME`): its one argument, `code`, is a JavaScript script. */
 const CODEMODE_TOOL = "codemode";
@@ -1811,6 +1812,9 @@ export function projectThread(
 	// Answers with no run to stand by: an undo's, on a thread it emptied.
 	for (const shown of shownAlone) shownAnswer(b, shown);
 
+	// The host's report and question messages show as T3's notice rows (`notices.ts`): a run one starts is no turn of
+	// a person's, so a model switch shows on the person's next one.
+	noticeItems(b.turnItems, b.subagents);
 	markModelSwitches(b.runs, b.turnItems, drafts);
 	projectLiveCompactions(b);
 	projectCompactOutcomes(b, memory.compactOutcomes);
