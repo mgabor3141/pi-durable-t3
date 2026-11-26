@@ -151,7 +151,7 @@ export type ThreadRecord = {
 	snoozedUntil?: number;
 	snoozedAt?: number;
 	lastSnoozeWakeAt?: number;
-	/** The thread's own request priority (T3's "Priority" option, `priority.ts`); absent: Inherit. */
+	/** The thread's own request priority (T3's "Priority" option, `priority.ts`); absent: Default, its parent's. */
 	priority?: Priority;
 	/** Bumped on every write, so an older in-memory copy never replaces a newer one. */
 	revision: number;

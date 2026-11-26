@@ -1647,7 +1647,7 @@ export class Bridge {
 		}
 	}
 
-	/** A "Priority" choice, kept on the thread's record: Inherit (`null`) clears it. A selection that names none (a
+	/** A "Priority" choice, kept on the thread's record: Default (`null`) clears it. A selection that names none (a
 	 * message on a model without the option) keeps the thread's. */
 	async #applyPriority(threadId: string, choice: Priority | null): Promise<void> {
 		await this.updateThreadRecord(threadId, (record) => {

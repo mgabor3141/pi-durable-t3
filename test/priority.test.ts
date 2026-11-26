@@ -19,9 +19,9 @@ it("a thread runs at its own priority, else its parent's; past a fork, only what
 		grandchild: node("subagent", "child"),
 		side: node("fork", "root", undefined, true),
 		own: node("subagent", "root", "high"),
-		// A fork of `root` that took Inherit: `root`'s own Low is not read, and `root` inherits nothing.
+		// A fork of `root` that took Default: `root`'s own Low is not read, and `root` inherits nothing.
 		fork: node("fork", "root"),
-		// A fork of `own` (a subagent of `root`) that took Inherit: past `own`, `root`'s Low.
+		// A fork of `own` (a subagent of `root`) that took Default: past `own`, `root`'s Low.
 		forkOfChild: node("fork", "own"),
 		forkOfFork: node("fork", "fork"),
 		forkKept: node("fork", "root", "normal"),
@@ -42,7 +42,7 @@ it("a thread runs at its own priority, else its parent's; past a fork, only what
 	expect(at("unknown")).toBeUndefined();
 });
 
-it("a selection names a choice, Inherit, or nothing; another value is an error that names it", () => {
+it("a selection names a choice, Default, or nothing; another value is an error that names it", () => {
 	expect(priorityChoice([{ id: "thinking", value: "high" }])).toBeUndefined();
 	expect(priorityChoice(undefined)).toBeUndefined();
 	expect(priorityChoice([{ id: "priority", value: "high" }])).toBe("high");
@@ -58,7 +58,7 @@ it("a request gets the thread's priority only where pi gave it the field", async
 	};
 	const run = (payload: unknown, conversationId: number) => handler.beforeProviderRequest({ model: {}, payload }, { conversationId });
 	expect(run({ model: "m", priority: 3 }, 1)).toEqual({ payload: { model: "m", priority: -5 } });
-	// Inherit all the way up: models.json's value stands.
+	// Default all the way up: models.json's value stands.
 	expect(run({ model: "m", priority: 3 }, 2)).toBeUndefined();
 	// No field: a provider without `compat.vllmPriority`, or another API's request.
 	expect(run({ model: "m" }, 1)).toBeUndefined();

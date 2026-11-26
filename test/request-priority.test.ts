@@ -1,6 +1,6 @@
 // A thread's priority on the wire: the reference host with pi's own OpenAI-compatible provider (models.json), against
 // a server that records each request's body. The "Priority" option shows only on a model whose provider sets
-// `compat.vllmPriority`; a thread's choice is the `priority` the request carries, Inherit sends models.json's value,
+// `compat.vllmPriority`; a thread's choice is the `priority` the request carries, Default sends models.json's value,
 // and a model without the setting gets no field while the thread keeps its choice for when it is back.
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -82,7 +82,7 @@ it("a thread's priority is the request's priority field, only for a provider wit
 			label: "Priority",
 			type: "select",
 			options: [
-				{ id: "inherit", label: "Inherit" },
+				{ id: "inherit", label: "Default", isDefault: true },
 				{ id: "high", label: "Urgent" },
 				{ id: "normal", label: "Normal" },
 				{ id: "low", label: "Relaxed" },
@@ -139,7 +139,7 @@ it("a thread's priority is the request's priority field, only for a provider wit
 		expect(sent("third")?.priority).toBe(-5);
 		expect((await projection(threadId)).thread.modelSelection.options).toContainEqual({ id: "priority", value: "high" });
 
-		// Low, then Inherit: models.json's value.
+		// Low, then Default: models.json's value.
 		await message("fourth", gateway.slug, [{ id: "priority", value: "low" }]);
 		await completed(threadId, 4);
 		expect(sent("fourth")?.priority).toBe(5);
