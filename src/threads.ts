@@ -1297,7 +1297,7 @@ export class Threads {
 							: { type: "run", threadId: source.threadId, runId: input.runId },
 				...(input.child === undefined ? {} : { spawn: input.child.spawn }),
 			});
-			// A fork takes its source's priority as it is now (Default too); a side chat and a child follow theirs (`priority.ts`).
+			// A fork takes its source's priority as it is now (Inherited too); a side chat and a child follow theirs (`priority.ts`).
 			if (input.child === undefined && input.sideChat !== true && source.priority !== undefined) record.priority = source.priority;
 			if (input.sideChat === true) {
 				record.pendingContext = { type: "side_chat" };

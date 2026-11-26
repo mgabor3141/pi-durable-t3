@@ -394,7 +394,7 @@ function begin(meta: ThreadMeta, view: ConversationView | undefined, memory: Thr
 	const modelSelection: Any = {
 		instanceId: PROVIDER_INSTANCE_ID,
 		model: meta.model === null ? "default" : modelSlug(meta.model),
-		// The thread's own priority, as the option it was chosen with (`priority.ts`); Default is the option's default.
+		// The thread's own priority, as the option it was chosen with (`priority.ts`); Inherited is the option's default.
 		...(meta.thinkingLevel === undefined && meta.priority === undefined
 			? {}
 			: { options: [...(meta.thinkingLevel === undefined ? [] : thinkingOption(meta.thinkingLevel)), ...(meta.priority === undefined ? [] : [{ id: PRIORITY_OPTION, value: meta.priority }])] }),

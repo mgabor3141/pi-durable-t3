@@ -1,7 +1,7 @@
 // A thread's request priority: T3's "Priority" model option, sent as the request's `priority` field (vLLM's: lower is
 // taken sooner). pi sends that field only for a model whose `compat.vllmPriority` is set in models.json (on its
 // provider or on the model), with that value; the option shows on those models alone, and a thread's choice replaces
-// the value in its requests. A thread without one (Default) takes its parent's, else the value pi put there.
+// the value in its requests. A thread without one (Inherited) takes its parent's, else the value pi put there.
 import { type ConversationId, defineExtension, type Extension, GenerationTask, hook } from "@earendil-works/pi-durable";
 
 /** The model option's id. */
@@ -13,15 +13,15 @@ export const PRIORITIES = { high: -5, normal: 0, low: 5 } as const;
 export type Priority = keyof typeof PRIORITIES;
 
 /** The option as a model declares it (T3's `SelectProviderOptionDescriptor`). The labels are words no thinking level
- * uses: T3 shows both options' values side by side (the model button's tooltip: "High · Relaxed"). Default (a thread
- * with no choice of its own, which follows its parent) is marked the default, so every thread shows a value, the same
- * one before and after it is picked. The ids are what a thread's record keeps. */
+ * uses: T3 shows both options' values side by side (the model button's tooltip: "High · Relaxed"). Inherited (a
+ * thread with no choice of its own, which follows its parent) is marked the default, so every thread shows a value,
+ * the same one before and after it is picked. The ids are what a thread's record keeps. */
 export const PRIORITY_DESCRIPTOR = {
 	id: PRIORITY_OPTION,
 	label: "Priority",
 	type: "select",
 	options: [
-		{ id: INHERIT, label: "Default", isDefault: true },
+		{ id: INHERIT, label: "Inherited", isDefault: true },
 		{ id: "high", label: "Urgent" },
 		{ id: "normal", label: "Normal" },
 		{ id: "low", label: "Relaxed" },
@@ -33,7 +33,7 @@ export function takesPriority(model: { readonly api?: string; readonly compat?: 
 	return model.api === "openai-completions" && (model.compat as { vllmPriority?: unknown } | undefined)?.vllmPriority !== undefined;
 }
 
-/** The priority a selection's options choose: a choice, `null` for Default (none of the thread's own), `undefined`
+/** The priority a selection's options choose: a choice, `null` for Inherited (none of the thread's own), `undefined`
  * when they name none. An unknown value is an error, `Error` with the value in its message. */
 export function priorityChoice(options: readonly { readonly id: string; readonly value: string | boolean }[] | undefined): Priority | null | undefined {
 	const value = options?.find((option) => option.id === PRIORITY_OPTION)?.value;

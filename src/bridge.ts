@@ -250,10 +250,10 @@ export type T3Attachment = {
 	 */
 	plainResults(registry: RegistryReader): Extension;
 	/**
-	 * Each thread's request priority (T3's "Priority" model option: Default, Urgent, Normal, Relaxed), as an extension to
+	 * Each thread's request priority (T3's "Priority" model option: Inherited, Urgent, Normal, Relaxed), as an extension to
 	 * install on the Harness's registry: a request that pi gives a `priority` field (a model whose `compat.vllmPriority`
 	 * is set in models.json, on its provider or on the model) carries the thread's instead, -5, 0 or 5 (lower is taken
-	 * sooner). A thread on Default takes its parent's (a subagent's, a side chat's), else keeps models.json's value.
+	 * sooner). A thread on Inherited takes its parent's (a subagent's, a side chat's), else keeps models.json's value.
 	 * The option shows only on such models; without this extension, a choice is kept and shown but not sent.
 	 */
 	requestPriority(): Extension;
