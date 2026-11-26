@@ -539,7 +539,7 @@ export class ThreadOps {
 		const agentQueued = before.runs.some((run) => run.status === "queued" && run.queueHeld !== true && before.messages.find((message) => message.id === run.userMessageId)?.createdBy === "agent");
 		if (!sent) {
 			try {
-				await this.#bridge.sendMessage({
+				await this.#bridge.sendFromOutside({
 					threadId: input.threadId,
 					commandId,
 					messageId,

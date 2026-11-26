@@ -136,6 +136,15 @@ function stopNote(by: StopBy | undefined): ContentBlock {
 
 const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/** What the thread tools hear of a thread's outside world (`Bridge.onOutside`): a person's Stop, before it takes effect;
+ * and a message sent from outside them, before it is sent. */
+export interface OutsideListener {
+	readonly stopped?: (threadId: string) => void;
+	/** `writesMessage`: the message is written and starts or joins a run (not a Resume, which writes none, nor a note).
+	 * Answers what to do once the send has ended, either way. */
+	readonly message?: (message: { readonly threadId: string; readonly messageId: string; readonly text: string; readonly provenance: Provenance; readonly writesMessage: boolean }) => Promise<((sent: boolean) => Promise<void>) | undefined>;
+}
+
 /** A live shell item: everything \`orchestration.subscribeShell\` streams after its snapshot. */
 type ShellItem = Exclude<WsItem<"orchestration.subscribeShell">, { readonly kind: "snapshot" } | { readonly kind: "synchronized" }>;
 
@@ -183,6 +192,8 @@ export class Bridge {
 	readonly #views = new Map<string, ThreadView>();
 	readonly #viewHost: ThreadViewHost;
 	readonly #shellListeners = new Set<(item: ShellItem) => void>();
+	/** The thread tools' part in what someone does to a thread from outside them (`orchestration.ts`). */
+	readonly #outsideListeners = new Set<OutsideListener>();
 	readonly #deletedListeners = new Set<(threadId: string) => void>();
 	readonly #shells = new Map<string, OrchestrationV2ThreadShell>();
 	/** The project ids last shown to clients, so a registry change emits the removed shells. */
@@ -663,6 +674,39 @@ export class Bridge {
 	onShell(listener: (item: ShellItem) => void): () => void {
 		this.#shellListeners.add(listener);
 		return () => this.#shellListeners.delete(listener);
+	}
+
+	/** Hear of a person's Stop and of messages sent from outside the thread tools (`OutsideListener`). */
+	onOutside(listener: OutsideListener): () => void {
+		this.#outsideListeners.add(listener);
+		return () => this.#outsideListeners.delete(listener);
+	}
+
+	/**
+	 * A message someone sends a thread from outside the thread tools: a person's or a client's (`dispatch.ts`), or an
+	 * agent's through T3's `t3_thread_send` (`thread-ops.ts`). The listeners hear of it before it is sent (a child's parent
+	 * asks to hear back, as T3 makes such a message a new delegated task), and of how the send ended.
+	 */
+	async sendFromOutside(input: Parameters<Bridge["sendMessage"]>[0]): Promise<void> {
+		const after: ((sent: boolean) => Promise<void>)[] = [];
+		for (const listener of this.#outsideListeners) {
+			// The message goes whatever a listener's bookkeeping does: a person's message is not held up by a report.
+			const done = await listener.message?.({ threadId: input.threadId, messageId: input.messageId, text: input.text, provenance: input.provenance ?? USER_WEB, writesMessage: input.continuationOf === undefined && input.note !== true }).catch((error: unknown) => {
+				this.#log.warn("a message's follow-up could not be asked for", { threadId: input.threadId, error: messageOf(error) });
+				return undefined;
+			});
+			if (done !== undefined) after.push(done);
+		}
+		const ended = async (sent: boolean) => {
+			for (const each of after) await each(sent).catch((failure: unknown) => this.#log.warn("a message's follow-up could not be settled", { threadId: input.threadId, error: messageOf(failure) }));
+		};
+		try {
+			await this.sendMessage(input);
+		} catch (error) {
+			await ended(false);
+			throw error;
+		}
+		await ended(true);
 	}
 
 	#emitShell(item: ShellItem): void {
@@ -1510,6 +1554,9 @@ export class Bridge {
 	 */
 	async interrupt(threadId: string, by: StopBy = { by: "user" }): Promise<void> {
 		const release = this.acquire(threadId);
+		// A person's Stop stops the work the thread started too (the thread tools' children), as T3's stops its delegated
+		// tasks; told first, so their reports to it are dropped before its own wait for them ends.
+		if (by.by === "user") for (const listener of this.#outsideListeners) listener.stopped?.(threadId);
 		try {
 			const state = this.#viewOf(threadId);
 			// Await the loaded head and let a failure surface, rather than returning quietly and leaving a stale run going.

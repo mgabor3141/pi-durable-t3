@@ -284,7 +284,8 @@ it("a turn that was stopped with the question in hand is not told of it", { time
 	const requestId = await pending(kid);
 	// The wait has answered with the question, and the parent's turn is still at work.
 	await until("the wait's answer", () => results.some((result) => result["pendingRequestIds"] !== undefined));
-	await bridge().interrupt("a");
+	// Another agent's stop, which leaves the child at work (a person's would stop the child too, its question with it).
+	await bridge().interrupt("a", { by: "agent" });
 	const parent = (await bridge().waitFor("a", (projection) => (projection.runs.every((run) => run.status === "interrupted") ? projection : undefined), 10_000))!;
 	await sleep(400);
 	expect(notices((await bridge().projection("a")).projection)).toEqual([]);

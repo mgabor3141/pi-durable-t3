@@ -21,6 +21,13 @@ const MESSAGE_BUDGET = 2_000;
 const OWN_PROMPT_CHARS = 120;
 
 export const isActiveRun = (run: OrchestrationV2Run) => ACTIVE_RUN.has(run.status);
+/**
+ * Does `threadId` wait for the report of a child it started? A child's report wakes it and its work goes on, so until
+ * then it has not settled. Only its own children count: a thread may ask any other for a report, and two that asked each
+ * other would each wait for the other.
+ */
+export const awaitsChildren = (threads: readonly { readonly threadId: string; readonly spawn?: unknown; readonly lineage: { readonly parentThreadId?: string | null }; readonly notify?: readonly { readonly threadId: string }[] }[], threadId: string): boolean =>
+	threads.some((thread) => thread.spawn !== undefined && thread.lineage.parentThreadId === threadId && (thread.notify ?? []).some((request) => request.threadId === threadId));
 /** Whether a shell's thread is working: it has an active or queued run, or activity of its own. */
 export const isActiveShell = (shell: OrchestrationV2ThreadShell) => shell.activityRunStatus != null || ACTIVE_RUN.has(shell.status);
 /**
@@ -70,7 +77,7 @@ const clip = (text: string, max: number): { text: string; cut: boolean } => (tex
  */
 export function report(
 	projection: OrchestrationV2ThreadProjection,
-	options: { readonly fromRunId?: string | null; readonly reader?: string; readonly own?: string; readonly label?: (threadId: string) => string; readonly budget?: number } = {},
+	options: { readonly fromRunId?: string | null; readonly reader?: string; readonly own?: string; readonly label?: (threadId: string) => string; readonly budget?: number; readonly awaitsChildren?: boolean } = {},
 ): Report {
 	const threadId = projection.thread.id as string;
 	const title = projection.thread.title;
@@ -80,7 +87,9 @@ export function report(
 	const activity = runs.filter((run) => run.ordinal >= start.ordinal);
 	const ids = new Set(activity.map((run) => run.id as string));
 	const last = activity.at(-1)!;
-	const verdict = verdictOf(last, projection);
+	// A thread that waits for reports of children it started has not finished: they wake it, and it goes on (T3's
+	// `waiting_for_children`).
+	const verdict = options.awaitsChildren === true ? "active" : verdictOf(last, projection);
 	const inActivity = (message: (typeof projection.messages)[number]) => message.runId !== null && ids.has(message.runId as string);
 	const answer = projection.messages.filter((message) => message.role === "assistant" && inActivity(message) && message.text.trim() !== "").at(-1);
 	// The projection lists messages in the order they happened: one after the answer (a note) is listed after it.
@@ -90,7 +99,8 @@ export function report(
 	for (const [index, message] of projection.messages.entries()) {
 		if (message.role !== "user" || !inActivity(message)) continue;
 		const sender = message.senderThreadId === undefined ? undefined : (message.senderThreadId as string);
-		const just = options.own !== undefined && (message.id as string) === options.own;
+		// The message the reader sent, abbreviated: not one a person sent the thread, which the reader is told of whole.
+		const just = options.own !== undefined && (message.id as string) === options.own && (options.reader === undefined || sender === options.reader);
 		const who = just || (sender !== undefined && sender === options.reader) ? "YOU" : sender !== undefined ? `THREAD ${options.label?.(sender) ?? sender}` : message.createdBy === "user" ? "USER" : "AGENT MESSAGE";
 		(answerIndex >= 0 && index > answerIndex ? late : lines).push(`[${who}]: ${clip(message.text.trim(), just ? OWN_PROMPT_CHARS : MESSAGE_BUDGET).text}`);
 	}
@@ -118,10 +128,11 @@ function runOfMessage(projection: OrchestrationV2ThreadProjection, messageId: st
 	return message?.runId == null ? undefined : (message.runId as string);
 }
 
-/** The report of the activity a message started, once it settled (`undefined` until then). */
+/** The report of the activity a message started, once it settled (`undefined` until then): the thread is idle and waits
+ * for no report of a child it started (`awaitsChildren`). */
 export function settledReport(projection: OrchestrationV2ThreadProjection, messageId: string, options: Parameters<typeof report>[1] = {}): Report | undefined {
 	const runId = runOfMessage(projection, messageId);
-	if (runId === undefined || isBusy(projection)) return undefined;
+	if (runId === undefined || isBusy(projection) || options.awaitsChildren === true) return undefined;
 	return report(projection, { ...options, fromRunId: runId });
 }
 

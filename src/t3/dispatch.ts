@@ -58,7 +58,7 @@ export function dispatchCommand(bridge: Bridge, command: DispatchCommand, proven
 								? "queue"
 								: "start";
 				const attachments = attachmentRecords(command.attachments);
-				await bridge.sendMessage({
+				await bridge.sendFromOutside({
 					threadId: command.threadId,
 					commandId: command.commandId,
 					messageId: command.messageId,

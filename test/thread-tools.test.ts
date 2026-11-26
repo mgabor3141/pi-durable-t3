@@ -61,6 +61,9 @@ const brain: FauxResponseStep = (context, options) => {
 			outcome === "aborted" ? fauxAssistantMessage("", { stopReason: "aborted" }) : fauxAssistantMessage(`released ${hold[1]}`),
 		);
 	}
+	// A long answer, once released: "Long: <name>" answers 9,000 characters of the name's first letter.
+	const long = /^Long: (\S+)/.exec(lastText);
+	if (last.role === "user" && long !== null) return gate(long[1]!).promise.then(() => fauxAssistantMessage(long[1]![0]!.repeat(9_000)));
 	if (last.role === "toolResult") return fauxAssistantMessage(`Parent saw: ${lastText}`);
 	if (last.role === "user" && lastText.startsWith("Delegate ")) {
 		const call = JSON.parse(lastText.slice("Delegate ".length)) as { name: string; args: Record<string, unknown> };
@@ -105,7 +108,7 @@ async function setup(options: { readonly webhookOrigin?: () => string } = {}) {
 		const projection = await settled("a", (candidate) => candidate.messages.filter((message) => message.text.startsWith("Parent saw:")).length >= count);
 		return projection!.messages.filter((message) => message.text.startsWith("Parent saw:")).map((message) => JSON.parse(message.text.slice("Parent saw: ".length)));
 	};
-	return { bridge, orchestration, f, ask, settled, sawAll, ops, tasks: () => tasks! };
+	return { bridge, orchestration, f, ask, settled, sawAll, ops, create, tasks: () => tasks! };
 }
 
 it("a parent starts a child, waits for its report, and follows up on it", { timeout: 60_000 }, async () => {
@@ -211,12 +214,13 @@ it("a note joins a thread's context without starting work; reads, lists and the 
 
 it("thread_cancel stops a thread and its children, and nobody is woken by the stopped work", { timeout: 60_000 }, async () => {
 	const { bridge, f, ask, sawAll, settled } = await setup();
-	// The child starts a grandchild that holds, without waiting, then finishes its own turn.
+	// The child starts a grandchild that holds, without waiting, then finishes its own turn; it still waits for the
+	// grandchild's report, and so does the parent for the child's.
 	const grand = { name: "thread_prompt", args: { new: { title: "Grandchild" }, message: "Hold on: g1", wait: false } };
-	await ask("a", { name: "thread_prompt", args: { new: { title: "Child" }, message: `Delegate ${JSON.stringify(grand)}` } });
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Child" }, message: `Delegate ${JSON.stringify(grand)}`, wait: false } });
 	const [first] = await sawAll(1);
-	expect(first.report).toContain("[AGENT]: Parent saw:");
 	const child = first.threadId as string;
+	await settled(child, (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
 	const grandchild = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === child)!.threadId;
 	await bridge.waitFor(grandchild, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
 	expect(bridge.threadRecord(grandchild)!.notify).toEqual([expect.objectContaining({ threadId: child })]);
@@ -228,6 +232,7 @@ it("thread_cancel stops a thread and its children, and nobody is woken by the st
 	const stopped = await bridge.waitFor(grandchild, (projection) => (projection.runs.every((run) => run.status !== "running") ? projection : undefined), 10_000);
 	expect(stopped!.runs.at(-1)!.status).toBe("interrupted");
 	expect((await bridge.projection(child)).projection.runs, "the child did not start again").toHaveLength(1);
+	expect((await bridge.projection("a")).projection.messages.filter((message) => message.text.startsWith("[Report from thread")), "the parent that stopped it is told nothing").toEqual([]);
 
 	// The stopped agent is told with its next message that an agent stopped it, not the user.
 	await bridge.sendMessage({ threadId: grandchild, commandId: "after-cancel", messageId: "after-cancel", text: "What is 1+1?", mode: "queue" });
@@ -240,26 +245,119 @@ it("thread_cancel stops a thread and its children, and nobody is woken by the st
 	]);
 });
 
-it("Stop on a parent waiting for its child ends the parent at once; the child works on", { timeout: 60_000 }, async () => {
+it("a person's Stop on a parent stops its children too, and no report of theirs wakes it", { timeout: 60_000 }, async () => {
 	const { bridge, ask } = await setup();
-	await ask("a", { name: "thread_prompt", args: { new: { title: "Slow" }, message: "Hold on: s1" } });
-	const child = await (async () => {
-		for (let waited = 0; waited < 10_000; waited += 20) {
-			const found = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a");
-			if (found !== undefined) return found.threadId;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-		throw new Error("no child");
-	})();
-	await bridge.waitFor(child, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	// One child the parent waits for, and one it started without waiting, which asked for its report.
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Background" }, message: "Hold on: s2", wait: false } });
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Waited" }, message: "Hold on: s1" } });
+	const child = (title: string) => bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a" && thread.title === title)?.threadId;
+	await until("both children", () => child("Waited") !== undefined && child("Background") !== undefined);
+	for (const title of ["Waited", "Background"]) await bridge.waitFor(child(title)!, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
 	// The wait listens for the parent's Stop (a tool's abort is its context's signal), so the parent does not wait for s1.
 	const pressed = Date.now();
 	await bridge.interrupt("a");
 	const parent = await bridge.waitFor("a", (projection) => (projection.runs.every((run) => run.status !== "running") ? projection : undefined), 2_000);
-	expect(parent, "the parent ended before its child").toBeDefined();
+	expect(parent, "the parent ended before its children").toBeDefined();
 	expect(Date.now() - pressed).toBeLessThan(2_000);
-	expect((await bridge.projection(child)).projection.runs.at(-1)!.status, "the child was not stopped").toBe("running");
+	for (const title of ["Waited", "Background"]) {
+		const stopped = await bridge.waitFor(child(title)!, (projection) => (projection.runs.at(-1)?.status === "interrupted" ? true : undefined), 5_000);
+		expect(stopped, `${title} was stopped with its parent`).toBe(true);
+	}
 	gate("s1").release();
+	gate("s2").release();
+	await new Promise((resolve) => setTimeout(resolve, 500));
+	const after = (await bridge.projection("a")).projection;
+	expect(after.messages.filter((message) => message.text.startsWith("[Report from thread")), "no report woke the stopped parent").toEqual([]);
+	expect(after.runs.filter((run) => run.status === "running" || run.status === "queued")).toEqual([]);
+	for (const title of ["Waited", "Background"]) expect((bridge.threadRecord(child(title)!)?.notify ?? []).length, `${title} owes no report`).toBe(0);
+});
+
+it("a child that hands work on without waiting reports once that work is done, not when its own turn ends", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled } = await setup();
+	const inner = JSON.stringify({ name: "thread_prompt", args: { new: { title: "Grandchild" }, message: "Hold on: g1", wait: false } });
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Child" }, message: `Delegate ${inner}`, wait: false } });
+	const childOf = (parent: string) => bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === parent)?.threadId;
+	await until("the child", () => childOf("a") !== undefined);
+	const child = childOf("a")!;
+	await until("the grandchild", () => childOf(child) !== undefined);
+	// The child's turn ends once it has started the grandchild; the grandchild still works.
+	await settled(child, (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	expect((await bridge.projection("a")).projection.messages.filter((message) => message.text.startsWith("[Report from thread")), "no report before the grandchild's work is done").toEqual([]);
+	gate("g1").release();
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
+	const reports = parent!.messages.filter((message) => message.text.startsWith("[Report from thread"));
+	expect(reports).toHaveLength(1);
+	expect(reports[0]!.text.split("\n").at(-1), "the child's answer after the grandchild's report").toBe("[AGENT]: Got the report: [AGENT]: released g1");
+});
+
+it("a prompt whose queued message a person removes asks for nothing more, and its caller still settles", { timeout: 60_000 }, async () => {
+	const { bridge, orchestration, ask, settled, sawAll } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Held" }, message: "Hold on: x", wait: false } });
+	const [started] = await sawAll(1);
+	const child = started.threadId as string;
+	await bridge.waitFor(child, (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	await ask("a", { name: "thread_prompt", args: { threadId: child, message: "What is 1+1?", wait: false } });
+	await sawAll(2);
+	const queued = await bridge.waitFor(child, (projection) => projection.runs.find((run) => run.status === "queued"), 10_000);
+	await bridge.cancelQueued(child, queued!.id as string);
+	gate("x").release();
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
+	// The parent is not held by a report that will never come: a wait for it ends, completed.
+	const waited = await orchestration.wait(undefined, ["a"], 3_000);
+	expect(waited.verdict).toBe("completed");
+	expect(bridge.threadRecord(child)?.notify ?? []).toEqual([]);
+});
+
+it("a prompt the thread refuses asks for nothing, and its caller still settles", { timeout: 60_000 }, async () => {
+	const { bridge, orchestration, ask, sawAll } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Adder" }, message: "What is 1+1?" } });
+	const [first] = await sawAll(1);
+	const child = first.threadId as string;
+	// A steer to a child that is not working is refused.
+	await ask("a", { name: "thread_prompt", args: { threadId: child, message: "And 2+2?", mode: "steer", wait: false } });
+	await sawAll(2);
+	expect(bridge.threadRecord(child)?.notify ?? []).toEqual([]);
+	expect((await orchestration.wait(undefined, ["a"], 3_000)).verdict).toBe("completed");
+});
+
+it("a person's message to a child that finished is reported to its parent; another thread's is not", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled, ops, create } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Adder" }, message: "What is 2+2?" } });
+	await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Parent saw:")));
+	const child = bridge.threadRecords().find((thread) => thread.lineage.parentThreadId === "a")!.threadId;
+	await dispatchCommand(bridge, { type: "message.dispatch", commandId: "person-1", threadId: child, messageId: "person-m1", text: "And 3+4?", dispatchMode: { type: "queue_after_active" } } as never, USER_WEB, log);
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
+	const report = parent!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text;
+	expect(report).toContain("[USER]: And 3+4?");
+	expect(report.split("\n").at(-1)).toBe("[AGENT]: 7");
+	// Another thread that writes to the child (T3's `t3_thread_send`) asked for its own answer: the parent is not told.
+	await create({ threadId: "b", projectId: "p", title: "Other" });
+	await ops.send({ threadId: "b" }, { threadId: child, message: "And 1+1?" } as never);
+	await settled(child, (projection) => projection.messages.some((message) => message.role === "assistant" && message.text === "2"));
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	expect((await bridge.projection("a")).projection.messages.filter((message) => message.text.startsWith("[Report from thread"))).toHaveLength(1);
+});
+
+it("one message holds at most 16,000 characters of reports; a report past that says where to read it", { timeout: 60_000 }, async () => {
+	const { bridge, ask, settled } = await setup();
+	await ask("a", { name: "thread_prompt", args: { new: { title: "First" }, message: "Long: a1", wait: false } });
+	await ask("a", { name: "thread_prompt", args: { new: { title: "Second" }, message: "Long: b1", wait: false } });
+	await settled("a", (projection) => projection.messages.filter((message) => message.text.startsWith("Parent saw:")).length === 2);
+	// The parent works while both settle: the first report waits for its turn to take it, and the second joins it.
+	await bridge.sendMessage({ threadId: "a", commandId: "busy", messageId: "busy-m", text: "Hold on: p", mode: "queue" });
+	await bridge.waitFor("a", (projection) => (projection.runs.some((run) => run.status === "running") ? true : undefined), 10_000);
+	gate("a1").release();
+	await until("the first report waits in the parent's queue", async () => (await bridge.waitingMessages("a")).some((message) => message.messageId.startsWith("n-")));
+	gate("b1").release();
+	await until("the second report joined it", async () => (await bridge.waitingMessages("a")).some((message) => message.text.includes('[Report from thread "Second"')));
+	gate("p").release();
+	const parent = await settled("a", (projection) => projection.messages.some((message) => message.text.startsWith("Got the report:")));
+	const text = parent!.messages.find((message) => message.text.startsWith("[Report from thread"))!.text;
+	expect(text).toContain(`[AGENT]: ${"a".repeat(9_000)}`);
+	expect(text).not.toContain("b".repeat(100));
+	const second = bridge.threadRecords().find((thread) => thread.title === "Second")!.threadId;
+	expect(text).toContain(`[Not shown: this message holds enough reports already. Read it with thread_read, threadId ${second}]`);
 });
 
 it("thread_wait collects several children's reports with the worst verdict", { timeout: 60_000 }, async () => {
